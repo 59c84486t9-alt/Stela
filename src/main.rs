@@ -21,6 +21,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate an Apple executable's guest mappings and unresolved loader work.
+    PlanExecutable {
+        input: PathBuf,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+    },
     /// Inspect kernel collection images using collection-relative offsets.
     FilesetManifest {
         input: PathBuf,
@@ -155,6 +161,38 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::PlanExecutable {
+            input,
+            architecture,
+        } => {
+            let data = std::fs::read(&input)?;
+            let artifacts = macho::inspect(&data, &input.display().to_string())?;
+            let slices = macho::split_slices(&data)?;
+            let selected: Vec<_> = artifacts
+                .iter()
+                .zip(slices)
+                .filter(|(artifact, _)| {
+                    matches!(artifact.architecture.as_str(), "arm64" | "arm64e")
+                        && architecture
+                            .as_ref()
+                            .is_none_or(|wanted| wanted == &artifact.architecture)
+                })
+                .collect();
+            ensure!(
+                selected.len() == 1,
+                "expected exactly one matching Apple executable slice, found {}; select --architecture arm64 or arm64e",
+                selected.len()
+            );
+            let (_, (offset, bytes)) = selected[0];
+            let plan = macho::load_plan::plan(bytes)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind": "macho_executable_load_plan", "container_sha256": stela_core::sha256(&data),
+                    "slice_offset": offset, "plan": plan
+                }))?
+            );
+        }
         Command::FilesetManifest { input, output } => {
             ensure!(
                 !output.exists(),

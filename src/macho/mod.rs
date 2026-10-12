@@ -1,5 +1,6 @@
 //! Inventory standalone Mach-O slices. Containers are explicitly uncounted.
 pub mod fileset;
+pub mod load_plan;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;
