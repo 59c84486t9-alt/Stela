@@ -1,210 +1,266 @@
 #!/usr/bin/env python3
-"""Measure isolated instruction emission and pinned native differential prefixes."""
+"""Report Apple-silicon translation evidence without inventing a completion denominator."""
 import argparse
-from bisect import bisect_right
+from collections import Counter
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
 
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from evidence import write_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
-PINNED_KERNEL_SHA256 = 'ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203'
-VERIFICATION_KINDS = {'real_kernel_integer_leafs', 'real_kernel_controlled_ram_leafs',
-                      'real_kernel_pair_leafs_with_ram_contracts'}
-COUNT_FIELDS = ('source_word_instances', 'decoded_lifted_words', 'native_emitted_words',
-                'unsupported_words', 'unresolved_control_flow_words', 'native_emitted_bytes')
+STATUSES = ('implemented', 'partial', 'unsupported')
+RET = 0xd65f03c0
 
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def natural(value, field):
-    if type(value) is not int or value < 0:
-        raise ValueError(f'{field} must be a nonnegative integer')
+def repository_path(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError('Evidence/source paths must be nonempty repository-relative paths')
+    path = Path(value)
+    if path.is_absolute() or '..' in path.parts:
+        raise ValueError('Evidence/source paths must stay inside the repository')
+    return path
+
+
+def digest(value):
+    if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+        raise ValueError('Expected a lowercase SHA-256 identity')
     return value
 
 
-def percentage(numerator, denominator):
-    natural(numerator, 'numerator')
-    natural(denominator, 'denominator')
-    if numerator > denominator:
-        raise ValueError('Numerator exceeds denominator')
-    value = None if denominator == 0 else float(
-        (Decimal(numerator) * 100 / Decimal(denominator)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
-    return {'numerator': numerator, 'denominator': denominator, 'units': 'source 4-byte instruction-word instances',
-            'decimal_places': 4, 'rounding': 'nearest; ties upward', 'value': value}
+def validate_registry(registry):
+    if registry.get('schema_version') != 2 or registry.get('kind') != 'reviewed_apple_silicon_instruction_forms':
+        raise ValueError('Unsupported Apple-silicon reviewed-form registry')
+    target = registry.get('target_profile', {})
+    if (target.get('vendor') != 'Apple' or target.get('guest_architectures') != ['arm64', 'arm64e']
+            or target.get('host_architecture') != 'x86_64'):
+        raise ValueError('Registry must target Apple arm64/arm64e to native x86_64')
+    if target.get('required_isa_inventory_complete') is not False or target.get('required_isa_form_count') is not None:
+        raise ValueError('An incomplete reviewed list cannot establish a required Apple ISA denominator')
+    if not registry.get('registry_version') or not registry.get('instruction_sources') or not target.get('inventory_limits'):
+        raise ValueError('Reviewed forms require versioned source facts and inventory limits')
+    profile = registry.get('profile', {}).get('id')
+    if not profile or not registry.get('profile', {}).get('outside_scope'):
+        raise ValueError('Support needs an explicit bounded execution profile')
+    evidence = registry.get('evidence_groups', {})
+    rows = {}
+    for row in registry.get('forms', []):
+        identity = row.get('id')
+        if not isinstance(identity, str) or not identity or identity in rows:
+            raise ValueError('Reviewed form IDs must be unique and nonempty')
+        if row.get('alias') is not False:
+            raise ValueError('Aliases cannot inflate reviewed support counts')
+        if not row.get('category') or not row.get('source_file') or not row.get('source_sha256'):
+            raise ValueError('Reviewed forms need their instruction source facts')
+        digest(row['source_sha256'])
+        mask, value = int(row['encoding_mask'], 16), int(row['encoding_value'], 16)
+        if not 0 <= mask <= 0xffffffff or not 0 <= value <= 0xffffffff or value & ~mask:
+            raise ValueError('Invalid reviewed encoding mask/value')
+        if row.get('status') not in STATUSES:
+            raise ValueError('Unknown support status')
+        if row.get('profile') != profile or not row.get('scope'):
+            raise ValueError('Form support scope/profile missing')
+        if row['status'] != 'unsupported':
+            if not row.get('review') or not row.get('compiler_sources') or not row.get('smoke_samples'):
+                raise ValueError('Support requires reviewed implementation and smoke samples')
+            if not row.get('evidence_groups') or any(group not in evidence for group in row['evidence_groups']):
+                raise ValueError('Support requires a native differential evidence group')
+            for source in row['compiler_sources']:
+                repository_path(source)
+            for sample in row['smoke_samples']:
+                validate_sample(row, sample)
+            if row['status'] == 'partial' and not row.get('rejected_samples'):
+                raise ValueError('Partial forms need a rejected scope-boundary sample')
+        rows[identity] = row
+    return rows
 
 
-def check_probe(probe, expected_source, compiler=None):
-    if probe.get('schema_version') != 1 or probe.get('kind') != 'isolated_instruction_codegen_progress':
-        raise ValueError('Unsupported instruction-progress report')
-    if probe.get('source_sha256') != expected_source:
-        raise ValueError('Instruction-progress source identity mismatch')
-    fingerprint = probe.get('compiler_source_sha256')
+def validate_sample(form, sample):
+    word = int(sample['word'], 16)
+    if not 0 <= word <= 0xffffffff or word & int(form['encoding_mask'], 16) != int(form['encoding_value'], 16):
+        raise ValueError(f'Smoke does not match canonical form: {form["id"]}')
+    # Official byte-register forms distinguish an extended operand from LSL,
+    # although the extended form's !=011 constraint cannot fit a fixed mask.
+    reguse = form.get('docvars', {}).get('reguse') if form['id'].endswith('_ldst_regoff') else None
+    if reguse == 'ext-reg' and ((word >> 13) & 7) not in (2, 6, 7):
+        raise ValueError('Extended-register smoke has the wrong operand form')
+    if reguse == 'shifted-reg' and ((word >> 13) & 7) != 3:
+        raise ValueError('Shifted-register smoke has the wrong operand form')
+    expected = sample.get('expected_mnemonics')
+    if not isinstance(expected, list) or not expected:
+        raise ValueError('Smoke needs an independent decoded mnemonic expectation')
+    return word
+
+
+def summarize(rows):
+    categories = {}
+    overall = Counter({status: 0 for status in STATUSES})
+    for row in rows.values():
+        counts = categories.setdefault(row['category'], Counter({status: 0 for status in STATUSES}))
+        counts[row['status']] += 1
+        overall[row['status']] += 1
+    def finish(counts):
+        return {**dict(counts), 'reviewed_forms': sum(counts.values())}
+    return {'categories': {key: finish(counts) for key, counts in sorted(categories.items())},
+            'reviewed': finish(overall), 'required_isa_forms': None,
+            'required_isa_completion_percentage': None, 'overall_completion_percentage': None,
+            'complete_binaries': {'verified': 0, 'full_binary_harness_available': False,
+                                  'required_total': None, 'completion_percentage': None,
+                                  'evidence_requirement': 'Stela full Mach-O load and native execution with validated process behavior; leaf fixtures do not qualify.'}}
+
+
+def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run):
+    source = directory / 'source.arm64'
+    source.write_bytes(struct.pack('<II', word, RET))
+    output = directory / 'native'
+    process = run([str(cli), 'compile-leaf', str(source), '--output-dir', str(output)],
+                  capture_output=True, text=True, timeout=30)
+    if expect_failure:
+        if process.returncode == 0 or expect_failure not in process.stderr or output.exists():
+            raise ValueError(f'Expected unsupported scope boundary {word:#x}: {process.stderr}')
+        return {'word': f'0x{word:08x}', 'rejected': True, 'reason': expect_failure}
+    if process.returncode != 0:
+        raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
+    manifest = json.loads(process.stdout)
+    if manifest.get('source_sha256') != sha256(source):
+        raise ValueError('Compiler probe source identity mismatch')
+    native = output / 'native.bin'
+    if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
+        raise ValueError('Compiler probe native output identity mismatch')
+    fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
-        raise ValueError('Missing compiler fingerprint')
-    if compiler is not None and fingerprint != compiler:
-        raise ValueError('Compiler changed during progress measurement')
-    counts = probe.get('counts', {})
-    for field in COUNT_FIELDS:
-        natural(counts.get(field), field)
-    total = counts['source_word_instances']
-    emitted = counts['native_emitted_words']
-    if emitted + counts['unsupported_words'] + counts['unresolved_control_flow_words'] != total:
-        raise ValueError('Inconsistent isolated emission counts')
-    if not emitted <= counts['decoded_lifted_words'] <= total:
-        raise ValueError('Inconsistent lifted instruction count')
-    if probe.get('percentage') != percentage(emitted, total):
-        raise ValueError('Inconsistent isolated emission percentage')
-    if probe.get('verified_words') is not None:
-        raise ValueError('Isolated emission probe must not claim verification')
-    return fingerprint
+        raise ValueError('Compiler probe fingerprint missing')
+    return {'word': f'0x{word:08x}', 'emitted': True, 'compiler_source_sha256': fingerprint,
+            'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
+            'native_bytes': native.stat().st_size}
 
 
-def measure(cli, source, expected_hash, compiler=None, manifest=None, run=subprocess.check_output):
-    source = Path(source)
-    if sha256(source) != expected_hash:
-        raise ValueError(f'Pinned source changed: {source}')
-    command = [str(cli), 'instruction-progress', str(source)]
-    if manifest is not None:
-        command += ['--fileset-manifest', str(manifest)]
-    probe = json.loads(run(command, text=True, timeout=300))
-    check_probe(probe, expected_hash, compiler)
-    if sha256(source) != expected_hash:
-        raise ValueError(f'Pinned source changed during measurement: {source}')
-    if manifest is not None and probe.get('fileset_manifest_sha256') != sha256(manifest):
-        raise ValueError('Instruction-progress fileset manifest identity mismatch')
-    return probe
+def smoke_forms(cli, forms, overrides, directory):
+    decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    fingerprint = None
+    results = []
+    for identity, row in overrides.items():
+        if row['status'] == 'unsupported':
+            continue
+        for index, sample in enumerate(row['smoke_samples']):
+            word = validate_sample(forms[identity], sample)
+            instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
+            if instruction is None or instruction.mnemonic not in sample['expected_mnemonics']:
+                raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
+            location = directory / f'{len(results)}-supported'
+            location.mkdir()
+            probe = compile_probe(cli, word, location)
+            if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
+                raise ValueError('Compiler changed during ISA progress probes')
+            fingerprint = probe['compiler_source_sha256']
+            results.append({'id': identity, 'sample': index, 'assembly': f'{instruction.mnemonic} {instruction.op_str}', **probe})
+        for index, sample in enumerate(row.get('rejected_samples', [])):
+            location = directory / f'{len(results)}-rejected'
+            location.mkdir()
+            probe = compile_probe(cli, int(sample['word'], 16), location, sample['reason'])
+            results.append({'id': identity, 'scope_boundary_sample': index, **probe})
+    if fingerprint is None:
+        location = directory / 'compiler-identity'
+        location.mkdir()
+        fingerprint = compile_probe(cli, RET, location)['compiler_source_sha256']
+    return fingerprint, results
 
 
-def aggregate(probes):
-    if not probes:
-        raise ValueError('Cannot aggregate an empty corpus')
-    compiler = probes[0]['compiler_source_sha256']
-    for probe in probes:
-        check_probe(probe, probe['source_sha256'], compiler)
-    counts = {field: sum(probe['counts'][field] for probe in probes) for field in COUNT_FIELDS}
-    return {'inputs': len(probes), 'compiler_source_sha256': compiler, 'counts': counts,
-            'percentage': percentage(counts['native_emitted_words'], counts['source_word_instances'])}
+def validate_evidence(registry, overrides, compiler, root=ROOT):
+    names = sorted({name for row in overrides.values() if row['status'] != 'unsupported'
+                    for name in row['evidence_groups']})
+    results = {}
+    for name in names:
+        group = registry['evidence_groups'][name]
+        path = root / repository_path(group['report'])
+        report_data = path.read_bytes()
+        report = json.loads(report_data)
+        if report.get('passed') is not True or report.get('kind') != group['kind']:
+            raise ValueError(f'Native differential evidence missing or failed: {name}')
+        if report.get('compiler_source_sha256') != compiler:
+            raise ValueError(f'Stale native differential compiler evidence: {name}')
+        comparisons = next((report[key] for key in ('state_comparisons', 'state_and_memory_comparisons',
+                           'register_state_comparisons', 'three_way_register_state_comparisons') if key in report), None)
+        if type(comparisons) is not int or comparisons <= 0:
+            raise ValueError(f'Native differential evidence has no comparisons: {name}')
+        harness = root / repository_path(group['harness'])
+        harness_hash = sha256(harness)
+        recorded = report.get('harness_source_sha256')
+        if recorded != harness_hash:
+            raise ValueError(f'Stale differential harness evidence: {name}')
+        shared = {}
+        if 'shared_runner_sha256' in report:
+            shared['dev/differential.py'] = report['shared_runner_sha256']
+        if 'shared_sources_sha256' in report:
+            declared = report['shared_sources_sha256']
+            if not isinstance(declared, dict):
+                raise ValueError('Shared differential source identities must be a mapping')
+            for source, digest in declared.items():
+                source_path = Path(source)
+                if source_path.is_absolute() or '..' in source_path.parts:
+                    raise ValueError('Shared source must be a repository-relative path')
+                if not (root / source_path).is_file():
+                    source_path = Path('dev') / source_path
+                if str(source_path) in shared and shared[str(source_path)] != digest:
+                    raise ValueError('Conflicting shared differential source identities')
+                shared[str(source_path)] = digest
+        for source, digest in shared.items():
+            if sha256(root / source) != digest:
+                raise ValueError(f'Stale shared differential source evidence: {source}')
+        results[name] = {'report': group['report'], 'report_sha256': hashlib.sha256(report_data).hexdigest(),
+                         'harness': group['harness'], 'harness_source_sha256': harness_hash,
+                         'report_binds_harness_hash': True,
+                         'shared_sources_sha256': shared,
+                         'native_comparisons': comparisons, 'compiler_source_sha256': compiler}
+    sources = sorted({path for row in overrides.values() if row['status'] != 'unsupported'
+                      for path in row['compiler_sources']})
+    return results, {path: sha256(root / path) for path in sources}
 
 
-def instruction_intervals(manifest, source_size):
-    """Unique embedded-image instruction ranges; do not count root umbrella ranges."""
-    spans = []
-    for image in manifest['images']:
-        for section in image['sections']:
-            if section.get('instructions') and not section.get('zero_fill'):
-                start = natural(section.get('file_offset'), 'section file_offset')
-                size = natural(section.get('bytes'), 'section bytes')
-                if start % 4 or size % 4 or start + size > source_size:
-                    raise ValueError('Invalid embedded instruction range')
-                if size:
-                    spans.append((start, start + size))
-    merged = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def collect_verification(reports, kernel_bytes, kernel_hash, compiler, intervals, denominator):
-    if not reports:
-        return {'status': 'unknown_no_reports_supplied', 'unique_source_word_instances': None,
-                'percentage': None, 'reports': []}
-    if hashlib.sha256(kernel_bytes).hexdigest() != kernel_hash:
-        raise ValueError('Kernel bytes do not match pinned source')
-    if sum(end - start for start, end in intervals) // 4 != denominator:
-        raise ValueError('Kernel instruction denominator differs from embedded manifest ranges')
-    starts = [start for start, _ in intervals]
-    offsets = set()
-    identities = []
-    passed_rows = 0
-    for report_path, report, report_hash in reports:
-        if report.get('kind') not in VERIFICATION_KINDS:
-            raise ValueError(f'Unsupported verification report: {report_path}')
-        if report.get('container_sha256') != kernel_hash:
-            raise ValueError(f'Stale verification source: {report_path}')
-        if 'passed' in report and report['passed'] is not True:
-            raise ValueError(f'Failed verification report: {report_path}')
-        if 'compiler_source_sha256' in report and report['compiler_source_sha256'] != compiler:
-            raise ValueError(f'Stale verification compiler: {report_path}')
-        rows = report.get('verified')
-        if not isinstance(rows, list):
-            raise ValueError(f'Missing verified rows: {report_path}')
-        # Older integer reports bind the compiler in every passed row, rather
-        # than at report level. An empty such report cannot prove its compiler.
-        if not rows and report.get('compiler_source_sha256') != compiler:
-            raise ValueError(f'Unbound empty verification report: {report_path}')
-        included = 0
-        for row in rows:
-            if row.get('passed') is not True:
-                continue
-            if row.get('compiler_source_sha256') != compiler:
-                raise ValueError(f'Stale verified row compiler: {report_path}')
-            comparisons = row.get('state_and_memory_comparisons', row.get('state_comparisons'))
-            if natural(comparisons, 'native comparison count') == 0:
-                raise ValueError('Verified row has no native comparisons')
-            offset = natural(row.get('file_offset'), 'verified file_offset')
-            size = natural(row.get('source_bytes'), 'verified source_bytes')
-            if offset % 4 or size == 0 or size % 4 or offset + size > len(kernel_bytes):
-                raise ValueError('Invalid verified source range')
-            if hashlib.sha256(kernel_bytes[offset:offset + size]).hexdigest() != row.get('source_sha256'):
-                raise ValueError('Verified source bytes changed')
-            native_path = row.get('native_artifact')
-            if not isinstance(native_path, str) or sha256(native_path) != row.get('native_sha256'):
-                raise ValueError('Verified native artifact missing or changed')
-            for position in range(offset, offset + size, 4):
-                interval = bisect_right(starts, position) - 1
-                if interval < 0 or position + 4 > intervals[interval][1]:
-                    raise ValueError('Verified word is outside measured instruction sections')
-                offsets.add(position)
-            included += 1
-        passed_rows += included
-        identities.append({'path': str(report_path), 'sha256': report_hash, 'passed_native_rows': included})
-    return {'status': 'pinned_native_differential_prefixes', 'unique_source_word_instances': len(offsets),
-            'passed_native_rows_before_deduplication': passed_rows,
-            'percentage': percentage(len(offsets), denominator), 'reports': identities,
-            'limits': 'Counts unique source file words contained in passing native differential prefixes. Does not prove each word was reached by test inputs, every input behaves correctly, or whole functions/OS are verified.'}
+def validate_current_compiler(registry, compiler, root=ROOT):
+    paths = registry.get('compiler_fingerprint_sources')
+    if not isinstance(paths, list) or not paths or len(set(paths)) != len(paths):
+        raise ValueError('Registry needs the ordered compiler fingerprint source recipe')
+    sources = {str(repository_path(path)): (root / repository_path(path)).read_bytes() for path in paths}
+    if hashlib.sha256(b''.join(sources.values())).hexdigest() != compiler:
+        raise ValueError('Built compiler fingerprint differs from current source bytes')
+    return {path: hashlib.sha256(data).hexdigest() for path, data in sources.items()}
 
 
 def markdown(report):
-    kernel = report['kernel']['percentage']
-    apps = report['applications_aggregate']['percentage']
-    verification = report['kernel_native_differential_prefixes']['percentage']
-    def row(label, ratio, denominator=None):
-        if ratio is None:
-            return f'| {label} | Unknown | {denominator:,} | Unknown |'
-        value = 'N/A (empty corpus)' if ratio['value'] is None else f"{ratio['value']:.4f}%"
-        return f"| {label} | {ratio['numerator']:,} | {ratio['denominator']:,} | {value} |"
-    return ('| Measurement | Source instances | Corpus instances | Coverage |\n'
-            '| --- | ---: | ---: | ---: |\n' +
-            row('Kernel: isolated emission', kernel) + '\n' +
-            row('Eight apps: isolated emission', apps) + '\n' +
-            row('Kernel: tested prefixes', verification, kernel['denominator']) + '\n\n' +
+    row = report['summary']['reviewed']
+    return ('| Measurement | Current evidence |\n| --- | --- |\n'
+            f"| Reviewed instruction forms implemented | {row['implemented']:,} |\n"
+            f"| Reviewed instruction forms partially implemented | {row['partial']:,} |\n"
+            '| Required Apple-silicon ISA inventory | Incomplete; total unknown |\n'
+            '| Required ISA completion | Unknown |\n'
+            f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n"
+            '| Overall compatibility completion | Unknown |\n\n'
             f"Snapshot {report['measured_at_utc'].split('T')[0]} UTC; compiler `{report['compiler_source_sha256'][:12]}`.\n\n"
-            'Counts are instruction instances, not unique ISA encodings. '
-            'Isolated emission checks code generation; tested prefixes provide bounded native differential evidence and may contain unreached words. '
-            'These are corpus percentages, not a whole-macOS completion percentage. '
-            '[Method and provenance](docs/development.md).\n')
+            'Reviewed forms cover the bounded leaf/private-RAM profile, with aliases excluded. '
+            'They are an implementation count, not a percentage of the required Apple ISA. '
+            'Complete binaries require full loading and execution; leaf tests do not qualify. '
+            '[Scope and evidence](docs/development.md).\n')
 
 
-def write_markdown(destination, text):
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode='w', dir=destination.parent, delete=False) as pending:
-        pending.write(text)
+def write_markdown(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as pending:
+        pending.write(content)
         name = pending.name
     try:
-        os.replace(name, destination)
+        os.replace(name, path)
     finally:
         if os.path.exists(name):
             os.unlink(name)
@@ -213,13 +269,12 @@ def write_markdown(destination, text):
 def update_readme(path, fragment):
     path = Path(path)
     text = path.read_text()
-    start = '<!-- stela-instruction-progress:start -->'
-    end = '<!-- stela-instruction-progress:end -->'
+    start, end = '<!-- stela-instruction-progress:start -->', '<!-- stela-instruction-progress:end -->'
     if text.count(start) != 1 or text.count(end) != 1:
-        raise ValueError('README must contain exactly one instruction-progress marker pair')
+        raise ValueError('README needs exactly one progress marker pair')
     first, last = text.index(start) + len(start), text.index(end)
     if first > last:
-        raise ValueError('README instruction-progress markers are reversed')
+        raise ValueError('README progress markers reversed')
     updated = text[:first] + '\n' + fragment.rstrip() + '\n' + text[last:]
     if path.read_text() != text:
         raise ValueError('README changed during update')
@@ -228,68 +283,43 @@ def update_readme(path, fragment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
-    parser.add_argument('--kernel', type=Path, default=ROOT / '.stela/26A434/kernelcache.vma2.macho')
-    parser.add_argument('--fileset-manifest', type=Path, default=ROOT / '.stela/26A434/kernel-fileset-functions.json')
-    parser.add_argument('--corpus', type=Path, default=ROOT / '.stela/corpus-pairs.json')
-    parser.add_argument('--verification-report', type=Path, action='append', default=[])
-    parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/instructions.json')
+    parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
-    parser.add_argument('--update-readme', action='store_true',
-                        help='Atomically replace exactly one marked progress block in repository README.md')
+    parser.add_argument('--update-readme', action='store_true')
     args = parser.parse_args()
-    corpus_data = args.corpus.read_bytes()
-    corpus = json.loads(corpus_data)
-    if corpus.get('kind') != 'universal_macho_instruction_corpus' or len(corpus.get('files', [])) != 8:
-        raise ValueError('Expected pinned eight-application corpus')
-    if any(not row.get('paired_architectures') or 'error' in row for row in corpus['files']):
-        raise ValueError('Corpus contains an unpaired or failed input')
-    paths = [row['path'] for row in corpus['files']]
-    if len(set(paths)) != 8:
-        raise ValueError('Duplicate corpus paths')
-    kernel_data = args.kernel.read_bytes()
-    if hashlib.sha256(kernel_data).hexdigest() != PINNED_KERNEL_SHA256:
-        raise ValueError('Pinned kernel identity mismatch')
-    manifest_data = args.fileset_manifest.read_bytes()
-    manifest = json.loads(manifest_data)
-    if manifest.get('container_sha256') != PINNED_KERNEL_SHA256:
-        raise ValueError('Fileset manifest is for a different source')
+    registry_data = args.registry.read_bytes()
+    registry = json.loads(registry_data)
+    rows = validate_registry(registry)
     executable_hash = sha256(args.cli)
-    kernel = measure(args.cli, args.kernel, PINNED_KERNEL_SHA256, manifest=args.fileset_manifest)
-    compiler = kernel['compiler_source_sha256']
-    applications = []
-    for row in corpus['files']:
-        probe = measure(args.cli, row['path'], row['file_sha256'], compiler)
-        applications.append({'path': row['path'], **probe})
-    if sha256(args.cli) != executable_hash:
-        raise ValueError('CLI executable changed during measurement')
-    if args.fileset_manifest.read_bytes() != manifest_data or args.corpus.read_bytes() != corpus_data:
-        raise ValueError('Pinned input manifest changed during measurement')
-    reports = []
-    for path in args.verification_report:
-        data = path.read_bytes()
-        reports.append((path, json.loads(data), hashlib.sha256(data).hexdigest()))
-    verification = collect_verification(reports, kernel_data, PINNED_KERNEL_SHA256, compiler,
-                                        instruction_intervals(manifest, len(kernel_data)),
-                                        kernel['counts']['source_word_instances'])
-    report = {'schema_version': 1, 'kind': 'pinned_instruction_progress_snapshot',
+    with tempfile.TemporaryDirectory(prefix='stela-apple-progress-') as temporary:
+        compiler, probes = smoke_forms(args.cli, rows, rows, Path(temporary))
+    evidence, sources = validate_evidence(registry, rows, compiler)
+    fingerprint_sources = validate_current_compiler(registry, compiler)
+    if (sha256(args.cli) != executable_hash or args.registry.read_bytes() != registry_data
+            or validate_current_compiler(registry, compiler) != fingerprint_sources):
+        raise ValueError('Compiler/registry changed during measurement')
+    report = {'schema_version': 2, 'kind': 'apple_silicon_translation_progress',
               'measured_at_utc': datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'),
+              'registry_version': registry['registry_version'], 'target_profile': registry['target_profile'],
+              'instruction_sources': registry['instruction_sources'],
+              'registry_sha256': hashlib.sha256(registry_data).hexdigest(),
               'compiler_source_sha256': compiler, 'compiler_executable_sha256': executable_hash,
-              'harness_source_sha256': sha256(__file__),
-              'corpus_manifest_sha256': hashlib.sha256(corpus_data).hexdigest(),
-              'fileset_manifest_sha256': hashlib.sha256(manifest_data).hexdigest(),
-              'kernel': {'path': str(args.kernel), **kernel}, 'applications': applications,
-              'applications_aggregate': aggregate(applications),
-              'kernel_native_differential_prefixes': verification,
-              'limits': 'Static source instruction-word instances from pinned executable sections. Isolated emitter success is not whole-block translation or behavioral verification. Inline data and unreachable code may occur. No whole-OS completion percentage is inferred.'}
+              'harness_source_sha256': sha256(__file__), 'compiler_sources_sha256': sources,
+              'compiler_fingerprint_sources_sha256': fingerprint_sources,
+              'profile': registry['profile'], 'summary': summarize(rows),
+              'native_differential_evidence': evidence, 'compiler_smoke_probes': probes,
+              'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
+                                 for identity, row in rows.items()],
+              'limits': 'Apple-silicon arm64/arm64e to native x86_64 is the target. Required public and Apple-specific ISA inventory is incomplete. Reviewed form counts cannot establish an ISA or overall completion percentage. Status is reviewed implementation under the bounded profile plus current differential evidence and representative compile smoke; neither smoke nor differential tests prove exhaustive correctness. Complete binary loading/execution and OS boot remain unverified.'}
     archive = write_evidence(args.output, report)
     if args.markdown_output:
         write_markdown(args.markdown_output, markdown(report))
     if args.update_readme:
         update_readme(ROOT / 'README.md', markdown(report))
     print(json.dumps({'report': str(args.output), 'archive': str(archive),
-                      'kernel': kernel['percentage'], 'applications': report['applications_aggregate']['percentage'],
-                      'kernel_native_differential_prefixes': verification}, indent=2))
+                      'compiler_source_sha256': compiler, 'summary': report['summary']}, indent=2))
 
 
 if __name__ == '__main__':
