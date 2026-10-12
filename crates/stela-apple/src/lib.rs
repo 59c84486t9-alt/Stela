@@ -1,4 +1,5 @@
 //! Read Apple's public macOS IPSW feed and download original images.
+pub mod restore;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use reqwest::{Url, blocking::Client, header, redirect::Policy};

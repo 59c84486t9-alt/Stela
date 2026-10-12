@@ -24,3 +24,11 @@ stela-runtime = { path = "crates/stela-runtime" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Large restore images spend substantial time in these crates in debug builds.
+# Keep Stela itself debuggable while using optimized hash compression code.
+[profile.dev.package.sha1]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

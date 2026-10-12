@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>ProductVersion</key><string>27.0.fixture</string>
+<key>ProductBuildVersion</key><string>FIXTURE</string>
+<key>SupportedProductTypes</key><array><string>TestMac1,1</string></array>
+<key>BuildIdentities</key><array><dict>
+<key>Ap,ProductType</key><string>TestMac1,1</string>
+<key>Info</key><dict><key>DeviceClass</key><string>testmacap</string><key>Variant</key><string>Fixture Erase</string></dict>
+<key>Manifest</key><dict>
+<key>OS</key><dict><key>Digest</key><data>AAECAw==</data><key>Info</key><dict><key>Path</key><string>os.dmg.aea</string><key>HashMethod</key><string>sha2-384</string></dict></dict>
+<key>Opaque</key><dict><key>Digest</key><data>AAE=</data></dict>
+</dict></dict></array></dict></plist>

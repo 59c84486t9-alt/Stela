@@ -1179,6 +1179,7 @@ dependencies = [
  "clap",
  "hex",
  "serde_json",
+ "sha2",
  "stela-apple",
  "stela-compiler",
  "stela-core",

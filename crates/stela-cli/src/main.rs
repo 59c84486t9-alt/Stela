@@ -2,6 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use stela_core::{Progress, Stage, read_json, write_json};
 use std::{fs::File, path::PathBuf};
+mod image;
 
 #[derive(Parser)]
 #[command(
@@ -16,6 +17,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect BuildManifest identities and model-specific component paths.
+    ImageManifest {
+        image: PathBuf,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Extract one named ZIP member with a size limit and hash receipt.
+    ExtractImage {
+        image: PathBuf,
+        #[arg(long)]
+        member: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
+        max_bytes: u64,
+    },
     /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
     BinaryText { input: PathBuf },
     /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
@@ -109,6 +128,34 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::ImageManifest {
+            image: input,
+            model,
+            output,
+        } => {
+            ensure!(
+                !output.exists(),
+                "report exists; choose a new --output path"
+            );
+            let report = image::manifest(&input, model.as_deref())?;
+            write_json(&output, &report)?;
+            eprintln!(
+                "macOS {} build {}: {} matching identities; {}",
+                report.product_version,
+                report.product_build,
+                report.identities.len(),
+                output.display()
+            );
+        }
+        Command::ExtractImage {
+            image: input,
+            member,
+            output,
+            max_bytes,
+        } => {
+            let report = image::extract(&input, &member, &output, max_bytes)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::BinaryText { input } => {
             use stela_compiler::Lifter;
             let bytes = std::fs::read(&input)?;

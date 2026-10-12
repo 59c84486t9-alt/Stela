@@ -87,3 +87,129 @@ fn first_use_cache_is_reused_and_invalid_instructions_do_not_compile() {
     );
     assert!(!dir.path().join("invalid-output").exists());
 }
+
+#[test]
+fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let file = std::fs::File::create(dir.path().join("fixture.ipsw")).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("BuildManifest.plist", options).unwrap();
+    zip.write_all(include_bytes!("../../../tests/fixtures/restore.plist"))
+        .unwrap();
+    zip.start_file("kernelcache.fixture", options).unwrap();
+    zip.write_all(b"fixturekernel").unwrap();
+    zip.finish().unwrap();
+    let report = cli(
+        dir.path(),
+        &[
+            "image-manifest",
+            "fixture.ipsw",
+            "--model",
+            "TestMac1,1",
+            "--output",
+            "manifest.json",
+        ],
+    );
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["product_build"], "FIXTURE");
+    assert!(
+        !cli(
+            dir.path(),
+            &[
+                "extract-image",
+                "fixture.ipsw",
+                "--member",
+                "kernelcache.fixture",
+                "--output",
+                "small",
+                "--max-bytes",
+                "2"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(!dir.path().join("small").exists());
+    let extracted = cli(
+        dir.path(),
+        &[
+            "extract-image",
+            "fixture.ipsw",
+            "--member",
+            "kernelcache.fixture",
+            "--output",
+            "kernel",
+        ],
+    );
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("kernel")).unwrap(),
+        b"fixturekernel"
+    );
+    assert!(
+        !cli(
+            dir.path(),
+            &[
+                "extract-image",
+                "fixture.ipsw",
+                "--member",
+                "kernelcache.fixture",
+                "--output",
+                "kernel"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !cli(
+            dir.path(),
+            &[
+                "extract-image",
+                "fixture.ipsw",
+                "--member",
+                "../kernel",
+                "--output",
+                "escape"
+            ]
+        )
+        .status
+        .success()
+    );
+    let mut corrupt = std::fs::read(dir.path().join("fixture.ipsw")).unwrap();
+    let position = corrupt
+        .windows(13)
+        .position(|w| w == b"fixturekernel")
+        .unwrap();
+    corrupt[position] ^= 1;
+    std::fs::write(dir.path().join("corrupt.ipsw"), corrupt).unwrap();
+    assert!(
+        !cli(
+            dir.path(),
+            &[
+                "extract-image",
+                "corrupt.ipsw",
+                "--member",
+                "kernelcache.fixture",
+                "--output",
+                "bad-kernel"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(!dir.path().join("bad-kernel").exists());
+}
