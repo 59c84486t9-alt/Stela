@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import time
+from evidence import write_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = ROOT / ".stela" / "vm"
@@ -184,7 +185,7 @@ def smoke(native=None, expected=42):
             if native:
                 report["native_sha256"] = hashlib.sha256(Path(native).read_bytes()).hexdigest()
             filename = "aot-smoke-report.json" if native else "smoke-report.json"
-            (STATE / filename).write_text(json.dumps(report, indent=2) + "\n")
+            write_evidence(STATE / filename,report)
             print(json.dumps(report, indent=2))
             monitor.execute("quit")
         finally:

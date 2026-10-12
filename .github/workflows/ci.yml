@@ -13,6 +13,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: python3 -m pip install -r dev/requirements-test.txt
       - run: python3 dev/differential.py
+      - run: python3 -m unittest discover -s dev -p 'test_*.py'
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 clang
       - run: python3 dev/vm.py smoke
       - run: |

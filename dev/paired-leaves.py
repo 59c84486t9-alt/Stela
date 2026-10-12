@@ -14,6 +14,7 @@ import tempfile
 
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from differential import ROOT, executable, native, reference, states
+from evidence import write_evidence
 
 
 def entry_code(row):
@@ -78,7 +79,7 @@ def main():
     report={"kind":"paired_real_command_leafs","passed":True,"files":reports,
             "limits":"Only the tiny entry functions of true/false are translated. No complete Mach-O app loading or macOS ABI adaptation is demonstrated."}
     destination=ROOT / ".stela/paired-leaves-report.json"
-    destination.write_text(json.dumps(report,indent=2)+"\n")
+    write_evidence(destination,report)
     print(json.dumps(report,indent=2))
 
 

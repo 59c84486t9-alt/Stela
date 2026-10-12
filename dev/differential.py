@@ -20,6 +20,7 @@ import tempfile
 
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
 from unicorn import arm64_const as arm
+from evidence import write_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 0x100000
@@ -233,7 +234,7 @@ def main():
                    "compiler_executable_sha256":hashlib.sha256(cli.read_bytes()).hexdigest()})
     destination = ROOT / ".stela/differential-report.json"
     destination.parent.mkdir(exist_ok=True)
-    destination.write_text(json.dumps(report,indent=2)+"\n")
+    write_evidence(destination,report)
     print(json.dumps(report,indent=2))
 
 
