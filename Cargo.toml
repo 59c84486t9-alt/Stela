@@ -1,5 +1,16 @@
+[package]
+name = "stela-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stela"
+path = "src/main.rs"
+
 [workspace]
-members = ["crates/*"]
+members = ["crates/stela-core", "crates/stela-compiler", "crates/stela-runtime"]
+default-members = ["."]
 resolver = "2"
 
 [workspace.package]
@@ -17,11 +28,36 @@ hex = "0.4"
 libc = "0.2"
 tempfile = "3"
 stela-core = { path = "crates/stela-core" }
-stela-apple = { path = "crates/stela-apple" }
-stela-macho = { path = "crates/stela-macho" }
 stela-compiler = { path = "crates/stela-compiler" }
 stela-runtime = { path = "crates/stela-runtime" }
-stela-containers = { path = "crates/stela-containers" }
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+stela-core.workspace = true
+stela-compiler.workspace = true
+stela-runtime.workspace = true
+plist = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha1 = "0.10"
+object = { version = "0.37", features = ["read"] }
+walkdir = "2"
+lzfse_rust = "0.2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[lints]
+workspace = true
 
 [profile.release]
 lto = "thin"

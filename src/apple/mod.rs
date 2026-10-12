@@ -409,7 +409,7 @@ mod tests {
     }
     #[test]
     fn parses_real_feed_structure_and_unknown_universal() -> Result<()> {
-        let bytes = include_bytes!("../../../tests/fixtures/catalog.plist");
+        let bytes = include_bytes!("../../tests/fixtures/catalog.plist");
         let images = parse_catalog(bytes)?;
         assert_eq!(images.len(), 2);
         assert_eq!(

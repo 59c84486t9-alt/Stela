@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     #[test]
     fn filters_restore_models_and_preserves_opaque_digest_metadata() -> Result<()> {
-        let bytes = include_bytes!("../../../tests/fixtures/restore.plist");
+        let bytes = include_bytes!("../../tests/fixtures/restore.plist");
         let report = inspect(bytes, Some("TestMac1,1"))?;
         assert_eq!(report.identities.len(), 1);
         assert_eq!(report.identities[0].components["OS"].path, "os.dmg.aea");

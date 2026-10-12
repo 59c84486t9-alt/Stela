@@ -1162,37 +1162,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "stela-apple"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "plist",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "stela-core",
- "tempfile",
-]
-
-[[package]]
 name = "stela-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "lzfse_rust",
+ "object",
+ "plist",
+ "reqwest",
+ "serde",
  "serde_json",
+ "sha1",
  "sha2",
- "stela-apple",
  "stela-compiler",
- "stela-containers",
  "stela-core",
- "stela-macho",
  "stela-runtime",
  "tempfile",
+ "walkdir",
  "zip",
 ]
 
@@ -1201,18 +1189,6 @@ name = "stela-compiler"
 version = "0.1.0"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "stela-containers"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "lzfse_rust",
- "serde",
- "sha2",
- "stela-core",
 ]
 
 [[package]]
@@ -1225,19 +1201,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
-]
-
-[[package]]
-name = "stela-macho"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "object",
- "serde",
- "stela-core",
- "tempfile",
- "walkdir",
 ]
 
 [[package]]

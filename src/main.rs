@@ -2,7 +2,10 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use stela_core::{Progress, Stage, read_json, write_json};
 use std::{fs::File, path::PathBuf};
+mod apple;
+mod containers;
 mod image;
+mod macho;
 
 #[derive(Parser)]
 #[command(
@@ -149,7 +152,7 @@ fn run() -> Result<()> {
                 !output.exists(),
                 "report exists; choose a new --output path"
             );
-            let report = stela_macho::fileset::inspect(&std::fs::read(input)?)?;
+            let report = crate::macho::fileset::inspect(&std::fs::read(input)?)?;
             write_json(&output, &report)?;
             eprintln!(
                 "{} embedded images, {} unique instruction-section bytes; {}",
@@ -187,8 +190,7 @@ fn run() -> Result<()> {
                 .unwrap_or(std::path::Path::new("."));
             std::fs::create_dir_all(parent)?;
             let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-            let receipt =
-                stela_containers::decode_kernel(&bytes, &mut pending, max_output_bytes)?;
+            let receipt = crate::containers::decode_kernel(&bytes, &mut pending, max_output_bytes)?;
             pending.as_file().sync_all()?;
             pending.persist_noclobber(output).map_err(|e| e.error)?;
             write_json(&receipt_path, &receipt)?;
@@ -225,7 +227,7 @@ fn run() -> Result<()> {
         Command::BinaryText { input } => {
             use stela_compiler::Lifter;
             let bytes = std::fs::read(&input)?;
-            let slices = stela_macho::text_slices(&bytes, &input.display().to_string())?;
+            let slices = crate::macho::text_slices(&bytes, &input.display().to_string())?;
             let mut output = vec![];
             for slice in slices {
                 let arm = matches!(slice.artifact.architecture.as_str(), "arm64" | "arm64e");
@@ -306,7 +308,7 @@ fn run() -> Result<()> {
         }
         Command::Images { command } => match command {
             Images::List { model } => {
-                let mut images = stela_apple::catalog()?;
+                let mut images = crate::apple::catalog()?;
                 if let Some(model) = model {
                     images.retain(|i| i.models.contains(&model));
                 }
@@ -318,8 +320,8 @@ fn run() -> Result<()> {
                 output_dir,
                 dry_run,
             } => {
-                let images = stela_apple::catalog()?;
-                let image = stela_apple::select(&images, build.as_deref(), model.as_deref())?;
+                let images = crate::apple::catalog()?;
+                let image = crate::apple::select(&images, build.as_deref(), model.as_deref())?;
                 // Use a synthesized filename, never a remote path component.
                 ensure!(
                     image.build.bytes().all(|c| c.is_ascii_alphanumeric()),
@@ -344,7 +346,7 @@ fn run() -> Result<()> {
                         )?
                     );
                 } else {
-                    let receipt = stela_apple::download(&image, &output)?;
+                    let receipt = crate::apple::download(&image, &output)?;
                     println!("{}", serde_json::to_string_pretty(&receipt)?);
                     eprintln!("Saved {}", output.display());
                 }
@@ -368,7 +370,7 @@ fn run() -> Result<()> {
                 !output.exists(),
                 "inventory already exists; use a new output path for each scan"
             );
-            let inventory = stela_macho::scan(&root, &build)?;
+            let inventory = crate::macho::scan(&root, &build)?;
             write_json(&output, &inventory)?;
             eprintln!(
                 "{} slices, {} scan errors, {} excluded containers; {}",

@@ -97,7 +97,7 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file("BuildManifest.plist", options).unwrap();
-    zip.write_all(include_bytes!("../../../tests/fixtures/restore.plist"))
+    zip.write_all(include_bytes!("fixtures/restore.plist"))
         .unwrap();
     zip.start_file("kernelcache.fixture", options).unwrap();
     zip.write_all(b"fixturekernel").unwrap();

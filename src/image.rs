@@ -9,7 +9,7 @@ use std::{
 pub fn manifest(
     image: &Path,
     model: Option<&str>,
-) -> Result<stela_apple::restore::RestoreManifest> {
+) -> Result<crate::apple::restore::RestoreManifest> {
     let mut archive = zip::ZipArchive::new(File::open(image)?)?;
     let member = archive.by_name("BuildManifest.plist")?;
     let mut bytes = vec![];
@@ -18,12 +18,12 @@ pub fn manifest(
         bytes.len() <= 64 * 1024 * 1024,
         "restore manifest exceeds 64 MiB"
     );
-    stela_apple::restore::inspect(&bytes, model)
+    crate::apple::restore::inspect(&bytes, model)
 }
 
 pub fn extract(image: &Path, name: &str, output: &Path, maximum: u64) -> Result<serde_json::Value> {
     ensure!(
-        stela_apple::restore::safe_member(name),
+        crate::apple::restore::safe_member(name),
         "unsafe archive member name"
     );
     let mut receipt_name = output.as_os_str().to_owned();
