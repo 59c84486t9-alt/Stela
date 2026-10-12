@@ -21,6 +21,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover Apple image dependencies inside an explicit guest filesystem.
+    DiscoverImages {
+        input: PathBuf,
+        #[arg(long)]
+        guest_root: PathBuf,
+        #[arg(long)]
+        guest_path: Option<String>,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+        #[arg(long, value_parser = parse_address)]
+        image_base: Option<u64>,
+        #[arg(long, default_value = "0x50000000000", value_parser = parse_address)]
+        library_base: u64,
+        #[arg(long, default_value = "0x10000000000", value_parser = parse_address)]
+        library_stride: u64,
+    },
     /// Bind explicit Apple images and probe cross-image native entry execution.
     RunLinkedImages {
         input: PathBuf,
@@ -28,8 +44,18 @@ enum Command {
         architecture: Option<String>,
         #[arg(long, value_parser = parse_address)]
         image_base: Option<u64>,
-        #[arg(long, value_parser = parse_library)]
+        #[arg(long, value_parser = parse_library, conflicts_with = "guest_root")]
         library: Vec<LibraryInput>,
+        #[arg(long)]
+        guest_root: Option<PathBuf>,
+        #[arg(long, requires = "guest_root")]
+        guest_path: Option<String>,
+        #[arg(long, requires = "guest_root", value_parser = parse_address)]
+        library_base: Option<u64>,
+        #[arg(long, requires = "guest_root", value_parser = parse_address)]
+        library_stride: Option<u64>,
+        #[arg(long, requires = "guest_root")]
+        allow_unresolved_unused_dependencies: bool,
         #[arg(long)]
         state: Option<PathBuf>,
         #[arg(long, default_value = "0xffff0000", value_parser = parse_address)]
@@ -324,11 +350,42 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::DiscoverImages {
+            input,
+            guest_root,
+            guest_path,
+            architecture,
+            image_base,
+            library_base,
+            library_stride,
+        } => {
+            let discovery = macho::dependency_graph::discover(
+                &input,
+                macho::dependency_graph::DiscoveryOptions {
+                    guest_root,
+                    guest_path,
+                    architecture,
+                    image_base,
+                    library_base,
+                    library_stride,
+                },
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"kind":"dependency_discovery",
+                "graph":discovery.graph,"complete_binary_verified":false}))?
+            );
+        }
         Command::RunLinkedImages {
             input,
             architecture,
             image_base,
             library,
+            guest_root,
+            guest_path,
+            library_base,
+            library_stride,
+            allow_unresolved_unused_dependencies,
             state,
             stop_pc,
             block_budget,
@@ -373,28 +430,52 @@ fn run() -> Result<()> {
                 !provided_state || registers.sp.is_multiple_of(16),
                 "research entry SP must be 16-byte aligned"
             );
-            let mut inputs = Vec::new();
-            for (path, base) in std::iter::once((input, image_base))
-                .chain(library.into_iter().map(|lib| (lib.path, Some(lib.base))))
-            {
-                let container = std::fs::read(&path)?;
-                let (slice_offset, slice) =
-                    apple_slice(&container, &path, architecture.as_deref())?;
-                inputs.push(ImageInput {
-                    data: slice.to_vec(),
-                    container_sha256: stela_core::sha256(&container),
-                    slice_offset,
-                    load_base: base,
-                });
-            }
-            let mut images = LinkedImages::load(
-                inputs,
-                cache_dir,
-                StackSpec {
-                    base: stack_base,
-                    bytes: stack_bytes,
-                },
-            )?;
+            let stack = StackSpec {
+                base: stack_base,
+                bytes: stack_bytes,
+            };
+            let (mut images, dependency_graph) = if let Some(guest_root) = guest_root {
+                let discovery = macho::dependency_graph::discover(
+                    &input,
+                    macho::dependency_graph::DiscoveryOptions {
+                        guest_root,
+                        guest_path,
+                        architecture,
+                        image_base,
+                        library_base: library_base.unwrap_or(0x50000000000),
+                        library_stride: library_stride.unwrap_or(0x10000000000),
+                    },
+                )?;
+                ensure!(
+                    discovery.graph.complete_dependency_graph
+                        || allow_unresolved_unused_dependencies,
+                    "dependency graph has {} unresolved edges; trusted entry research requires explicit --allow-unresolved-unused-dependencies",
+                    discovery.graph.unresolved_dependencies
+                );
+                let loaded = LinkedImages::load_discovered(
+                    discovery.inputs,
+                    cache_dir,
+                    stack,
+                    &discovery.links,
+                )?;
+                (loaded, Some(discovery.graph))
+            } else {
+                let mut inputs = Vec::new();
+                for (path, base) in std::iter::once((input, image_base))
+                    .chain(library.into_iter().map(|lib| (lib.path, Some(lib.base))))
+                {
+                    let container = std::fs::read(&path)?;
+                    let (slice_offset, slice) =
+                        apple_slice(&container, &path, architecture.as_deref())?;
+                    inputs.push(ImageInput {
+                        data: slice.to_vec(),
+                        container_sha256: stela_core::sha256(&container),
+                        slice_offset,
+                        load_base: base,
+                    });
+                }
+                (LinkedImages::load(inputs, cache_dir, stack)?, None)
+            };
             ensure!(
                 images
                     .regions()
@@ -435,6 +516,7 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "kind":"linked_macho_entry_probe","images":images.images(),"mapped_entry":images.entry(),
+                "dependency_graph":dependency_graph,"unresolved_unused_dependencies_allowed":allow_unresolved_unused_dependencies,
                     "memory_regions":images.regions(),"guard_segments_not_reserved":images.guards(),"stack":images.stack(),
                     "host_execute":false,"initial_state":initial_state,"state":register_json(&thread.registers),
                     "pc":thread.pc.0,"outcome":outcome,"memory":memory,

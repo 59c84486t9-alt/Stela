@@ -22,6 +22,13 @@ pub struct ImageInput {
     pub load_base: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyLink {
+    pub requester: usize,
+    pub ordinal: usize,
+    pub provider: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Binding {
     pub import_index: u32,
@@ -80,7 +87,29 @@ fn binding_value(address: u64, addend: i64) -> Result<u64> {
     Ok(value)
 }
 
-fn resolve_bindings(images: &[ImageReceipt]) -> Result<Vec<Vec<Binding>>> {
+fn resolve_bindings(
+    images: &[ImageReceipt],
+    links: Option<&[DependencyLink]>,
+) -> Result<Vec<Vec<Binding>>> {
+    let mut linked = BTreeMap::new();
+    if let Some(links) = links {
+        for link in links {
+            ensure!(
+                link.requester < images.len()
+                    && link.provider > 0
+                    && link.provider < images.len()
+                    && link.ordinal > 0
+                    && link.ordinal <= images[link.requester].plan.dependencies.len(),
+                "invalid discovered dependency link"
+            );
+            ensure!(
+                linked
+                    .insert((link.requester, link.ordinal), link.provider)
+                    .is_none(),
+                "duplicate discovered dependency link"
+            );
+        }
+    }
     let mut providers = BTreeMap::new();
     for image in &images[1..] {
         let id = image
@@ -141,12 +170,23 @@ fn resolve_bindings(images: &[ImageReceipt]) -> Result<Vec<Vec<Binding>>> {
                 "binding through nonordinary dependency command {:#x} is unsupported",
                 dependency.command
             );
-            let provider = *providers.get(dependency.name.as_str()).with_context(|| {
-                format!(
-                    "missing provided dylib {:?} for symbol {:?}",
-                    dependency.name, import.name
-                )
-            })?;
+            let provider = if links.is_some() {
+                *linked
+                    .get(&(image.index, import.library_ordinal as usize))
+                    .with_context(|| {
+                        format!(
+                            "missing discovered dependency {:?} for symbol {:?}",
+                            dependency.name, import.name
+                        )
+                    })?
+            } else {
+                *providers.get(dependency.name.as_str()).with_context(|| {
+                    format!(
+                        "missing provided dylib {:?} for symbol {:?}",
+                        dependency.name, import.name
+                    )
+                })?
+            };
             let symbol = exports[provider]
                 .get(import.name.as_str())
                 .with_context(|| {
@@ -197,6 +237,27 @@ impl LinkedImages {
     /// unique install identities. No dependency search, host substitution or
     /// initializers occur. Unreferenced dependencies remain explicit in receipts.
     pub fn load(inputs: Vec<ImageInput>, cache: PathBuf, stack: StackSpec) -> Result<Self> {
+        Self::load_with_links(inputs, cache, stack, None)
+    }
+
+    /// Bind using requester/ordinal edges discovered from the guest filesystem.
+    /// Selected file provenance authorizes a provider whose install identity can
+    /// differ from its load-path spelling. No install-name fallback fills holes.
+    pub fn load_discovered(
+        inputs: Vec<ImageInput>,
+        cache: PathBuf,
+        stack: StackSpec,
+        links: &[DependencyLink],
+    ) -> Result<Self> {
+        Self::load_with_links(inputs, cache, stack, Some(links))
+    }
+
+    fn load_with_links(
+        inputs: Vec<ImageInput>,
+        cache: PathBuf,
+        stack: StackSpec,
+        links: Option<&[DependencyLink]>,
+    ) -> Result<Self> {
         ensure!(
             !inputs.is_empty() && inputs.len() <= 32,
             "linked image set requires 1..32 explicit images"
@@ -226,7 +287,7 @@ impl LinkedImages {
                 applied_binds: 0,
             });
         }
-        let bindings = resolve_bindings(&images)?;
+        let bindings = resolve_bindings(&images, links)?;
         let mut specs = Vec::new();
         let mut code = Vec::new();
         let mut guards = Vec::new();
@@ -406,7 +467,7 @@ mod tests {
             image(1, Some("@rpath/a.dylib"), "_f", 0x2000),
             image(2, Some("@rpath/b.dylib"), "_f", 0x3000),
         ];
-        let result = resolve_bindings(&images).unwrap();
+        let result = resolve_bindings(&images, None).unwrap();
         assert_eq!(
             (
                 result[0][0].provider_image,
@@ -419,29 +480,61 @@ mod tests {
     }
 
     #[test]
+    fn discovered_bindings_use_selected_file_edges_without_install_name_fallback() {
+        let mut images = vec![
+            image(0, None, "_main", 0),
+            image(1, Some("@rpath/b.dylib"), "_f", 0x2000),
+        ];
+        assert!(resolve_bindings(&images, None).is_err());
+        let link = DependencyLink {
+            requester: 0,
+            ordinal: 1,
+            provider: 1,
+        };
+        assert_eq!(
+            resolve_bindings(&images, Some(std::slice::from_ref(&link))).unwrap()[0][0].value,
+            0x2007
+        );
+        images[1].plan.dylib_identity.as_mut().unwrap().name = "@rpath/a.dylib".into();
+        assert!(resolve_bindings(&images, Some(&[])).is_err());
+        assert!(resolve_bindings(&images, Some(&[link.clone(), link])).is_err());
+        assert!(
+            resolve_bindings(
+                &images,
+                Some(&[DependencyLink {
+                    requester: 0,
+                    ordinal: 1,
+                    provider: 0
+                }])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn binding_declines_missing_duplicate_weak_and_flat_resolution() {
         let mut images = vec![
             image(0, None, "_main", 0),
             image(1, Some("@rpath/b.dylib"), "_f", 0x2000),
         ];
-        assert!(resolve_bindings(&images).is_err());
+        assert!(resolve_bindings(&images, None).is_err());
         images[1].plan.dylib_identity.as_mut().unwrap().name = "@rpath/a.dylib".into();
         images.push(image(2, Some("@rpath/a.dylib"), "_f", 0x3000));
-        assert!(resolve_bindings(&images).is_err());
+        assert!(resolve_bindings(&images, None).is_err());
         images.pop();
         images[0].fixups.imports[0].weak = true;
-        assert!(resolve_bindings(&images).is_err());
+        assert!(resolve_bindings(&images, None).is_err());
         images[0].fixups.imports[0].weak = false;
         for ordinal in [-3, -2, -1, 0, 2] {
             images[0].fixups.imports[0].library_ordinal = ordinal;
-            assert!(resolve_bindings(&images).is_err());
+            assert!(resolve_bindings(&images, None).is_err());
         }
         images[0].fixups.imports[0].library_ordinal = 1;
         images[0].plan.header_flags = 0;
-        assert!(resolve_bindings(&images).is_err());
+        assert!(resolve_bindings(&images, None).is_err());
         images[0].plan.header_flags = object::macho::MH_TWOLEVEL;
         images[1].exports[0].name = "_missing".into();
-        assert!(resolve_bindings(&images).is_err());
+        assert!(resolve_bindings(&images, None).is_err());
     }
 
     #[test]
