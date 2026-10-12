@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v5",
+  "registry_version": "apple-silicon-reviewed-forms-v6",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -77,11 +77,6 @@
       "report": ".stela/conditional-select-differential-report.json",
       "kind": "conditional_select_arm_vs_native_x86"
     },
-    "integer_multiply": {
-      "harness": "dev/multiply-differential.py",
-      "report": ".stela/multiply-differential-report.json",
-      "kind": "integer_multiply_arm_vs_native_x86"
-    },
     "pc_relative": {
       "harness": "dev/pc-relative-differential.py",
       "report": ".stela/pc-relative-differential-report.json",
@@ -95,6 +90,11 @@
         "exhaustive_immediate_pairs",
         "block_state_and_actual_ret_comparisons"
       ]
+    },
+    "integer_math": {
+      "harness": "dev/integer-math-differential.py",
+      "report": ".stela/integer-math-differential-report.json",
+      "kind": "integer_math_arm_vs_native_x86"
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -4313,13 +4313,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -4352,13 +4352,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -4623,13 +4623,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -4662,13 +4662,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -5234,6 +5234,84 @@
       "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
     },
     {
+      "id": "SDIV_32_dp_2src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac00c00",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SDIV"
+      },
+      "source_file": "sdiv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdiv.xml",
+      "source_sha256": "00841fd8c66107d0cc9e9df857b85ad6354cdfd2a955d10c19fe130932d97e4a",
+      "mnemonic": "SDIV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ac20c20",
+          "expected_mnemonics": [
+            "sdiv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer form, source/destination register roles and architectural corner cases reviewed against the selected official XML and integer-math decoder/emitter; linked suite compares independent integer mathematics, original ARM and native x86. Smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, ZR sources/discarded destinations, W32 zero extension and NZCV preservation in the declared leaf profile. Zero divisor yields zero; signed division truncates toward zero and signed MIN/-1 wraps to MIN without a host divide trap. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "SDIV_64_dp_2src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac00c00",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SDIV"
+      },
+      "source_file": "sdiv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdiv.xml",
+      "source_sha256": "00841fd8c66107d0cc9e9df857b85ad6354cdfd2a955d10c19fe130932d97e4a",
+      "mnemonic": "SDIV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ac20c20",
+          "expected_mnemonics": [
+            "sdiv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer form, source/destination register roles and architectural corner cases reviewed against the selected official XML and integer-math decoder/emitter; linked suite compares independent integer mathematics, original ARM and native x86. Smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, ZR sources/discarded destinations, W32 zero extension and NZCV preservation in the declared leaf profile. Zero divisor yields zero; signed division truncates toward zero and signed MIN/-1 wraps to MIN without a host divide trap. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
       "id": "SMADDL_64WA_dp_3src",
       "alias": false,
       "category": "base_integer_system",
@@ -5253,13 +5331,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -5292,13 +5370,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -5331,13 +5409,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -6917,6 +6995,84 @@
       "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
     },
     {
+      "id": "UDIV_32_dp_2src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac00800",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UDIV"
+      },
+      "source_file": "udiv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udiv.xml",
+      "source_sha256": "3ce90616ccb5c83c36dc64b2e4037cf32f0fed2317d6c2dda5f5aa9da63ea8a5",
+      "mnemonic": "UDIV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ac20820",
+          "expected_mnemonics": [
+            "udiv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer form, source/destination register roles and architectural corner cases reviewed against the selected official XML and integer-math decoder/emitter; linked suite compares independent integer mathematics, original ARM and native x86. Smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, ZR sources/discarded destinations, W32 zero extension and NZCV preservation in the declared leaf profile. Zero divisor yields zero; signed division truncates toward zero and signed MIN/-1 wraps to MIN without a host divide trap. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "UDIV_64_dp_2src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac00800",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UDIV"
+      },
+      "source_file": "udiv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udiv.xml",
+      "source_sha256": "3ce90616ccb5c83c36dc64b2e4037cf32f0fed2317d6c2dda5f5aa9da63ea8a5",
+      "mnemonic": "UDIV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ac20820",
+          "expected_mnemonics": [
+            "udiv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer form, source/destination register roles and architectural corner cases reviewed against the selected official XML and integer-math decoder/emitter; linked suite compares independent integer mathematics, original ARM and native x86. Smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, ZR sources/discarded destinations, W32 zero extension and NZCV preservation in the declared leaf profile. Zero divisor yields zero; signed division truncates toward zero and signed MIN/-1 wraps to MIN without a host divide trap. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
       "id": "UMADDL_64WA_dp_3src",
       "alias": false,
       "category": "base_integer_system",
@@ -6936,13 +7092,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -6975,13 +7131,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -7014,13 +7170,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_multiply"
+        "integer_math"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/aarch64/multiply.rs",
-        "crates/stela-compiler/src/x86_64/multiply.rs"
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
       ],
       "smoke_samples": [
         {
@@ -7044,8 +7200,8 @@
     "crates/stela-compiler/src/x86_64/bitfield.rs",
     "crates/stela-compiler/src/aarch64/conditional_select.rs",
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
-    "crates/stela-compiler/src/aarch64/multiply.rs",
-    "crates/stela-compiler/src/x86_64/multiply.rs",
+    "crates/stela-compiler/src/aarch64/integer_math.rs",
+    "crates/stela-compiler/src/x86_64/integer_math.rs",
     "crates/stela-compiler/src/aarch64/pc_relative.rs",
     "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",

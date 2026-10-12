@@ -1,11 +1,12 @@
-//! Apple A64 scalar integer multiply encodings, with ZR in every register role.
+//! Apple A64 scalar integer product/division encodings; register 31 is ZR.
 //!
 //! Semantics and fixed bits follow the pinned Arm 2026-06 MADD/MSUB,
-//! SMADDL/SMSUBL, UMADDL/UMSUBL and SMULH/UMULH instruction XML.
+//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH and SDIV/UDIV instruction XML.
 use super::{Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Divide { signed: bool, width: Width },
     Low { width: Width },
     Long { signed: bool },
     High { signed: bool },
@@ -21,11 +22,28 @@ pub struct Operand {
     pub accumulator: Register,
 }
 
-/// Match the data-processing (three-source) class. Unsupported/reserved class
+/// Match scalar SDIV/UDIV and the product three-source class. Reserved product class
 /// members return Err, so they cannot accidentally become a nearby multiply.
 /// MUL/MNEG and long aliases are represented by an ordinary ZR accumulator.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if matches!(word & 0x7fe0fc00, 0x1ac00800 | 0x1ac00c00) {
+        return Some(Ok(Operand {
+            kind: Kind::Divide {
+                signed: word & (1 << 10) != 0,
+                width: if word >> 31 != 0 {
+                    Width::X64
+                } else {
+                    Width::W32
+                },
+            },
+            subtract: false,
+            destination: register(word & 31, false),
+            left: register((word >> 5) & 31, false),
+            right: register((word >> 16) & 31, false),
+            accumulator: Register::Zero,
+        }));
+    }
     if word & 0x7f000000 != 0x1b000000 {
         return None;
     }
@@ -60,6 +78,31 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn division_fixed_bits_width_and_zero_roles_are_exact() {
+        for (base, signed) in [(0x1ac00800, false), (0x1ac00c00, true)] {
+            for (sf, width) in [(0, Width::W32), (1u32 << 31, Width::X64)] {
+                let word = base | sf | (31 << 16) | (31 << 5) | 31;
+                let operand = decode(word).unwrap().unwrap();
+                assert_eq!(operand.kind, Kind::Divide { signed, width });
+                assert_eq!(operand.destination, Register::Zero);
+                assert_eq!(operand.left, Register::Zero);
+                assert_eq!(operand.right, Register::Zero);
+                assert_eq!(operand.accumulator, Register::Zero);
+                for bit in [11, 12, 13, 14, 15, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30] {
+                    // A neighboring encoding can be a different valid integer
+                    // operation (for example UMULH), but never another divide.
+                    if let Some(Ok(neighbor)) = decode(word ^ (1 << bit)) {
+                        assert!(
+                            !matches!(neighbor.kind, Kind::Divide { .. }),
+                            "{word:08x} bit {bit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn opcode_space_and_reserved_neighbors_are_explicit() {
