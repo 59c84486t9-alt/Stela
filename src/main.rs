@@ -6,6 +6,7 @@ mod apple;
 mod containers;
 mod corpus_progress;
 mod image;
+mod linked_benchmark;
 mod macho;
 
 #[derive(Parser)]
@@ -21,6 +22,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Benchmark the known linked-image fixture in a release build.
+    BenchmarkLinkedImages {
+        input: PathBuf,
+        #[arg(long)]
+        library: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Discover Apple image dependencies inside an explicit guest filesystem.
     DiscoverImages {
         input: PathBuf,
@@ -350,6 +359,13 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::BenchmarkLinkedImages {
+            input,
+            library,
+            output,
+        } => {
+            linked_benchmark::run(&input, &library, &output)?;
+        }
         Command::DiscoverImages {
             input,
             guest_root,
