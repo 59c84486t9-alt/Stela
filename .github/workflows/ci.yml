@@ -36,6 +36,8 @@ jobs:
           - logical-immediate-differential
           - carry-differential
           - register-offset-differential
+          - conditional-select-differential
+          - multiply-differential
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v1",
+  "registry_version": "apple-silicon-reviewed-forms-v2",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -71,6 +71,16 @@
       "harness": "dev/register-offset-differential.py",
       "report": ".stela/register-offset-differential-report.json",
       "kind": "register_offset_arm_vs_native_x86"
+    },
+    "conditional_select": {
+      "harness": "dev/conditional-select-differential.py",
+      "report": ".stela/conditional-select-differential-report.json",
+      "kind": "conditional_select_arm_vs_native_x86"
+    },
+    "integer_multiply": {
+      "harness": "dev/multiply-differential.py",
+      "report": ".stela/multiply-differential-report.json",
+      "kind": "integer_multiply_arm_vs_native_x86"
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -1277,6 +1287,318 @@
           "reason": "UnresolvedDirectTarget"
         }
       ]
+    },
+    {
+      "id": "CSEL_32_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x1a800000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSEL"
+      },
+      "source_file": "csel.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csel.xml",
+      "source_sha256": "f462ad29ccd87614ba7fd456f1a27c8267545d552b7e167162efda2fec3707f1",
+      "mnemonic": "CSEL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1a820020",
+          "expected_mnemonics": [
+            "csel"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSEL_64_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x9a800000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSEL"
+      },
+      "source_file": "csel.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csel.xml",
+      "source_sha256": "f462ad29ccd87614ba7fd456f1a27c8267545d552b7e167162efda2fec3707f1",
+      "mnemonic": "CSEL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9a820020",
+          "expected_mnemonics": [
+            "csel"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSINC_32_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x1a800400",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSINC"
+      },
+      "source_file": "csinc.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csinc.xml",
+      "source_sha256": "f780a1a7a915fdecb2fcb0268fb1b8f2d01790148cf9e600d4bdbd8be4724f9f",
+      "mnemonic": "CSINC",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1a820420",
+          "expected_mnemonics": [
+            "csinc"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSINC_64_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x9a800400",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSINC"
+      },
+      "source_file": "csinc.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csinc.xml",
+      "source_sha256": "f780a1a7a915fdecb2fcb0268fb1b8f2d01790148cf9e600d4bdbd8be4724f9f",
+      "mnemonic": "CSINC",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9a820420",
+          "expected_mnemonics": [
+            "csinc"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSINV_32_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x5a800000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSINV"
+      },
+      "source_file": "csinv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csinv.xml",
+      "source_sha256": "6c9aebeac46e0085e6ea2193c9049dc1b8c87c72083af0d66b7311d4f3beda75",
+      "mnemonic": "CSINV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5a820020",
+          "expected_mnemonics": [
+            "csinv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSINV_64_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xda800000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSINV"
+      },
+      "source_file": "csinv.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csinv.xml",
+      "source_sha256": "6c9aebeac46e0085e6ea2193c9049dc1b8c87c72083af0d66b7311d4f3beda75",
+      "mnemonic": "CSINV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xda820020",
+          "expected_mnemonics": [
+            "csinv"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSNEG_32_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x5a800400",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSNEG"
+      },
+      "source_file": "csneg.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csneg.xml",
+      "source_sha256": "45af5204607f8196282b6e5cdbcbe64ec4fc4e3c0f5f38922dd902572086f41a",
+      "mnemonic": "CSNEG",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5a820420",
+          "expected_mnemonics": [
+            "csneg"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CSNEG_64_condsel",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xda800400",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CSNEG"
+      },
+      "source_file": "csneg.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/csneg.xml",
+      "source_sha256": "45af5204607f8196282b6e5cdbcbe64ec4fc4e3c0f5f38922dd902572086f41a",
+      "mnemonic": "CSNEG",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "conditional_select"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/conditional_select.rs",
+        "crates/stela-compiler/src/x86_64/conditional_select.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xda820420",
+          "expected_mnemonics": [
+            "csneg"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined registers, overlaps, W32/X64 widths and 16 condition encodings including always-true AL/NV; false-arm transform at operand width, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
     },
     {
       "id": "EON_32_log_shift",
@@ -3798,6 +4120,84 @@
       "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
     },
     {
+      "id": "MADD_32A_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1b000000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "MADD"
+      },
+      "source_file": "madd.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/madd.xml",
+      "source_sha256": "080c0b9c94a530b5a948b26f5b3891ce6047bd4354885c92e97b8485d7d298ce",
+      "mnemonic": "MADD",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1b020c20",
+          "expected_mnemonics": [
+            "madd"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "MADD_64A_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b000000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "MADD"
+      },
+      "source_file": "madd.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/madd.xml",
+      "source_sha256": "080c0b9c94a530b5a948b26f5b3891ce6047bd4354885c92e97b8485d7d298ce",
+      "mnemonic": "MADD",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9b020c20",
+          "expected_mnemonics": [
+            "madd"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
       "id": "MOVK_32_movewide",
       "alias": false,
       "category": "base_integer_system",
@@ -4028,6 +4428,84 @@
       ],
       "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
       "scope": "All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."
+    },
+    {
+      "id": "MSUB_32A_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1b008000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "MSUB"
+      },
+      "source_file": "msub.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/msub.xml",
+      "source_sha256": "d89aff26d94897f1b17b601a4908442189c5f07242f0e7ec75e3dc2052df4c7d",
+      "mnemonic": "MSUB",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1b028c20",
+          "expected_mnemonics": [
+            "msub"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "MSUB_64A_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b008000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "MSUB"
+      },
+      "source_file": "msub.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/msub.xml",
+      "source_sha256": "d89aff26d94897f1b17b601a4908442189c5f07242f0e7ec75e3dc2052df4c7d",
+      "mnemonic": "MSUB",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9b028c20",
+          "expected_mnemonics": [
+            "msub"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
     },
     {
       "id": "NOP_HI_hints",
@@ -4500,6 +4978,123 @@
       ],
       "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
       "scope": "All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."
+    },
+    {
+      "id": "SMADDL_64WA_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b200000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SMADDL"
+      },
+      "source_file": "smaddl.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smaddl.xml",
+      "source_sha256": "a2c9f59ee04b4084629ec2ad7e7f106fe2a4ab9cc14f7c3961efcda94ede1419",
+      "mnemonic": "SMADDL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9b220c20",
+          "expected_mnemonics": [
+            "smaddl"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32 multiplicands and X64 addend/destination registers and overlaps, signed/unsigned source extension, modular X64 add/sub result, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "SMSUBL_64WA_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b208000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SMSUBL"
+      },
+      "source_file": "smsubl.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smsubl.xml",
+      "source_sha256": "e6820e40a3c9035456b5bc6040ce62273e2585a895e75ff56dca7c8a6f82fe79",
+      "mnemonic": "SMSUBL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9b228c20",
+          "expected_mnemonics": [
+            "smsubl"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32 multiplicands and X64 addend/destination registers and overlaps, signed/unsigned source extension, modular X64 add/sub result, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "SMULH_64_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b400000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SMULH"
+      },
+      "source_file": "smulh.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smulh.xml",
+      "source_sha256": "752db64fb9e23e2df2fb9279be86572b5703bbb0d3299c7479fcd02aa618b6c3",
+      "mnemonic": "SMULH",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9b427c20",
+          "expected_mnemonics": [
+            "smulh"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined X64 operands and overlaps, signed/unsigned high-product bits, ZR sources/discarded destinations, ignored Ra bits14:10 and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
     },
     {
       "id": "STP_32_ldstpair_off",
@@ -5986,12 +6581,133 @@
           "reason": "UnresolvedDirectTarget"
         }
       ]
+    },
+    {
+      "id": "UMADDL_64WA_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9ba00000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UMADDL"
+      },
+      "source_file": "umaddl.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umaddl.xml",
+      "source_sha256": "58a53260325734ee6d456fc2ff1ec819985f96ce060282d8f4cfd862aa4f9c9d",
+      "mnemonic": "UMADDL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ba20c20",
+          "expected_mnemonics": [
+            "umaddl"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32 multiplicands and X64 addend/destination registers and overlaps, signed/unsigned source extension, modular X64 add/sub result, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "UMSUBL_64WA_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9ba08000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UMSUBL"
+      },
+      "source_file": "umsubl.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umsubl.xml",
+      "source_sha256": "cb305f9f5be535b3d9adc75a96b718d1f6f5274483b308fee646424d67b9b396",
+      "mnemonic": "UMSUBL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ba28c20",
+          "expected_mnemonics": [
+            "umsubl"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined W32 multiplicands and X64 addend/destination registers and overlaps, signed/unsigned source extension, modular X64 add/sub result, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "UMULH_64_dp_3src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9bc00000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UMULH"
+      },
+      "source_file": "umulh.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umulh.xml",
+      "source_sha256": "19d97bbd9812aa472c0ff785e6afa1e71971c0f31e6800d858c8ff069e048080",
+      "mnemonic": "UMULH",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_multiply"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/multiply.rs",
+        "crates/stela-compiler/src/x86_64/multiply.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9bc27c20",
+          "expected_mnemonics": [
+            "umulh"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
+      "scope": "All defined X64 operands and overlaps, signed/unsigned high-product bits, ZR sources/discarded destinations, ignored Ra bits14:10 and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
     }
   ],
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
     "crates/stela-compiler/src/aarch64.rs",
     "crates/stela-compiler/src/x86_64.rs",
+    "crates/stela-compiler/src/aarch64/conditional_select.rs",
+    "crates/stela-compiler/src/x86_64/conditional_select.rs",
+    "crates/stela-compiler/src/aarch64/multiply.rs",
+    "crates/stela-compiler/src/x86_64/multiply.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/Cargo.toml",

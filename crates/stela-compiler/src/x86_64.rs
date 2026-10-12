@@ -8,6 +8,8 @@ use crate::{
 };
 
 pub struct Emitter;
+mod conditional_select;
+mod multiply;
 mod register_offset;
 
 fn offset(register: Register) -> Option<u32> {
@@ -273,6 +275,8 @@ impl Backend<Instruction> for Emitter {
         for instruction in instructions {
             block.source_map.push((instruction.pc, code.len()));
             match instruction.operation {
+                Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
+                Operation::Multiply(operand) => multiply::emit(code, &operand),
                 Operation::MemoryPair {
                     transfer,
                     bytes,

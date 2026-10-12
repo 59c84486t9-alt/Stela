@@ -1,5 +1,7 @@
 //! Decode architectural operand roles, including SP versus the zero register.
 use crate::{GuestAddress, Lifter, UnsupportedReason};
+pub mod conditional_select;
+pub mod multiply;
 pub mod register_offset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,8 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    ConditionalSelect(conditional_select::Operand),
+    Multiply(multiply::Operand),
     MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
         transfer: MemoryTransfer,
@@ -227,6 +231,10 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if let Some(decoded) = conditional_select::decode(word) {
+            Operation::ConditionalSelect(decoded)
+        } else if let Some(decoded) = multiply::decode(word) {
+            Operation::Multiply(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = register_offset::decode(word) {
             Operation::MemoryRegisterOffset(decoded.map_err(|()| unsupported())?)
         } else if word & 0x3e000000 == 0x28000000 {
@@ -478,7 +486,6 @@ mod tests {
             0xba008400, // RMIF
             0x3a00080d, // SETF8
             0x3a00480d, // SETF16
-            0x9a820020, // CSEL
             0xfa420000, // CCMP
         ] {
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
