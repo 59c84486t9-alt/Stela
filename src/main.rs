@@ -208,6 +208,14 @@ enum Command {
         #[arg(long, default_value_t = 32)]
         samples: usize,
     },
+    /// Briefly map an original cache read-only and compare its original VM views.
+    ProbeCacheMappings {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        cache_base: Option<u64>,
+    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -1019,6 +1027,26 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::json!({"report":output,"kind":report["kind"],
                 "complete_binary_verified":false,"fixups_applied":false})
+            );
+        }
+        Command::ProbeCacheMappings {
+            input,
+            output,
+            cache_base,
+        } => {
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            // SAFETY: this developer command operates on trusted, serialized
+            // acquisition files that the caller keeps unchanged until it exits.
+            // The probe checks hashes/identities, but does not lock the inodes.
+            let mut report = unsafe { macho::shared_cache_memory::probe(&input, cache_base)? };
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"mappings":report["mapping_count"],
+                "image_headers_verified":report["image_headers_verified"],"complete_binary_verified":false})
             );
         }
         Command::FetchAeaKey { input, output } => {
