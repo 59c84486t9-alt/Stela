@@ -21,6 +21,42 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Compile one native block with explicit guest-address exits.
+    CompileBlock {
+        input: PathBuf,
+        #[arg(long, default_value = "0x100000", value_parser = parse_address)]
+        guest_base: u64,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Execute trusted raw code through bounded native block dispatch.
+    RunBlocks {
+        input: PathBuf,
+        #[arg(long, default_value = "0x100000", value_parser = parse_address)]
+        guest_base: u64,
+        #[arg(long, value_parser = parse_address)]
+        entry: Option<u64>,
+        #[arg(long, value_parser = parse_address)]
+        stop_pc: Option<u64>,
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long, default_value_t = 10000)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+    },
+    /// Probe trusted executable entry code; dyld/process setup remains unresolved.
+    ProbeImageEntry {
+        input: PathBuf,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+        #[arg(long, default_value = "0xffff0000", value_parser = parse_address)]
+        stop_pc: u64,
+        #[arg(long, default_value_t = 10000)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+    },
     /// Validate an Apple executable's guest mappings and unresolved loader work.
     PlanExecutable {
         input: PathBuf,
@@ -117,6 +153,45 @@ fn parse_address(value: &str) -> Result<u64, String> {
     .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RegisterInput {
+    x: [u64; 31],
+    #[serde(default)]
+    sp: u64,
+    #[serde(default)]
+    nzcv: u32,
+    #[serde(default)]
+    reserved: u32,
+}
+
+fn register_json(state: &stela_compiler::GuestState) -> serde_json::Value {
+    serde_json::json!({"x":state.x,"sp":state.sp,"nzcv":state.nzcv,"reserved":state.reserved})
+}
+
+fn apple_slice<'a>(
+    data: &'a [u8],
+    path: &std::path::Path,
+    architecture: Option<&str>,
+) -> Result<(u64, &'a [u8])> {
+    let artifacts = macho::inspect(data, &path.display().to_string())?;
+    let slices = macho::split_slices(data)?;
+    let selected: Vec<_> = artifacts
+        .iter()
+        .zip(slices)
+        .filter(|(artifact, _)| {
+            matches!(artifact.architecture.as_str(), "arm64" | "arm64e")
+                && architecture.is_none_or(|wanted| wanted == artifact.architecture)
+        })
+        .collect();
+    ensure!(
+        selected.len() == 1,
+        "expected exactly one matching Apple executable slice, found {}; select --architecture arm64 or arm64e",
+        selected.len()
+    );
+    Ok(selected[0].1)
+}
+
 #[derive(Subcommand)]
 enum Images {
     List {
@@ -161,29 +236,153 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::CompileBlock {
+            input,
+            guest_base,
+            output_dir,
+        } => {
+            let source = std::fs::read(&input)?;
+            let window = &source[..source
+                .len()
+                .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
+            let compiled = stela_compiler::block::compile(
+                window,
+                stela_compiler::GuestAddress(guest_base),
+            )?;
+            ensure!(
+                !output_dir.exists(),
+                "output directory exists; choose a new one"
+            );
+            std::fs::create_dir_all(&output_dir)?;
+            std::fs::write(output_dir.join("native.bin"), &compiled.native.x86_64_code)?;
+            let manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot",
+                "source_bytes":compiled.source_bytes,"source_sha256":stela_core::sha256(&source[..compiled.source_bytes]),
+                "guest_base":guest_base,"abi":stela_compiler::block::BLOCK_ABI,
+                "native_sha256":stela_core::sha256(&compiled.native.x86_64_code),
+                "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
+                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "verified":false});
+            write_json(&output_dir.join("manifest.json"), &manifest)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::RunBlocks {
+            input,
+            guest_base,
+            entry,
+            stop_pc,
+            state,
+            block_budget,
+            cache_dir,
+        } => {
+            use stela_runtime::blocks::{BlockRuntime, ThreadState};
+            ensure!(
+                block_budget <= 1_000_000,
+                "research block budget exceeds 1,000,000"
+            );
+            let registers: RegisterInput = if let Some(path) = state {
+                serde_json::from_slice(&std::fs::read(path)?)?
+            } else {
+                RegisterInput::default()
+            };
+            ensure!(
+                registers.nzcv & !0xf0000000 == 0,
+                "only architectural NZCV bits31:28 are supported"
+            );
+            let mut thread = ThreadState {
+                pc: stela_compiler::GuestAddress(entry.unwrap_or(guest_base)),
+                registers: stela_compiler::GuestState {
+                    x: registers.x,
+                    sp: registers.sp,
+                    nzcv: registers.nzcv,
+                    reserved: registers.reserved,
+                },
+            };
+            let source = std::fs::read(input)?;
+            let source_hash = stela_core::sha256(&source);
+            let mut runtime = BlockRuntime::new(1, cache_dir);
+            runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
+            // SAFETY: This explicit research command accepts trusted guest code
+            // and caller-provided direct native RAM addresses under its documented ABI.
+            let outcome = unsafe {
+                runtime.run(
+                    &mut thread,
+                    stop_pc.map(stela_compiler::GuestAddress),
+                    block_budget,
+                )?
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
+                "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
+                "outcome":outcome,"abi":stela_compiler::block::BLOCK_ABI,
+                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "complete_binary_verified":false}))?
+            );
+        }
+        Command::ProbeImageEntry {
+            input,
+            architecture,
+            stop_pc,
+            block_budget,
+            cache_dir,
+        } => {
+            use stela_runtime::blocks::{BlockRuntime, ThreadState};
+            ensure!(
+                block_budget <= 1_000_000,
+                "research block budget exceeds 1,000,000"
+            );
+            let data = std::fs::read(&input)?;
+            let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
+            let image = macho::block_image::BlockImage::from_slice(bytes)?;
+            let mut runtime = BlockRuntime::new(1, cache_dir);
+            let mut executable_regions = Vec::new();
+            for region in image.regions() {
+                ensure!(
+                    stop_pc < region.guest_address()
+                        || stop_pc >= region.guest_address() + region.bytes().len() as u64,
+                    "research return address overlaps executable source"
+                );
+                let generation = runtime.register_code(
+                    stela_compiler::GuestAddress(region.guest_address()),
+                    region.bytes().to_vec(),
+                )?;
+                executable_regions.push(serde_json::json!({"segment":region.segment_name(),
+                    "guest_address":region.guest_address(),"file_offset":region.file_offset(),
+                    "source_bytes":region.bytes().len(),"source_sha256":stela_core::sha256(region.bytes()),
+                    "mapping_generation":generation}));
+            }
+            let mut thread = ThreadState {
+                pc: stela_compiler::GuestAddress(image.plan().entry.guest_address),
+                registers: Default::default(),
+            };
+            thread.registers.x[30] = stop_pc;
+            // SAFETY: Research entry probing requires trusted code whose data
+            // references satisfy the direct-RAM ABI. No dyld/process setup is supplied.
+            let outcome = unsafe {
+                runtime.run(
+                    &mut thread,
+                    Some(stela_compiler::GuestAddress(stop_pc)),
+                    block_budget,
+                )?
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"kind":"macho_entry_block_probe",
+                "container_sha256":stela_core::sha256(&data),"slice_offset":slice_offset,"plan":image.plan(),
+                "executable_regions":executable_regions,
+                "pc":thread.pc.0,"state":register_json(&thread.registers),"outcome":outcome,
+                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "complete_binary_verified":false})
+                )?
+            );
+        }
         Command::PlanExecutable {
             input,
             architecture,
         } => {
             let data = std::fs::read(&input)?;
-            let artifacts = macho::inspect(&data, &input.display().to_string())?;
-            let slices = macho::split_slices(&data)?;
-            let selected: Vec<_> = artifacts
-                .iter()
-                .zip(slices)
-                .filter(|(artifact, _)| {
-                    matches!(artifact.architecture.as_str(), "arm64" | "arm64e")
-                        && architecture
-                            .as_ref()
-                            .is_none_or(|wanted| wanted == &artifact.architecture)
-                })
-                .collect();
-            ensure!(
-                selected.len() == 1,
-                "expected exactly one matching Apple executable slice, found {}; select --architecture arm64 or arm64e",
-                selected.len()
-            );
-            let (_, (offset, bytes)) = selected[0];
+            let (offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
             let plan = macho::load_plan::plan(bytes)?;
             println!(
                 "{}",

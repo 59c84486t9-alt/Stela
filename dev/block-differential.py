@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Original Apple-used A64 control flow versus native block exits and dispatch.
+
+Unicorn runs each complete original block, including its terminator. Its real PC
+is compared with the native return tuple and an independent branch/state oracle.
+The host loop and actual Rust runtime exercise the same multiblock programs. This does not claim application loading or macOS execution.
+"""
+import argparse
+from contextlib import ExitStack
+import ctypes
+import hashlib
+import json
+import multiprocessing
+from pathlib import Path
+import struct
+import subprocess
+import tempfile
+import time
+
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_ERR_FETCH_UNMAPPED
+from unicorn import arm64_const as arm
+
+from differential import ROOT, BASE, MASK, ARM_REGISTERS, State, executable, arithmetic, move, states
+from evidence import write_evidence
+
+ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
+KINDS = {'fallthrough': 0, 'direct': 1, 'indirect': 2, 'call': 3, 'return': 4}
+
+
+class BlockExit(ctypes.Structure):
+    _fields_ = [('next_pc', ctypes.c_uint64), ('kind', ctypes.c_uint64)]
+
+
+def snapshot(state):
+    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+
+
+def holds(condition, flags):
+    n, z, c, v = (bool(flags & (1 << bit)) for bit in (31, 30, 29, 28))
+    return (z, not z, c, not c, n, not n, v, not v,
+            c and not z, not c or z, n == v, n != v,
+            not z and n == v, z or n != v, True, True)[condition]
+
+
+def direct(call, words):
+    return (0x94000000 if call else 0x14000000) | (words & 0x3ffffff)
+
+
+def conditional(condition, words):
+    return 0x54000000 | ((words & 0x7ffff) << 5) | condition
+
+
+def compare_branch(width, nonzero, register, words):
+    return (width << 31) | (nonzero << 24) | 0x34000000 | ((words & 0x7ffff) << 5) | register
+
+
+def test_branch(nonzero, register, bit, words):
+    return ((bit >> 5) << 31) | (nonzero << 24) | 0x36000000 | ((bit & 31) << 19) | ((words & 0x3fff) << 5) | register
+
+
+def indirect(operation, register):
+    return {'br': 0xd61f0000, 'blr': 0xd63f0000, 'ret': 0xd65f0000}[operation] | (register << 5)
+
+
+def prefix_step(operation, state):
+    """Fixture-level integer oracle; does not decode or invoke compiler helpers."""
+    kind, destination, source, immediate = operation
+    value = state.x[source] if source != 31 else 0
+    if kind == 'move':
+        result = immediate
+    elif kind in ('add', 'subtract_flags'):
+        total = value + immediate if kind == 'add' else value - immediate
+        result = total & MASK
+        if kind == 'subtract_flags':
+            signed = value - (1 << 64) if value & (1 << 63) else value
+            signed_total = signed - immediate
+            state.nzcv = ((int(bool(result & (1 << 63))) << 31)
+                          | (int(result == 0) << 30) | (int(value >= immediate) << 29)
+                          | (int(not -(1 << 63) <= signed_total < (1 << 63)) << 28))
+    else:
+        raise AssertionError(operation)
+    if destination != 31:
+        state.x[destination] = result
+
+
+def oracle(case, initial):
+    state = State.from_buffer_copy(initial)
+    for operation in case['prefix']:
+        prefix_step(operation, state)
+    pc = (case['base'] + 4 * len(case['prefix'])) & MASK
+    transfer = case['transfer']
+    operation = transfer['op']
+    next_pc, kind = (pc + (4 if operation != 'fallthrough' else 0)) & MASK, 'fallthrough'
+    if operation in ('b', 'bl'):
+        next_pc = (pc + transfer['offset'] * 4) & MASK
+        kind = 'call' if operation == 'bl' else 'direct'
+    elif operation == 'condition':
+        if holds(transfer['condition'], state.nzcv):
+            next_pc, kind = (pc + transfer['offset'] * 4) & MASK, 'direct'
+    elif operation in ('compare', 'test'):
+        register = transfer['register']
+        value = state.x[register] if register != 31 else 0
+        if operation == 'compare':
+            value &= (1 << transfer['bits']) - 1
+        else:
+            value &= 1 << transfer['bit']
+        if bool(value) == bool(transfer['nonzero']):
+            next_pc, kind = (pc + transfer['offset'] * 4) & MASK, 'direct'
+    elif operation in ('br', 'blr', 'ret'):
+        register = transfer['register']
+        # Capture before BLR overwrites X30; register31 is XZR, never SP.
+        next_pc = state.x[register] if register != 31 else 0
+        kind = {'br': 'indirect', 'blr': 'call', 'ret': 'return'}[operation]
+    elif operation != 'fallthrough':
+        raise AssertionError(transfer)
+    if operation in ('bl', 'blr'):
+        state.x[30] = (pc + 4) & MASK
+    return snapshot(state), {'next_pc': next_pc, 'kind': KINDS[kind]}
+
+
+def make_case(name, transfer, prefix=None, base=BASE, trailing=False):
+    prefix = prefix if prefix is not None else [('add', 9, 9, 1)]
+    words = []
+    for kind, destination, source, immediate in prefix:
+        if kind == 'move':
+            words.append(move(2, 1, destination, immediate))
+        else:
+            words.append(arithmetic(int(kind == 'subtract_flags'), int(kind == 'subtract_flags'),
+                                    1, destination, source, immediate))
+    operation = transfer['op']
+    if operation in ('b', 'bl'):
+        words.append(direct(operation == 'bl', transfer['offset']))
+    elif operation == 'condition':
+        words.append(conditional(transfer['condition'], transfer['offset']))
+    elif operation == 'compare':
+        words.append(compare_branch(int(transfer['bits'] == 64), transfer['nonzero'], transfer['register'], transfer['offset']))
+    elif operation == 'test':
+        words.append(test_branch(transfer['nonzero'], transfer['register'], transfer['bit'], transfer['offset']))
+    elif operation in ('br', 'blr', 'ret'):
+        words.append(indirect(operation, transfer['register']))
+    elif operation != 'fallthrough':
+        raise AssertionError(transfer)
+    consumed = len(words) * 4
+    if trailing:
+        # UDF is deliberately outside the compiled block, not silently accepted.
+        words.extend([0, 0xffffffff])
+    return {'name': name, 'base': base, 'words': words, 'source_bytes': consumed,
+            'prefix': prefix, 'transfer': transfer}
+
+
+def cases():
+    result = []
+    for operation in ('b', 'bl'):
+        for offset in (-(1 << 25), -5, 0, 1, 5, (1 << 25) - 1):
+            result.append(make_case(f'{operation}-{offset}', {'op': operation, 'offset': offset}, base=0x10000000, trailing=True))
+    for condition in range(16):
+        for offset in (-(1 << 18), -3, 3, (1 << 18) - 1):
+            result.append(make_case(f'condition-{condition}-{offset}',
+                                   {'op': 'condition', 'condition': condition, 'offset': offset}))
+        result.append(make_case(f'fresh-flags-{condition}',
+                               {'op': 'condition', 'condition': condition, 'offset': 9},
+                               [('subtract_flags', 31, 1, 1), ('add', 9, 9, 1)]))
+    for bits in (32, 64):
+        for nonzero in (0, 1):
+            for register in (0, 7, 31):
+                for offset in (-(1 << 18), 3, (1 << 18) - 1):
+                    result.append(make_case(f'compare-{bits}-{nonzero}-{register}-{offset}',
+                                           {'op': 'compare', 'bits': bits, 'nonzero': nonzero,
+                                            'register': register, 'offset': offset}))
+    for bit in (0, 31, 32, 63):
+        for nonzero in (0, 1):
+            for register in (0, 7, 31):
+                for offset in (-(1 << 13), 3, (1 << 13) - 1):
+                    result.append(make_case(f'test-{bit}-{nonzero}-{register}-{offset}',
+                                           {'op': 'test', 'bit': bit, 'nonzero': nonzero,
+                                            'register': register, 'offset': offset}))
+    for operation in ('br', 'blr', 'ret'):
+        for register in range(32):
+            result.append(make_case(f'{operation}-x{register}', {'op': operation, 'register': register}, trailing=True))
+    result.extend([make_case('fallthrough', {'op': 'fallthrough'}),
+                   make_case('fallthrough-flags', {'op': 'fallthrough'}, [('subtract_flags', 0, 0, 1)]),
+                   make_case('window-cap-fallthrough', {'op': 'fallthrough'},
+                             [('add', 9, 9, 1)] * 256, trailing=True)])
+    decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    for case in result:
+        source = struct.pack('<' + 'I' * len(case['words']), *case['words'])[:case['source_bytes']]
+        decoded = list(decoder.disasm(source, case['base']))
+        if len(decoded) * 4 != case['source_bytes']:
+            raise AssertionError(f'Independent decoder rejected fixture {case}')
+    return result
+
+
+def initial_states():
+    result = []
+    for flags in range(16):
+        for value in (0, 1, 0x80000000, 0x100000000, 0x8000000000000000, MASK):
+            state = State.from_buffer_copy(states()[flags % 10])
+            state.x[0] = state.x[1] = state.x[7] = value
+            state.sp = 0x1234000056780000
+            state.nzcv = flags << 28
+            state.reserved = 0xa5c39e71
+            result.append(state)
+    return result
+
+
+def machine_for(blocks, initial):
+    machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    pages = set()
+    for case in blocks.values():
+        pages.update(range(case['base'] & ~0xfff, (case['base'] + case['source_bytes'] + 0xfff) & ~0xfff, 0x1000))
+    for page in sorted(pages):
+        machine.mem_map(page, 0x1000)
+    for case in blocks.values():
+        machine.mem_write(case['base'], struct.pack('<' + 'I' * len(case['words']), *case['words'])[:case['source_bytes']])
+    for register, value in zip(ARM_REGISTERS, initial.x):
+        machine.reg_write(register, value)
+    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
+    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    return machine
+
+
+def original_block(machine, case, reserved):
+    addresses = []
+    handle = machine.hook_add(UC_HOOK_CODE, lambda _machine, address, _size, _data: addresses.append(address))
+    try:
+        try:
+            machine.emu_start(case['base'], 0, count=case['source_bytes'] // 4)
+        except UcError as error:
+            # Unicorn may fetch the target before honoring its instruction
+            # counter. Accept only that fetch after the exact original block;
+            # the PC and full state still have to match the independent oracle.
+            if error.errno != UC_ERR_FETCH_UNMAPPED or len(addresses) != case['source_bytes'] // 4:
+                raise
+    finally:
+        machine.hook_del(handle)
+    expected_addresses = list(range(case['base'], case['base'] + case['source_bytes'], 4))
+    if addresses != expected_addresses:
+        raise AssertionError(f'Original did not execute exactly the consumed block: {addresses}, expected {expected_addresses}')
+    return {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
+            'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
+            'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
+            'reserved': reserved}, machine.reg_read(arm.UC_ARM64_REG_PC)
+
+
+def multiblock_cases():
+    def block(offset, prefix, transfer):
+        return make_case(f'multi-{offset}', transfer, prefix, base=BASE + offset)
+    nested = [block(0, [('add', 20, 30, 0), ('move', 0, 0, 1)], {'op': 'bl', 'offset': (0x40 - 8) // 4}),
+              block(12, [('add', 0, 0, 16), ('add', 30, 20, 0)], {'op': 'ret', 'register': 30}),
+              block(0x40, [('add', 0, 0, 2), ('add', 19, 30, 0)], {'op': 'bl', 'offset': (0x80 - 0x48) // 4}),
+              block(0x4c, [('add', 0, 0, 8), ('add', 30, 19, 0)], {'op': 'ret', 'register': 30}),
+              block(0x80, [('add', 0, 0, 4)], {'op': 'ret', 'register': 30})]
+    mixed = [block(0, [('move', 0, 0, 3)], {'op': 'fallthrough'}),
+             block(4, [('add', 0, 0, 2)], {'op': 'br', 'register': 7}),
+             block(0x40, [('add', 0, 0, 4)], {'op': 'b', 'offset': (0x80 - 0x44) // 4}),
+             block(0x80, [('add', 0, 0, 8)], {'op': 'ret', 'register': 5})]
+    loop = [block(0, [('subtract_flags', 0, 0, 1)], {'op': 'condition', 'condition': 1, 'offset': -1}),
+            block(8, [], {'op': 'ret', 'register': 5})]
+    budget = [block(0, [('add', 0, 0, 1)], {'op': 'b', 'offset': -1})]
+    return [{'name': 'nested-call-return', 'blocks': nested, 'budget': 32, 'stop': 'unmapped', 'x0': 31},
+            {'name': 'fallthrough-indirect-tailcall', 'blocks': mixed, 'budget': 32, 'stop': 'unmapped', 'x0': 17},
+            {'name': 'backward-counted-loop', 'blocks': loop, 'budget': 32, 'stop': 'unmapped', 'x0': 0},
+            {'name': 'bounded-infinite-loop', 'blocks': budget, 'budget': 16, 'stop': 'budget', 'x0': 23}]
+
+
+def execute_cases(compiled, multi):
+    comparisons, block_steps = 0, 0
+    state_corpus = hashlib.sha256()
+    all_states = initial_states()
+    for case in compiled:
+        with executable(case['native']) as address:
+            function = ctypes.CFUNCTYPE(BlockExit, ctypes.POINTER(State))(address)
+            for initial in all_states:
+                state = State.from_buffer_copy(initial)
+                expected_state, expected_exit = oracle(case, initial)
+                machine = machine_for({case['base']: case}, initial)
+                arm_state, arm_pc = original_block(machine, case, initial.reserved)
+                actual_exit = function(ctypes.byref(state))
+                actual = {'next_pc': actual_exit.next_pc, 'kind': actual_exit.kind}
+                if arm_state != expected_state or arm_pc != expected_exit['next_pc'] or snapshot(state) != arm_state or actual != expected_exit:
+                    raise AssertionError(json.dumps({'name': case['name'], 'initial': snapshot(initial),
+                                                     'oracle_state': expected_state, 'arm_state': arm_state,
+                                                     'native_state': snapshot(state), 'oracle_exit': expected_exit,
+                                                     'arm_pc': arm_pc, 'native_exit': actual}, indent=2))
+                state_corpus.update(bytes(initial))
+                state_corpus.update(struct.pack('<QQ', actual_exit.next_pc, actual_exit.kind))
+                comparisons += 1
+    traces = []
+    for fixture in multi:
+        blocks = {case['base']: case for case in fixture['blocks']}
+        for incoming_flags in range(16):
+            initial = State.from_buffer_copy(all_states[incoming_flags * 6])
+            initial.x[0] = 7
+            initial.x[5] = initial.x[30] = BASE + 0x900
+            initial.x[7] = BASE + 0x40
+            state = State.from_buffer_copy(initial)
+            machine = machine_for(blocks, initial)
+            pc, trace = BASE, []
+            with ExitStack() as stack:
+                functions = {pc: ctypes.CFUNCTYPE(BlockExit, ctypes.POINTER(State))(
+                    stack.enter_context(executable(case['native']))) for pc, case in blocks.items()}
+                for _ in range(fixture['budget']):
+                    if pc not in blocks:
+                        stop = 'unmapped'
+                        break
+                    case = blocks[pc]
+                    expected_state, expected_exit = oracle(case, state)
+                    arm_state, arm_pc = original_block(machine, case, initial.reserved)
+                    returned = functions[pc](ctypes.byref(state))
+                    actual_exit = {'next_pc': returned.next_pc, 'kind': returned.kind}
+                    if snapshot(state) != expected_state or arm_state != expected_state or arm_pc != returned.next_pc or actual_exit != expected_exit:
+                        raise AssertionError(f'Multiblock mismatch {fixture["name"]}, PC={pc:#x}, {trace}')
+                    trace.append([pc, returned.next_pc, returned.kind])
+                    state_corpus.update(bytes(state))
+                    state_corpus.update(struct.pack('<QQQ', pc, returned.next_pc, returned.kind))
+                    pc = returned.next_pc
+                    block_steps += 1
+                else:
+                    stop = 'budget'
+            if stop != fixture['stop'] or state.x[0] != fixture['x0']:
+                raise AssertionError(f'Wrong dispatch result {fixture["name"]}: {stop}, {state.x[0]}, {trace}')
+            traces.append({'name': fixture['name'], 'incoming_nzcv': initial.nzcv, 'stop': stop,
+                           'blocks': len(trace), 'next_pc': pc, 'x0': state.x[0], 'final_state': snapshot(state), 'trace': trace})
+    return {'single_block_state_exit_comparisons': comparisons,
+            'multiblock_execution_comparisons': len(traces), 'multiblock_state_exit_comparisons': block_steps,
+            'state_corpus_sha256': state_corpus.hexdigest(), 'dispatch_traces': traces}
+
+
+def runtime_cases(cli, directory, fixtures, traces, compiler):
+    """Exercise the actual Rust dispatcher and disk cache, not just host dispatch."""
+    executions, compiled_count, disk_hits, memory_hits = 0, 0, 0, 0
+    reports, source_corpus = [], hashlib.sha256()
+    initial_corpus = initial_states()
+    for fixture in fixtures:
+        end = max(case['base'] + case['source_bytes'] for case in fixture['blocks'])
+        source = bytearray(end - BASE)
+        for case in fixture['blocks']:
+            encoded = struct.pack('<' + 'I' * len(case['words']), *case['words'])[:case['source_bytes']]
+            source[case['base'] - BASE:case['base'] - BASE + len(encoded)] = encoded
+        source_corpus.update(source)
+        input_path = directory / (fixture['name'] + '.bin')
+        input_path.write_bytes(source)
+        cache = directory / (fixture['name'] + '-runtime-cache')
+        fixture_reports = []
+        for trace in (trace for trace in traces if trace['name'] == fixture['name']):
+            initial = State.from_buffer_copy(initial_corpus[(trace['incoming_nzcv'] >> 28) * 6])
+            initial.x[0] = 7
+            initial.x[5] = initial.x[30] = BASE + 0x900
+            initial.x[7] = BASE + 0x40
+            state_path = directory / 'runtime-state.json'
+            state_path.write_text(json.dumps(snapshot(initial)))
+            actual = json.loads(subprocess.check_output(
+                [str(cli), 'run-blocks', str(input_path), '--guest-base', hex(BASE),
+                 '--state', str(state_path), '--block-budget', str(fixture['budget']),
+                 '--cache-dir', str(cache)], timeout=10))
+            reason = 'budget_exhausted' if fixture['stop'] == 'budget' else 'unmapped_target'
+            outcome = actual['outcome']
+            if (actual['state'] != trace['final_state'] or actual['pc'] != trace['next_pc']
+                    or outcome['reason']['kind'] != reason or actual['abi'] != ABI
+                    or actual['compiler_source_sha256'] != compiler
+                    or actual['source_sha256'] != hashlib.sha256(source).hexdigest()
+                    or actual['complete_binary_verified'] is not False):
+                raise AssertionError(json.dumps({'fixture': fixture['name'], 'expected': trace, 'runtime': actual}, indent=2))
+            if fixture['name'] == 'bounded-infinite-loop' and outcome['blocks_executed'] != fixture['budget']:
+                raise AssertionError('Rust runtime did not honor block budget')
+            executions += 1
+            compiled_count += outcome['compiled_blocks']
+            disk_hits += outcome['disk_cache_hits']
+            memory_hits += outcome['memory_cache_hits']
+            fixture_reports.append(outcome)
+        if fixture_reports[0]['compiled_blocks'] == 0 or fixture_reports[1]['disk_cache_hits'] == 0:
+            raise AssertionError('Cold compilation and disk-cache reuse were not observed')
+        reports.append({'name': fixture['name'], 'executions': len(fixture_reports),
+                        'cold': fixture_reports[0], 'warm_disk_cache': fixture_reports[1]})
+    return {'rust_runtime_execution_comparisons': executions,
+            'rust_runtime_compiled_blocks': compiled_count,
+            'rust_runtime_disk_cache_hits': disk_hits, 'rust_runtime_memory_cache_hits': memory_hits,
+            'runtime_input_corpus_sha256': source_corpus.hexdigest(), 'runtime_dispatch': reports}
+
+
+def worker(pipe, compiled, multi):
+    try:
+        pipe.send(execute_cases(compiled, multi))
+    except BaseException as error:
+        pipe.send({'error': repr(error)})
+    finally:
+        pipe.close()
+
+
+def bounded_cases(compiled, multi):
+    context = multiprocessing.get_context('spawn')
+    receive, send = context.Pipe(duplex=False)
+    process = context.Process(target=worker, args=(send, compiled, multi))
+    process.start()
+    send.close()
+    try:
+        deadline = time.monotonic() + 300
+        while not receive.poll(1):
+            if process.exitcode is not None or time.monotonic() >= deadline:
+                raise AssertionError(f'Block worker failed/timed out: {process.exitcode}')
+        result = receive.recv()
+        process.join(timeout=2)
+        if process.exitcode != 0 or 'error' in result:
+            raise AssertionError(f'Block suite failed: {result}, exit={process.exitcode}')
+        return result
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join()
+        receive.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--no-build', action='store_true')
+    args = parser.parse_args()
+    if not args.no_build:
+        subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
+    cli = ROOT / 'target/debug/stela'
+    executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
+    compiled, multi = cases(), multiblock_cases()
+    compiler, corpus, manifests = None, hashlib.sha256(), []
+    all_cases = compiled + [case for fixture in multi for case in fixture['blocks']]
+    with tempfile.TemporaryDirectory(prefix='stela-block-diff-') as temporary:
+        directory = Path(temporary)
+        for index, case in enumerate(all_cases):
+            source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+            corpus.update(struct.pack('<QI', case['base'], len(source)))
+            corpus.update(source)
+            input_path = directory / 'source.bin'
+            input_path.write_bytes(source)
+            output = directory / str(index)
+            manifest = json.loads(subprocess.check_output([str(cli), 'compile-block', str(input_path),
+                                                          '--guest-base', hex(case['base']), '--output-dir', str(output)]))
+            if manifest['abi'] != ABI or manifest['source_bytes'] != case['source_bytes']:
+                raise AssertionError(f'Wrong block manifest ABI/boundary: {manifest}, case={case}')
+            if compiler is not None and compiler != manifest['compiler_source_sha256']:
+                raise AssertionError('Compiler changed during block suite')
+            compiler = manifest['compiler_source_sha256']
+            case['native'] = (output / 'native.bin').read_bytes()
+            if manifest['native_sha256'] != hashlib.sha256(case['native']).hexdigest():
+                raise AssertionError('Native output hash mismatch')
+            manifests.append({'name': case['name'], 'guest_base': case['base'], 'source_bytes': case['source_bytes'],
+                              'native_sha256': manifest['native_sha256'],
+                              'input_source_sha256': hashlib.sha256(source).hexdigest()})
+        result = bounded_cases(compiled, multi)
+        result.update(runtime_cases(cli, directory, multi, result['dispatch_traces'], compiler))
+    if executable_hash != hashlib.sha256(cli.read_bytes()).hexdigest():
+        raise AssertionError('Compiler executable changed during block suite')
+    report = {'kind': 'arm64_block_control_flow_differential', 'passed': True,
+              'programs': len(compiled), 'multiblock_fixtures': len(multi), **result,
+              'reference': 'Original A64 Unicorn execution and independent integer/control-flow oracle',
+              'native': 'Native x86-64 BlockExit SysV RAX/RDX return, RX mappings, Python host dispatch and actual Rust runtime',
+              'abi': ABI, 'tested_state': ['x0..x30', 'SP', 'NZCV', 'reserved ABI field', 'actual next guest PC',
+                                            'taken/untaken exit kind', 'BL/BLR link register', 'BLR X30 target capture',
+                                            'all 16 conditions and all 16 NZCV states', 'fresh flags before branch',
+                                            'CBZ/CBNZ W32/X64 and XZR', 'TBZ/TBNZ bits0/31/32/63 and XZR',
+                                            'signed branch displacement edges', 'all BR/BLR/RET register fields',
+                                            'first terminator source boundary', '256-word fallthrough window boundary', 'nested calls/returns',
+                                            'fallthrough/indirect/tail transfers', 'counted and bounded infinite loops',
+                                            'explicit unmapped target stop'],
+              'corpus_sha256': corpus.hexdigest(), 'compiled_blocks': manifests,
+              'compiler_source_sha256': compiler, 'compiler_executable_sha256': executable_hash,
+              'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
+              'shared_sources_sha256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                        for path in [ROOT / 'dev/differential.py',
+                                                     ROOT / 'crates/stela-runtime/src/blocks.rs',
+                                                     ROOT / 'crates/stela-runtime/src/lib.rs',
+                                                     ROOT / 'crates/stela-runtime/src/execution.rs']},
+              'limits': 'Bounded ordinary integer blocks with private state. Unmapped target fetch after a fully consumed original block is a boundary observation, not fault-delivery evidence. The flat Rust runtime image may coalesce adjacent fixture blocks. No PAC, platform ABI, memory faults, arbitrary guest binaries or macOS boot.'}
+    write_evidence(ROOT / '.stela/block-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == '__main__':
+    main()

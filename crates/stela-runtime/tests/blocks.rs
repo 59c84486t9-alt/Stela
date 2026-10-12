@@ -1,0 +1,329 @@
+//! Native, serialized block-dispatch acceptance tests using only owned ARM code.
+#![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+use anyhow::Result;
+use stela_compiler::{GuestAddress, GuestState};
+use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
+use std::path::{Path, PathBuf};
+
+const BASE: u64 = 0x1000;
+const STOP: u64 = 0xdead_0000;
+const RET: u32 = 0xd65f03c0;
+const NOP: u32 = 0xd503201f;
+const ADD_ONE: u32 = 0x91000400; // ADD X0, X0, #1
+
+fn words(input: &[u32]) -> Vec<u8> {
+    input.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+fn state(pc: u64, value: u64) -> ThreadState {
+    let mut registers = GuestState::default();
+    registers.x[0] = value;
+    registers.x[30] = STOP;
+    ThreadState {
+        registers,
+        pc: GuestAddress(pc),
+    }
+}
+fn transfer(pc: u64, target: u64, call: bool) -> u32 {
+    let displacement = (target as i64 - pc as i64) / 4;
+    assert_eq!((target as i64 - pc as i64) % 4, 0);
+    assert!((-(1 << 25)..(1 << 25)).contains(&displacement));
+    (if call { 0x94000000 } else { 0x14000000 }) | (displacement as u32 & 0x03ffffff)
+}
+fn mov(destination: u32, source: u32) -> u32 {
+    0xaa0003e0 | source << 16 | destination
+}
+
+#[test]
+fn nested_direct_and_indirect_calls_preserve_architectural_link_registers() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(17, cache.path().to_path_buf());
+    let mut main = vec![NOP; 13];
+    main[..4].copy_from_slice(&[
+        mov(19, 30),
+        transfer(BASE + 4, BASE + 0x20, true),
+        mov(30, 19),
+        RET,
+    ]);
+    main[8..].copy_from_slice(&[
+        mov(20, 30),
+        0xd63f0120, // BLR X9
+        0x91000800, // ADD X0, X0, #2
+        mov(30, 20),
+        RET,
+    ]);
+    runtime.register_code(GuestAddress(BASE), words(&main))?;
+    runtime.register_code(GuestAddress(0x2000), words(&[0x91000c00, RET]))?;
+    let mut thread = state(BASE, 7);
+    thread.registers.x[9] = 0x2000;
+    // SAFETY: all code is owned, memory-free and terminating; execution is serialized.
+    let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 10)? };
+    assert_eq!(result.reason, StopReason::StopAddress);
+    assert_eq!(result.blocks_executed, 5);
+    assert_eq!(result.compiled_blocks, 5);
+    assert_eq!(thread.pc, GuestAddress(STOP));
+    assert_eq!(thread.registers.x[0], 12);
+    assert_eq!(thread.registers.x[19], STOP);
+    assert_eq!(thread.registers.x[20], BASE + 8);
+    assert_eq!(thread.registers.x[30], STOP);
+    Ok(())
+}
+
+#[test]
+fn finite_budget_suspends_loop_at_real_guest_pc_and_resumes_from_cached_block() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(18, cache.path().to_path_buf());
+    runtime.register_code(GuestAddress(BASE), words(&[0xf1000400, 0x54ffffe1, RET]))?;
+    let mut thread = state(BASE, 3);
+    // SAFETY: this memory-free decrement loop is bounded by the dispatch budget.
+    let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(first.reason, StopReason::BudgetExhausted);
+    assert_eq!(first.blocks_executed, 2);
+    assert_eq!(first.compiled_blocks, 1);
+    assert_eq!(first.memory_cache_hits, 1);
+    assert_eq!(thread.pc, GuestAddress(BASE));
+    assert_eq!(thread.registers.x[0], 1);
+    // SAFETY: the same owned code now reaches its return within two blocks.
+    let resumed = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(resumed.reason, StopReason::StopAddress);
+    assert_eq!(resumed.blocks_executed, 2);
+    assert_eq!(resumed.memory_cache_hits, 1);
+    assert_eq!(thread.registers.x[0], 0);
+    assert_eq!(thread.pc, GuestAddress(STOP));
+    Ok(())
+}
+
+#[test]
+fn straight_line_window_limit_falls_through_without_losing_an_instruction() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(19, cache.path().to_path_buf());
+    let mut program = vec![ADD_ONE; 257];
+    program.push(RET);
+    runtime.register_code(GuestAddress(BASE), words(&program))?;
+    let mut thread = state(BASE, 0);
+    // SAFETY: finite, memory-free additions with an explicit guest return sentinel.
+    let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+    assert_eq!(first.reason, StopReason::BudgetExhausted);
+    assert_eq!(thread.pc, GuestAddress(BASE + 256 * 4));
+    assert_eq!(thread.registers.x[0], 256);
+    // SAFETY: only one addition and RET remain.
+    let second = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+    assert_eq!(second.reason, StopReason::StopAddress);
+    assert_eq!(second.blocks_executed, 1);
+    assert_eq!(thread.registers.x[0], 257);
+    assert_eq!(thread.pc, GuestAddress(STOP));
+    Ok(())
+}
+
+#[test]
+fn unsupported_callee_is_lazy_and_preserves_completed_caller_effects() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(20, cache.path().to_path_buf());
+    runtime.register_code(
+        GuestAddress(BASE),
+        words(&[ADD_ONE, transfer(BASE + 4, 0x2000, true)]),
+    )?;
+    runtime.register_code(GuestAddress(0x2000), words(&[0]))?;
+    let mut thread = state(BASE, 40);
+    // SAFETY: the supported caller is memory-free; unknown callee code must not run.
+    let result = unsafe { runtime.run(&mut thread, None, 10)? };
+    assert!(matches!(result.reason, StopReason::Unsupported { .. }));
+    assert_eq!(result.blocks_executed, 1);
+    assert_eq!(result.compiled_blocks, 1);
+    assert_eq!(thread.pc, GuestAddress(0x2000));
+    assert_eq!(thread.registers.x[0], 41);
+    assert_eq!(thread.registers.x[30], BASE + 8);
+    Ok(())
+}
+
+#[test]
+fn indirect_unmapped_and_unaligned_targets_stop_without_host_jumps() -> Result<()> {
+    for (target, expected) in [
+        (0x9000, StopReason::UnmappedTarget),
+        (BASE + 1, StopReason::UnalignedTarget),
+    ] {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new(21, cache.path().to_path_buf());
+        runtime.register_code(GuestAddress(BASE), words(&[0xd61f0120]))?; // BR X9
+        let mut thread = state(BASE, 55);
+        thread.registers.x[9] = target;
+        // SAFETY: BR returns a guest PC to dispatch; it must never jump there on the host.
+        let result = unsafe { runtime.run(&mut thread, None, 10)? };
+        assert_eq!(result.reason, expected);
+        assert_eq!(result.blocks_executed, 1);
+        assert_eq!(thread.pc, GuestAddress(target));
+        assert_eq!(thread.registers.x[0], 55);
+    }
+    Ok(())
+}
+
+#[test]
+fn registration_replacement_removal_and_reregistration_invalidate_loaded_blocks() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(22, cache.path().to_path_buf());
+    let original = words(&[0xd2800020, RET]); // MOV X0, #1
+    let first_generation = runtime.register_code(GuestAddress(BASE), original.clone())?;
+    let mut thread = state(BASE, 0);
+    // SAFETY: own memory-free constant-return code.
+    unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(thread.registers.x[0], 1);
+    let second_generation = runtime.register_code(GuestAddress(BASE), words(&[0xd2800040, RET]))?;
+    assert!(second_generation > first_generation);
+    thread = state(BASE, 0);
+    // SAFETY: replacement is another owned constant-return program.
+    let replaced = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(replaced.reason, StopReason::StopAddress);
+    assert_eq!(replaced.compiled_blocks, 1);
+    assert_eq!(replaced.memory_cache_hits, 0);
+    assert_eq!(thread.registers.x[0], 2);
+    assert!(runtime.unregister_code(GuestAddress(BASE)));
+    assert!(!runtime.unregister_code(GuestAddress(BASE)));
+    thread = state(BASE, 99);
+    // SAFETY: no code may execute after its region was removed.
+    let removed = unsafe { runtime.run(&mut thread, None, 1)? };
+    assert_eq!(removed.reason, StopReason::UnmappedTarget);
+    assert_eq!(removed.blocks_executed, 0);
+    assert_eq!(thread.registers.x[0], 99);
+    assert!(runtime.register_code(GuestAddress(BASE), original)? > second_generation);
+    // SAFETY: original owned code has been explicitly registered anew.
+    let restored = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(restored.reason, StopReason::StopAddress);
+    assert_eq!(restored.memory_cache_hits, 0);
+    assert_eq!(restored.disk_cache_hits, 1);
+    assert_eq!(thread.registers.x[0], 1);
+    Ok(())
+}
+
+#[test]
+fn warm_execution_uses_rx_memory_and_new_runtime_revalidates_disk_cache() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let program = words(&[ADD_ONE, RET]);
+    let mut runtime = BlockRuntime::new(23, cache.path().to_path_buf());
+    runtime.register_code(GuestAddress(BASE), program.clone())?;
+    let mut thread = state(BASE, 1);
+    // SAFETY: own finite memory-free code, serialized through this runtime.
+    let cold = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(cold.compiled_blocks, 1);
+    thread = state(BASE, 7);
+    // SAFETY: the same immutable executable copy remains valid.
+    let warm = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(warm.compiled_blocks, 0);
+    assert_eq!(warm.disk_cache_hits, 0);
+    assert_eq!(warm.memory_cache_hits, 1);
+    assert_eq!(thread.registers.x[0], 8);
+    let mut other = BlockRuntime::new(23, cache.path().to_path_buf());
+    other.register_code(GuestAddress(BASE), program)?;
+    thread = state(BASE, 12);
+    // SAFETY: loading must revalidate the persisted native bytes before executing.
+    let disk = unsafe { other.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(disk.compiled_blocks, 0);
+    assert_eq!(disk.disk_cache_hits, 1);
+    assert_eq!(disk.memory_cache_hits, 0);
+    assert_eq!(thread.registers.x[0], 13);
+    Ok(())
+}
+
+fn named_files(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            result.extend(named_files(&path, name)?);
+        } else if path.file_name().and_then(|s| s.to_str()) == Some(name) {
+            result.push(path);
+        }
+    }
+    Ok(result)
+}
+
+#[test]
+fn disk_corruption_cannot_replace_a_loaded_copy_and_is_rejected_on_reload() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let program = words(&[ADD_ONE, RET]);
+    let mut runtime = BlockRuntime::new(24, cache.path().to_path_buf());
+    runtime.register_code(GuestAddress(BASE), program.clone())?;
+    let mut thread = state(BASE, 0);
+    // SAFETY: own memory-free code, first load before corrupting its disk artifact.
+    unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    let files = named_files(cache.path(), "native.bin")?;
+    assert_eq!(files.len(), 1);
+    std::fs::write(&files[0], [0xcc])?;
+    thread = state(BASE, 10);
+    // SAFETY: loaded RX memory is independent of later untrusted disk edits.
+    let warm = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(warm.memory_cache_hits, 1);
+    assert_eq!(thread.registers.x[0], 11);
+    let mut other = BlockRuntime::new(24, cache.path().to_path_buf());
+    other.register_code(GuestAddress(BASE), program)?;
+    thread = state(BASE, 20);
+    // SAFETY: corruption must be rejected before any new mapping or execution.
+    assert!(unsafe { other.run(&mut thread, Some(GuestAddress(STOP)), 2) }.is_err());
+    assert_eq!(thread.pc, GuestAddress(BASE));
+    assert_eq!(thread.registers.x[0], 20);
+    Ok(())
+}
+
+#[test]
+fn rejects_overlapping_regions_and_never_pads_partial_final_instruction() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(25, cache.path().to_path_buf());
+    let mut program = words(&[ADD_ONE]);
+    program.extend([0xc0, 0x03, 0x5f]); // Three bytes of RET, deliberately incomplete.
+    runtime.register_code(GuestAddress(BASE), program)?;
+    assert!(
+        runtime
+            .register_code(GuestAddress(BASE + 4), words(&[RET]))
+            .is_err()
+    );
+    assert!(
+        runtime
+            .register_code(GuestAddress(BASE - 4), words(&[NOP, RET]))
+            .is_err()
+    );
+    let mut thread = state(BASE, 40);
+    // SAFETY: the complete addition is memory-free; truncated RET must never execute.
+    let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 10)? };
+    assert_eq!(result.reason, StopReason::TruncatedInstruction);
+    assert_eq!(result.blocks_executed, 1);
+    assert_eq!(thread.pc, GuestAddress(BASE + 4));
+    assert_eq!(thread.registers.x[0], 41);
+    assert_eq!(thread.registers.x[30], STOP);
+    Ok(())
+}
+
+#[test]
+fn direct_ram_effects_survive_call_and_return_dispatch_boundaries() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(26, cache.path().to_path_buf());
+    runtime.register_code(
+        GuestAddress(BASE),
+        words(&[
+            mov(19, 30),
+            ADD_ONE,
+            0xf9000020, // STR X0, [X1]
+            transfer(BASE + 12, 0x2000, true),
+            mov(30, 19),
+            RET,
+        ]),
+    )?;
+    runtime.register_code(
+        GuestAddress(0x2000),
+        words(&[
+            0xf9400020, // LDR X0, [X1]
+            ADD_ONE, 0xf9000020, // STR X0, [X1]
+            RET,
+        ]),
+    )?;
+    let mut cell = Box::new(0u64);
+    let mut thread = state(BASE, 40);
+    thread.registers.x[1] = (&raw mut *cell) as u64;
+    // SAFETY: X1 points to one exclusively owned aligned u64 for the whole run.
+    // Code accesses exactly that cell and neither aliases Rust/runtime state nor
+    // escapes it; no Rust reference to the cell is active during execution.
+    let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 4)? };
+    assert_eq!(result.reason, StopReason::StopAddress);
+    assert_eq!(result.blocks_executed, 3);
+    assert_eq!(thread.registers.x[0], 42);
+    assert_eq!(*cell, 42);
+    assert_eq!(thread.pc, GuestAddress(STOP));
+    Ok(())
+}

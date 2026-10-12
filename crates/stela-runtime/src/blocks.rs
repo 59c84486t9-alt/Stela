@@ -1,0 +1,315 @@
+//! Serialized native block dispatch over immutable guest instruction snapshots.
+//! Guest code bytes are fetched from owned regions; data addresses retain the
+//! direct-RAM profile. Replacement invalidates dependent RX copies before return.
+use crate::{Prepared, execution::platform, prepare_block};
+use anyhow::{Context, Result, ensure};
+use serde::Serialize;
+use stela_compiler::{
+    GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
+    block::{BLOCK_ABI, BlockExit, ExitKind, MAX_BLOCK_INSTRUCTIONS},
+};
+use stela_core::sha256;
+use std::{collections::BTreeMap, io::Read, marker::PhantomData, path::PathBuf, rc::Rc};
+
+const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct ThreadState {
+    pub registers: GuestState,
+    pub pc: GuestAddress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StopReason {
+    StopAddress,
+    BudgetExhausted,
+    UnmappedTarget,
+    UnalignedTarget,
+    TruncatedInstruction,
+    Unsupported { detail: String },
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunOutcome {
+    pub reason: StopReason,
+    pub blocks_executed: usize,
+    pub compiled_blocks: usize,
+    pub disk_cache_hits: usize,
+    pub memory_cache_hits: usize,
+    pub last_exit: Option<(u64, u64)>,
+}
+
+#[derive(Debug)]
+struct CodeRegion {
+    source: Box<[u8]>,
+    end: u64,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct LoadedBlock {
+    region_base: u64,
+    generation: u64,
+    source_bytes: usize,
+    prepared: Prepared,
+    mapping: platform::Mapping,
+}
+
+/// Source registration, resolution and execution are serialized through &mut.
+/// No function pointer, mutable code slice or executable mapping escapes.
+#[derive(Debug)]
+pub struct BlockRuntime {
+    address_space: u64,
+    cache_root: PathBuf,
+    next_generation: u64,
+    regions: BTreeMap<u64, CodeRegion>,
+    loaded: BTreeMap<u64, LoadedBlock>,
+    _serialized: PhantomData<Rc<()>>,
+}
+
+impl BlockRuntime {
+    pub fn new(address_space: u64, cache_root: PathBuf) -> Self {
+        Self {
+            address_space,
+            cache_root,
+            next_generation: 0,
+            regions: BTreeMap::new(),
+            loaded: BTreeMap::new(),
+            _serialized: PhantomData,
+        }
+    }
+
+    pub fn address_space(&self) -> u64 {
+        self.address_space
+    }
+
+    /// Own an immutable file/code snapshot. Partial trailing bytes are retained
+    /// but can never be padded into a fetchable instruction. Same-base replacement
+    /// always advances generation, even when the source bytes are identical.
+    pub fn register_code(&mut self, base: GuestAddress, source: Vec<u8>) -> Result<u64> {
+        ensure!(
+            base.0.is_multiple_of(4) && source.len() >= 4,
+            "code region must have an aligned base and at least one instruction"
+        );
+        let end = base
+            .0
+            .checked_add(u64::try_from(source.len())?)
+            .context("code region overflow")?;
+        for (&start, region) in &self.regions {
+            ensure!(
+                start == base.0 || end <= start || base.0 >= region.end,
+                "code registration overlaps an existing region"
+            );
+        }
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .context("code generation exhausted")?;
+        self.loaded.retain(|_, block| block.region_base != base.0);
+        self.regions.insert(
+            base.0,
+            CodeRegion {
+                source: source.into_boxed_slice(),
+                end,
+                generation,
+            },
+        );
+        self.next_generation = generation;
+        Ok(generation)
+    }
+
+    pub fn unregister_code(&mut self, base: GuestAddress) -> bool {
+        let removed = self.regions.remove(&base.0).is_some();
+        if removed {
+            self.loaded.retain(|_, block| block.region_base != base.0);
+        }
+        removed
+    }
+
+    fn region(&self, pc: GuestAddress) -> Option<(u64, &CodeRegion)> {
+        self.regions
+            .range(..=pc.0)
+            .next_back()
+            .filter(|(_, region)| pc.0 < region.end)
+            .map(|(&base, region)| (base, region))
+    }
+
+    fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
+        let (base, region) = self.region(pc).context("instruction mapping disappeared")?;
+        if let Some(block) = self.loaded.get(&pc.0) {
+            ensure!(
+                block.region_base == base && block.generation == region.generation,
+                "stale native block generation"
+            );
+            outcome.memory_cache_hits += 1;
+            return Ok(());
+        }
+        let offset = usize::try_from(pc.0 - base)?;
+        let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
+        let generation = region.generation;
+        let window = &region.source[offset..offset + available];
+        let prepared = prepare_block(window, pc, &self.cache_root)?;
+        let manifest = &prepared.prepared.manifest;
+        ensure!(
+            manifest.identity.guest_base == pc.0
+                && manifest.identity.abi == BLOCK_ABI
+                && manifest.identity.target_cpu == "x86_64-baseline"
+                && manifest.identity.schema_version == 1,
+            "unsupported block translation identity"
+        );
+        ensure!(
+            manifest.identity.compiler_source_sha256
+                == sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes())
+                && manifest.identity.source_sha256 == sha256(&window[..prepared.source_bytes]),
+            "block compiler/source identity mismatch"
+        );
+        validate_source_map(&prepared.prepared, pc, prepared.source_bytes)?;
+        ensure!(
+            manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
+            "invalid block native size"
+        );
+        let mut native = Vec::new();
+        std::fs::File::open(prepared.prepared.directory.join("native.bin"))?
+            .take((MAX_NATIVE_BYTES + 1) as u64)
+            .read_to_end(&mut native)?;
+        ensure!(
+            native.len() == manifest.native_bytes && sha256(&native) == manifest.native_sha256,
+            "block native snapshot checksum mismatch"
+        );
+        let mapping = platform::Mapping::new(&native)?;
+        if prepared.prepared.cache_hit {
+            outcome.disk_cache_hits += 1;
+        } else {
+            outcome.compiled_blocks += 1;
+        }
+        self.loaded.insert(
+            pc.0,
+            LoadedBlock {
+                region_base: base,
+                generation,
+                source_bytes: prepared.source_bytes,
+                prepared: prepared.prepared,
+                mapping,
+            },
+        );
+        Ok(())
+    }
+
+    /// Execute native blocks until a caller-owned stop address, a dispatch
+    /// boundary that cannot be satisfied, or the finite block budget is reached.
+    /// Unsupported compilation is returned as a stop, not a guest exception.
+    /// A zero budget executes no blocks. PC denotes the next guest instruction.
+    ///
+    /// # Safety
+    /// Registered instructions and their generated code must be trusted. Every
+    /// guest data access must satisfy the compiler's direct private-RAM profile:
+    /// live bounds, appropriate permissions/alignment, untagged/authenticated
+    /// pointers, identical native virtual addresses, exclusive writes and no
+    /// alias of Rust references, state, native code, runtime metadata or host
+    /// stack. Source snapshots are instruction-fetch storage, not guest data
+    /// mappings. The caller excludes concurrent mutation and assumes unguarded
+    /// instruction pages with GCS disabled; PAC/BTI/GCS exception behavior is not
+    /// modeled. Native faults can terminate the host process. This is neither a
+    /// signal sandbox nor a complete Apple process/exception implementation.
+    pub unsafe fn run(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+    ) -> Result<RunOutcome> {
+        platform::ensure_supported()?;
+        let mut outcome = RunOutcome {
+            reason: StopReason::BudgetExhausted,
+            blocks_executed: 0,
+            compiled_blocks: 0,
+            disk_cache_hits: 0,
+            memory_cache_hits: 0,
+            last_exit: None,
+        };
+        loop {
+            let pc = state.pc;
+            if stop_pc == Some(pc) {
+                outcome.reason = StopReason::StopAddress;
+                break;
+            }
+            if outcome.blocks_executed == block_budget {
+                break;
+            }
+            if !pc.0.is_multiple_of(4) {
+                outcome.reason = StopReason::UnalignedTarget;
+                break;
+            }
+            let Some((base, region)) = self.region(pc) else {
+                outcome.reason = StopReason::UnmappedTarget;
+                break;
+            };
+            if region.end - pc.0 < 4 {
+                outcome.reason = StopReason::TruncatedInstruction;
+                break;
+            }
+            // Decode ahead of loading so an unsupported instruction is a typed
+            // dispatch stop. Disk corruption and allocation errors remain errors.
+            if !self.loaded.contains_key(&pc.0) {
+                let offset = usize::try_from(pc.0 - base)?;
+                let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
+                if let Err(error) = stela_compiler::block::source_bytes(
+                    &region.source[offset..offset + words * 4],
+                    pc,
+                ) {
+                    outcome.reason = StopReason::Unsupported {
+                        detail: error.to_string(),
+                    };
+                    break;
+                }
+            }
+            self.load(pc, &mut outcome)?;
+            let block = self.loaded.get(&pc.0).context("loaded block disappeared")?;
+            let (_, current) = self.region(pc).context("loaded block unmapped")?;
+            ensure!(
+                block.generation == current.generation && block.source_bytes > 0,
+                "refusing stale block execution"
+            );
+            let BlockExit { next_pc, kind } =
+                unsafe { block.mapping.call_block(&mut state.registers)? };
+            ExitKind::try_from(kind)
+                .map_err(|_| anyhow::anyhow!("invalid native block exit kind"))?;
+            state.pc = GuestAddress(next_pc);
+            outcome.last_exit = Some((next_pc, kind));
+            outcome.blocks_executed += 1;
+        }
+        Ok(outcome)
+    }
+
+    /// Inspect source/native identity and reverse maps without exposing RX pointers.
+    pub fn loaded_manifest(&self, pc: GuestAddress) -> Option<&crate::Manifest> {
+        self.loaded.get(&pc.0).map(|block| &block.prepared.manifest)
+    }
+}
+
+fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: usize) -> Result<()> {
+    let manifest = &prepared.manifest;
+    ensure!(
+        !manifest.verified && manifest.source_map.len() == source_bytes / 4,
+        "invalid block source map length or verification claim"
+    );
+    let mut prior = None;
+    for (index, &(guest, native)) in manifest.source_map.iter().enumerate() {
+        ensure!(
+            guest.0
+                == base
+                    .0
+                    .checked_add(index as u64 * 4)
+                    .context("source map address overflow")?,
+            "block source map guest mismatch"
+        );
+        ensure!(
+            native < manifest.native_bytes
+                && prior.is_none_or(|old| native > old)
+                && (index != 0 || native == 0),
+            "invalid block native source map offset"
+        );
+        prior = Some(native);
+    }
+    Ok(())
+}

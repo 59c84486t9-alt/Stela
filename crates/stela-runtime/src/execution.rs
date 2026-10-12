@@ -133,7 +133,7 @@ impl ExecutableLeaf {
 }
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-mod platform {
+pub(crate) mod platform {
     use anyhow::{Context, Result, ensure};
     use stela_compiler::GuestState;
     use std::ptr::NonNull;
@@ -212,6 +212,19 @@ mod platform {
             Ok(())
         }
 
+        pub unsafe fn call_block(
+            &self,
+            state: &mut GuestState,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            // SAFETY: The block loader checks the distinct struct-return ABI;
+            // the runtime caller upholds the trusted direct-RAM contract.
+            let function: unsafe extern "C" fn(
+                *mut GuestState,
+            ) -> stela_compiler::block::BlockExit =
+                unsafe { std::mem::transmute(self.pointer.as_ptr()) };
+            Ok(unsafe { function(state) })
+        }
+
         #[cfg(test)]
         pub fn address(&self) -> usize {
             self.pointer.as_ptr() as usize
@@ -228,7 +241,7 @@ mod platform {
 }
 
 #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
-mod platform {
+pub(crate) mod platform {
     use anyhow::{Result, bail};
     use stela_compiler::GuestState;
 
@@ -247,6 +260,14 @@ mod platform {
 
         pub unsafe fn call(&self, _state: &mut GuestState) -> Result<()> {
             ensure_supported()
+        }
+
+        pub unsafe fn call_block(
+            &self,
+            _state: &mut GuestState,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            ensure_supported()?;
+            unreachable!()
         }
     }
 }

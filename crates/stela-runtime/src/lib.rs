@@ -1,12 +1,29 @@
-//! First-launch AOT cache for the supported raw leaf-function subset.
-//! Full application launch, Mach-O linking and live block execution are future work.
+//! Persistent AOT storage and serialized native leaf/basic-block execution.
+//! Full application launch, platform ABI and Mach-O linking remain future work.
+pub mod blocks;
 pub mod dispatch;
 pub mod execution;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
-use stela_core::{read_json, sha256, write_json};
+use stela_core::{sha256, write_json};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+
+fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    ensure!(
+        file.metadata()?.len() <= limit as u64,
+        "cache file exceeds size limit"
+    );
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= limit, "cache file grew beyond size limit");
+    Ok(bytes)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
@@ -36,8 +53,11 @@ pub struct Prepared {
 }
 
 fn validate(directory: &Path, identity: &Identity) -> Result<Manifest> {
-    let manifest_bytes = std::fs::read(directory.join("manifest.json"))?;
-    let expected: String = read_json(&directory.join("manifest.sha256.json"))?;
+    let manifest_bytes = bounded_file(&directory.join("manifest.json"), MAX_CACHE_MANIFEST_BYTES)?;
+    let expected: String = serde_json::from_slice(&bounded_file(
+        &directory.join("manifest.sha256.json"),
+        1024,
+    )?)?;
     ensure!(
         sha256(&manifest_bytes) == expected,
         "cached manifest checksum mismatch"
@@ -47,7 +67,11 @@ fn validate(directory: &Path, identity: &Identity) -> Result<Manifest> {
         manifest.identity == *identity,
         "cached source/compiler/ABI identity mismatch"
     );
-    let native = std::fs::read(directory.join("native.bin"))?;
+    ensure!(
+        manifest.native_bytes > 0 && manifest.native_bytes <= MAX_CACHE_NATIVE_BYTES,
+        "invalid cached native code size"
+    );
+    let native = bounded_file(&directory.join("native.bin"), MAX_CACHE_NATIVE_BYTES)?;
     ensure!(
         native.len() == manifest.native_bytes && sha256(&native) == manifest.native_sha256,
         "cached native code checksum mismatch"
@@ -68,6 +92,43 @@ pub fn prepare_leaf(source: &[u8], base: GuestAddress, root: &Path) -> Result<Pr
         abi: NATIVE_ABI.into(),
         target_cpu: "x86_64-baseline".into(),
     };
+    prepare(identity, root, || stela_compiler::compile(source, base))
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreparedBlock {
+    pub source_bytes: usize,
+    pub prepared: Prepared,
+}
+
+/// Decode the consumed prefix to identify it before looking up persistent AOT.
+/// A disk hit avoids code generation; source extent still requires decoding.
+pub fn prepare_block(source: &[u8], base: GuestAddress, root: &Path) -> Result<PreparedBlock> {
+    use stela_compiler::block;
+    let source_bytes = block::source_bytes(source, base)?;
+    let prefix = &source[..source_bytes];
+    let identity = Identity {
+        schema_version: 1,
+        source_sha256: sha256(prefix),
+        compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+        guest_base: base.0,
+        abi: block::BLOCK_ABI.into(),
+        target_cpu: "x86_64-baseline".into(),
+    };
+    let prepared = prepare(identity, root, || {
+        block::compile(prefix, base).map(|b| b.native)
+    })?;
+    Ok(PreparedBlock {
+        source_bytes,
+        prepared,
+    })
+}
+
+fn prepare(
+    identity: Identity,
+    root: &Path,
+    generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
+) -> Result<Prepared> {
     let key = sha256(&serde_json::to_vec(&identity)?);
     std::fs::create_dir_all(root)?;
     let root = root.canonicalize()?;
@@ -86,7 +147,11 @@ pub fn prepare_leaf(source: &[u8], base: GuestAddress, root: &Path) -> Result<Pr
     let NativeBlock {
         x86_64_code,
         source_map,
-    } = stela_compiler::compile(source, base)?;
+    } = generate()?;
+    ensure!(
+        !x86_64_code.is_empty() && x86_64_code.len() <= MAX_CACHE_NATIVE_BYTES,
+        "generated code exceeds cache size limit"
+    );
     let pending = tempfile::tempdir_in(&root)?;
     let manifest = Manifest {
         identity: identity.clone(),
@@ -130,6 +195,24 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect()
+    }
+    #[test]
+    fn oversized_cache_files_are_rejected_before_reading_payloads() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let prepared = prepare_leaf(&source(42), GuestAddress(0), root.path())?;
+        let native = std::fs::OpenOptions::new()
+            .write(true)
+            .open(prepared.directory.join("native.bin"))?;
+        native.set_len(MAX_CACHE_NATIVE_BYTES as u64 + 1)?;
+        assert!(prepare_leaf(&source(42), GuestAddress(0), root.path()).is_err());
+        let root = tempfile::tempdir()?;
+        let prepared = prepare_leaf(&source(42), GuestAddress(0), root.path())?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(prepared.directory.join("manifest.json"))?
+            .set_len(MAX_CACHE_MANIFEST_BYTES as u64 + 1)?;
+        assert!(prepare_leaf(&source(42), GuestAddress(0), root.path()).is_err());
+        Ok(())
     }
     #[test]
     fn reuses_only_exact_input_and_context_and_rejects_corruption() -> Result<()> {
