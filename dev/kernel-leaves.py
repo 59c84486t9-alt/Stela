@@ -10,15 +10,43 @@ from collections import Counter,defaultdict
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 import subprocess
 import tempfile
 
 from capstone import Cs,CS_ARCH_ARM64,CS_MODE_ARM
-from differential import ROOT,reference,states,bounded_native
+from differential import ROOT,State,reference,states,bounded_native
 from evidence import write_evidence
 
-ALLOWED={"mov","movz","movn","movk","add","adds","sub","subs","cmp","cmn","and","ands","bic","bics","orr","orn","eor","eon","tst","nop","ret","b","cbz","cbnz","tbz","tbnz"}
+ALLOWED={"mov","movz","movn","movk","add","adds","sub","subs","cmp","cmn","and","ands","bic","bics","orr","orn","eor","eon","tst","nop","ret","b","cbz","cbnz","tbz","tbnz",
+         "csel","csinc","csinv","csneg","cinc","cinv","cneg","cset","csetm",
+         "madd","msub","mul","mneg","smaddl","smsubl","smull","smnegl",
+         "umaddl","umsubl","umull","umnegl","smulh","umulh"}
+
+
+def equal_register_pair(value):
+    """Parse two distinct real X registers; SP and XZR are not state slots."""
+    names=value.split(",")
+    if len(names)!=2 or any(re.fullmatch(r"x(?:[0-9]|[12][0-9]|30)",name,re.IGNORECASE) is None for name in names):
+        raise argparse.ArgumentTypeError("Expected two registers X0..X30 separated by one comma, e.g. X0,X1")
+    pair=tuple(int(name[1:]) for name in names)
+    if pair[0]==pair[1]:
+        raise argparse.ArgumentTypeError("Equality inputs need two distinct registers")
+    return pair
+
+
+def input_states(equal_registers=None):
+    initial=states(all_flags=True)
+    if equal_registers is not None:
+        left,right=equal_registers
+        matched=[]
+        for original in initial:
+            state=State.from_buffer_copy(original)
+            state.x[right]=state.x[left]
+            matched.append(state)
+        initial+=matched
+    return initial
 
 
 def starts(data,base):
@@ -103,6 +131,8 @@ def main():
     parser.add_argument("manifest",type=Path)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--max-functions",type=int,default=64)
+    parser.add_argument("--symbol",action="append",default=[],help="Select an exact symbol name; repeat for multiple symbols")
+    parser.add_argument("--equal-registers",type=equal_register_pair,help="Add copies of every input state with the second register equal to the first, e.g. X0,X1")
     args=parser.parse_args()
     if args.max_functions<=0:
         raise ValueError("--max-functions must be positive")
@@ -112,10 +142,17 @@ def main():
         raise ValueError("Collection identity mismatch")
     image=next(i for i in manifest["images"] if i["id"]=="com.apple.kernel")
     addresses,eligible=candidates(data,image)
+    if args.symbol:
+        requested=set(args.symbol)
+        available={name for entry in eligible for name in entry["names"]}
+        missing=requested-available
+        if missing:
+            parser.error("No eligible bounded integer leaf for exact symbol(s): "+", ".join(sorted(missing)))
+        eligible=[entry for entry in eligible if requested.intersection(entry["names"])]
     subprocess.run([str(ROOT/"dev/cargo"),"build","--locked","-p","stela-cli"],check=True)
     cli=ROOT/"target/debug/stela"
     verified=[];declined=[]
-    initial_states=states(all_flags=True)
+    initial_states=input_states(args.equal_registers)
     with tempfile.TemporaryDirectory(prefix="stela-kernel-leaves-") as temporary:
         source=Path(temporary)/"leaf.arm64"
         for entry in eligible[:args.max_functions]:
@@ -142,6 +179,10 @@ def main():
             "verified":verified,"declined":declined,"deferred_candidates":max(0,len(eligible)-args.max_functions),
             "state_comparisons":sum(v["state_comparisons"] for v in verified),
             "limits":"Only bounded integer-only named leaf prefixes with internal direct branches are considered. Guest memory, PAC, system registers, kernel ABI, faults, and full kernel boot are not tested."}
+    if args.symbol:
+        report["selected_exact_symbols"]=sorted(set(args.symbol))
+    if args.equal_registers is not None:
+        report["additional_equal_register_inputs"]={"copied_from":f"X{args.equal_registers[0]}","copied_to":f"X{args.equal_registers[1]}","extra_states":len(initial_states)//2}
     write_evidence(args.output,report)
     print(json.dumps({"report":str(args.output),"function_starts":len(addresses),"filtered_candidates":len(eligible),
                       "verified":len(verified),"declined":len(declined),"state_comparisons":report["state_comparisons"],
