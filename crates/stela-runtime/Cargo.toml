@@ -9,5 +9,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+libc.workspace = true
 stela-core.workspace = true
 stela-compiler.workspace = true

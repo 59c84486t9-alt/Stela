@@ -1,5 +1,7 @@
 //! First-launch AOT cache for the supported raw leaf-function subset.
-//! Full application launch, Mach-O linking and dynamic code dispatch are future work.
+//! Full application launch, Mach-O linking and live block execution are future work.
+pub mod dispatch;
+pub mod execution;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
