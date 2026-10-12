@@ -34,7 +34,8 @@ RETURN_END = 0xfffffe000a633980
 FUNCTION_START = 0xfffffe000a633828
 FUNCTION_END = 0xfffffe000a6339fc
 RESTART_HELPER = 0xfffffe000a633884
-SYSENT, SAVED, UTHREAD = 0x100000, 0x200000, 0x300000
+SYSENT, SAVED, UTHREAD = 0x220000000000, 0x220000010000, 0x220000020000
+CPU_RESERVED = 0xa5c39e71
 MASK64 = (1 << 64) - 1
 RETURN_TYPES = [
     "none", "int", "unsigned_int", "offset", "address", "size",
@@ -73,6 +74,22 @@ def guest_state(data, pc=None):
             "reserved": u32(data, 0x114),
         },
         "pc": u64(data, 0x108) if pc is None else pc,
+    }
+
+
+def cpu_state(uc):
+    """Actual modeled CPU fields, distinct from the saved guest-state buffer."""
+    return {
+        "registers": {
+            "x": [
+                uc.reg_read(getattr(arm, "UC_ARM64_REG_X" + str(index)))
+                for index in range(31)
+            ],
+            "sp": uc.reg_read(arm.UC_ARM64_REG_SP),
+            "nzcv": uc.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
+            "reserved": CPU_RESERVED,
+        },
+        "pc": uc.reg_read(arm.UC_ARM64_REG_PC),
     }
 
 
@@ -178,7 +195,9 @@ class FormatterProbe:
         put(sysent, "<I", 0x10, return_type)
         uthread = bytearray(4096)
         put(uthread, "<II", 0x40, *values)
-        for address, buffer in ((SAVED, before), (SYSENT, sysent), (UTHREAD, uthread)):
+        saved_page = bytearray(4096)
+        saved_page[:len(before)] = before
+        for address, buffer in ((SAVED, saved_page), (SYSENT, sysent), (UTHREAD, uthread)):
             self.uc.mem_write(address, bytes(buffer))
         for index in range(31):
             self.uc.reg_write(
@@ -188,15 +207,25 @@ class FormatterProbe:
         self.uc.reg_write(arm.UC_ARM64_REG_SP, 0x40400000)
         self.uc.reg_write(arm.UC_ARM64_REG_PSTATE, 0x3c5)
         self.uc.reg_write(arm.UC_ARM64_REG_X19, SAVED)
+        self.uc.reg_write(arm.UC_ARM64_REG_PC, ENTRY_START)
+        cpu_before_entry = cpu_state(self.uc)
 
         self.clear_trace()
         self.uc.emu_start(ENTRY_START, ENTRY_END, count=16)
         assert self.uc.reg_read(arm.UC_ARM64_REG_PC) == ENTRY_END
         assert self.trace == list(range(ENTRY_START, ENTRY_END, 4))
+        cpu_after_entry = cpu_state(self.uc)
         after_entry = bytes(self.uc.mem_read(SAVED, len(before)))
         expected_entry = bytearray(before)
         put(expected_entry, "<I", 0x110, (flags << 28) & ~0x20000000)
         assert after_entry == expected_entry
+        assert bytes(self.uc.mem_read(SAVED + len(before), 4096 - len(before))) == bytes(4096 - len(before))
+        assert bytes(self.uc.mem_read(SYSENT, 4096)) == sysent
+        assert bytes(self.uc.mem_read(UTHREAD, 4096)) == uthread
+        page_sha256_after_entry = [
+            sha256(bytes(self.uc.mem_read(base, 4096)))
+            for base in (SAVED, SYSENT, UTHREAD)
+        ]
         entry_writes = list(self.writes)
 
         self.clear_trace()
@@ -209,6 +238,8 @@ class FormatterProbe:
         for register, value in arguments:
             self.uc.reg_write(register, value)
         end = RESTART_HELPER if kind == "restart" else RETURN_END
+        self.uc.reg_write(arm.UC_ARM64_REG_PC, RETURN_START)
+        cpu_before_return = cpu_state(self.uc)
         self.uc.emu_start(RETURN_START, end, count=128)
         assert self.uc.reg_read(arm.UC_ARM64_REG_PC) == end
         assert all(RETURN_START <= pc < FUNCTION_END for pc in self.trace)
@@ -220,8 +251,15 @@ class FormatterProbe:
             int.from_bytes(self.instruction(pc), "little") & 0xfc000000 == 0x94000000
             for pc in self.trace
         ), "No BL/helper may execute"
+        if kind != "restart":
+            assert all(
+                RETURN_START <= pc < RETURN_END or 0xfffffe000a633990 <= pc < FUNCTION_END
+                for pc in self.trace
+            ), "Ordinary formatter paths must exclude the epilogue gap"
 
         after = bytes(self.uc.mem_read(SAVED, len(before)))
+        cpu_after_return = cpu_state(self.uc)
+        assert bytes(self.uc.mem_read(SAVED + len(before), 4096 - len(before))) == bytes(4096 - len(before))
         assert bytes(self.uc.mem_read(SYSENT, 4096)) == sysent
         assert bytes(self.uc.mem_read(UTHREAD, 4096)) == uthread
         assert bytes(self.uc.mem_read(PAGE_PC, 4096)) == self.code
@@ -264,7 +302,28 @@ class FormatterProbe:
             "original_after_entry_state": guest_state(after_entry),
             "original_observed_state": guest_state(after),
             "saved_buffer_before_hex": bytes(before).hex(),
+            "saved_buffer_after_entry_hex": after_entry.hex(),
             "saved_buffer_after_hex": after.hex(),
+            "native_replay": {
+                "cpu_before_entry": cpu_before_entry,
+                "cpu_after_entry": cpu_after_entry,
+                "cpu_before_return": cpu_before_return,
+                "cpu_after_return": cpu_after_return,
+                "page_hash_order": ["saved_state", "sysent", "uthread"],
+                "page_sha256_after_entry": page_sha256_after_entry,
+                "page_sha256_after_return": [
+                    sha256(bytes(self.uc.mem_read(base, 4096)))
+                    for base in (SAVED, SYSENT, UTHREAD)
+                ],
+                "memory_inputs": {
+                    "sysent_return_type": return_type,
+                    "uthread_retval32": list(values),
+                    "completion_w3": error & 0xffffffff,
+                    "saved_bytes": len(before),
+                    "page_bytes": 4096,
+                    "saved_page_padding_byte": 0,
+                },
+            },
             "entry_writes": entry_writes,
             "formatter_writes": list(self.writes),
             "path_id": path_id,
@@ -319,6 +378,11 @@ class FormatterProbe:
             })
         return {
             "schema_version": 1,
+            "native_replay_schema_version": 1,
+            "native_memory_layout": {
+                "sysent": SYSENT, "saved_state": SAVED, "uthread": UTHREAD,
+                "bytes_each": 4096,
+            },
             "status": "passed",
             "evidence_kind": "original_unchanged_Apple_code_bounded_interior_Unicorn_execution",
             "kernel_path": str(self.kernel),
@@ -352,12 +416,21 @@ class FormatterProbe:
                 "function_sha256": sha256(
                     self.code[FUNCTION_START - PAGE_PC:FUNCTION_END - PAGE_PC]
                 ),
+                "native_source_extents": [
+                    {"start": hex(RETURN_START), "end_exclusive": hex(RETURN_END)},
+                    {"start": hex(0xfffffe000a633990), "end_exclusive": hex(FUNCTION_END)},
+                ],
+                "epilogue_not_registered_or_executed": {
+                    "start": hex(RETURN_END), "end_exclusive": hex(0xfffffe000a633990),
+                },
             },
             "preconditions": [
-                "Synthetic owned buffers at SYSENT 0x100000/SAVED 0x200000/UTHREAD 0x300000, each 4096 bytes RW and nonexecutable.",
+                "Synthetic owned buffers at SYSENT 0x220000000000/SAVED 0x220000010000/UTHREAD 0x220000020000, each 4096 bytes RW and nonexecutable; identical numeric addresses are used by the native replay.",
                 "Synthetic savedstate64 header flavor 0x15; only LP64 interior entry is exercised. Savedstate PAC jophash is arbitrary and never validated.",
                 "Hardware-preferred saved guest PC is 0x10000c (SVC at 0x100008); this probe never executes SVC, exception entry or exception return.",
                 "CPU PSTATE initialized to 0x3c5 (EL1h, DAIF masked); kernel GPRs and stack are synthetic. Formatter arithmetic changes host CPU flags independently of saved CPSR.",
+                "Actual CPU snapshots contain X0..X30, SP, NZCV and PC, with reserved sentinel 0xa5c39e71 for the native state ABI; saved-buffer guest_state records remain separate. Other CPU PSTATE bits are not replayed.",
+                "Each of the three complete 4096-byte data pages is reset per case. Savedstate occupies the first 0x140 bytes; all remaining saved-page bytes are zero and verified unchanged.",
                 "Execute unchanged entry clear-C window separately, then harness supplies formatter arguments X0=sysent,X1=savedstate,X2=uthread,W3=completion. No intervening kernel handler or call sequence is modeled.",
                 "All 16 original guest NZCV combinations are covered; success depends on entry clearing C, rather than return formatter independently clearing C.",
                 "Synthetic retval pairs cover signed/unsigned32 boundaries and packed64 patterns; maxint error is a formatter-domain boundary, not a claim of an assigned Darwin errno.",
