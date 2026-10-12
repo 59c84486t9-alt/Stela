@@ -17,6 +17,7 @@ from evidence import write_evidence
 ROOT = Path(__file__).resolve().parents[1]
 STATUSES = ('implemented', 'partial', 'unsupported')
 RET = 0xd65f03c0
+BLOCK_ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
 
 
 def sha256(path):
@@ -119,11 +120,16 @@ def summarize(rows):
                                   'evidence_requirement': 'Stela full Mach-O load and native execution with validated process behavior; leaf fixtures do not qualify.'}}
 
 
-def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run):
+def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf'):
+    if mode not in ('leaf', 'block'):
+        raise ValueError('Unknown compiler probe mode')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
     output = directory / 'native'
-    process = run([str(cli), 'compile-leaf', str(source), '--output-dir', str(output)],
+    command = [str(cli), 'compile-' + mode, str(source), '--output-dir', str(output)]
+    if mode == 'block':
+        command.extend(['--guest-base', '0x10000000'])
+    process = run(command,
                   capture_output=True, text=True, timeout=30)
     if expect_failure:
         if process.returncode == 0 or expect_failure not in process.stderr or output.exists():
@@ -132,7 +138,15 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run)
     if process.returncode != 0:
         raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
     manifest = json.loads(process.stdout)
-    if manifest.get('source_sha256') != sha256(source):
+    source_data = source.read_bytes()
+    if mode == 'block':
+        if manifest.get('abi') != BLOCK_ABI:
+            raise ValueError('Compiler block probe ABI mismatch')
+        consumed = manifest.get('source_bytes')
+        if type(consumed) is not int or consumed != 4 or consumed > len(source_data):
+            raise ValueError('Compiler block probe must consume exactly the first terminator')
+        source_data = source_data[:consumed]
+    if manifest.get('source_sha256') != hashlib.sha256(source_data).hexdigest():
         raise ValueError('Compiler probe source identity mismatch')
     native = output / 'native.bin'
     if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
@@ -142,10 +156,11 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run)
         raise ValueError('Compiler probe fingerprint missing')
     return {'word': f'0x{word:08x}', 'emitted': True, 'compiler_source_sha256': fingerprint,
             'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
-            'native_bytes': native.stat().st_size}
+            'native_bytes': native.stat().st_size,
+            **({'abi': BLOCK_ABI, 'source_bytes': consumed, 'compiler_mode': mode} if mode == 'block' else {})}
 
 
-def smoke_forms(cli, forms, overrides, directory):
+def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
     results = []
@@ -159,7 +174,7 @@ def smoke_forms(cli, forms, overrides, directory):
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
             location.mkdir()
-            probe = compile_probe(cli, word, location)
+            probe = compile_probe(cli, word, location, **({'mode': mode} if mode != 'leaf' else {}))
             if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
@@ -167,16 +182,17 @@ def smoke_forms(cli, forms, overrides, directory):
         for index, sample in enumerate(row.get('rejected_samples', [])):
             location = directory / f'{len(results)}-rejected'
             location.mkdir()
-            probe = compile_probe(cli, int(sample['word'], 16), location, sample['reason'])
+            probe = compile_probe(cli, int(sample['word'], 16), location, sample['reason'],
+                                  **({'mode': mode} if mode != 'leaf' else {}))
             results.append({'id': identity, 'scope_boundary_sample': index, **probe})
     if fingerprint is None:
         location = directory / 'compiler-identity'
         location.mkdir()
-        fingerprint = compile_probe(cli, RET, location)['compiler_source_sha256']
+        fingerprint = compile_probe(cli, RET, location, **({'mode': mode} if mode != 'leaf' else {}))['compiler_source_sha256']
     return fingerprint, results
 
 
-def validate_evidence(registry, overrides, compiler, root=ROOT):
+def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=None):
     names = sorted({name for row in overrides.values() if row['status'] != 'unsupported'
                     for name in row['evidence_groups']})
     results = {}
@@ -189,8 +205,11 @@ def validate_evidence(registry, overrides, compiler, root=ROOT):
             raise ValueError(f'Native differential evidence missing or failed: {name}')
         if report.get('compiler_source_sha256') != compiler:
             raise ValueError(f'Stale native differential compiler evidence: {name}')
-        comparisons = next((report[key] for key in ('state_comparisons', 'state_and_memory_comparisons',
-                           'register_state_comparisons', 'three_way_register_state_comparisons') if key in report), None)
+        comparison_keys = (('single_block_state_exit_comparisons',)
+                           if group['kind'] == 'arm64_block_control_flow_differential'
+                           else ('state_comparisons', 'state_and_memory_comparisons',
+                                 'register_state_comparisons', 'three_way_register_state_comparisons'))
+        comparisons = next((report[key] for key in comparison_keys if key in report), None)
         if type(comparisons) is not int or comparisons <= 0:
             raise ValueError(f'Native differential evidence has no comparisons: {name}')
         harness = root / repository_path(group['harness'])
@@ -214,6 +233,11 @@ def validate_evidence(registry, overrides, compiler, root=ROOT):
                 if str(source_path) in shared and shared[str(source_path)] != digest:
                     raise ValueError('Conflicting shared differential source identities')
                 shared[str(source_path)] = digest
+        for source in group.get('required_shared_sources', []):
+            if str(repository_path(source)) not in shared:
+                raise ValueError(f'Differential report does not bind required shared source: {source}')
+        if group.get('abi') is not None and report.get('abi') != group['abi']:
+            raise ValueError(f'Differential ABI mismatch: {name}')
         for source, digest in shared.items():
             if sha256(root / source) != digest:
                 raise ValueError(f'Stale shared differential source evidence: {source}')
@@ -222,6 +246,13 @@ def validate_evidence(registry, overrides, compiler, root=ROOT):
                          'report_binds_harness_hash': True,
                          'shared_sources_sha256': shared,
                          'native_comparisons': comparisons, 'compiler_source_sha256': compiler}
+        if group['kind'] == 'arm64_block_control_flow_differential':
+            if executable_hash is not None and report.get('compiler_executable_sha256') != executable_hash:
+                raise ValueError('Stale native block runtime executable evidence')
+            for key in ('multiblock_state_exit_comparisons', 'rust_runtime_execution_comparisons'):
+                if type(report.get(key)) is not int or report[key] <= 0:
+                    raise ValueError(f'Block differential evidence missing {key}')
+                results[name][key] = report[key]
     sources = sorted({path for row in overrides.values() if row['status'] != 'unsupported'
                       for path in row['compiler_sources']})
     return results, {path: sha256(root / path) for path in sources}
@@ -239,15 +270,24 @@ def validate_current_compiler(registry, compiler, root=ROOT):
 
 def markdown(report):
     row = report['summary']['reviewed']
+    block = report.get('block_profile_evidence')
+    block_rows = ''
+    if block:
+        counts = block['summary']['reviewed']
+        comparisons = sum(group['native_comparisons'] for group in block['native_differential_evidence'].values())
+        block_rows = (f"| Block-profile control-flow forms implemented | {counts['implemented']:,} |\n"
+                      f"| Native block state/exit comparisons | {comparisons:,} |\n")
     return ('| Measurement | Current evidence |\n| --- | --- |\n'
-            f"| Reviewed instruction forms implemented | {row['implemented']:,} |\n"
-            f"| Reviewed instruction forms partially implemented | {row['partial']:,} |\n"
+            f"| Leaf-profile instruction forms implemented | {row['implemented']:,} |\n"
+            f"| Leaf-profile instruction forms partially implemented | {row['partial']:,} |\n"
+            + block_rows +
             '| Required Apple-silicon ISA inventory | Incomplete; total unknown |\n'
             '| Required ISA completion | Unknown |\n'
             f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n"
             '| Overall compatibility completion | Unknown |\n\n'
             f"Snapshot {report['measured_at_utc'].split('T')[0]} UTC; compiler `{report['compiler_source_sha256'][:12]}`.\n\n"
-            'Reviewed forms cover the bounded leaf/private-RAM profile, with aliases excluded. '
+            'Reviewed forms cover bounded leaf/private-RAM and ordinary block-exit profiles, with aliases excluded. '
+            'Profile counts overlap and are not added. '
             'They are an implementation count, not a percentage of the required Apple ISA. '
             'Complete binaries require full loading and execution; leaf tests do not qualify. '
             '[Scope and evidence](docs/development.md).\n')
@@ -284,6 +324,7 @@ def update_readme(path, fragment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
+    parser.add_argument('--block-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-block-forms.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
@@ -292,13 +333,30 @@ def main():
     registry_data = args.registry.read_bytes()
     registry = json.loads(registry_data)
     rows = validate_registry(registry)
+    block_data = args.block_registry.read_bytes()
+    block_registry = json.loads(block_data)
+    block_rows = validate_registry(block_registry)
+    if (block_registry['profile'].get('compiler_command') != 'compile-block'
+            or block_registry['profile'].get('abi') != BLOCK_ABI):
+        raise ValueError('Block registry must declare the native block-exit compiler ABI')
     executable_hash = sha256(args.cli)
     with tempfile.TemporaryDirectory(prefix='stela-apple-progress-') as temporary:
         compiler, probes = smoke_forms(args.cli, rows, rows, Path(temporary))
+        block_directory = Path(temporary) / 'blocks'
+        block_directory.mkdir()
+        block_compiler, block_probes = smoke_forms(args.cli, block_rows, block_rows, block_directory, mode='block')
+        if block_compiler != compiler:
+            raise ValueError('Leaf and block compiler identities differ')
     evidence, sources = validate_evidence(registry, rows, compiler)
+    block_evidence, block_sources = validate_evidence(block_registry, block_rows, compiler,
+                                                      executable_hash=executable_hash)
     fingerprint_sources = validate_current_compiler(registry, compiler)
+    if validate_current_compiler(block_registry, compiler) != fingerprint_sources:
+        raise ValueError('Leaf and block fingerprint recipes differ')
     if (sha256(args.cli) != executable_hash or args.registry.read_bytes() != registry_data
-            or validate_current_compiler(registry, compiler) != fingerprint_sources):
+            or args.block_registry.read_bytes() != block_data
+            or validate_current_compiler(registry, compiler) != fingerprint_sources
+            or validate_current_compiler(block_registry, compiler) != fingerprint_sources):
         raise ValueError('Compiler/registry changed during measurement')
     report = {'schema_version': 2, 'kind': 'apple_silicon_translation_progress',
               'measured_at_utc': datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'),
@@ -309,17 +367,27 @@ def main():
               'harness_source_sha256': sha256(__file__), 'compiler_sources_sha256': sources,
               'compiler_fingerprint_sources_sha256': fingerprint_sources,
               'profile': registry['profile'], 'summary': summarize(rows),
+              'block_profile_evidence': {
+                  'registry_version': block_registry['registry_version'],
+                  'registry_sha256': hashlib.sha256(block_data).hexdigest(),
+                  'profile': block_registry['profile'], 'summary': summarize(block_rows),
+                  'overlap_with_leaf_form_ids': sorted(set(rows) & set(block_rows)),
+                  'counts_are_not_additive': True, 'compiler_sources_sha256': block_sources,
+                  'native_differential_evidence': block_evidence, 'compiler_smoke_probes': block_probes,
+                  'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
+                                     for identity, row in block_rows.items()]},
               'native_differential_evidence': evidence, 'compiler_smoke_probes': probes,
               'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
                                  for identity, row in rows.items()],
-              'limits': 'Apple-silicon arm64/arm64e to native x86_64 is the target. Required public and Apple-specific ISA inventory is incomplete. Reviewed form counts cannot establish an ISA or overall completion percentage. Status is reviewed implementation under the bounded profile plus current differential evidence and representative compile smoke; neither smoke nor differential tests prove exhaustive correctness. Complete binary loading/execution and OS boot remain unverified.'}
+              'limits': 'Apple-silicon arm64/arm64e to native x86_64 is the target. Required public and Apple-specific ISA inventory is incomplete. Reviewed form counts cannot establish an ISA or overall completion percentage. Status is reviewed implementation under the declared leaf/block profiles plus current differential evidence and representative compile smoke; neither smoke nor differential tests prove exhaustive correctness. Complete binary loading/execution and OS boot remain unverified.'}
     archive = write_evidence(args.output, report)
     if args.markdown_output:
         write_markdown(args.markdown_output, markdown(report))
     if args.update_readme:
         update_readme(ROOT / 'README.md', markdown(report))
     print(json.dumps({'report': str(args.output), 'archive': str(archive),
-                      'compiler_source_sha256': compiler, 'summary': report['summary']}, indent=2))
+                      'compiler_source_sha256': compiler, 'summary': report['summary'],
+                      'block_profile_summary': report['block_profile_evidence']['summary']}, indent=2))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,564 @@
+{
+  "schema_version": 2,
+  "kind": "reviewed_apple_silicon_instruction_forms",
+  "target_profile": {
+    "vendor": "Apple",
+    "guest_architectures": [
+      "arm64",
+      "arm64e"
+    ],
+    "host_architecture": "x86_64",
+    "scope": "Native Apple-silicon macOS binaries, including required public and Apple-specific extensions and ABI behavior; host extensions selected by explicit capability checks.",
+    "required_isa_inventory_complete": false,
+    "required_isa_form_count": null,
+    "inventory_limits": "Reviewed shared A64 forms only. This list is not a complete Apple CPU feature contract, private-extension inventory, or binary-compatibility denominator."
+  },
+  "instruction_sources": [
+    {
+      "archive_bytes": 34182920,
+      "archive_sha256": "63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354",
+      "other_release_directories_excluded": [
+        "ISA_A64_xml_A_profile-2026-03/"
+      ],
+      "publisher": "Arm Limited",
+      "redistribution_scope": "Only factual identifiers, names, categorical/feature metadata and fixed encoding bits are included. Arm XML, authored instruction prose and pseudocode remain local and are not redistributed.",
+      "release": "2026-06",
+      "release_reference_uri": "https://support.arm.com/documentation/ddi0487/mc/Preface/About-this-Manual/Corresponding-Collateral",
+      "selected_archive_prefix": "ISA_A64_xml_A_profile-2026-06/",
+      "type": "official machine-readable A64 XML",
+      "uri": "https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz"
+    }
+  ],
+  "compiler_fingerprint_sources": [
+    "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/aarch64.rs",
+    "crates/stela-compiler/src/x86_64.rs",
+    "crates/stela-compiler/src/block.rs",
+    "crates/stela-compiler/src/x86_64/block.rs",
+    "crates/stela-compiler/src/aarch64/conditional_select.rs",
+    "crates/stela-compiler/src/x86_64/conditional_select.rs",
+    "crates/stela-compiler/src/aarch64/multiply.rs",
+    "crates/stela-compiler/src/x86_64/multiply.rs",
+    "crates/stela-compiler/src/aarch64/register_offset.rs",
+    "crates/stela-compiler/src/x86_64/register_offset.rs",
+    "crates/stela-compiler/Cargo.toml",
+    "Cargo.lock"
+  ],
+  "registry_version": "apple-silicon-block-forms-v1",
+  "profile": {
+    "id": "direct-private-ram-block-v1",
+    "compiler_command": "compile-block",
+    "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+    "description": "Reviewed ordinary control-flow forms under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind is returned in RAX/RDX. The mapped guest code/address profile is nonwrapping, GCS disabled, executable pages unguarded and ordinary data addresses use private direct RAM.",
+    "outside_scope": [
+      "PAC and tagged/authenticated pointers",
+      "GCS, guarded-page BTI checks and PSTATE.BTYPE",
+      "architectural exception delivery and asynchronous state reconstruction",
+      "privilege, MMU, devices and full ARM memory ordering",
+      "full process ABI, application loading and macOS boot"
+    ]
+  },
+  "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
+  "evidence_groups": {
+    "block_control_flow": {
+      "harness": "dev/block-differential.py",
+      "report": ".stela/block-differential-report.json",
+      "kind": "arm64_block_control_flow_differential",
+      "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ]
+    }
+  },
+  "forms": [
+    {
+      "id": "BLR_64_branch_reg",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd63f0000",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BLR"
+      },
+      "source_file": "blr.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/blr.xml",
+      "source_sha256": "d630532dee343d6b29d58fbd0de1075de3e7ce8e9f00850987c50b2614d21179",
+      "mnemonic": "BLR",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd63f03c0",
+          "expected_mnemonics": [
+            "blr"
+          ]
+        },
+        {
+          "word": "0xd63f03e0",
+          "expected_mnemonics": [
+            "blr"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "BL_only_branch_imm",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfc000000",
+      "encoding_value": "0x94000000",
+      "docvars": {
+        "branch-offset": "br26",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BL"
+      },
+      "source_file": "bl.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bl.xml",
+      "source_sha256": "30d124a8c1efce7edd2c85f124a3340276bbf5128dc45c9af5ab436df6fbf70f",
+      "mnemonic": "BL",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x94000001",
+          "expected_mnemonics": [
+            "bl"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "BR_64_branch_reg",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd61f0000",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BR"
+      },
+      "source_file": "br.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/br.xml",
+      "source_sha256": "e0beebeae1a772293acc6ad92899ecc583d8bc099dcf2a35b62b521a408086a8",
+      "mnemonic": "BR",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd61f0000",
+          "expected_mnemonics": [
+            "br"
+          ]
+        },
+        {
+          "word": "0xd61f03e0",
+          "expected_mnemonics": [
+            "br"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "B_only_branch_imm",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfc000000",
+      "encoding_value": "0x14000000",
+      "docvars": {
+        "branch-offset": "br26",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "B"
+      },
+      "source_file": "b_uncond.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/b_uncond.xml",
+      "source_sha256": "fa1cf2a8f22fcd5e3165c53b178fd8399970fc472ac201d51c95b033ef5bbfa0",
+      "mnemonic": "B",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x14000001",
+          "expected_mnemonics": [
+            "b"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "B_only_condbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000010",
+      "encoding_value": "0x54000000",
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-cond",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "B"
+      },
+      "source_file": "b_cond.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/b_cond.xml",
+      "source_sha256": "cf99544ab9a9380c9583f6c0aa8403c82f2cec8eb25f0c4f883000268c96de50",
+      "mnemonic": "B",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x54000020",
+          "expected_mnemonics": [
+            "b.eq"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "CBNZ_32_compbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x35000000",
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-nonzero",
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CBNZ"
+      },
+      "source_file": "cbnz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cbnz.xml",
+      "source_sha256": "bc5cf99b2f17d1e0a49ad361a3849cb9475ec76b27fd1000c089068c33b7177f",
+      "mnemonic": "CBNZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x35000020",
+          "expected_mnemonics": [
+            "cbnz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "CBNZ_64_compbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0xb5000000",
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-nonzero",
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CBNZ"
+      },
+      "source_file": "cbnz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cbnz.xml",
+      "source_sha256": "bc5cf99b2f17d1e0a49ad361a3849cb9475ec76b27fd1000c089068c33b7177f",
+      "mnemonic": "CBNZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xb5000020",
+          "expected_mnemonics": [
+            "cbnz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "CBZ_32_compbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x34000000",
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-zero",
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CBZ"
+      },
+      "source_file": "cbz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cbz.xml",
+      "source_sha256": "ea05c70befe01b512f089f3f6932d60bfe525f6810642ffd8204fe1ce30e60f4",
+      "mnemonic": "CBZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x34000020",
+          "expected_mnemonics": [
+            "cbz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "CBZ_64_compbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0xb4000000",
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-zero",
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CBZ"
+      },
+      "source_file": "cbz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cbz.xml",
+      "source_sha256": "ea05c70befe01b512f089f3f6932d60bfe525f6810642ffd8204fe1ce30e60f4",
+      "mnemonic": "CBZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xb4000020",
+          "expected_mnemonics": [
+            "cbz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "RET_64R_branch_reg",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd65f0000",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "RET"
+      },
+      "source_file": "ret.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ret.xml",
+      "source_sha256": "131aec3f9e58d6bef1d168c9e3e434609999200e159512a853dac0233e0eb7ef",
+      "mnemonic": "RET",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd65f03c0",
+          "expected_mnemonics": [
+            "ret"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "TBNZ_only_testbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0x7f000000",
+      "encoding_value": "0x37000000",
+      "docvars": {
+        "branch-offset": "br14",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "TBNZ"
+      },
+      "source_file": "tbnz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/tbnz.xml",
+      "source_sha256": "60c9236fc7a27e60e94aac191c01c954ea9d198d1c3a652306f53ebefc0ae869",
+      "mnemonic": "TBNZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x37000020",
+          "expected_mnemonics": [
+            "tbnz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "TBZ_only_testbranch",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0x7f000000",
+      "encoding_value": "0x36000000",
+      "docvars": {
+        "branch-offset": "br14",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "TBZ"
+      },
+      "source_file": "tbz.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/tbz.xml",
+      "source_sha256": "3396d97209c4d8724fe52b6e81a91c5be7ddea7600ec09074960060ad7d5039e",
+      "mnemonic": "TBZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x36000020",
+          "expected_mnemonics": [
+            "tbz"
+          ]
+        }
+      ],
+      "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
+      "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    }
+  ]
+}

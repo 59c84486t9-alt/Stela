@@ -174,8 +174,8 @@ class IsaProgressTests(unittest.TestCase):
         report = {'summary': progress.summarize(rows), 'measured_at_utc': '2026-10-12T00:00:00Z',
                   'compiler_source_sha256': COMPILER}
         text = progress.markdown(report)
-        self.assertIn('| Reviewed instruction forms implemented | 1 |', text)
-        self.assertIn('| Reviewed instruction forms partially implemented | 1 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 1 |', text)
+        self.assertIn('| Leaf-profile instruction forms partially implemented | 1 |', text)
         self.assertIn('| Required ISA completion | Unknown |', text)
         self.assertIn('| Overall compatibility completion | Unknown |', text)
         self.assertIn('| Complete binaries verified through Stela | 0 |', text)
@@ -211,6 +211,82 @@ class IsaProgressTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     progress.update_readme(path, 'new')
                 self.assertEqual(path.read_text(), content)
+
+
+class BlockProgressTests(unittest.TestCase):
+    def fake_compiler(self, mutation=None):
+        def fake(command, **kwargs):
+            self.assertEqual(command[1], 'compile-block')
+            self.assertEqual(command[command.index('--guest-base') + 1], '0x10000000')
+            source = Path(command[2])
+            output = Path(command[command.index('--output-dir') + 1])
+            output.mkdir()
+            (output / 'native.bin').write_bytes(b'\xc3')
+            manifest = {'source_sha256': hashlib.sha256(source.read_bytes()[:4]).hexdigest(),
+                        'source_bytes': 4, 'abi': progress.BLOCK_ABI,
+                        'native_sha256': progress.sha256(output / 'native.bin'),
+                        'compiler_source_sha256': COMPILER}
+            if mutation:
+                mutation(manifest, source)
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return fake
+
+    def test_block_probe_binds_consumed_prefix_instead_of_trailing_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = progress.compile_probe('cli', 0xd63f03c0, Path(temporary),
+                                            run=self.fake_compiler(), mode='block')
+        self.assertEqual(result['source_bytes'], 4)
+        self.assertEqual(result['abi'], progress.BLOCK_ABI)
+        with tempfile.TemporaryDirectory() as temporary:
+            def full_source_hash(manifest, source):
+                manifest['source_sha256'] = progress.sha256(source)
+            with self.assertRaisesRegex(ValueError, 'source identity'):
+                progress.compile_probe('cli', 0xd63f03c0, Path(temporary),
+                                       run=self.fake_compiler(full_source_hash), mode='block')
+
+    def test_block_probe_rejects_false_boundary_and_incompatible_abi(self):
+        changes = [{'source_bytes': value} for value in (False, 0, -4, 8, 12, '4')]
+        changes += [{'abi': 'leaf-abi'}, {'abi': None}]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                def mutate(manifest, _source):
+                    manifest.update(change)
+                with self.assertRaises(ValueError):
+                    progress.compile_probe('cli', 0xd63f03c0, Path(temporary),
+                                           run=self.fake_compiler(mutate), mode='block')
+
+    def test_block_smoke_selects_block_compiler_without_changing_leaf_default(self):
+        registry = fixtures()
+        registry['forms'] = [registry['forms'][1]]
+        registry['forms'][0]['status'] = 'implemented'
+        registry['forms'][0].pop('rejected_samples')
+        rows = progress.validate_registry(registry)
+        for mode, expected_kwargs in (('leaf', {}), ('block', {'mode': 'block'})):
+            with tempfile.TemporaryDirectory() as temporary:
+                with patch.object(progress, 'compile_probe', return_value={
+                        'emitted': True, 'compiler_source_sha256': COMPILER}) as probe:
+                    progress.smoke_forms('cli', rows, rows, Path(temporary), mode=mode)
+            self.assertEqual(probe.call_args.kwargs, expected_kwargs)
+
+    def test_separate_profiles_do_not_inflate_instruction_count(self):
+        root = Path(__file__).resolve().parents[1]
+        leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
+        block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 157)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 9)
+        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
+        self.assertEqual(len(set(leaf) & set(block)), 9)
+        report = {'summary': progress.summarize(leaf), 'measured_at_utc': '2026-10-12T00:00:00Z',
+                  'compiler_source_sha256': COMPILER,
+                  'block_profile_evidence': {'summary': progress.summarize(block),
+                      'native_differential_evidence': {'block': {'native_comparisons': 28704}}}}
+        text = progress.markdown(report)
+        self.assertIn('| Leaf-profile instruction forms implemented | 157 |', text)
+        self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
+        self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
+        self.assertIn('counts overlap and are not added', text)
+        self.assertNotIn('| 169 |', text)
+        self.assertNotIn('%', text)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -272,6 +348,41 @@ class EvidenceTests(unittest.TestCase):
         self.report['shared_sources_sha256'] = {'dev/differential.py': 'b' * 64}
         self.write_report()
         with self.assertRaises(ValueError):
+            progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+
+
+    def test_block_evidence_requires_current_compiler_and_runtime_sources(self):
+        self.registry['evidence_groups']['carry'].update(
+            kind='arm64_block_control_flow_differential', abi=progress.BLOCK_ABI,
+            required_shared_sources=['runtime.rs'])
+        (self.root / 'runtime.rs').write_text('native runtime')
+        self.report.update(kind='arm64_block_control_flow_differential', abi=progress.BLOCK_ABI,
+                           single_block_state_exit_comparisons=28704,
+                           multiblock_state_exit_comparisons=528,
+                           rust_runtime_execution_comparisons=64,
+                           shared_sources_sha256={'runtime.rs': progress.sha256(self.root / 'runtime.rs')})
+        self.report.pop('three_way_register_state_comparisons')
+        self.write_report()
+        reports, _ = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.assertEqual(reports['carry']['native_comparisons'], 28704)
+        self.assertEqual(reports['carry']['rust_runtime_execution_comparisons'], 64)
+        self.report['compiler_executable_sha256'] = 'd' * 64
+        self.write_report()
+        progress.validate_evidence(self.registry, self.rows, COMPILER, self.root, executable_hash='d' * 64)
+        with self.assertRaisesRegex(ValueError, 'runtime executable'):
+            progress.validate_evidence(self.registry, self.rows, COMPILER, self.root, executable_hash='e' * 64)
+        current = copy.deepcopy(self.report)
+        for changes in ({'compiler_source_sha256': 'b' * 64}, {'shared_sources_sha256': {}},
+                        {'abi': 'leaf'}, {'rust_runtime_execution_comparisons': 0},
+                        {'single_block_state_exit_comparisons': 0}):
+            self.report = {**current, **changes}
+            self.write_report()
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.report = current
+        self.write_report()
+        (self.root / 'runtime.rs').write_text('changed runtime')
+        with self.assertRaisesRegex(ValueError, 'Stale shared'):
             progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
 
 
