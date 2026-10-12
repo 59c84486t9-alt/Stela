@@ -443,10 +443,31 @@ def invoke(cli, *arguments):
     return json.loads(result.stdout)
 
 
+def retain_fixtures(directory, inputs):
+    """Keep the verified pair by content identity, without replacing older pairs."""
+    require(len(inputs) == 2, 'retained fixture requires exactly main and dylib')
+    hashes = [digest(data) for data in inputs]
+    destination = directory.resolve() / digest(''.join(hashes).encode('ascii'))
+    destination.mkdir(parents=True, exist_ok=True)
+    result = {'directory': str(destination), 'image_sha256': hashes}
+    for name, filename, data in zip(('main', 'library'), ('main', 'libstela-fixture.dylib'), inputs):
+        path = destination / filename
+        try:
+            with path.open('xb') as stream:
+                stream.write(data)
+        except FileExistsError:
+            pass
+        require(path.read_bytes() == data, 'retained fixture identity mismatch: ' + str(path))
+        result[name] = str(path)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/bound-image-differential.json')
+    parser.add_argument('--retain-fixtures', type=Path,
+                        help='retain the verified pair in a content-addressed subdirectory for release benchmarks')
     arguments = parser.parse_args()
     require(platform.machine() == 'x86_64', 'native differential requires x86_64')
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
@@ -533,10 +554,12 @@ def main():
                   'tested_state': ['all 31 GPRs, SP, NZCV, reserved', 'cross-image BLR/RET PC', 'two genuine chained binds',
                                    'one genuine library BSS rebase', 'both images complete DATA_CONST/DATA/BSS', 'FP/LR stack frame', 'two placements and address-bound disk caches'],
                   'limits': 'Own unchanged Apple-linked main and companion dylib under supplied research entry ABI. Positive library ordinal and regular nonweak exports only. No full dependency discovery, initializers, reexports, flat/weak lookup, PAC, system calls or macOS process launch.'}
+        report['retained_fixtures'] = retain_fixtures(arguments.retain_fixtures, inputs) if arguments.retain_fixtures else None
         archive = write_evidence(arguments.output, report)
     print(json.dumps({'passed': True, 'full_state_comparisons': len(rows), 'placements': [[hex(base) for base in bases] for bases in PLACEMENTS],
                       'bound_symbols': sorted(library_exports), 'declined_inputs': len(declines), 'complete_binaries_verified': 0,
-                      'report': str(arguments.output), 'snapshot': str(archive)}, indent=2))
+                      'report': str(arguments.output), 'snapshot': str(archive),
+                      'retained_fixtures': report['retained_fixtures']}, indent=2))
 
 
 if __name__ == '__main__':

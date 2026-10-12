@@ -10,6 +10,19 @@ bound = importlib.import_module('bound-image-differential')
 
 
 class ExportFramingTests(unittest.TestCase):
+    def test_retained_pair_survives_source_cleanup_and_preserves_previous_pairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = [b'original main', b'original dylib']
+            first = bound.retain_fixtures(root, original)
+            self.assertEqual(first, bound.retain_fixtures(root, original))
+            second = bound.retain_fixtures(root, [b'updated main', original[1]])
+            self.assertNotEqual(first['directory'], second['directory'])
+            self.assertEqual([Path(first[key]).read_bytes() for key in ('main', 'library')], original)
+            Path(first['library']).write_bytes(b'corrupted')
+            with self.assertRaisesRegex(AssertionError, 'retained fixture identity mismatch'):
+                bound.retain_fixtures(root, original)
+
     def test_uleb_overflow_and_truncation_are_declined(self):
         for data in (b'\x80', b'\xff' * 10 + b'\x00'):
             with self.assertRaises(AssertionError):
