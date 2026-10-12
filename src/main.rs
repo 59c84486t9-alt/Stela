@@ -4,8 +4,8 @@ use stela_core::{Progress, Stage, read_json, write_json};
 use std::{fs::File, path::PathBuf};
 mod apple;
 mod containers;
+mod corpus_progress;
 mod image;
-mod instruction_progress;
 mod macho;
 
 #[derive(Parser)]
@@ -58,7 +58,8 @@ enum Command {
     /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
     BinaryText { input: PathBuf },
     /// Measure actual isolated native emission over pinned ARM instruction words.
-    InstructionProgress {
+    #[command(alias = "instruction-progress")]
+    CorpusProgress {
         input: PathBuf,
         #[arg(long)]
         fileset_manifest: Option<PathBuf>,
@@ -231,11 +232,11 @@ fn run() -> Result<()> {
             let report = image::extract(&input, &member, &output, max_bytes)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::InstructionProgress {
+        Command::CorpusProgress {
             input,
             fileset_manifest,
         } => {
-            let report = instruction_progress::measure(&input, fileset_manifest.as_deref())?;
+            let report = corpus_progress::measure(&input, fileset_manifest.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::BinaryText { input } => {

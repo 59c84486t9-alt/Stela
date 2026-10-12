@@ -417,7 +417,7 @@ pub fn measure(input: &Path, fileset_manifest: Option<&Path>) -> Result<Value> {
         "probe_version":PROBE_VERSION, "source_sha256":sha256(&data),"source_bytes":data.len(),
         "fileset_manifest_sha256":manifest_hash,
         "compiler_source_sha256":sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
-        "compiler_probe_source_sha256":sha256(include_bytes!("instruction_progress.rs")),
+        "compiler_probe_source_sha256":sha256(include_bytes!("corpus_progress.rs")),
         "input_scope":scope,"unique_source_ranges":ranges,
         "duplicate_section_words_deduplicated":section_word_instances-counts.source_word_instances,
         "counts":{"source_word_instances":counts.source_word_instances,
