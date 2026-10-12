@@ -198,6 +198,16 @@ enum Command {
         #[arg(long, requires = "with_subcaches")]
         apple_map: Option<PathBuf>,
     },
+    /// Decode original cache slide chains, retaining unresolved authentication.
+    PlanCacheFixups {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        cache_base: Option<u64>,
+        #[arg(long, default_value_t = 32)]
+        samples: usize,
+    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -373,6 +383,30 @@ enum ProgressCommand {
         #[arg(long, default_value = ".stela/progress.json")]
         ledger: PathBuf,
     },
+}
+
+fn write_new_report(output: &std::path::Path, report: &mut serde_json::Value) -> Result<()> {
+    use std::io::Write;
+    ensure!(
+        !output.try_exists()?,
+        "report exists; choose a new --output path"
+    );
+    report["cli_executable_sha256"] = serde_json::json!(stela_core::sha256(&std::fs::read(
+        std::env::current_exe()?
+    )?));
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut pending, report)?;
+    pending.write_all(b"\n")?;
+    pending.as_file().sync_all()?;
+    pending
+        .persist_noclobber(output)
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -942,7 +976,6 @@ fn run() -> Result<()> {
             with_subcaches,
             apple_map,
         } => {
-            use std::io::Write;
             ensure!(
                 !output.try_exists()?,
                 "report exists; choose a new --output path"
@@ -956,26 +989,36 @@ fn run() -> Result<()> {
                 report["apple_map_verification"] =
                     macho::shared_cache::verify_apple_map(&report, &path)?;
             }
-            report["cli_executable_sha256"] = serde_json::json!(stela_core::sha256(
-                &std::fs::read(std::env::current_exe()?)?
-            ));
-            let parent = output
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new("."));
-            std::fs::create_dir_all(parent)?;
-            let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-            serde_json::to_writer_pretty(&mut pending, &report)?;
-            pending.write_all(b"\n")?;
-            pending.as_file().sync_all()?;
-            pending
-                .persist_noclobber(&output)
-                .map_err(|error| error.error)?;
+            write_new_report(&output, &mut report)?;
             println!(
                 "{}",
                 serde_json::json!({"report":output,
                 "images":report["images"].as_array().map(Vec::len),
                 "source_sha256":report["source_sha256"], "complete_binary_verified":false})
+            );
+        }
+        Command::PlanCacheFixups {
+            input,
+            output,
+            cache_base,
+            samples,
+        } => {
+            ensure!(samples <= 256, "cache fixup samples must be at most 256");
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            let set = macho::shared_cache::manifest_set(&input)?;
+            let preferred = set["files"][0]["header"]["shared_region_start"]
+                .as_u64()
+                .context("cache shared-region base is unavailable")?;
+            let mut report =
+                macho::shared_cache_slide::plan(&set, cache_base.unwrap_or(preferred), samples)?;
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"kind":report["kind"],
+                "complete_binary_verified":false,"fixups_applied":false})
             );
         }
         Command::FetchAeaKey { input, output } => {
