@@ -68,7 +68,7 @@ impl<R: Read + Seek> Metadata<'_, R> {
     }
 }
 
-fn extent(offset: u64, size: u64, limit: u64) -> Result<u64> {
+pub(super) fn extent(offset: u64, size: u64, limit: u64) -> Result<u64> {
     let end = offset
         .checked_add(size)
         .context("metadata extent overflow")?;
@@ -423,7 +423,7 @@ fn parse<R: Read + Seek>(reader: &mut R, file_bytes: u64) -> Result<Value> {
     )
 }
 
-fn hash_file(file: &mut File) -> Result<String> {
+pub(super) fn hash_file(file: &mut File) -> Result<String> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -509,7 +509,7 @@ struct SetMapping {
     mapping: Mapping,
 }
 
-fn same_file(before: &FileMetadata, after: &FileMetadata) -> bool {
+pub(super) fn same_file(before: &FileMetadata, after: &FileMetadata) -> bool {
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return false;
     }
@@ -529,7 +529,7 @@ fn same_file(before: &FileMetadata, after: &FileMetadata) -> bool {
     true
 }
 
-fn file_identity(metadata: &FileMetadata) -> Value {
+pub(super) fn file_identity(metadata: &FileMetadata) -> Value {
     let mut result = json!({"bytes":metadata.len()});
     #[cfg(unix)]
     {
@@ -909,6 +909,31 @@ pub fn manifest_set(path: &Path) -> Result<Value> {
         }
     }
     mappings.sort_by_key(|mapping| mapping.mapping.address);
+    let region_start = files[0].value["header"]["shared_region_start"]
+        .as_u64()
+        .context("original shared region base is unavailable")?;
+    let region_bytes = files[0].value["header"]["shared_region_bytes"]
+        .as_u64()
+        .context("original shared region size is unavailable")?;
+    ensure!(
+        region_bytes > 0 && region_start == base_address,
+        "original shared region is empty or disagrees with the base mapping"
+    );
+    let region_end = region_start
+        .checked_add(region_bytes)
+        .context("original shared region extent overflow")?;
+    for mapping in &mappings {
+        ensure!(
+            mapping.mapping.address >= region_start
+                && mapping
+                    .mapping
+                    .address
+                    .checked_add(mapping.mapping.size)
+                    .context("mapping VM extent overflow")?
+                    <= region_end,
+            "cache mapping exceeds the original shared region"
+        );
+    }
     for pair in mappings.windows(2) {
         ensure!(
             pair[0]
@@ -1122,6 +1147,8 @@ mod tests {
         put32(&mut bytes, 16, 552);
         put32(&mut bytes, 20, 1);
         bytes[88..104].fill(0x12);
+        put64(&mut bytes, 224, 0x180000000);
+        put64(&mut bytes, 232, 0x10000);
         put64(&mut bytes, 552, 0x180000000);
         put64(&mut bytes, 560, 4096);
         put32(&mut bytes, 576, 5);
@@ -1342,6 +1369,30 @@ mod tests {
             "56565656-5656-5656-5656-565656565656"
         );
         assert!(value["files"][0]["source_identity"].is_object());
+    }
+
+    #[test]
+    fn set_checks_original_region_base_extent_and_complete_subcache_containment() {
+        for mutation in 0..4 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = set_fixture(directory.path());
+            mutate_file(&path, |bytes| match mutation {
+                0 => put64(bytes, 224, 0x180004000),
+                1 => put64(bytes, 232, 0),
+                2 => put64(bytes, 232, 0x8000),
+                _ => put64(bytes, 232, u64::MAX),
+            });
+            assert!(
+                manifest_set(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("shared region")
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = set_fixture(directory.path());
+        mutate_file(&path, |bytes| put64(bytes, 232, 0x9000));
+        assert!(manifest_set(&path).is_ok());
     }
 
     #[test]
