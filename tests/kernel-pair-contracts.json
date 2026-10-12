@@ -26,17 +26,17 @@
     {
       "name": "_mbuf_set_status",
       "source_sha256": "209452b3c4f62e3d597ee20ea5b73c10c003cc4a009044ade6fce05a21bdde20",
-      "contract": null
+      "contract": "mbuf_status"
     },
     {
       "name": "_mbuf_set_flowid",
       "source_sha256": "f43170e2d8ac033e654197ca75bcbaf6f07d01f2cef66fd7b18f080a810f76d3",
-      "contract": null
+      "contract": "mbuf_flowid"
     },
     {
       "name": "_mbuf_set_tx_compl_data",
       "source_sha256": "10e3043b7264d2ecf012bdd5dc7edc27d1b8e936306916502dbc2e34eb4cd6bd",
-      "contract": null
+      "contract": "mbuf_tx_data"
     },
     {
       "name": "_kern_packet_clear_flow_uuid",
@@ -76,7 +76,7 @@
     {
       "name": "__ZN12IOUserClient19setAsyncReference64EPyP8ipc_portyy",
       "source_sha256": "e93a3ad9449ce24ce41d4903e89c7a1736ae7eb7adfd5ca5fd33ece306aeaa39",
-      "contract": null
+      "contract": "async_reference64"
     },
     {
       "name": "_SecureDTInitPropertyIterator",
@@ -88,5 +88,11 @@
       "source_sha256": "8ccdcfda48985f485761d2d908fae8ac88843f42d71e8026ce0905d0a340464e",
       "contract": "iterator_restart"
     }
-  ]
+  ],
+  "input_models": {
+    "mbuf_status": "128 cases: null/live x0, packet-header bit1 clear/set, completion flag bit25 clear/set; each scenario across 16 edge/random x1 values. Live object is 0xb8 writable RAM bytes at offset 1024 or ending exactly at the 64 KiB RAM boundary. Independent expected RAM preserves initialized completion storage or clears it before writing low32(x1) at +0xb0. Other flags/bytes preserved. External bounds-check branch is retained in source and may still decline compilation.",
+    "mbuf_flowid": "Same mbuf scenarios and RAM extent as mbuf_status; independent expected write is low16(x1) at +0xb4.",
+    "mbuf_tx_data": "Same mbuf scenarios and RAM extent as mbuf_status; independent expected writes x1/x2 at +0xa0/+0xa8, preserving +0xb0..+0xb7 when completion flag was already set and zeroing those bytes on first initialization.",
+    "async_reference64": "64 cases: writable nonnull three-u64 array at offset 1024 or ending exactly at RAM boundary; every low2(old first word) across 16 edge/random opaque x1 values, with x2 and x3 independently initialized. Expected three words are (old_first & 3) | x1, x2, x3. No port pointer dereference or kernel port semantics claimed; null/nonwritable x0 violates this valid-call contract. All other 64 KiB RAM bytes and SP are unchanged."
+  }
 }
