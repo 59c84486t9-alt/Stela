@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v4",
+  "registry_version": "apple-silicon-reviewed-forms-v5",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -86,6 +86,15 @@
       "harness": "dev/pc-relative-differential.py",
       "report": ".stela/pc-relative-differential-report.json",
       "kind": "pc_relative_arm_vs_native_x86"
+    },
+    "bitfield": {
+      "harness": "dev/bitfield-differential.py",
+      "report": ".stela/bitfield-differential-report.json",
+      "kind": "bitfield_arm_vs_native_x86",
+      "required_positive_counts": [
+        "exhaustive_immediate_pairs",
+        "block_state_and_actual_ret_comparisons"
+      ]
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -945,6 +954,86 @@
       ],
       "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
       "scope": "All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."
+    },
+    {
+      "id": "BFM_32M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x33000000",
+      "docvars": {
+        "bitfield-fill": "nofill",
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BFM"
+      },
+      "source_file": "bfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfm.xml",
+      "source_sha256": "bdacef0b27b4adb5ab4dcc0a7ed0e53b6771b396426ec2027d041f107118eb86",
+      "mnemonic": "BFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x33052c20",
+          "expected_mnemonics": [
+            "bfxil"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
+    },
+    {
+      "id": "BFM_64M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xb3400000",
+      "docvars": {
+        "bitfield-fill": "nofill",
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BFM"
+      },
+      "source_file": "bfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfm.xml",
+      "source_sha256": "bdacef0b27b4adb5ab4dcc0a7ed0e53b6771b396426ec2027d041f107118eb86",
+      "mnemonic": "BFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xb3452c20",
+          "expected_mnemonics": [
+            "bfxil"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
     },
     {
       "id": "BICS_32_log_shift",
@@ -5065,6 +5154,86 @@
       "scope": "All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."
     },
     {
+      "id": "SBFM_32M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x13000000",
+      "docvars": {
+        "bitfield-fill": "signed-fill",
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SBFM"
+      },
+      "source_file": "sbfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sbfm.xml",
+      "source_sha256": "bc5af7c37d1b967bca370b6a99fc8e66187f94515b95f68455e990a228b54443",
+      "mnemonic": "SBFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x13052c20",
+          "expected_mnemonics": [
+            "sbfx"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
+    },
+    {
+      "id": "SBFM_64M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x93400000",
+      "docvars": {
+        "bitfield-fill": "signed-fill",
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SBFM"
+      },
+      "source_file": "sbfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sbfm.xml",
+      "source_sha256": "bc5af7c37d1b967bca370b6a99fc8e66187f94515b95f68455e990a228b54443",
+      "mnemonic": "SBFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x93452c20",
+          "expected_mnemonics": [
+            "sbfx"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
+    },
+    {
       "id": "SMADDL_64WA_dp_3src",
       "alias": false,
       "category": "base_integer_system",
@@ -6668,6 +6837,86 @@
       ]
     },
     {
+      "id": "UBFM_32M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x53000000",
+      "docvars": {
+        "bitfield-fill": "zero-fill",
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UBFM"
+      },
+      "source_file": "ubfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ubfm.xml",
+      "source_sha256": "8d765e2d33e119067b3d5660f8bb4efb9db48d2c41eaf6f9048222d1981b8e4e",
+      "mnemonic": "UBFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x53052c20",
+          "expected_mnemonics": [
+            "ubfx"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
+    },
+    {
+      "id": "UBFM_64M_bitfield",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xd3400000",
+      "docvars": {
+        "bitfield-fill": "zero-fill",
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "UBFM"
+      },
+      "source_file": "ubfm.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ubfm.xml",
+      "source_sha256": "8d765e2d33e119067b3d5660f8bb4efb9db48d2c41eaf6f9048222d1981b8e4e",
+      "mnemonic": "UBFM",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "bitfield"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/bitfield.rs",
+        "crates/stela-compiler/src/x86_64/bitfield.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd3452c20",
+          "expected_mnemonics": [
+            "ubfx"
+          ]
+        }
+      ],
+      "review": "Canonical fixed bits and decode legality reviewed against pinned official June XML. Original ARM, native leaf/block and independent per-bit arithmetic verify every valid immediate pair plus directed operand roles; aliases excluded. All six forms occur in the pinned Apple VMAPPLE kernel instruction sections; static occurrence is not execution coverage.",
+      "scope": "All defined W32/X64 immediate bitfields, wrapping insert/extract and signed extension, preserved BFM destination bits, overlapping/ZR operands, W zero extension and SP/NZCV/reserved preservation in the declared bounded leaf profile. Full PSTATE/DIT and platform behavior remain outside profile."
+    },
+    {
       "id": "UMADDL_64WA_dp_3src",
       "alias": false,
       "category": "base_integer_system",
@@ -6791,6 +7040,8 @@
     "crates/stela-compiler/src/x86_64.rs",
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
+    "crates/stela-compiler/src/aarch64/bitfield.rs",
+    "crates/stela-compiler/src/x86_64/bitfield.rs",
     "crates/stela-compiler/src/aarch64/conditional_select.rs",
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/multiply.rs",

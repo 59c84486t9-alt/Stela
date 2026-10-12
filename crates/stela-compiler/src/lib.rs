@@ -14,6 +14,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64.rs"),
     include_str!("block.rs"),
     include_str!("x86_64/block.rs"),
+    include_str!("aarch64/bitfield.rs"),
+    include_str!("x86_64/bitfield.rs"),
     include_str!("aarch64/conditional_select.rs"),
     include_str!("x86_64/conditional_select.rs"),
     include_str!("aarch64/multiply.rs"),

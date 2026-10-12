@@ -1,5 +1,6 @@
 //! Decode architectural operand roles, including SP versus the zero register.
 use crate::{GuestAddress, Lifter, UnsupportedReason};
+pub mod bitfield;
 pub mod conditional_select;
 pub mod multiply;
 pub mod pc_relative;
@@ -55,6 +56,7 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    Bitfield(bitfield::Operand),
     PcRelative(pc_relative::Operand),
     ConditionalSelect(conditional_select::Operand),
     Multiply(multiply::Operand),
@@ -235,6 +237,8 @@ impl Lifter for Decoder {
             Operation::Nop
         } else if let Some(decoded) = pc_relative::decode(pc, word) {
             Operation::PcRelative(decoded)
+        } else if let Some(decoded) = bitfield::decode(word) {
+            Operation::Bitfield(decoded)
         } else if let Some(decoded) = conditional_select::decode(word) {
             Operation::ConditionalSelect(decoded)
         } else if let Some(decoded) = multiply::decode(word) {

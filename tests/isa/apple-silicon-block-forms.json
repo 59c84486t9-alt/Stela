@@ -35,6 +35,8 @@
     "crates/stela-compiler/src/x86_64.rs",
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
+    "crates/stela-compiler/src/aarch64/bitfield.rs",
+    "crates/stela-compiler/src/x86_64/bitfield.rs",
     "crates/stela-compiler/src/aarch64/conditional_select.rs",
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/multiply.rs",

@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub struct Emitter;
+mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
 mod multiply;
@@ -273,6 +274,7 @@ fn emit_instruction(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) {
     match instruction.operation {
+        Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
         Operation::Multiply(operand) => multiply::emit(code, &operand),
