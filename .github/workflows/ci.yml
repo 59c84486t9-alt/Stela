@@ -1,0 +1,20 @@
+name: Rust and debug fixture
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 clang
+      - run: python3 dev/vm.py smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-vm-evidence
+          path: .stela/vm/

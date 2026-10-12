@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>MobileDeviceSoftwareVersionsByVersion</key><dict><key>1</key><dict>
+<key>MobileDeviceSoftwareVersions</key><dict>
+<key>VirtualMac2,1</key><dict>
+<key>TEST1</key><dict><key>Restore</key><dict><key>BuildVersion</key><string>TEST1</string><key>ProductVersion</key><string>27.9</string><key>FirmwareURL</key><string>https://updates.cdn-apple.com/fixture1.ipsw</string></dict></dict>
+<key>Unknown</key><dict><key>Universal</key><dict><key>Restore</key><dict><key>BuildVersion</key><string>TEST2</string><key>ProductVersion</key><string>27.10</string><key>FirmwareURL</key><string>https://updates.cdn-apple.com/fixture2.ipsw</string></dict></dict></dict>
+</dict>
+<key>Macmini9,1</key><dict><key>TEST1</key><dict><key>Restore</key><dict><key>BuildVersion</key><string>TEST1</string><key>ProductVersion</key><string>27.9</string><key>FirmwareURL</key><string>https://updates.cdn-apple.com/fixture1.ipsw</string><key>FirmwareSHA1</key><string>1111111111111111111111111111111111111111</string></dict></dict></dict>
+</dict></dict></dict></dict></plist>
