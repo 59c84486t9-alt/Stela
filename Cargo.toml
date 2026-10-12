@@ -22,4 +22,3 @@ stela-macho = { path = "crates/stela-macho" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
