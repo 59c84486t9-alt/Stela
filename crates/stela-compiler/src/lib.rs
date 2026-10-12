@@ -1,7 +1,8 @@
-//! Ahead-of-time translation of a bounded ARM64 leaf-function subset.
+//! Ahead-of-time native translation of supported Apple-silicon ARM64 semantics.
 //! Unsupported instructions are errors; no interpreter fallback is emitted.
 
 pub mod aarch64;
+pub mod block;
 pub mod x86_64;
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("lib.rs"),
     include_str!("aarch64.rs"),
     include_str!("x86_64.rs"),
+    include_str!("block.rs"),
+    include_str!("x86_64/block.rs"),
     include_str!("aarch64/conditional_select.rs"),
     include_str!("x86_64/conditional_select.rs"),
     include_str!("aarch64/multiply.rs"),

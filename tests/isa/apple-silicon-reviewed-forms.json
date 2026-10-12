@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v2",
+  "registry_version": "apple-silicon-reviewed-forms-v3",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -6704,6 +6704,8 @@
     "crates/stela-compiler/src/lib.rs",
     "crates/stela-compiler/src/aarch64.rs",
     "crates/stela-compiler/src/x86_64.rs",
+    "crates/stela-compiler/src/block.rs",
+    "crates/stela-compiler/src/x86_64/block.rs",
     "crates/stela-compiler/src/aarch64/conditional_select.rs",
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/multiply.rs",

@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub struct Emitter;
+pub(crate) mod block;
 mod conditional_select;
 mod multiply;
 mod register_offset;
@@ -264,6 +265,236 @@ fn nzcv(code: &mut Vec<u8>, subtract: bool) {
     code.extend([0x89, 0x87, 0, 1, 0, 0]); // mov dword [rdi+256],eax
 }
 
+/// Shared semantic emission. Block compilation handles control transfers itself.
+fn emit_instruction(
+    code: &mut Vec<u8>,
+    instruction: &Instruction,
+    fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
+) {
+    match instruction.operation {
+        Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
+        Operation::Multiply(operand) => multiply::emit(code, &operand),
+        Operation::MemoryPair {
+            transfer,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode,
+        } => {
+            memory_pair(code, transfer, bytes, data, base, displacement, mode);
+        }
+        Operation::Memory {
+            transfer,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode,
+        } => {
+            memory(code, transfer, bytes, data, base, displacement, mode);
+        }
+        Operation::Branch { target } => jump(code, None, instruction.pc, target, fixups),
+        Operation::BranchCondition {
+            target,
+            condition: cond,
+        } => {
+            let opcode = condition(code, cond);
+            jump(code, opcode, instruction.pc, target, fixups);
+        }
+        Operation::BranchZero {
+            target,
+            source,
+            width,
+            nonzero,
+        } => {
+            load(code, source);
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x85, 0xc0]);
+            jump(
+                code,
+                Some(if nonzero { 0x85 } else { 0x84 }),
+                instruction.pc,
+                target,
+                fixups,
+            );
+        }
+        Operation::BranchBit {
+            target,
+            source,
+            bit,
+            nonzero,
+        } => {
+            load(code, source);
+            code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,imm8
+            jump(
+                code,
+                Some(if nonzero { 0x82 } else { 0x83 }),
+                instruction.pc,
+                target,
+                fixups,
+            );
+        }
+        Operation::AddSubCarry {
+            width,
+            subtract,
+            flags,
+            destination,
+            left,
+            right,
+        } => {
+            load(code, left);
+            right_operand(code, right, width, Shift::Lsl, 0);
+            // Recover guest C after operand loads, including XOR-based
+            // ZR loads that clobber host flags. SBC consumes !C as borrow.
+            code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
+            if subtract {
+                code.push(0xf5); // cmc: ARM no-borrow -> x86 borrow
+            }
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([if subtract { 0x19 } else { 0x11 }, 0xc8]); // sbb/adc (e/r)ax,(e/r)cx
+            store(code, destination);
+            if flags {
+                nzcv(code, subtract);
+            }
+        }
+        Operation::AddSubRegister {
+            width,
+            subtract,
+            flags,
+            destination,
+            left,
+            right,
+            shift,
+            amount,
+        } => {
+            load(code, left);
+            right_operand(code, right, width, shift, amount);
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
+            store(code, destination);
+            if flags {
+                nzcv(code, subtract);
+            }
+        }
+        Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
+        Operation::LogicalImmediate {
+            width,
+            kind,
+            flags,
+            destination,
+            source,
+            immediate,
+        } => {
+            load(code, source);
+            code.extend([0x48, 0xb9]); // movabs rcx,logical bitmask
+            code.extend(immediate.to_le_bytes());
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([
+                match kind {
+                    Logical::And => 0x21,
+                    Logical::Or => 0x09,
+                    Logical::Xor => 0x31,
+                },
+                0xc8,
+            ]);
+            store(code, destination); // MOV preserves the logical result flags.
+            if flags {
+                nzcv(code, false); // AND clears CF/OF, matching ARM C/V=0.
+            }
+        }
+        Operation::LogicalRegister {
+            width,
+            kind,
+            invert,
+            flags,
+            destination,
+            left,
+            right,
+            shift,
+            amount,
+        } => {
+            load(code, left);
+            right_operand(code, right, width, shift, amount);
+            if invert {
+                if width == Width::X64 {
+                    code.push(0x48);
+                }
+                code.extend([0xf7, 0xd1]);
+            }
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([
+                match kind {
+                    Logical::And => 0x21,
+                    Logical::Or => 0x09,
+                    Logical::Xor => 0x31,
+                },
+                0xc8,
+            ]);
+            store(code, destination);
+            if flags {
+                nzcv(code, false);
+            } // AND clears host CF/OF, matching ARM C/V=0.
+        }
+        Operation::Return => code.push(0xc3),
+        Operation::Nop => code.push(0x90),
+        Operation::MoveWide {
+            width,
+            kind,
+            destination,
+            immediate: value,
+            shift,
+        } => {
+            let value = u64::from(value) << shift;
+            match kind {
+                WideMove::Zero => immediate(code, value),
+                WideMove::Not => immediate(code, !value),
+                WideMove::Keep => {
+                    load(code, destination);
+                    code.extend([0x48, 0xb9]); // movabs rcx,mask
+                    code.extend((!(0xffffu64 << shift)).to_le_bytes());
+                    code.extend([0x48, 0x21, 0xc8, 0x48, 0xb9]); // and rax,rcx; movabs rcx,value
+                    code.extend(value.to_le_bytes());
+                    code.extend([0x48, 0x09, 0xc8]);
+                }
+            }
+            if width == Width::W32 {
+                code.extend([0x89, 0xc0]);
+            } // mov eax,eax: zero-extend
+            store(code, destination);
+        }
+        Operation::AddSub {
+            width,
+            subtract,
+            flags,
+            destination,
+            source,
+            immediate,
+        } => {
+            load(code, source);
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x81, if subtract { 0xe8 } else { 0xc0 }]);
+            code.extend(immediate.to_le_bytes());
+            store(code, destination); // MOV leaves arithmetic flags unchanged.
+            if flags {
+                nzcv(code, subtract);
+            }
+        }
+    }
+}
+
 impl Backend<Instruction> for Emitter {
     fn emit(&self, instructions: &[Instruction]) -> Result<NativeBlock, UnsupportedReason> {
         let mut block = NativeBlock {
@@ -274,230 +505,7 @@ impl Backend<Instruction> for Emitter {
         let mut fixups = vec![];
         for instruction in instructions {
             block.source_map.push((instruction.pc, code.len()));
-            match instruction.operation {
-                Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
-                Operation::Multiply(operand) => multiply::emit(code, &operand),
-                Operation::MemoryPair {
-                    transfer,
-                    bytes,
-                    data,
-                    base,
-                    displacement,
-                    mode,
-                } => {
-                    memory_pair(code, transfer, bytes, data, base, displacement, mode);
-                }
-                Operation::Memory {
-                    transfer,
-                    bytes,
-                    data,
-                    base,
-                    displacement,
-                    mode,
-                } => {
-                    memory(code, transfer, bytes, data, base, displacement, mode);
-                }
-                Operation::Branch { target } => {
-                    jump(code, None, instruction.pc, target, &mut fixups)
-                }
-                Operation::BranchCondition {
-                    target,
-                    condition: cond,
-                } => {
-                    let opcode = condition(code, cond);
-                    jump(code, opcode, instruction.pc, target, &mut fixups);
-                }
-                Operation::BranchZero {
-                    target,
-                    source,
-                    width,
-                    nonzero,
-                } => {
-                    load(code, source);
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([0x85, 0xc0]);
-                    jump(
-                        code,
-                        Some(if nonzero { 0x85 } else { 0x84 }),
-                        instruction.pc,
-                        target,
-                        &mut fixups,
-                    );
-                }
-                Operation::BranchBit {
-                    target,
-                    source,
-                    bit,
-                    nonzero,
-                } => {
-                    load(code, source);
-                    code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,imm8
-                    jump(
-                        code,
-                        Some(if nonzero { 0x82 } else { 0x83 }),
-                        instruction.pc,
-                        target,
-                        &mut fixups,
-                    );
-                }
-                Operation::AddSubCarry {
-                    width,
-                    subtract,
-                    flags,
-                    destination,
-                    left,
-                    right,
-                } => {
-                    load(code, left);
-                    right_operand(code, right, width, Shift::Lsl, 0);
-                    // Recover guest C after operand loads, including XOR-based
-                    // ZR loads that clobber host flags. SBC consumes !C as borrow.
-                    code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
-                    if subtract {
-                        code.push(0xf5); // cmc: ARM no-borrow -> x86 borrow
-                    }
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([if subtract { 0x19 } else { 0x11 }, 0xc8]); // sbb/adc (e/r)ax,(e/r)cx
-                    store(code, destination);
-                    if flags {
-                        nzcv(code, subtract);
-                    }
-                }
-                Operation::AddSubRegister {
-                    width,
-                    subtract,
-                    flags,
-                    destination,
-                    left,
-                    right,
-                    shift,
-                    amount,
-                } => {
-                    load(code, left);
-                    right_operand(code, right, width, shift, amount);
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
-                    store(code, destination);
-                    if flags {
-                        nzcv(code, subtract);
-                    }
-                }
-                Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
-                Operation::LogicalImmediate {
-                    width,
-                    kind,
-                    flags,
-                    destination,
-                    source,
-                    immediate,
-                } => {
-                    load(code, source);
-                    code.extend([0x48, 0xb9]); // movabs rcx,logical bitmask
-                    code.extend(immediate.to_le_bytes());
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([
-                        match kind {
-                            Logical::And => 0x21,
-                            Logical::Or => 0x09,
-                            Logical::Xor => 0x31,
-                        },
-                        0xc8,
-                    ]);
-                    store(code, destination); // MOV preserves the logical result flags.
-                    if flags {
-                        nzcv(code, false); // AND clears CF/OF, matching ARM C/V=0.
-                    }
-                }
-                Operation::LogicalRegister {
-                    width,
-                    kind,
-                    invert,
-                    flags,
-                    destination,
-                    left,
-                    right,
-                    shift,
-                    amount,
-                } => {
-                    load(code, left);
-                    right_operand(code, right, width, shift, amount);
-                    if invert {
-                        if width == Width::X64 {
-                            code.push(0x48);
-                        }
-                        code.extend([0xf7, 0xd1]);
-                    }
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([
-                        match kind {
-                            Logical::And => 0x21,
-                            Logical::Or => 0x09,
-                            Logical::Xor => 0x31,
-                        },
-                        0xc8,
-                    ]);
-                    store(code, destination);
-                    if flags {
-                        nzcv(code, false);
-                    } // AND clears host CF/OF, matching ARM C/V=0.
-                }
-                Operation::Return => code.push(0xc3),
-                Operation::Nop => code.push(0x90),
-                Operation::MoveWide {
-                    width,
-                    kind,
-                    destination,
-                    immediate: value,
-                    shift,
-                } => {
-                    let value = u64::from(value) << shift;
-                    match kind {
-                        WideMove::Zero => immediate(code, value),
-                        WideMove::Not => immediate(code, !value),
-                        WideMove::Keep => {
-                            load(code, destination);
-                            code.extend([0x48, 0xb9]); // movabs rcx,mask
-                            code.extend((!(0xffffu64 << shift)).to_le_bytes());
-                            code.extend([0x48, 0x21, 0xc8, 0x48, 0xb9]); // and rax,rcx; movabs rcx,value
-                            code.extend(value.to_le_bytes());
-                            code.extend([0x48, 0x09, 0xc8]);
-                        }
-                    }
-                    if width == Width::W32 {
-                        code.extend([0x89, 0xc0]);
-                    } // mov eax,eax: zero-extend
-                    store(code, destination);
-                }
-                Operation::AddSub {
-                    width,
-                    subtract,
-                    flags,
-                    destination,
-                    source,
-                    immediate,
-                } => {
-                    load(code, source);
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([0x81, if subtract { 0xe8 } else { 0xc0 }]);
-                    code.extend(immediate.to_le_bytes());
-                    store(code, destination); // MOV leaves arithmetic flags unchanged.
-                    if flags {
-                        nzcv(code, subtract);
-                    }
-                }
-            }
+            emit_instruction(code, instruction, &mut fixups);
         }
         let offsets: std::collections::BTreeMap<_, _> = block
             .source_map
