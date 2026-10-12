@@ -1,5 +1,6 @@
 //! Decode architectural operand roles, including SP versus the zero register.
 use crate::{GuestAddress, Lifter, UnsupportedReason};
+pub mod register_offset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
@@ -51,6 +52,7 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
         transfer: MemoryTransfer,
         bytes: u8,
@@ -225,6 +227,8 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if let Some(decoded) = register_offset::decode(word) {
+            Operation::MemoryRegisterOffset(decoded.map_err(|()| unsupported())?)
         } else if word & 0x3e000000 == 0x28000000 {
             // Integer LDP/STP/LDPSW. SIMD, non-temporal pairs, tagged
             // stores and reserved opcodes are not interchangeable with these accesses.
@@ -585,7 +589,6 @@ mod tests {
             0xf9c00000, // unallocated signed doubleword
             0xf8400800, // LDTR: unprivileged access is a different policy
             0xf8000800, // STTR
-            0xf8606800, // register-offset LDR
             0x3d400000, // SIMD/FP LDR
             0xf8400c00, // pre-index LDR with base/target overlap
             0xf8400400, // post-index LDR with base/target overlap

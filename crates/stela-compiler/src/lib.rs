@@ -11,6 +11,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("lib.rs"),
     include_str!("aarch64.rs"),
     include_str!("x86_64.rs"),
+    include_str!("aarch64/register_offset.rs"),
+    include_str!("x86_64/register_offset.rs"),
     include_str!("../Cargo.toml"),
     include_str!("../../../Cargo.lock"),
 );

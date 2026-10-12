@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub struct Emitter;
+mod register_offset;
 
 fn offset(register: Register) -> Option<u32> {
     match register {
@@ -383,6 +384,7 @@ impl Backend<Instruction> for Emitter {
                         nzcv(code, subtract);
                     }
                 }
+                Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
                 Operation::LogicalImmediate {
                     width,
                     kind,
