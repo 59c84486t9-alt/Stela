@@ -188,6 +188,16 @@ enum Command {
     },
     /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
     BinaryText { input: PathBuf },
+    /// Inventory an Apple ARM dyld shared-cache file without extracting dylibs.
+    SharedCacheManifest {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        with_subcaches: bool,
+        #[arg(long, requires = "with_subcaches")]
+        apple_map: Option<PathBuf>,
+    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -924,6 +934,48 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&apple::aea::inspect(&input)?)?
+            );
+        }
+        Command::SharedCacheManifest {
+            input,
+            output,
+            with_subcaches,
+            apple_map,
+        } => {
+            use std::io::Write;
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            let mut report = if with_subcaches {
+                macho::shared_cache::manifest_set(&input)?
+            } else {
+                macho::shared_cache::manifest(&input)?
+            };
+            if let Some(path) = apple_map {
+                report["apple_map_verification"] =
+                    macho::shared_cache::verify_apple_map(&report, &path)?;
+            }
+            report["cli_executable_sha256"] = serde_json::json!(stela_core::sha256(
+                &std::fs::read(std::env::current_exe()?)?
+            ));
+            let parent = output
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            std::fs::create_dir_all(parent)?;
+            let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+            serde_json::to_writer_pretty(&mut pending, &report)?;
+            pending.write_all(b"\n")?;
+            pending.as_file().sync_all()?;
+            pending
+                .persist_noclobber(&output)
+                .map_err(|error| error.error)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,
+                "images":report["images"].as_array().map(Vec::len),
+                "source_sha256":report["source_sha256"], "complete_binary_verified":false})
             );
         }
         Command::FetchAeaKey { input, output } => {

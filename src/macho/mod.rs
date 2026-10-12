@@ -8,6 +8,7 @@ pub mod fileset;
 pub mod linked_images;
 pub mod load_plan;
 pub mod mapped_image;
+pub mod shared_cache;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;
