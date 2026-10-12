@@ -45,10 +45,13 @@ fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
         object::Architecture::Aarch64 => {
             // cpu_subtype's high byte contains capability flags.
             let subtype = integer(data, 8, 4, file.is_little_endian())? as u32 & 0x00ff_ffff;
-            if subtype == 2 {
-                "arm64e".to_owned()
-            } else {
-                "arm64".to_owned()
+            match subtype {
+                0 => "arm64".to_owned(),
+                2 => "arm64e".to_owned(),
+                // LLVM MachO.h 4a0a7e3ddc3b: CPU_SUBTYPE_ARM64E_X1.
+                // Naming this slice does not admit it to the execution profile.
+                12 => "arm64e.x1".to_owned(),
+                other => format!("arm64-subtype-{other}"),
             }
         }
         object::Architecture::X86_64 => "x86_64".to_owned(),
@@ -369,6 +372,17 @@ mod tests {
         assert_eq!(slices[1].architecture, "x86_64");
         fat[36..40].copy_from_slice(&4096u32.to_be_bytes());
         assert!(inspect(&fat, "broken").is_err());
+        Ok(())
+    }
+    #[test]
+    fn new_apple_subtypes_are_named_without_becoming_baseline_execution() -> Result<()> {
+        for (subtype, label) in [(0x8000000c, "arm64e.x1"), (0x8000007f, "arm64-subtype-127")] {
+            let bytes = thin(0x0100000c, subtype);
+            assert_eq!(inspect(&bytes, "own-subtype")?[0].architecture, label);
+            assert!(
+                matches!(load_plan::plan(&bytes), Err(load_plan::PlanError::UnsupportedCpu { cpu_subtype, .. }) if cpu_subtype == subtype)
+            );
+        }
         Ok(())
     }
     #[test]
