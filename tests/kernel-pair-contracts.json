@@ -1,0 +1,92 @@
+{
+  "target": "macOS 27.0.1 (26A434), VirtualMac2,1",
+  "container_sha256": "ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203",
+  "limits": "Reviewed bounded prefixes and instruction-level controlled RAM contracts. Null contracts are compiler probes only. No Apple code is embedded in this file.",
+  "functions": [
+    {
+      "name": "_lck_rw_gate_init",
+      "source_sha256": "4270c67c26eeeed97101cdfc82426d9c09391d74c761032eb4bff8d67388c1e1",
+      "contract": "gate_init"
+    },
+    {
+      "name": "_lck_mtx_gate_init",
+      "source_sha256": "4270c67c26eeeed97101cdfc82426d9c09391d74c761032eb4bff8d67388c1e1",
+      "contract": "gate_init"
+    },
+    {
+      "name": "_kcdata_memory_get_used_bytes",
+      "source_sha256": "bdb9a29152ba91d32b043e367db018a8bd9df4c986017248c45dd48e2fb49bfe",
+      "contract": "used_bytes"
+    },
+    {
+      "name": "_mbuf_get_unsent_data_bytes",
+      "source_sha256": "ada42286ff95c4a39d5adc297bf87c36779642fb77c2e203665a829977a62e5f",
+      "contract": "mbuf_counts"
+    },
+    {
+      "name": "_mbuf_set_status",
+      "source_sha256": "209452b3c4f62e3d597ee20ea5b73c10c003cc4a009044ade6fce05a21bdde20",
+      "contract": null
+    },
+    {
+      "name": "_mbuf_set_flowid",
+      "source_sha256": "f43170e2d8ac033e654197ca75bcbaf6f07d01f2cef66fd7b18f080a810f76d3",
+      "contract": null
+    },
+    {
+      "name": "_mbuf_set_tx_compl_data",
+      "source_sha256": "10e3043b7264d2ecf012bdd5dc7edc27d1b8e936306916502dbc2e34eb4cd6bd",
+      "contract": null
+    },
+    {
+      "name": "_kern_packet_clear_flow_uuid",
+      "source_sha256": "2908f43acd7f69c3391b2d09341ead52a842d67f5c8b8eed6f80e4a21bdc4987",
+      "contract": "clear16"
+    },
+    {
+      "name": "_kern_packet_set_chain_counts",
+      "source_sha256": "e5263014b7817f4ccc9353ad119b067aeb06d2945c8ce7682e3352cba078c331",
+      "contract": "chain_counts"
+    },
+    {
+      "name": "_uuid_clear",
+      "source_sha256": "2908f43acd7f69c3391b2d09341ead52a842d67f5c8b8eed6f80e4a21bdc4987",
+      "contract": "clear16"
+    },
+    {
+      "name": "__ZN16IOPMinformeeList10initializeEv",
+      "source_sha256": "172537203e81c36c082c5a4ceee87dfe1eef052ccbc4078e30ca4caa33c5fa92",
+      "contract": "clear16_at16"
+    },
+    {
+      "name": "__ZN19IOPMPowerSourceList10initializeEv",
+      "source_sha256": "172537203e81c36c082c5a4ceee87dfe1eef052ccbc4078e30ca4caa33c5fa92",
+      "contract": "clear16_at16"
+    },
+    {
+      "name": "__ZN19IOPMPowerSourceList9addToListEP15IOPMPowerSource",
+      "source_sha256": "248ddc640c204ca310ae1e7493dbe567f47eb9ce3c43ac803b42730d0100ba22",
+      "contract": "list_insert"
+    },
+    {
+      "name": "__ZN9IOCommand4initEv",
+      "source_sha256": "e08189d77152a351046468e25451b20a28f639c543e3e72f656f4b0faf9ce511",
+      "contract": "self_links"
+    },
+    {
+      "name": "__ZN12IOUserClient19setAsyncReference64EPyP8ipc_portyy",
+      "source_sha256": "e93a3ad9449ce24ce41d4903e89c7a1736ae7eb7adfd5ca5fd33ece306aeaa39",
+      "contract": null
+    },
+    {
+      "name": "_SecureDTInitPropertyIterator",
+      "source_sha256": "d9b569cf79846965bf551ca57edd729fa4a33cff88dccb76e6f79665b4b0e511",
+      "contract": "iterator_init"
+    },
+    {
+      "name": "_SecureDTRestartPropertyIteration",
+      "source_sha256": "8ccdcfda48985f485761d2d908fae8ac88843f42d71e8026ce0905d0a340464e",
+      "contract": "iterator_restart"
+    }
+  ]
+}

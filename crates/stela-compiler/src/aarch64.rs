@@ -51,6 +51,14 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    MemoryPair {
+        transfer: MemoryTransfer,
+        bytes: u8,
+        data: [Register; 2],
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    },
     Memory {
         transfer: MemoryTransfer,
         bytes: u8,
@@ -163,6 +171,47 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if word & 0x3e000000 == 0x28000000 {
+            // Integer LDP/STP/LDPSW. SIMD, non-temporal pairs, tagged
+            // stores and reserved opcodes are not interchangeable with these accesses.
+            let opcode = word >> 30;
+            let loading = word & (1 << 22) != 0;
+            let bytes = match opcode {
+                0 => 4,
+                1 if loading => 4,
+                2 => 8,
+                _ => return Err(unsupported()),
+            };
+            let mode = match (word >> 23) & 3 {
+                1 => AddressMode::PostIndex,
+                2 => AddressMode::Offset,
+                3 => AddressMode::PreIndex,
+                _ => return Err(unsupported()),
+            };
+            let rn = (word >> 5) & 31;
+            let rt = word & 31;
+            let rt2 = (word >> 10) & 31;
+            if (loading && rt == rt2)
+                || (mode != AddressMode::Offset && rn != 31 && (rn == rt || rn == rt2))
+            {
+                return Err(unsupported());
+            }
+            let immediate = ((word >> 15) & 0x7f) as i32;
+            Operation::MemoryPair {
+                transfer: if loading {
+                    MemoryTransfer::Load {
+                        signed: opcode == 1,
+                        width: if opcode == 0 { Width::W32 } else { Width::X64 },
+                    }
+                } else {
+                    MemoryTransfer::Store
+                },
+                bytes,
+                data: [register(rt, false), register(rt2, false)],
+                base: register(rn, true),
+                displacement: ((immediate << 25) >> 25) * i32::from(bytes),
+                mode,
+            }
         } else if word & 0x3f000000 == 0x39000000 || word & 0x3f200000 == 0x38000000 {
             // Scalar integer loads/stores only: VR=0. Reject PRFM, reserved
             // signed sizes, register offsets, atomics and unprivileged forms.
@@ -306,6 +355,28 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pair_neighbors_and_unpredictable_operands_are_rejected() {
+        for word in [
+            0xa8400400, // LDNP x0,x1,[x0] is non-temporal, not LDP
+            0xa8000400, // STNP
+            0x6d400400, // SIMD LDP d0,d1,[x0]
+            0xe9400400, // unallocated integer pair opcode
+            0x69000400, // STGP allocation-tag store must not become plain STP
+            0xa9400000, // LDP with identical destinations
+            0xa9407fff, // LDP xzr,xzr,[sp] still has identical destinations
+            0xa8c10400, // LDP post-index overlaps first destination
+            0xa9c10420, // LDP pre-index overlaps second destination
+            0xa8810400, // STP post-index overlaps first source
+            0xa9810420, // STP pre-index overlaps second source
+        ] {
+            assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
+        }
+        assert!(Decoder.lift(GuestAddress(0), 0xa9400400).is_ok()); // offset LDP can overwrite base
+        assert!(Decoder.lift(GuestAddress(0), 0xa9000000).is_ok()); // STP same source twice is defined
+        assert!(Decoder.lift(GuestAddress(0), 0xa9bf7fff).is_ok()); // STP xzr,xzr,[sp,#-16]!
+    }
+
     #[test]
     fn memory_neighbors_and_unpredictable_writeback_fail_closed() {
         for word in [

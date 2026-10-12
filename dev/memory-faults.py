@@ -25,12 +25,15 @@ memory_suite = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(memory_suite)
 
 
-def arm_fault(source, initial, ram_address, page_size, readonly):
+def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly=False):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     machine.mem_map(BASE, 0x10000)
     machine.mem_write(BASE, source)
-    machine.mem_map(ram_address, page_size)
-    machine.mem_write(ram_address, b"\xa5" * page_size)
+    observed_bytes = page_size * (2 if second_readonly else 1)
+    machine.mem_map(ram_address, observed_bytes)
+    machine.mem_write(ram_address, b"\xa5" * observed_bytes)
+    if second_readonly:
+        machine.mem_protect(ram_address + page_size, page_size, UC_PROT_READ)
     if readonly:
         machine.mem_protect(ram_address, page_size, UC_PROT_READ)
     for register, value in zip(ARM_REGISTERS, initial.x):
@@ -54,7 +57,7 @@ def arm_fault(source, initial, ram_address, page_size, readonly):
         final.x[index] = machine.reg_read(register)
     final.sp = machine.reg_read(arm.UC_ARM64_REG_SP)
     final.nzcv = machine.reg_read(arm.UC_ARM64_REG_NZCV)
-    return final, bytes(machine.mem_read(ram_address, page_size)), faults
+    return final, bytes(machine.mem_read(ram_address, observed_bytes)), faults
 
 
 def cases():

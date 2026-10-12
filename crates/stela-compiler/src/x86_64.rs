@@ -44,17 +44,7 @@ fn memory(
     displacement: i32,
     mode: AddressMode,
 ) {
-    load(code, base);
-    if base == Register::Sp {
-        // The profile enables ARM SP alignment checks, before address addition.
-        // A native UD2 is a mapped fault boundary, not guest exception delivery.
-        code.extend([0xa8, 15, 0x74, 2, 0x0f, 0x0b]); // test al,15; jz +2; ud2
-    }
-    code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
-    code.extend(displacement.to_le_bytes());
-    if mode != AddressMode::PostIndex {
-        code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
-    }
+    memory_address(code, base, displacement, mode);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
@@ -87,6 +77,24 @@ fn memory(
         }
     }
     // A failed native memory instruction cannot update the base register.
+    memory_writeback(code, base, mode);
+}
+
+fn memory_address(code: &mut Vec<u8>, base: Register, displacement: i32, mode: AddressMode) {
+    load(code, base);
+    if base == Register::Sp {
+        // The profile enables ARM SP alignment checks, before address addition.
+        // A native UD2 is a mapped fault boundary, not guest exception delivery.
+        code.extend([0xa8, 15, 0x74, 2, 0x0f, 0x0b]); // test al,15; jz +2; ud2
+    }
+    code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
+    code.extend(displacement.to_le_bytes());
+    if mode != AddressMode::PostIndex {
+        code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
+    }
+}
+
+fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
     if mode != AddressMode::Offset {
         code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32],rdx
         code.extend(
@@ -95,6 +103,58 @@ fn memory(
                 .to_le_bytes(),
         );
     }
+}
+
+/// Pair loads stage both values before committing either guest destination.
+/// Pair stores expose completed first-element writes if the second access faults.
+/// Concurrent/128-bit single-copy atomic semantics are outside this RAM profile.
+fn memory_pair(
+    code: &mut Vec<u8>,
+    transfer: MemoryTransfer,
+    bytes: u8,
+    data: [Register; 2],
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+) {
+    memory_address(code, base, displacement, mode);
+    match transfer {
+        MemoryTransfer::Store => {
+            right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
+            if let Some(offset) = offset(data[1]) {
+                code.extend([0x4c, 0x8b, 0x87]); // mov r8,[rdi+disp32]
+                code.extend(offset.to_le_bytes());
+            } else {
+                code.extend([0x45, 0x31, 0xc0]); // xor r8d,r8d
+            }
+            if bytes == 8 {
+                code.push(0x48);
+            }
+            code.extend([0x89, 0x08]); // first element: [rax] <- (e/r)cx
+            code.extend([if bytes == 8 { 0x4c } else { 0x44 }, 0x89, 0x40, bytes]);
+        }
+        MemoryTransfer::Load { signed, width } => {
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([if signed { 0x63 } else { 0x8b }, 0x08]);
+            code.extend([
+                if width == Width::X64 { 0x4c } else { 0x44 },
+                if signed { 0x63 } else { 0x8b },
+                0x40,
+                bytes,
+            ]);
+            // Commit only after both loads succeeded, including discarded/ZR
+            // destinations. RAX/RDX retain address and potential writeback.
+            for (register, rex, modrm) in [(data[0], 0x48, 0x8f), (data[1], 0x4c, 0x87)] {
+                if let Some(offset) = offset(register) {
+                    code.extend([rex, 0x89, modrm]);
+                    code.extend(offset.to_le_bytes());
+                }
+            }
+        }
+    }
+    memory_writeback(code, base, mode);
 }
 
 fn right_operand(code: &mut Vec<u8>, register: Register, width: Width, shift: Shift, amount: u8) {
@@ -212,6 +272,16 @@ impl Backend<Instruction> for Emitter {
         for instruction in instructions {
             block.source_map.push((instruction.pc, code.len()));
             match instruction.operation {
+                Operation::MemoryPair {
+                    transfer,
+                    bytes,
+                    data,
+                    base,
+                    displacement,
+                    mode,
+                } => {
+                    memory_pair(code, transfer, bytes, data, base, displacement, mode);
+                }
                 Operation::Memory {
                     transfer,
                     bytes,

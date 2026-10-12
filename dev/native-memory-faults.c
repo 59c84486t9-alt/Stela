@@ -16,7 +16,7 @@ struct guest_state { uint64_t x[31], sp; uint32_t nzcv, reserved; };
 _Static_assert(sizeof(struct guest_state) == 264, "GuestState ABI");
 static struct guest_state state;
 static unsigned char *ram;
-static size_t page_size;
+static size_t page_size, observed_bytes;
 
 static void output(const void *data, size_t length) {
     const unsigned char *bytes = data;
@@ -41,13 +41,14 @@ static void capture(int number, siginfo_t *info, void *context) {
     uint64_t result[] = {(uint64_t)number, pc, (uintptr_t)info->si_addr};
     output(result, sizeof(result));
     output(&state, sizeof(state));
-    output(ram, page_size);
+    output(ram, observed_bytes);
     _exit(0);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) return 2;
+    if (argc != 5 && argc != 6) return 2;
     page_size = (size_t)sysconf(_SC_PAGESIZE);
+    observed_bytes = page_size;
     FILE *file = fopen(argv[1], "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 3;
     long length = ftell(file);
@@ -70,13 +71,26 @@ int main(int argc, char **argv) {
         if (mprotect(ram, page_size, PROT_READ)) return 9;
     } else if (!strcmp(argv[2], "crossing")) {
         target -= 4;
+    } else if (!strcmp(argv[2], "pair_second") || !strcmp(argv[2], "pair_readonly")) {
+        if (argc != 6) return 13;
+        int distance = atoi(argv[5]);
+        if (distance != 4 && distance != 8) return 14;
+        target -= (unsigned)distance;
+        if (!strcmp(argv[2], "pair_readonly")) {
+            if (mprotect(ram + page_size, page_size, PROT_READ | PROT_WRITE)) return 15;
+            memset(ram + page_size, 0xa5, page_size);
+            if (mprotect(ram + page_size, page_size, PROT_READ)) return 16;
+            observed_bytes = 2 * page_size;
+        }
+    } else if (!strcmp(argv[2], "sp_alignment8")) {
+        target = (uintptr_t)(ram + 520);
     } else if (!strcmp(argv[2], "sp_alignment")) {
         target = (uintptr_t)(ram + 513);
     } else if (strcmp(argv[2], "guard")) return 10;
     int rn = atoi(argv[3]);
     int pre_offset = atoi(argv[4]);
     uint64_t base = (uint64_t)target - (uint64_t)(int64_t)pre_offset;
-    if (!strcmp(argv[2], "sp_alignment")) base = target;
+    if (!strncmp(argv[2], "sp_alignment", 12)) base = target;
     if (rn == 31) state.sp = base;
     else if (rn >= 0 && rn < 31) state.x[rn] = base;
     else return 11;
@@ -94,6 +108,6 @@ int main(int argc, char **argv) {
     uint64_t result[] = {0, 0, 0};
     output(result, sizeof(result));
     output(&state, sizeof(state));
-    output(ram, page_size);
+    output(ram, observed_bytes);
     return 0;
 }
