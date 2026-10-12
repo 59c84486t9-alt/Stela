@@ -275,15 +275,21 @@ class BlockProgressTests(unittest.TestCase):
         self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 159)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 9)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
+        self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
         self.assertEqual(len(set(leaf) & set(block)), 9)
         report = {'summary': progress.summarize(leaf), 'measured_at_utc': '2026-10-12T00:00:00Z',
                   'compiler_source_sha256': COMPILER,
                   'block_profile_evidence': {'summary': progress.summarize(block),
-                      'native_differential_evidence': {'block': {'native_comparisons': 28704}}}}
+                      'native_differential_evidence': {
+                          'block': {'native_comparisons': 28704},
+                          'traps': {'native_comparisons': 320,
+                                    'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
         self.assertIn('| Leaf-profile instruction forms implemented | 159 |', text)
         self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
+        self.assertIn('| Block-profile forms partially implemented | 2 |', text)
+        self.assertIn('| Native synchronous-trap boundary comparisons | 320 |', text)
         self.assertIn('counts overlap and are not added', text)
         self.assertNotIn('| 171 |', text)
         self.assertNotIn('%', text)
@@ -310,6 +316,23 @@ class EvidenceTests(unittest.TestCase):
         reports, sources = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
         self.assertEqual(reports['carry']['native_comparisons'], 42)
         self.assertEqual(sources['compiler.rs'], progress.sha256(self.root / 'compiler.rs'))
+
+    def test_trap_group_cannot_count_unrelated_ordinary_comparisons(self):
+        self.registry['evidence_groups']['carry'].update(
+            comparison_field='trap_state_exit_comparisons',
+            required_positive_counts=['trap_rust_runtime_execution_comparisons'])
+        for changes in ({}, {'trap_state_exit_comparisons': 320},
+                        {'trap_state_exit_comparisons': 320,
+                         'trap_rust_runtime_execution_comparisons': 0}):
+            self.report.update(changes)
+            self.write_report()
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.report['trap_rust_runtime_execution_comparisons'] = 320
+        self.write_report()
+        reports, _ = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.assertEqual(reports['carry']['native_comparisons'], 320)
+        self.assertEqual(reports['carry']['trap_rust_runtime_execution_comparisons'], 320)
 
     def test_failed_arm_only_stale_and_unbound_reports_cannot_count(self):
         original = copy.deepcopy(self.report)

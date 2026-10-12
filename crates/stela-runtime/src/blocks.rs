@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
-    block::{BLOCK_ABI, BlockExit, ExitKind, MAX_BLOCK_INSTRUCTIONS},
+    block::{BLOCK_ABI, BlockExit, ExitKind, MAX_BLOCK_INSTRUCTIONS, SynchronousTrap, decode_trap},
 };
 use stela_core::sha256;
 use std::{collections::BTreeMap, io::Read, marker::PhantomData, path::PathBuf, rc::Rc};
@@ -28,6 +28,7 @@ pub enum StopReason {
     UnalignedTarget,
     TruncatedInstruction,
     Unsupported { detail: String },
+    SynchronousTrap { trap: SynchronousTrap },
 }
 
 #[derive(Debug, Serialize)]
@@ -197,7 +198,10 @@ impl BlockRuntime {
     }
 
     /// Execute native blocks until a caller-owned stop address, a dispatch
-    /// boundary that cannot be satisfied, or the finite block budget is reached.
+    /// boundary that cannot be satisfied, a synchronous trap, or the finite
+    /// block budget is reached. A trap leaves PC at its instruction and reports
+    /// the preferred exception-return PC separately; only the caller may resume.
+    /// No host syscall, guest exception entry or architectural EL change occurs.
     /// Unsupported compilation is returned as a stop, not a guest exception.
     /// A zero budget executes no blocks. PC denotes the next guest instruction.
     ///
@@ -272,11 +276,29 @@ impl BlockRuntime {
             );
             let BlockExit { next_pc, kind } =
                 unsafe { block.mapping.call_block(&mut state.registers)? };
-            ExitKind::try_from(kind)
+            let exit_kind = ExitKind::try_from(kind)
                 .map_err(|_| anyhow::anyhow!("invalid native block exit kind"))?;
+            let trap = if exit_kind == ExitKind::Trap {
+                Some(validate_trap_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some(trap) = trap {
+                // The already executed instruction takes precedence over a
+                // coincident stop address or exhausted block budget. Do not
+                // advance to its return PC or execute another source block.
+                outcome.reason = StopReason::SynchronousTrap { trap };
+                break;
+            }
         }
         Ok(outcome)
     }
@@ -285,6 +307,46 @@ impl BlockRuntime {
     pub fn loaded_manifest(&self, pc: GuestAddress) -> Option<&crate::Manifest> {
         self.loaded.get(&pc.0).map(|block| &block.prepared.manifest)
     }
+}
+
+fn validate_trap_exit(
+    entry: GuestAddress,
+    returned: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<SynchronousTrap> {
+    ensure!(
+        source_bytes >= 4 && source_bytes.is_multiple_of(4),
+        "native trap has an invalid consumed source extent"
+    );
+    let expected = GuestAddress(
+        entry
+            .0
+            .checked_add(u64::try_from(source_bytes - 4)?)
+            .context("native trap instruction address overflow")?,
+    );
+    ensure!(
+        returned == expected,
+        "native trap PC does not identify the consumed terminator"
+    );
+    let offset = usize::try_from(
+        expected
+            .0
+            .checked_sub(region_base)
+            .context("native trap PC precedes its immutable source region")?,
+    )?;
+    let end = offset
+        .checked_add(4)
+        .context("native trap source extent overflow")?;
+    let word = u32::from_le_bytes(
+        source
+            .get(offset..end)
+            .context("native trap terminator exceeds immutable source region")?
+            .try_into()?,
+    );
+    decode_trap(expected, word)?
+        .context("native trap exit does not match an immutable trap instruction")
 }
 
 fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: usize) -> Result<()> {
@@ -312,4 +374,33 @@ fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: us
         prior = Some(native);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod trap_validation_tests {
+    use super::*;
+
+    #[test]
+    fn trap_exit_requires_the_exact_consumed_immutable_terminator() {
+        let base = GuestAddress(0x1000);
+        let terminal = GuestAddress(0x1004);
+        let source: Vec<_> = [0x91000400u32, 0xd4001001]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect(); // ADD; SVC #0x80
+        assert_eq!(
+            validate_trap_exit(base, terminal, 8, base.0, &source).unwrap(),
+            decode_trap(terminal, 0xd4001001).unwrap().unwrap()
+        );
+        assert!(validate_trap_exit(base, base, 8, base.0, &source).is_err());
+        assert!(validate_trap_exit(base, terminal, 0, base.0, &source).is_err());
+        assert!(validate_trap_exit(base, terminal, 6, base.0, &source).is_err());
+        assert!(validate_trap_exit(base, GuestAddress(0x1008), 12, base.0, &source).is_err());
+        assert!(validate_trap_exit(base, terminal, 8, 0x2000, &source).is_err());
+        let ordinary: Vec<_> = [0x91000400u32, 0xd65f03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert!(validate_trap_exit(base, terminal, 8, base.0, &ordinary).is_err());
+    }
 }

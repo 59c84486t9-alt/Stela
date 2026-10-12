@@ -103,5 +103,41 @@ class BlockHarnessTests(unittest.TestCase):
             self.assertEqual((returned.next_pc, returned.kind), (0x12345678, 3))
 
 
+class SynchronousTrapHarnessTests(unittest.TestCase):
+    def test_original_svc_and_brk_interrupt_pcs_are_observed(self):
+        cases = block.trap_cases()
+        for operation, number, advance in [('svc', 2, 4), ('brk', 7, 0)]:
+            case = next(case for case in cases if case['transfer'] == {'op': operation, 'immediate': 0x80} and not case['prefix'])
+            initial = block.trap_initial_states()[7]
+            state, observation = block.original_trap(case, initial)
+            self.assertEqual(state, block.snapshot(initial))
+            self.assertEqual(observation['interrupt'], {'number': number, 'observed_pc': case['base'] + advance})
+            self.assertEqual(observation['trap']['instruction_pc'], case['base'])
+            self.assertEqual(observation['trap']['exception_return_pc'], case['base'] + advance)
+            self.assertEqual(observation['executed_addresses'], [case['base']])
+
+    def test_all_original_trap_states_match_independent_prefix_oracle(self):
+        for case in block.trap_cases():
+            for initial in block.trap_initial_states():
+                expected, transfer = block.oracle(case, initial)
+                actual, observation = block.original_trap(case, initial)
+                self.assertEqual(actual, expected)
+                self.assertEqual(transfer, {'next_pc': observation['trap']['instruction_pc'], 'kind': 5})
+                self.assertEqual(len(observation['executed_addresses']), case['source_bytes'] // 4)
+
+    def test_original_fallthrough_to_trailing_bad_code_is_not_a_trap_success(self):
+        case = block.trap_cases()[0]
+        case['words'][case['source_bytes'] // 4 - 1] = 0xd503201f
+        with self.assertRaisesRegex(AssertionError, 'beyond the reviewed trap boundary'):
+            block.original_trap(case, block.trap_initial_states()[0])
+
+    def test_original_early_trap_cannot_satisfy_false_consumed_extent(self):
+        case = block.trap_cases()[0]
+        case['source_bytes'] += 4
+        with self.assertRaisesRegex(AssertionError, 'Original trap observation differs'):
+            block.original_trap(case, block.trap_initial_states()[0])
+
+
+
 if __name__ == '__main__':
     unittest.main()

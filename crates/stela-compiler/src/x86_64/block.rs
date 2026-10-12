@@ -57,6 +57,12 @@ pub(crate) fn emit(
     if let Some((pc, terminal)) = terminal {
         block.source_map.push((*pc, code.len()));
         match terminal {
+            Terminator::Trap(trap) => {
+                // The original instruction remains the stop PC for both SVC
+                // and BRK. Exception-return metadata stays with the decoder;
+                // neither host syscalls nor architectural exception entry run.
+                direct_exit(code, trap.instruction_pc, ExitKind::Trap);
+            }
             Terminator::DirectCall(target) => {
                 super::immediate(code, fallthrough.0);
                 super::store(code, Register::X(30));
@@ -119,4 +125,37 @@ pub(crate) fn emit(
         direct_exit(code, fallthrough, ExitKind::Fallthrough);
     }
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{SynchronousTrap, TrapKind};
+
+    #[test]
+    fn trap_exit_uses_instruction_pc_and_only_native_return_scratch_registers() {
+        for kind in [TrapKind::SupervisorCall, TrapKind::SoftwareBreakpoint] {
+            let pc = GuestAddress(0x123456789000);
+            let trap = SynchronousTrap {
+                kind,
+                immediate: 0x80,
+                instruction_pc: pc,
+                exception_return_pc: if kind == TrapKind::SupervisorCall {
+                    GuestAddress(pc.0 + 4)
+                } else {
+                    pc
+                },
+            };
+            let native = emit(
+                &[],
+                Some(&(pc, Terminator::Trap(trap))),
+                GuestAddress(pc.0 + 4),
+            );
+            let mut expected = vec![0x48, 0xb8]; // movabs rax,instruction_pc
+            expected.extend(pc.0.to_le_bytes());
+            expected.extend([0xba, 5, 0, 0, 0, 0xc3]); // mov edx,Trap; ret
+            assert_eq!(native.x86_64_code, expected);
+            assert_eq!(native.source_map, [(pc, 0)]);
+        }
+    }
 }

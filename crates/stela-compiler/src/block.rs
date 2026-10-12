@@ -3,12 +3,14 @@
 //! Native entry is System V `BlockExit function(GuestState *state)`. The caller
 //! owns dispatch and fetch validation; emitted code never jumps to a guest PC.
 //! Guest memory uses the ordinary direct-RAM profile. GCS and guarded/BTI pages
-//! are disabled, and PAC, guest exceptions and PSTATE.BTYPE are not modeled.
+//! are disabled, and PAC, architectural exception entry and PSTATE.BTYPE are
+//! not modeled. SVC/BRK stop at an explicit synchronous-trap boundary.
 
 use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock,
     aarch64::{Decoder, Instruction, Operation, Register},
 };
+use serde::Serialize;
 
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v1-block-exit-direct-ram";
@@ -23,6 +25,7 @@ pub enum ExitKind {
     Indirect = 2,
     Call = 3,
     Return = 4,
+    Trap = 5,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -35,9 +38,57 @@ impl TryFrom<u64> for ExitKind {
             2 => Ok(Self::Indirect),
             3 => Ok(Self::Call),
             4 => Ok(Self::Return),
+            5 => Ok(Self::Trap),
             _ => Err(()),
         }
     }
+}
+
+/// Identifies the original instruction, without performing exception delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrapKind {
+    SupervisorCall,
+    SoftwareBreakpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SynchronousTrap {
+    pub kind: TrapKind,
+    pub immediate: u16,
+    pub instruction_pc: GuestAddress,
+    /// Architectural preferred return address; the dispatcher still stops at
+    /// instruction_pc. This metadata does not advance or resume guest state.
+    pub exception_return_pc: GuestAddress,
+}
+
+/// Decode only exact SVC/BRK encodings at an aligned guest instruction address.
+/// HVC/SMC/HLT/DCPS and neighboring reserved encodings remain unsupported.
+pub fn decode_trap(pc: GuestAddress, word: u32) -> Result<Option<SynchronousTrap>, CompileError> {
+    if !pc.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "trap instruction PC must be aligned to 4 bytes".into(),
+        ));
+    }
+    // June 2026 official SVC_EX_exception / BRK_EX_exception encodings:
+    // only imm16 at bits 20:5 varies.
+    let kind = match word & 0xffe0001f {
+        0xd4000001 => TrapKind::SupervisorCall,
+        0xd4200000 => TrapKind::SoftwareBreakpoint,
+        _ => return Ok(None),
+    };
+    let exception_return_pc = match kind {
+        TrapKind::SupervisorCall => GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
+            CompileError("SVC exception return PC overflows guest address range".into())
+        })?),
+        TrapKind::SoftwareBreakpoint => pc,
+    };
+    Ok(Some(SynchronousTrap {
+        kind,
+        immediate: ((word >> 5) & 0xffff) as u16,
+        instruction_pc: pc,
+        exception_return_pc,
+    }))
 }
 
 /// Raw kind permits validation before converting results from executable code.
@@ -60,9 +111,13 @@ pub(crate) enum Terminator {
     Branch(Operation),
     DirectCall(GuestAddress),
     Register { source: Register, kind: ExitKind },
+    Trap(SynchronousTrap),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
+    if let Some(trap) = decode_trap(pc, word)? {
+        return Ok(Some(Terminator::Trap(trap)));
+    }
     if word & 0xfc000000 == 0x94000000 {
         let displacement = ((i64::from(word & 0x03ffffff) << 38) >> 38) * 4;
         let target =
@@ -154,7 +209,7 @@ pub fn source_bytes(source: &[u8], base: GuestAddress) -> Result<usize, CompileE
     Ok(parse(source, base)?.source_bytes)
 }
 
-/// Compile through the first control transfer, or exit at the input boundary.
+/// Compile through the first control transfer/trap, or exit at the input boundary.
 /// Unknown semantics before that boundary are rejected. Bytes following a
 /// terminator are unconsumed and do not participate in the returned source map.
 pub fn compile(source: &[u8], base: GuestAddress) -> Result<CompiledBlock, CompileError> {
@@ -183,10 +238,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..5 {
+        for kind in 0..6 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(5), Err(()));
+        assert_eq!(ExitKind::try_from(6), Err(()));
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
     }
 
@@ -291,5 +346,93 @@ mod tests {
         .unwrap();
         assert_eq!(compiled.source_bytes, MAX_BLOCK_INSTRUCTIONS * 4);
         assert_eq!(compiled.native.source_map.len(), MAX_BLOCK_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn synchronous_trap_immediates_and_preferred_returns_are_exact() {
+        for (encoding, kind, return_pc) in [
+            (0xd4000001, TrapKind::SupervisorCall, GuestAddress(0x2004)),
+            (
+                0xd4200000,
+                TrapKind::SoftwareBreakpoint,
+                GuestAddress(0x2000),
+            ),
+        ] {
+            for immediate in 0..=u16::MAX {
+                let word = encoding | (u32::from(immediate) << 5);
+                let trap = SynchronousTrap {
+                    kind,
+                    immediate,
+                    instruction_pc: GuestAddress(0x2000),
+                    exception_return_pc: return_pc,
+                };
+                assert_eq!(decode_trap(GuestAddress(0x2000), word).unwrap(), Some(trap));
+                assert_eq!(
+                    decode_terminator(GuestAddress(0x2000), word).unwrap(),
+                    Some(Terminator::Trap(trap))
+                );
+            }
+        }
+        for pc in [1, 2, 3, u64::MAX] {
+            assert!(decode_trap(GuestAddress(pc), 0xd4000001).is_err());
+            assert!(decode_trap(GuestAddress(pc), 0xd4200000).is_err());
+        }
+        assert!(decode_trap(GuestAddress(u64::MAX - 3), 0xd4000001).is_err());
+        assert_eq!(
+            decode_trap(GuestAddress(u64::MAX - 3), 0xd4200000).unwrap(),
+            Some(SynchronousTrap {
+                kind: TrapKind::SoftwareBreakpoint,
+                immediate: 0,
+                instruction_pc: GuestAddress(u64::MAX - 3),
+                exception_return_pc: GuestAddress(u64::MAX - 3),
+            })
+        );
+    }
+
+    #[test]
+    fn trap_masks_reject_every_fixed_bit_neighbor_and_other_exception_classes() {
+        for encoding in [0xd4000001, 0xd4200000] {
+            for bit in 0..32 {
+                if (0xffe0001fu32 & (1 << bit)) != 0 {
+                    let word = encoding ^ (1 << bit);
+                    assert_eq!(decode_trap(GuestAddress(0x2000), word).unwrap(), None);
+                }
+            }
+        }
+        for word in [
+            0xd4000002, // HVC
+            0xd4000003, // SMC
+            0xd4400000, // HLT
+            0xd4a00001, // DCPS1
+            0xd4a00002, // DCPS2
+            0xd4a00003, // DCPS3
+            0xd4000000, // reserved exception encoding
+            0xd4200001, // reserved BRK neighbor
+        ] {
+            assert_eq!(decode_trap(GuestAddress(0x2000), word).unwrap(), None);
+            assert!(compile(&bytes(&[word]), GuestAddress(0x2000)).is_err());
+        }
+    }
+
+    #[test]
+    fn trap_is_a_consumed_boundary_with_its_own_source_map_and_no_leaf_fallback() {
+        for word in [0xd4000001, 0xd4200000, 0xd41fffe1, 0xd43fffe0] {
+            let source = bytes(&[0xd503201f, word, 0xffffffff, 0xd65f03c0]);
+            let compiled = compile(&source, GuestAddress(0x2ffc)).unwrap();
+            assert_eq!(compiled.source_bytes, 8);
+            assert_eq!(source_bytes(&source, GuestAddress(0x2ffc)).unwrap(), 8);
+            assert_eq!(
+                compiled.native.source_map,
+                [(GuestAddress(0x2ffc), 0), (GuestAddress(0x3000), 1)]
+            );
+            assert_eq!(compiled.native.x86_64_code.len(), 17);
+            assert_eq!(compiled.native.x86_64_code[0], 0x90);
+            assert!(crate::compile(&bytes(&[word, 0xd65f03c0]), GuestAddress(0x3000)).is_err());
+        }
+        // Original block input-window policy still forbids wrapping extents,
+        // even though BRK's standalone preferred return PC is representable.
+        for word in [0xd4000001, 0xd4200000] {
+            assert!(compile(&bytes(&[word]), GuestAddress(u64::MAX - 3)).is_err());
+        }
     }
 }

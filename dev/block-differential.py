@@ -3,7 +3,10 @@
 
 Unicorn runs each complete original block, including its terminator. Its real PC
 is compared with the native return tuple and an independent branch/state oracle.
-The host loop and actual Rust runtime exercise the same multiblock programs. This does not claim application loading or macOS execution.
+The host loop and actual Rust runtime exercise the same multiblock programs.
+A separate SVC/BRK section observes genuine original interrupts and returns
+bounded trap metadata; it does not deliver exceptions or invoke host services.
+This does not claim application loading or macOS execution.
 """
 import argparse
 from contextlib import ExitStack
@@ -17,15 +20,15 @@ import subprocess
 import tempfile
 import time
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_ERR_FETCH_UNMAPPED
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_ARCH_X86, CS_MODE_64
+from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_ERR_FETCH_UNMAPPED
 from unicorn import arm64_const as arm
 
 from differential import ROOT, BASE, MASK, ARM_REGISTERS, State, executable, arithmetic, move, states
 from evidence import write_evidence
 
 ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
-KINDS = {'fallthrough': 0, 'direct': 1, 'indirect': 2, 'call': 3, 'return': 4}
+KINDS = {'fallthrough': 0, 'direct': 1, 'indirect': 2, 'call': 3, 'return': 4, 'trap': 5}
 
 
 class BlockExit(ctypes.Structure):
@@ -112,6 +115,8 @@ def oracle(case, initial):
         # Capture before BLR overwrites X30; register31 is XZR, never SP.
         next_pc = state.x[register] if register != 31 else 0
         kind = {'br': 'indirect', 'blr': 'call', 'ret': 'return'}[operation]
+    elif operation in ('svc', 'brk'):
+        next_pc, kind = pc, 'trap'
     elif operation != 'fallthrough':
         raise AssertionError(transfer)
     if operation in ('bl', 'blr'):
@@ -139,6 +144,8 @@ def make_case(name, transfer, prefix=None, base=BASE, trailing=False):
         words.append(test_branch(transfer['nonzero'], transfer['register'], transfer['bit'], transfer['offset']))
     elif operation in ('br', 'blr', 'ret'):
         words.append(indirect(operation, transfer['register']))
+    elif operation in ('svc', 'brk'):
+        words.append((0xd4000001 if operation == 'svc' else 0xd4200000) | (transfer['immediate'] << 5))
     elif operation != 'fallthrough':
         raise AssertionError(transfer)
     consumed = len(words) * 4
@@ -241,6 +248,148 @@ def original_block(machine, case, reserved):
             'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
             'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
             'reserved': reserved}, machine.reg_read(arm.UC_ARM64_REG_PC)
+
+
+def trap_cases():
+    result = []
+    prefixes = [('bare', []), ('preserved_flags', [('add', 9, 9, 1), ('move', 0, 0, 0x1234)]),
+                ('fresh_flags', [('subtract_flags', 31, 1, 1), ('add', 9, 9, 1)])]
+    for operation in ('svc', 'brk'):
+        for immediate in (0, 1, 0x80, 0x7fff, 0xffff):
+            for label, prefix in prefixes:
+                case = make_case(f'{operation}-{immediate:#x}-{label}',
+                                 {'op': operation, 'immediate': immediate}, prefix, trailing=True)
+                source = struct.pack('<' + 'I' * len(case['words']), *case['words'])[:case['source_bytes']]
+                decoded = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, case['base']))
+                if len(decoded) * 4 != case['source_bytes'] or decoded[-1].mnemonic != operation:
+                    raise AssertionError('Independent decoder rejected trap fixture ' + case['name'])
+                result.append(case)
+    return result
+
+
+def trap_record(case):
+    pc = case['base'] + case['source_bytes'] - 4
+    operation = case['transfer']['op']
+    return {'kind': 'supervisor_call' if operation == 'svc' else 'software_breakpoint',
+            'immediate': case['transfer']['immediate'], 'instruction_pc': pc,
+            'exception_return_pc': pc + 4 if operation == 'svc' else pc}
+
+
+def trap_initial_states():
+    incoming = initial_states()
+    return [incoming[flags * 6 + flags % 6] for flags in range(16)]
+
+
+def original_trap(case, initial):
+    # Map trailing invalid words too. A successful boundary observation must
+    # come from the genuine SVC/BRK interrupt, never a later UDF/fetch fault.
+    mapped_case = {**case, 'source_bytes': len(case['words']) * 4}
+    machine = machine_for({case['base']: mapped_case}, initial)
+    trace, interrupts = [], []
+    expected_addresses = list(range(case['base'], case['base'] + case['source_bytes'], 4))
+    def instruction(machine, address, size, _):
+        trace.append(address)
+        if size != 4 or trace != expected_addresses[:len(trace)]:
+            raise AssertionError('Original executed beyond the reviewed trap boundary')
+    def interrupt(machine, number, _):
+        interrupts.append({'number': number, 'observed_pc': machine.reg_read(arm.UC_ARM64_REG_PC)})
+        machine.emu_stop()
+    machine.hook_add(UC_HOOK_CODE, instruction)
+    machine.hook_add(UC_HOOK_INTR, interrupt)
+    machine.emu_start(case['base'], 0, count=len(case['words']) + 4)
+    record = trap_record(case)
+    expected_number = 2 if case['transfer']['op'] == 'svc' else 7
+    if trace != expected_addresses or interrupts != [{'number': expected_number, 'observed_pc': record['exception_return_pc']}]:
+        raise AssertionError(f'Original trap observation differs: {case["name"]}, {trace}, {interrupts}')
+    state = {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
+             'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
+             'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000, 'reserved': initial.reserved}
+    return state, {'trap': record, 'interrupt': interrupts[0], 'executed_addresses': trace}
+
+
+def execute_trap_cases(compiled):
+    rows, state_hash = [], hashlib.sha256()
+    for case in compiled:
+        decoded = list(Cs(CS_ARCH_X86, CS_MODE_64).disasm(case['native'], 0))
+        if sum(instruction.size for instruction in decoded) != len(case['native']) or any(
+                instruction.mnemonic in ('syscall', 'sysenter', 'int', 'int1', 'int3', 'hlt') for instruction in decoded):
+            raise AssertionError('Native trap block contains a host syscall/trap or incomplete decode')
+        comparisons = []
+        with executable(case['native']) as address:
+            function = ctypes.CFUNCTYPE(BlockExit, ctypes.POINTER(State))(address)
+            for initial in trap_initial_states():
+                expected, expected_exit = oracle(case, initial)
+                original_state, observation = original_trap(case, initial)
+                state = State.from_buffer_copy(initial)
+                returned = function(ctypes.byref(state))
+                native_exit = {'next_pc': returned.next_pc, 'kind': returned.kind}
+                if expected != original_state or snapshot(state) != original_state or native_exit != expected_exit:
+                    raise AssertionError(f'Trap state/exit differs: {case["name"]}, {observation}, {native_exit}')
+                state_hash.update(bytes(initial))
+                state_hash.update(bytes(state))
+                state_hash.update(struct.pack('<QQ', returned.next_pc, returned.kind))
+                comparisons.append({'initial': snapshot(initial), 'original_state': original_state,
+                                    'original': observation, 'native_state': snapshot(state), 'native_exit': native_exit})
+        rows.append({'name': case['name'], 'trap': trap_record(case), 'comparisons': comparisons})
+    return {'trap_state_exit_comparisons': sum(len(row['comparisons']) for row in rows),
+            'synchronous_traps': {'programs': len(compiled), 'state_corpus_sha256': state_hash.hexdigest(),
+                                  'raw_native_comparisons': rows,
+                                  'limits': 'SVC/BRK stop metadata only. Unicorn interrupt-hook PCs are observed directly; no exception-vector dispatch, ELR/ESR delivery, Darwin service implementation or host syscall is exercised.'}}
+
+
+def trap_runtime_cases(cli, directory, fixtures, compiler):
+    reports, count, compiled, disk_hits = [], 0, 0, 0
+    for index, case in enumerate(fixtures):
+        source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+        source_path = directory / f'trap-runtime-{index}.bin'
+        source_path.write_bytes(source)
+        cache = directory / 'trap-runtime-cache'
+        comparisons = []
+        for initial in trap_initial_states():
+            expected, expected_exit = oracle(case, initial)
+            original_state, observation = original_trap(case, initial)
+            state_path = directory / 'trap-state.json'
+            state_path.write_text(json.dumps(snapshot(initial)))
+            actual = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path),
+                               '--guest-base', hex(case['base']), '--state', str(state_path), '--block-budget', '8',
+                               '--cache-dir', str(cache)], timeout=10))
+            outcome = actual['outcome']
+            if (expected != original_state or actual['state'] != original_state or actual['pc'] != expected_exit['next_pc']
+                    or outcome['reason'] != {'kind': 'synchronous_trap', 'trap': trap_record(case)}
+                    or outcome['last_exit'] != [expected_exit['next_pc'], 5] or outcome['blocks_executed'] != 1
+                    or actual['abi'] != ABI or actual['compiler_source_sha256'] != compiler
+                    or actual['source_sha256'] != hashlib.sha256(source).hexdigest()
+                    or actual['complete_binary_verified'] is not False):
+                raise AssertionError(json.dumps({'name': case['name'], 'original': observation, 'runtime': actual}, indent=2))
+            first = not comparisons
+            if outcome['compiled_blocks'] != (1 if first else 0) or outcome['disk_cache_hits'] != (0 if first else 1):
+                raise AssertionError('Trap cold compilation/disk reuse differs')
+            count += 1
+            compiled += outcome['compiled_blocks']
+            disk_hits += outcome['disk_cache_hits']
+            comparisons.append({'initial': snapshot(initial), 'original': observation, 'native': actual})
+        reports.append({'name': case['name'], 'source_sha256': hashlib.sha256(source).hexdigest(), 'comparisons': comparisons})
+    return count, {'runtime_comparisons': reports, 'runtime_compiled_blocks': compiled, 'runtime_disk_cache_hits': disk_hits}
+
+
+def declined_trap_neighbors(cli, directory):
+    result = []
+    for name, opcode in [('hvc', 0xd4000002), ('smc', 0xd4000003), ('hlt', 0xd4400000),
+                         ('reserved_svc_low_zero', 0xd4000000), ('reserved_svc_low_bit', 0xd4000011),
+                         ('reserved_brk_low_bit', 0xd4200001)]:
+        for immediate in (0, 1, 0x80, 0x7fff, 0xffff):
+            word = opcode | (immediate << 5)
+            source = struct.pack('<II', word, 0xd65f03c0)
+            path = directory / 'declined-trap.bin'
+            path.write_bytes(source)
+            completed = subprocess.run([str(cli), 'compile-block', str(path), '--guest-base', hex(BASE),
+                                       '--output-dir', str(directory / f'declined-{name}-{immediate}')], capture_output=True, text=True)
+            if completed.returncode == 0 or not completed.stderr:
+                raise AssertionError(f'Unsupported trap neighbor compiled: {name}, {word:#x}')
+            result.append({'name': name, 'word': f'{word:08x}', 'immediate': immediate,
+                           'source_sha256': hashlib.sha256(source).hexdigest(), 'stderr': completed.stderr.strip(),
+                           'execution_attempted': False})
+    return result
 
 
 def multiblock_cases():
@@ -379,19 +528,21 @@ def runtime_cases(cli, directory, fixtures, traces, compiler):
             'runtime_input_corpus_sha256': source_corpus.hexdigest(), 'runtime_dispatch': reports}
 
 
-def worker(pipe, compiled, multi):
+def worker(pipe, compiled, multi, compiled_traps):
     try:
-        pipe.send(execute_cases(compiled, multi))
+        result = execute_cases(compiled, multi)
+        result.update(execute_trap_cases(compiled_traps))
+        pipe.send(result)
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
         pipe.close()
 
 
-def bounded_cases(compiled, multi):
+def bounded_cases(compiled, multi, compiled_traps):
     context = multiprocessing.get_context('spawn')
     receive, send = context.Pipe(duplex=False)
-    process = context.Process(target=worker, args=(send, compiled, multi))
+    process = context.Process(target=worker, args=(send, compiled, multi, compiled_traps))
     process.start()
     send.close()
     try:
@@ -419,7 +570,11 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
-    compiled, multi = cases(), multiblock_cases()
+    harness_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    shared_paths = [ROOT / 'dev/differential.py', ROOT / 'crates/stela-runtime/src/blocks.rs',
+                    ROOT / 'crates/stela-runtime/src/lib.rs', ROOT / 'crates/stela-runtime/src/execution.rs']
+    shared_hashes = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in shared_paths}
+    compiled, multi, compiled_traps = cases(), multiblock_cases(), trap_cases()
     compiler, corpus, manifests = None, hashlib.sha256(), []
     all_cases = compiled + [case for fixture in multi for case in fixture['blocks']]
     with tempfile.TemporaryDirectory(prefix='stela-block-diff-') as temporary:
@@ -444,10 +599,39 @@ def main():
             manifests.append({'name': case['name'], 'guest_base': case['base'], 'source_bytes': case['source_bytes'],
                               'native_sha256': manifest['native_sha256'],
                               'input_source_sha256': hashlib.sha256(source).hexdigest()})
-        result = bounded_cases(compiled, multi)
+        trap_manifests = []
+        for index, case in enumerate(compiled_traps):
+            source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+            input_path = directory / 'trap-source.bin'
+            input_path.write_bytes(source)
+            output = directory / f'trap-{index}'
+            manifest = json.loads(subprocess.check_output([str(cli), 'compile-block', str(input_path),
+                                  '--guest-base', hex(case['base']), '--output-dir', str(output)]))
+            if (manifest['abi'] != ABI or manifest['source_bytes'] != case['source_bytes']
+                    or manifest['source_sha256'] != hashlib.sha256(source[:case['source_bytes']]).hexdigest()
+                    or manifest['compiler_source_sha256'] != compiler):
+                raise AssertionError('Trap compiler ABI/source/consumed boundary differs')
+            case['native'] = (output / 'native.bin').read_bytes()
+            if hashlib.sha256(case['native']).hexdigest() != manifest['native_sha256']:
+                raise AssertionError('Trap native artifact hash differs')
+            source_map = manifest['source_map']
+            if ([row[0] for row in source_map] != list(range(case['base'], case['base'] + case['source_bytes'], 4))
+                    or any(not 0 <= row[1] < len(case['native']) for row in source_map)
+                    or [row[1] for row in source_map] != sorted(row[1] for row in source_map)):
+                raise AssertionError('Trap consumed source map includes trailing code or invalid native offsets')
+            trap_manifests.append({'name': case['name'], 'input_source_sha256': hashlib.sha256(source).hexdigest(), 'manifest': manifest})
+        declines = declined_trap_neighbors(cli, directory)
+        result = bounded_cases(compiled, multi, compiled_traps)
+        trap_runtime_count, runtime_details = trap_runtime_cases(cli, directory, compiled_traps, compiler)
+        result['trap_rust_runtime_execution_comparisons'] = trap_runtime_count
+        result['synchronous_traps'].update(runtime_details)
+        result['synchronous_traps'].update({'compiled_blocks': trap_manifests, 'declined_neighbors': declines})
         result.update(runtime_cases(cli, directory, multi, result['dispatch_traces'], compiler))
     if executable_hash != hashlib.sha256(cli.read_bytes()).hexdigest():
         raise AssertionError('Compiler executable changed during block suite')
+    if harness_hash != hashlib.sha256(Path(__file__).read_bytes()).hexdigest() or shared_hashes != {
+            str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in shared_paths}:
+        raise AssertionError('Harness/shared runtime source changed during block suite')
     report = {'kind': 'arm64_block_control_flow_differential', 'passed': True,
               'programs': len(compiled), 'multiblock_fixtures': len(multi), **result,
               'reference': 'Original A64 Unicorn execution and independent integer/control-flow oracle',
@@ -462,13 +646,9 @@ def main():
                                             'explicit unmapped target stop'],
               'corpus_sha256': corpus.hexdigest(), 'compiled_blocks': manifests,
               'compiler_source_sha256': compiler, 'compiler_executable_sha256': executable_hash,
-              'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'harness_source_sha256': harness_hash,
               'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
-              'shared_sources_sha256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                        for path in [ROOT / 'dev/differential.py',
-                                                     ROOT / 'crates/stela-runtime/src/blocks.rs',
-                                                     ROOT / 'crates/stela-runtime/src/lib.rs',
-                                                     ROOT / 'crates/stela-runtime/src/execution.rs']},
+              'shared_sources_sha256': shared_hashes,
               'limits': 'Bounded ordinary integer blocks with private state. Unmapped target fetch after a fully consumed original block is a boundary observation, not fault-delivery evidence. The flat Rust runtime image may coalesce adjacent fixture blocks. No PAC, platform ABI, memory faults, arbitrary guest binaries or macOS boot.'}
     write_evidence(ROOT / '.stela/block-differential-report.json', report)
     print(json.dumps(report, indent=2))

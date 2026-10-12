@@ -209,6 +209,9 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
                            if group['kind'] == 'arm64_block_control_flow_differential'
                            else ('state_comparisons', 'state_and_memory_comparisons',
                                  'register_state_comparisons', 'three_way_register_state_comparisons'))
+        comparison_field = group.get('comparison_field')
+        if comparison_field is not None:
+            comparison_keys = (comparison_field,)
         comparisons = next((report[key] for key in comparison_keys if key in report), None)
         if type(comparisons) is not int or comparisons <= 0:
             raise ValueError(f'Native differential evidence has no comparisons: {name}')
@@ -245,7 +248,12 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
                          'harness': group['harness'], 'harness_source_sha256': harness_hash,
                          'report_binds_harness_hash': True,
                          'shared_sources_sha256': shared,
-                         'native_comparisons': comparisons, 'compiler_source_sha256': compiler}
+                         'native_comparisons': comparisons, 'compiler_source_sha256': compiler,
+                         'comparison_field': comparison_field}
+        for key in group.get('required_positive_counts', []):
+            if type(report.get(key)) is not int or report[key] <= 0:
+                raise ValueError(f'Differential evidence missing positive count {key}')
+            results[name][key] = report[key]
         if group['kind'] == 'arm64_block_control_flow_differential':
             if executable_hash is not None and report.get('compiler_executable_sha256') != executable_hash:
                 raise ValueError('Stale native block runtime executable evidence')
@@ -274,9 +282,17 @@ def markdown(report):
     block_rows = ''
     if block:
         counts = block['summary']['reviewed']
-        comparisons = sum(group['native_comparisons'] for group in block['native_differential_evidence'].values())
+        groups = block['native_differential_evidence'].values()
+        comparisons = sum(group['native_comparisons'] for group in groups
+                          if group.get('comparison_field') != 'trap_state_exit_comparisons')
+        traps = sum(group['native_comparisons'] for group in groups
+                    if group.get('comparison_field') == 'trap_state_exit_comparisons')
         block_rows = (f"| Block-profile control-flow forms implemented | {counts['implemented']:,} |\n"
                       f"| Native block state/exit comparisons | {comparisons:,} |\n")
+        if counts['partial']:
+            block_rows += f"| Block-profile forms partially implemented | {counts['partial']:,} |\n"
+        if traps:
+            block_rows += f"| Native synchronous-trap boundary comparisons | {traps:,} |\n"
     return ('| Measurement | Current evidence |\n| --- | --- |\n'
             f"| Leaf-profile instruction forms implemented | {row['implemented']:,} |\n"
             f"| Leaf-profile instruction forms partially implemented | {row['partial']:,} |\n"
@@ -286,7 +302,7 @@ def markdown(report):
             f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n"
             '| Overall compatibility completion | Unknown |\n\n'
             f"Snapshot {report['measured_at_utc'].split('T')[0]} UTC; compiler `{report['compiler_source_sha256'][:12]}`.\n\n"
-            'Reviewed forms cover bounded leaf/private-RAM and ordinary block-exit profiles, with aliases excluded. '
+            'Reviewed forms cover bounded leaf/private-RAM and block-exit profiles, with aliases excluded. '
             'Profile counts overlap and are not added. '
             'They are an implementation count, not a percentage of the required Apple ISA. '
             'Complete binaries require full loading and execution; leaf tests do not qualify. '

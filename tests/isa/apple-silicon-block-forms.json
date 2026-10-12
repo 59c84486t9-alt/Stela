@@ -46,12 +46,12 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v2",
+  "registry_version": "apple-silicon-block-forms-v3",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
     "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
-    "description": "Reviewed ordinary control-flow forms under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind is returned in RAX/RDX. The mapped guest code/address profile is nonwrapping, GCS disabled, executable pages unguarded and ordinary data addresses use private direct RAM.",
+    "description": "Reviewed ordinary control-flow forms under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind is returned in RAX/RDX. The mapped guest code/address profile is nonwrapping, GCS disabled, executable pages unguarded and ordinary data addresses use private direct RAM. SVC/BRK partially support a precise typed boundary: native kind 5 returns the instruction PC, and immutable source decoding retains kind, imm16 and the preferred exception return PC. Architectural exception entry is pending.",
     "outside_scope": [
       "PAC and tagged/authenticated pointers",
       "GCS, guarded-page BTI checks and PSTATE.BTYPE",
@@ -72,6 +72,22 @@
         "crates/stela-runtime/src/blocks.rs",
         "crates/stela-runtime/src/lib.rs",
         "crates/stela-runtime/src/execution.rs"
+      ]
+    },
+    "block_synchronous_traps": {
+      "harness": "dev/block-differential.py",
+      "report": ".stela/block-differential-report.json",
+      "kind": "arm64_block_control_flow_differential",
+      "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "comparison_field": "trap_state_exit_comparisons",
+      "required_positive_counts": [
+        "trap_rust_runtime_execution_comparisons"
       ]
     }
   },
@@ -158,6 +174,60 @@
       ],
       "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
       "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "BRK_EX_exception",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4200000",
+      "docvars": {
+        "instr-class": "system",
+        "isa": "A64",
+        "mnemonic": "BRK"
+      },
+      "source_file": "brk.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/brk.xml",
+      "source_sha256": "d9475613cbe20105a77b9e8e0bd3d6a84758b01c58ffc687fd6216919976bffb",
+      "mnemonic": "BRK",
+      "features": [],
+      "status": "partial",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_synchronous_traps"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd4200000",
+          "expected_mnemonics": [
+            "brk"
+          ]
+        },
+        {
+          "word": "0xd4201000",
+          "expected_mnemonics": [
+            "brk"
+          ]
+        },
+        {
+          "word": "0xd43fffe0",
+          "expected_mnemonics": [
+            "brk"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xd4400000",
+          "reason": "Instruction"
+        }
+      ],
+      "review": "Exact pinned imm16 encoding and state-preserving trap-boundary emission reviewed against original ARM interrupt observations, independent prefix/state math, raw native tuples and Rust dispatch. Rejection samples check neighboring exception classes, not full exception-delivery semantics.",
+      "scope": "Partial: stop at the original instruction PC with preserved modeled GPR/SP/NZCV/reserved state, class and imm16. Preferred exception return is PC+4 for SVC and PC for BRK. No EL/PSTATE transition, vector dispatch, ESR/SPSR/ELR register update, syscall service or host trap is implemented. Input code extents remain nonwrapping; leaf compilation declines."
     },
     {
       "id": "BR_64_branch_reg",
@@ -483,6 +553,60 @@
       ],
       "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
       "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "SVC_EX_exception",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4000001",
+      "docvars": {
+        "instr-class": "system",
+        "isa": "A64",
+        "mnemonic": "SVC"
+      },
+      "source_file": "svc.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/svc.xml",
+      "source_sha256": "879b1f8b7dfae462d268ba96daa5b50acd022f53c407ef962bfb5833cf56e753",
+      "mnemonic": "SVC",
+      "features": [],
+      "status": "partial",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "block_synchronous_traps"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd4000001",
+          "expected_mnemonics": [
+            "svc"
+          ]
+        },
+        {
+          "word": "0xd4001001",
+          "expected_mnemonics": [
+            "svc"
+          ]
+        },
+        {
+          "word": "0xd41fffe1",
+          "expected_mnemonics": [
+            "svc"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xd4000002",
+          "reason": "Instruction"
+        }
+      ],
+      "review": "Exact pinned imm16 encoding and state-preserving trap-boundary emission reviewed against original ARM interrupt observations, independent prefix/state math, raw native tuples and Rust dispatch. Rejection samples check neighboring exception classes, not full exception-delivery semantics.",
+      "scope": "Partial: stop at the original instruction PC with preserved modeled GPR/SP/NZCV/reserved state, class and imm16. Preferred exception return is PC+4 for SVC and PC for BRK. No EL/PSTATE transition, vector dispatch, ESR/SPSR/ELR register update, syscall service or host trap is implemented. Input code extents remain nonwrapping; leaf compilation declines."
     },
     {
       "id": "TBNZ_only_testbranch",
