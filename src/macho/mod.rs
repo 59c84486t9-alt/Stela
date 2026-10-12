@@ -2,6 +2,7 @@
 pub mod block_image;
 pub mod fileset;
 pub mod load_plan;
+pub mod mapped_image;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;

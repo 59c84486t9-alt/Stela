@@ -21,6 +21,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Map a trusted image's initial segments and probe its translated entry.
+    RunMappedImage {
+        input: PathBuf,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long, default_value = "0xffff0000", value_parser = parse_address)]
+        stop_pc: u64,
+        #[arg(long, default_value_t = 10000)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+        #[arg(long, default_value = "0x70000000000", value_parser = parse_address)]
+        stack_base: u64,
+        #[arg(long, default_value_t = 65536)]
+        stack_bytes: u64,
+        #[arg(long, value_parser = parse_memory_query)]
+        read_memory: Vec<MemoryQuery>,
+    },
     /// Compile one native block with explicit guest-address exits.
     CompileBlock {
         input: PathBuf,
@@ -153,6 +173,22 @@ fn parse_address(value: &str) -> Result<u64, String> {
     .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone)]
+struct MemoryQuery {
+    address: u64,
+    bytes: usize,
+}
+
+fn parse_memory_query(value: &str) -> Result<MemoryQuery, String> {
+    let (address, bytes) = value.split_once(':').ok_or("expected ADDRESS:BYTES")?;
+    let address = parse_address(address)?;
+    let bytes = usize::try_from(parse_address(bytes)?).map_err(|error| error.to_string())?;
+    if bytes as u64 > stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES {
+        return Err("memory snapshot exceeds image memory limit".into());
+    }
+    Ok(MemoryQuery { address, bytes })
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RegisterInput {
@@ -236,6 +272,104 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::RunMappedImage {
+            input,
+            architecture,
+            state,
+            stop_pc,
+            block_budget,
+            cache_dir,
+            stack_base,
+            stack_bytes,
+            read_memory,
+        } => {
+            use macho::mapped_image::{MappedImage, StackSpec};
+            use stela_runtime::blocks::ThreadState;
+            ensure!(
+                block_budget <= 1_000_000 && stop_pc.is_multiple_of(4),
+                "research block budget or return-address alignment is invalid"
+            );
+            let snapshot_total = read_memory.iter().try_fold(0u64, |total, query| {
+                total
+                    .checked_add(query.bytes as u64)
+                    .context("snapshot byte count overflow")
+            })?;
+            ensure!(
+                snapshot_total <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+                "combined memory snapshots exceed image memory limit"
+            );
+            let provided_state = state.is_some();
+            let registers: RegisterInput = if let Some(path) = state {
+                serde_json::from_slice(&std::fs::read(path)?)?
+            } else {
+                RegisterInput::default()
+            };
+            ensure!(
+                registers.nzcv & !0xf0000000 == 0,
+                "only NZCV bits31:28 are supported"
+            );
+            let data = std::fs::read(&input)?;
+            let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
+            let mut image = MappedImage::load(
+                bytes,
+                cache_dir,
+                Some(StackSpec {
+                    base: stack_base,
+                    bytes: stack_bytes,
+                }),
+            )?;
+            ensure!(
+                image
+                    .regions()
+                    .iter()
+                    .all(|region| stop_pc < region.guest_address
+                        || stop_pc - region.guest_address >= region.virtual_bytes),
+                "return address overlaps image memory"
+            );
+            let mut thread = ThreadState {
+                pc: stela_compiler::GuestAddress(image.plan().entry.guest_address),
+                registers: stela_compiler::GuestState {
+                    x: registers.x,
+                    sp: registers.sp,
+                    nzcv: registers.nzcv,
+                    reserved: registers.reserved,
+                },
+            };
+            if !provided_state {
+                thread.registers.sp = image.stack().context("missing research stack")?.initial_sp;
+            }
+            thread.registers.x[30] = stop_pc;
+            let initial_state = register_json(&thread.registers);
+            // SAFETY: Explicit research execution assumes trusted entry code,
+            // suitable caller-supplied ABI state and data that needs no pending
+            // fixup/import. Owned mappings stay alive throughout serialized dispatch.
+            let outcome = unsafe {
+                image.run(
+                    &mut thread,
+                    Some(stela_compiler::GuestAddress(stop_pc)),
+                    block_budget,
+                )?
+            };
+            let memory = read_memory
+                .iter()
+                .map(|query| -> Result<serde_json::Value> {
+                    Ok(serde_json::json!({"address":query.address,
+                    "bytes_hex":hex::encode(image.read_snapshot(query.address,query.bytes)?)}))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"kind":"mapped_macho_entry_probe",
+                "container_sha256":stela_core::sha256(&data),"slice_offset":slice_offset,"plan":image.plan(),
+                "memory_regions":image.regions(),"guard_segments_not_reserved":image.unreserved_guards(),
+                "host_execute":false,"stack":image.stack(),"initial_state":initial_state,
+                "state":register_json(&thread.registers),"pc":thread.pc.0,"outcome":outcome,"memory":memory,
+                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "complete_binary_verified":false})
+                )?
+            );
+        }
         Command::CompileBlock {
             input,
             guest_base,
