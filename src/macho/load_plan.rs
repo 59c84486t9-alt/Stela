@@ -269,13 +269,11 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
                             return Err(invalid("overlapping section VM extents"));
                         }
                         section_ranges.push((address, bytes));
-                        if zerofill {
-                            if address < vmaddr + filesize {
-                                return Err(invalid(
-                                    "zero-fill section overlaps file-backed segment bytes",
-                                ));
-                            }
-                        } else {
+                        // Segment commands define the initial mapping. Apple ld
+                        // can start a zero-fill section inside the final padded
+                        // file page; it has no independent file extent. Do not
+                        // reject that layout or overwrite mapped file bytes.
+                        if !zerofill {
                             let offset = u64::from(section.offset.get(endian));
                             if offset < fileoff
                                 || checked_end(offset, bytes, "section file")? > fileend
@@ -827,8 +825,33 @@ mod tests {
         u32_put(&mut items[1], 120, 0x1008);
         assert!(plan(&image(items.clone())).is_err());
         u32_put(&mut items[1], 136, 1);
-        assert!(plan(&image(items.clone())).is_err());
+        assert!(plan(&image(items.clone())).is_ok());
         u64_put(&mut items[1], 104, BASE + 0x1100);
         assert!(plan(&image(items)).is_ok());
+    }
+    #[test]
+    fn zero_fill_sections_may_start_inside_segment_file_padding() {
+        let mut items = commands();
+        items[2].resize(152, 0);
+        u32_put(&mut items[2], 4, 152);
+        u32_put(&mut items[2], 64, 1);
+        items[2][72..77].copy_from_slice(b"__bss");
+        items[2][88..94].copy_from_slice(b"__DATA");
+        u64_put(&mut items[2], 104, BASE + 0x2008);
+        u64_put(&mut items[2], 112, 0x200);
+        // S_ZEROFILL has no section file extent. The segment still maps
+        // fileoff..filesize verbatim, then allocates its remaining VM tail.
+        u32_put(&mut items[2], 120, u32::MAX);
+        u32_put(&mut items[2], 136, macho::S_ZEROFILL);
+        let mut input = image(items.clone());
+        input[0x1108] = 0xa5;
+        let result = plan(&input).unwrap();
+        assert_eq!(result.segments[2].file.offset, 0x1100);
+        assert_eq!(result.segments[2].file.bytes, 0x100);
+        assert_eq!(result.segments[2].zero_fill.address, BASE + 0x2100);
+        assert_eq!(result.segments[2].zero_fill.bytes, 0xf00);
+        // Section bounds remain constrained by their segment, including BSS.
+        u64_put(&mut items[2], 112, 0x1000);
+        assert!(plan(&image(items)).is_err());
     }
 }
