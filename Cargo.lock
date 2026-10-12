@@ -1177,6 +1177,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "serde_json",
  "stela-apple",
  "stela-compiler",
@@ -1211,7 +1212,9 @@ name = "stela-macho"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "object",
+ "serde",
  "stela-core",
  "tempfile",
  "walkdir",

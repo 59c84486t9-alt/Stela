@@ -1,6 +1,7 @@
 //! Inventory standalone Mach-O slices. Containers are explicitly uncounted.
 use anyhow::{Context, Result, ensure};
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
+use serde::Serialize;
 use stela_core::{Artifact, Inventory, ScanIssue, sha256};
 use std::{fs::File, io::Read, path::Path};
 
@@ -77,7 +78,7 @@ fn is_macho(data: &[u8]) -> bool {
     )
 }
 
-pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
+pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     let magic = data
         .get(..4)
         .context("file is shorter than a Mach-O magic")?;
@@ -89,14 +90,14 @@ pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
         _ => None,
     };
     let Some((little, wide)) = fat else {
-        return Ok(vec![artifact(data, path, 0)?]);
+        return Ok(vec![(0, data)]);
     };
     let count = integer(data, 4, 4, little)? as usize;
     let stride = if wide { 32 } else { 20 };
     ensure!(count > 0 && count <= 128, "invalid fat slice count");
     ensure!(8 + count * stride <= data.len(), "truncated fat table");
     let mut ranges = vec![];
-    let mut artifacts = vec![];
+    let mut slices = vec![];
     for i in 0..count {
         let start = 8 + i * stride;
         let offset = integer(data, start + 8, if wide { 8 } else { 4 }, little)?;
@@ -116,9 +117,90 @@ pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
             "fat slices overlap"
         );
         ranges.push((offset, end));
-        artifacts.push(artifact(slice(data, offset, size)?, path, offset)?);
+        slices.push((offset, slice(data, offset, size)?));
     }
-    Ok(artifacts)
+    Ok(slices)
+}
+
+pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
+    split_slices(data)?
+        .into_iter()
+        .map(|(offset, bytes)| artifact(bytes, path, offset))
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextSection {
+    pub name: String,
+    pub guest_address: u64,
+    pub data_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextSlice {
+    pub artifact: Artifact,
+    pub sections: Vec<TextSection>,
+    pub entry_guest_address: Option<u64>,
+    pub defined_text_symbols: std::collections::BTreeMap<String, u64>,
+}
+
+/// Export text and symbols from validated, bounded slices for corpus analysis.
+/// This is section extraction, not discovery of all reachable instructions.
+pub fn text_slices(data: &[u8], path: &str) -> Result<Vec<TextSlice>> {
+    split_slices(data)?
+        .into_iter()
+        .map(|(offset, bytes)| {
+            let artifact = artifact(bytes, path, offset)?;
+            let file = object::File::parse(bytes)?;
+            let sections = file
+                .sections()
+                .filter(|s| s.kind() == object::SectionKind::Text)
+                .map(|section| {
+                    Ok(TextSection {
+                        name: section.name()?.into(),
+                        guest_address: section.address(),
+                        data_hex: hex::encode(section.data()?),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let entry_offset = file.entry();
+            let entry_guest_address = file
+                .sections()
+                .filter(|s| s.kind() == object::SectionKind::Text)
+                .find_map(|section| {
+                    let (offset, size) = section.file_range()?;
+                    if entry_offset != 0 && entry_offset >= offset && entry_offset - offset < size {
+                        section.address().checked_add(entry_offset - offset)
+                    } else {
+                        None
+                    }
+                });
+            let defined_text_symbols = file
+                .symbols()
+                .filter(|s| {
+                    s.is_definition()
+                        && s.kind() == object::SymbolKind::Text
+                        && sections.iter().any(|section| {
+                            s.address() >= section.guest_address
+                                && s.address() - section.guest_address
+                                    < section.data_hex.len() as u64 / 2
+                        })
+                })
+                .filter_map(|s| {
+                    s.name()
+                        .ok()
+                        .filter(|name| !name.is_empty())
+                        .map(|name| (name.to_owned(), s.address()))
+                })
+                .collect();
+            Ok(TextSlice {
+                artifact,
+                sections,
+                entry_guest_address,
+                defined_text_symbols,
+            })
+        })
+        .collect()
 }
 
 pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
@@ -195,6 +277,53 @@ pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn text_fixture(text_offset: u32) -> Vec<u8> {
+        let mut data = vec![];
+        for word in [0xfeedfacfu32, 0x0100000c, 2, 2, 2, 176, 0, 0] {
+            data.extend(word.to_le_bytes());
+        }
+        for word in [0x19u32, 152] {
+            data.extend(word.to_le_bytes());
+        }
+        let mut name = [0u8; 16];
+        name[..6].copy_from_slice(b"__TEXT");
+        data.extend(name);
+        for word in [0x1000u64, 8, 208, 8] {
+            data.extend(word.to_le_bytes());
+        }
+        for word in [7u32, 5, 1, 0] {
+            data.extend(word.to_le_bytes());
+        }
+        let mut text = [0u8; 16];
+        text[..6].copy_from_slice(b"__text");
+        data.extend(text);
+        data.extend(name);
+        for word in [0x1000u64, 8] {
+            data.extend(word.to_le_bytes());
+        }
+        for word in [text_offset, 2, 0, 0, 0x80000400, 0, 0, 0] {
+            data.extend(word.to_le_bytes());
+        }
+        for word in [0x80000028u32, 24] {
+            data.extend(word.to_le_bytes());
+        }
+        for word in [208u64, 0] {
+            data.extend(word.to_le_bytes());
+        }
+        assert_eq!(data.len(), 208);
+        data.extend(0xd503201fu32.to_le_bytes());
+        data.extend(0xd65f03c0u32.to_le_bytes());
+        data
+    }
+    #[test]
+    fn text_export_maps_entry_offsets_and_rejects_out_of_bounds_sections() -> Result<()> {
+        let slices = text_slices(&text_fixture(208), "fixture")?;
+        assert_eq!(slices[0].entry_guest_address, Some(0x1000));
+        assert_eq!(slices[0].artifact.text_bytes, 8);
+        assert_eq!(slices[0].sections[0].data_hex, "1f2003d5c0035fd6");
+        assert!(text_slices(&text_fixture(4096), "broken").is_err());
+        Ok(())
+    }
     fn thin(cpu: u32, subtype: u32) -> Vec<u8> {
         let mut data = vec![];
         for value in [0xfeedfacf, cpu, subtype, 2, 0, 0, 0, 0] {

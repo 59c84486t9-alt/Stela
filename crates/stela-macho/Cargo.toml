@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 stela-core.workspace = true
+serde.workspace = true
+hex.workspace = true
 object = { version = "0.37", features = ["read"] }
 walkdir = "2"
 

@@ -16,6 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
+    BinaryText { input: PathBuf },
     /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
     PrepareLeaf {
         input: PathBuf,
@@ -107,6 +109,41 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::BinaryText { input } => {
+            use stela_compiler::Lifter;
+            let bytes = std::fs::read(&input)?;
+            let slices = stela_macho::text_slices(&bytes, &input.display().to_string())?;
+            let mut output = vec![];
+            for slice in slices {
+                let arm = matches!(slice.artifact.architecture.as_str(), "arm64" | "arm64e");
+                let mut recognized = 0;
+                let mut words = 0;
+                if arm {
+                    for section in &slice.sections {
+                        let data = hex::decode(&section.data_hex)?;
+                        for (index, word) in data.as_chunks::<4>().0.iter().enumerate() {
+                            let pc = section
+                                .guest_address
+                                .checked_add(index as u64 * 4)
+                                .context("text address overflow")?;
+                            words += 1;
+                            if stela_compiler::aarch64::Decoder
+                                .lift(
+                                    stela_compiler::GuestAddress(pc),
+                                    u32::from_le_bytes(*word),
+                                )
+                                .is_ok()
+                            {
+                                recognized += 1;
+                            }
+                        }
+                    }
+                }
+                output.push(serde_json::json!({"slice": slice, "arm64_text_words": words, "recognized_leaf_words": recognized,
+                    "note": "Word recognition is not function translation, reachability, or verified application coverage."}));
+            }
+            println!("{}", serde_json::to_string(&output)?);
+        }
         Command::PrepareLeaf {
             input,
             guest_base,

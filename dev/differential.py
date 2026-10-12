@@ -6,6 +6,7 @@ The native output is produced by the CLI before being mapped RX and called.
 No ARM decoder, interpreter or runtime recompiler runs on the native path.
 """
 import ctypes
+from contextlib import contextmanager
 import hashlib
 import json
 import mmap
@@ -44,7 +45,8 @@ def reference(code, initial):
             "nzcv": machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000}
 
 
-def native(code, initial):
+@contextmanager
+def executable(code):
     if platform.machine() not in ("x86_64", "AMD64"):
         raise RuntimeError("Native differential runner requires an x86-64 host; use QEMU on ARM hosts.")
     region = mmap.mmap(-1, len(code), prot=mmap.PROT_READ | mmap.PROT_WRITE)
@@ -56,13 +58,18 @@ def native(code, initial):
     libc.mprotect.restype = ctypes.c_int
     if libc.mprotect(address, len(code), mmap.PROT_READ | mmap.PROT_EXEC) != 0:
         raise OSError(ctypes.get_errno(), "mprotect RX failed")
-    state = State.from_buffer_copy(initial)
     try:
-        ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)(ctypes.byref(state))
-        return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv}
+        yield address
     finally:
         del marker
         region.close()
+
+
+def native(code, initial):
+    state = State.from_buffer_copy(initial)
+    with executable(code) as address:
+        ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)(ctypes.byref(state))
+    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv}
 
 
 def move(kind, width, destination, immediate, shift=0):
