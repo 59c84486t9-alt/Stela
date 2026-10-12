@@ -272,7 +272,7 @@ class BlockProgressTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
-        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 157)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 159)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 9)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
         self.assertEqual(len(set(leaf) & set(block)), 9)
@@ -281,11 +281,11 @@ class BlockProgressTests(unittest.TestCase):
                   'block_profile_evidence': {'summary': progress.summarize(block),
                       'native_differential_evidence': {'block': {'native_comparisons': 28704}}}}
         text = progress.markdown(report)
-        self.assertIn('| Leaf-profile instruction forms implemented | 157 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 159 |', text)
         self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('counts overlap and are not added', text)
-        self.assertNotIn('| 169 |', text)
+        self.assertNotIn('| 171 |', text)
         self.assertNotIn('%', text)
 
 
