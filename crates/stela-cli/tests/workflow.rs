@@ -51,3 +51,39 @@ fn inventory_to_ledger_preserves_scope_and_protects_existing_work() {
             .success()
     );
 }
+
+#[test]
+fn first_use_cache_is_reused_and_invalid_instructions_do_not_compile() {
+    let dir = tempfile::tempdir().unwrap();
+    let code: Vec<_> = [0xd2800540u32, 0xd65f03c0]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    std::fs::write(dir.path().join("leaf.arm64"), code).unwrap();
+    for expected in [false, true] {
+        let output = cli(dir.path(), &["prepare-leaf", "leaf.arm64"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["cache_hit"], expected);
+        assert_eq!(report["manifest"]["verified"], false);
+    }
+    std::fs::write(dir.path().join("invalid.arm64"), [0, 0, 0, 0]).unwrap();
+    assert!(
+        !cli(
+            dir.path(),
+            &[
+                "compile-leaf",
+                "invalid.arm64",
+                "--output-dir",
+                "invalid-output"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(!dir.path().join("invalid-output").exists());
+}

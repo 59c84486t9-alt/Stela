@@ -1182,6 +1182,7 @@ dependencies = [
  "stela-compiler",
  "stela-core",
  "stela-macho",
+ "stela-runtime",
  "tempfile",
  "zip",
 ]
@@ -1214,6 +1215,18 @@ dependencies = [
  "stela-core",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "stela-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "stela-compiler",
+ "stela-core",
+ "tempfile",
 ]
 
 [[package]]

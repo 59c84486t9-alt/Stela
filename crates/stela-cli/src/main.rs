@@ -16,6 +16,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
+    PrepareLeaf {
+        input: PathBuf,
+        #[arg(long, default_value = "0x100000", value_parser = parse_address)]
+        guest_base: u64,
+        #[arg(long, default_value = ".stela/cache/leaf-v1")]
+        cache_dir: PathBuf,
+    },
     /// AOT-compile a raw, straight-line ARM64 leaf function into native x86.
     CompileLeaf {
         input: PathBuf,
@@ -99,6 +107,19 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::PrepareLeaf {
+            input,
+            guest_base,
+            cache_dir,
+        } => {
+            let source = std::fs::read(input)?;
+            let prepared = stela_runtime::prepare_leaf(
+                &source,
+                stela_compiler::GuestAddress(guest_base),
+                &cache_dir,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&prepared)?);
+        }
         Command::CompileLeaf {
             input,
             guest_base,

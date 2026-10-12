@@ -19,6 +19,7 @@ stela-core = { path = "crates/stela-core" }
 stela-apple = { path = "crates/stela-apple" }
 stela-macho = { path = "crates/stela-macho" }
 stela-compiler = { path = "crates/stela-compiler" }
+stela-runtime = { path = "crates/stela-runtime" }
 
 [profile.release]
 lto = "thin"

@@ -16,6 +16,7 @@ stela-core.workspace = true
 stela-apple.workspace = true
 stela-macho.workspace = true
 stela-compiler.workspace = true
+stela-runtime.workspace = true
 zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
