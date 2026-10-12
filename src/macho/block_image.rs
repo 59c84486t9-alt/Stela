@@ -143,7 +143,10 @@ mod tests {
         assert_eq!(result.plan().slice_sha256, sha256(&input));
         assert_eq!(result.plan().architecture, "arm64e");
         assert_eq!(result.plan().cpu_subtype, 0x8000_0002);
-        assert_eq!(result.plan().entry.guest_address, BASE + 0x200);
+        assert_eq!(
+            result.plan().entry.as_ref().unwrap().guest_address,
+            BASE + 0x200
+        );
         assert_eq!(region.segment_name(), "__TEXT");
         assert_eq!(region.guest_address(), BASE);
         assert_eq!(region.file_offset(), 0);
@@ -185,8 +188,11 @@ mod tests {
         let mut input = image(0x3004, 0, extra);
         put32(&mut input, 0x404, 0xd65f03c0);
         let result = BlockImage::from_slice(&input).unwrap();
-        assert_eq!(result.plan().entry.file_offset, 0x404);
-        assert_eq!(result.plan().entry.guest_address, BASE + 0x3004);
+        assert_eq!(result.plan().entry.as_ref().unwrap().file_offset, 0x404);
+        assert_eq!(
+            result.plan().entry.as_ref().unwrap().guest_address,
+            BASE + 0x3004
+        );
         let code = &result.regions()[1];
         assert_eq!(code.guest_address(), BASE + 0x3000);
         assert_eq!(code.file_offset(), 0x400);

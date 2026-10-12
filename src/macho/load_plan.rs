@@ -25,7 +25,7 @@ impl fmt::Display for PlanError {
             Self::Malformed(detail) => write!(f, "malformed Mach-O: {detail}"),
             Self::UnsupportedFormat => f.write_str("load planning requires one thin little-endian 64-bit Mach-O slice"),
             Self::UnsupportedCpu { cpu_type, cpu_subtype } => write!(f, "unsupported CPU type {cpu_type:#x}, subtype {cpu_subtype:#x}; expected arm64 or arm64e"),
-            Self::UnsupportedFileType(kind) => write!(f, "unsupported Mach-O file type {kind:#x}; expected MH_EXECUTE"),
+            Self::UnsupportedFileType(kind) => write!(f, "unsupported Mach-O file type {kind:#x} for requested executable/library planning mode"),
             Self::UnsupportedRequiredCommand(command) => write!(f, "unsupported required load command {command:#x}"),
             Self::UnsupportedSegmentLayout { name, flags } => write!(f, "unsupported segment layout {name:?}, flags {flags:#x}"),
             Self::UnsupportedEntryConvention => f.write_str("executable requires a single LC_MAIN entry; thread-state entry loading is unsupported"),
@@ -96,6 +96,8 @@ pub struct EntryPoint {
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadPlan {
     pub schema_version: u32,
+    pub file_type: u32,
+    pub dylib_identity: Option<Dependency>,
     pub slice_sha256: String,
     pub slice_bytes: u64,
     pub cpu_type: u32,
@@ -104,7 +106,7 @@ pub struct LoadPlan {
     pub architecture: String,
     pub header_flags: u32,
     pub segments: Vec<SegmentPlan>,
-    pub entry: EntryPoint,
+    pub entry: Option<EntryPoint>,
     pub dependencies: Vec<Dependency>,
     pub dylinker: Option<String>,
     pub rpaths: Vec<String>,
@@ -114,6 +116,13 @@ pub struct LoadPlan {
     pub deferred_commands: Vec<OpaqueCommand>,
     pub execution_supported: bool,
     pub unresolved_requirements: Vec<String>,
+}
+impl LoadPlan {
+    pub fn executable_entry(&self) -> Result<&EntryPoint> {
+        self.entry
+            .as_ref()
+            .ok_or(PlanError::UnsupportedEntryConvention)
+    }
 }
 fn checked_end(start: u64, bytes: u64, role: &str) -> Result<u64> {
     start
@@ -167,6 +176,15 @@ fn payload(data: &[u8], command: u32, role: &str, offset: u32, bytes: u32) -> Re
 /// image first; all returned offsets are relative to the selected thin slice.
 /// Success proves only structural planning, never process execution readiness.
 pub fn plan(data: &[u8]) -> Result<LoadPlan> {
+    plan_kind(data, macho::MH_EXECUTE)
+}
+
+/// Plan a dylib without inventing an executable entry or running initializers.
+pub fn plan_library(data: &[u8]) -> Result<LoadPlan> {
+    plan_kind(data, macho::MH_DYLIB)
+}
+
+fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
     if data.get(..4) != Some(&[0xcf, 0xfa, 0xed, 0xfe]) {
         return Err(PlanError::UnsupportedFormat);
     }
@@ -181,7 +199,7 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
             cpu_subtype,
         });
     }
-    if header.filetype(endian) != macho::MH_EXECUTE {
+    if header.filetype(endian) != expected_type {
         return Err(PlanError::UnsupportedFileType(header.filetype(endian)));
     }
     if header.ncmds(endian) > header.sizeofcmds(endian) / 8 {
@@ -190,6 +208,7 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
     let mut commands = header.load_commands(endian, data, 0)?;
     let mut segments: Vec<SegmentPlan> = vec![];
     let mut dependencies = vec![];
+    let mut dylib_identity = None;
     let mut dylinker = None;
     let mut rpaths = vec![];
     let mut payloads = vec![];
@@ -306,14 +325,29 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
                 });
             }
             LoadCommandVariant::EntryPoint(main) => {
+                if expected_type != macho::MH_EXECUTE {
+                    return Err(invalid("MH_DYLIB cannot declare LC_MAIN"));
+                }
                 if entry.is_some() || command.cmdsize() != 24 {
                     return Err(invalid("duplicate or incorrectly sized LC_MAIN"));
                 }
                 entry = Some((main.entryoff.get(endian), main.stacksize.get(endian)));
             }
             LoadCommandVariant::Thread(_, _) => return Err(PlanError::UnsupportedEntryConvention),
-            LoadCommandVariant::IdDylib(_) => {
-                return Err(invalid("MH_EXECUTE cannot declare LC_ID_DYLIB"));
+            LoadCommandVariant::IdDylib(dylib) => {
+                if expected_type != macho::MH_DYLIB {
+                    return Err(invalid("MH_EXECUTE cannot declare LC_ID_DYLIB"));
+                }
+                if dylib_identity.is_some() {
+                    return Err(invalid("duplicate LC_ID_DYLIB"));
+                }
+                dylib_identity = Some(Dependency {
+                    command: id,
+                    name: command_string(command, dylib.dylib.name, 24)?,
+                    timestamp: dylib.dylib.timestamp.get(endian),
+                    current_version: dylib.dylib.current_version.get(endian),
+                    compatibility_version: dylib.dylib.compatibility_version.get(endian),
+                });
             }
             LoadCommandVariant::Dylib(dylib) => dependencies.push(Dependency {
                 command: id,
@@ -323,6 +357,9 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
                 compatibility_version: dylib.dylib.compatibility_version.get(endian),
             }),
             LoadCommandVariant::LoadDylinker(linker) => {
+                if expected_type != macho::MH_EXECUTE {
+                    return Err(invalid("MH_DYLIB cannot declare LC_LOAD_DYLINKER"));
+                }
                 if dylinker.is_some() {
                     return Err(invalid("duplicate LC_LOAD_DYLINKER"));
                 }
@@ -416,30 +453,44 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
             "__TEXT must contain the header and load commands at file offset zero",
         ));
     }
-    let (image_offset, stack_size) = entry.ok_or(PlanError::UnsupportedEntryConvention)?;
-    let guest_address = checked_end(text_segment.guest.address, image_offset, "LC_MAIN address")?;
-    let mappings: Vec<_> = segments
-        .iter()
-        .filter(|s| {
-            s.initial_protection & macho::VM_PROT_EXECUTE != 0
-                && s.file.bytes != 0
-                && guest_address >= s.guest.address
-                && guest_address - s.guest.address < s.file.bytes
+    let entry = if expected_type == macho::MH_EXECUTE {
+        let (image_offset, stack_size) = entry.ok_or(PlanError::UnsupportedEntryConvention)?;
+        let guest_address =
+            checked_end(text_segment.guest.address, image_offset, "LC_MAIN address")?;
+        let mappings: Vec<_> = segments
+            .iter()
+            .filter(|s| {
+                s.initial_protection & macho::VM_PROT_EXECUTE != 0
+                    && s.file.bytes != 0
+                    && guest_address >= s.guest.address
+                    && guest_address - s.guest.address < s.file.bytes
+            })
+            .collect();
+        if mappings.len() != 1 {
+            return Err(invalid(
+                "LC_MAIN does not identify exactly one file-backed executable address",
+            ));
+        }
+        let mapping = mappings[0];
+        let file_offset = mapping.file.offset + (guest_address - mapping.guest.address);
+        if !guest_address.is_multiple_of(4) {
+            return Err(invalid("LC_MAIN guest address is not instruction aligned"));
+        }
+        if mapping.file.offset + mapping.file.bytes - file_offset < 4 {
+            return Err(invalid("LC_MAIN has no complete file-backed instruction"));
+        }
+        Some(EntryPoint {
+            image_offset,
+            file_offset,
+            guest_address,
+            stack_size,
         })
-        .collect();
-    if mappings.len() != 1 {
-        return Err(invalid(
-            "LC_MAIN does not identify exactly one file-backed executable address",
-        ));
-    }
-    let mapping = mappings[0];
-    let file_offset = mapping.file.offset + (guest_address - mapping.guest.address);
-    if !guest_address.is_multiple_of(4) {
-        return Err(invalid("LC_MAIN guest address is not instruction aligned"));
-    }
-    if mapping.file.offset + mapping.file.bytes - file_offset < 4 {
-        return Err(invalid("LC_MAIN has no complete file-backed instruction"));
-    }
+    } else {
+        if dylib_identity.is_none() {
+            return Err(invalid("MH_DYLIB requires LC_ID_DYLIB"));
+        }
+        None
+    };
     for item in &payloads {
         if item.file.bytes != 0
             && !segments.iter().any(|s| {
@@ -486,7 +537,9 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
             .push("arm64e pointer-authentication ABI and CPU-subtype capability policy".into());
     }
     Ok(LoadPlan {
-        schema_version: 1,
+        schema_version: 2,
+        file_type: expected_type,
+        dylib_identity,
         slice_sha256: sha256(data),
         slice_bytes: data.len() as u64,
         cpu_type,
@@ -499,12 +552,7 @@ pub fn plan(data: &[u8]) -> Result<LoadPlan> {
         .into(),
         header_flags: header.flags(endian),
         segments,
-        entry: EntryPoint {
-            image_offset,
-            file_offset,
-            guest_address,
-            stack_size,
-        },
+        entry,
         dependencies,
         dylinker,
         rpaths,
@@ -601,10 +649,10 @@ mod tests {
         let result = plan(&input).unwrap();
         assert_eq!(result.architecture, "arm64e");
         assert_eq!(result.cpu_subtype, 0x80000002);
-        assert_eq!(result.entry.file_offset, 0x1004);
-        assert_eq!(result.entry.image_offset, 0x1004);
-        assert_eq!(result.entry.guest_address, BASE + 0x1004);
-        assert_eq!(result.entry.stack_size, 0x20000);
+        assert_eq!(result.entry.as_ref().unwrap().file_offset, 0x1004);
+        assert_eq!(result.entry.as_ref().unwrap().image_offset, 0x1004);
+        assert_eq!(result.entry.as_ref().unwrap().guest_address, BASE + 0x1004);
+        assert_eq!(result.entry.as_ref().unwrap().stack_size, 0x20000);
         assert_eq!(
             result.segments[1].zero_fill,
             GuestRange {
@@ -617,6 +665,38 @@ mod tests {
         assert!(!result.execution_supported);
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["entry"]["guest_address"], BASE + 0x1004);
+    }
+    #[test]
+    fn plans_dylib_identity_without_inventing_an_entry_and_rejects_mixed_conventions() {
+        let identity = string_command(macho::LC_ID_DYLIB, 24, b"@rpath/libfixture.dylib");
+        let mut items = commands();
+        items.pop();
+        items.push(identity.clone());
+        let mut input = image(items.clone());
+        u32_put(&mut input, 12, macho::MH_DYLIB);
+        let result = plan_library(&input).unwrap();
+        assert_eq!(result.file_type, macho::MH_DYLIB);
+        assert_eq!(
+            result.dylib_identity.unwrap().name,
+            "@rpath/libfixture.dylib"
+        );
+        assert!(result.entry.is_none());
+        assert!(plan(&input).is_err());
+        assert!(plan_library(&image(commands())).is_err());
+        items.push(identity);
+        let mut duplicate = image(items);
+        u32_put(&mut duplicate, 12, macho::MH_DYLIB);
+        assert!(plan_library(&duplicate).is_err());
+        let mut missing = commands();
+        missing.pop();
+        let mut missing = image(missing);
+        u32_put(&mut missing, 12, macho::MH_DYLIB);
+        assert!(plan_library(&missing).is_err());
+        let mut with_main = commands();
+        with_main.push(string_command(macho::LC_ID_DYLIB, 24, b"lib.dylib"));
+        let mut with_main = image(with_main);
+        u32_put(&mut with_main, 12, macho::MH_DYLIB);
+        assert!(plan_library(&with_main).is_err());
     }
     #[test]
     fn preserves_dependencies_fixups_signatures_and_optional_unknown_commands() {
@@ -676,9 +756,9 @@ mod tests {
         let mut data = image(items);
         data.resize(0x1300, 0);
         let result = plan(&data).unwrap();
-        assert_eq!(result.entry.image_offset, 0x4004);
-        assert_eq!(result.entry.guest_address, BASE + 0x4004);
-        assert_eq!(result.entry.file_offset, 0x1204);
+        assert_eq!(result.entry.as_ref().unwrap().image_offset, 0x4004);
+        assert_eq!(result.entry.as_ref().unwrap().guest_address, BASE + 0x4004);
+        assert_eq!(result.entry.as_ref().unwrap().file_offset, 0x1204);
         let mut items = commands();
         u64_put(&mut items[1], 40, 0x1000);
         u64_put(&mut items[1], 48, 0x100);

@@ -1,7 +1,9 @@
 //! Inventory standalone Mach-O slices. Containers are explicitly uncounted.
 pub mod block_image;
 pub mod chained_fixups;
+pub mod exports;
 pub mod fileset;
+pub mod linked_images;
 pub mod load_plan;
 pub mod mapped_image;
 use anyhow::{Context, Result, ensure};

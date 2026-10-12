@@ -1,4 +1,4 @@
-//! Checked planning of unauthenticated, image-local Apple chained rebases.
+//! Checked decoding of unauthenticated Apple chained rebases and binds.
 //!
 //! Layout/stride facts: Apple's include/mach-o/fixup-chains.h. Validation and
 //! address interpretation: common/MachOAnalyzer.cpp, mach_o/ChainedFixups.cpp
@@ -19,6 +19,48 @@ pub struct FixupPlan {
     pub load_base: u64,
     pub pointer_formats: Vec<u16>,
     pub rebases: Vec<RebaseFixup>,
+}
+
+/// Decoded imports and pointer slots; binding still requires a real resolver.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecodedFixups {
+    pub preferred_base: u64,
+    pub load_base: u64,
+    pub pointer_formats: Vec<u16>,
+    pub rebases: Vec<RebaseFixup>,
+    pub imports: Vec<Import>,
+    pub binds: Vec<BindFixup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Import {
+    pub library_ordinal: i32,
+    pub weak: bool,
+    pub name: String,
+    /// Original signed table addend, before the slot's inline addend.
+    pub addend: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BindFixup {
+    pub segment_index: usize,
+    pub file_offset: u64,
+    pub guest_address: u64,
+    pub raw: u64,
+    pub pointer_format: u16,
+    pub import_index: u32,
+    pub inline_addend: i64,
+    /// Checked sum of import-table and inline addends. Apply this exactly once.
+    pub addend: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pointer {
+    Rebase(u64),
+    Bind {
+        import_index: u32,
+        inline_addend: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -72,14 +114,14 @@ fn insert_range(
     Ok(())
 }
 
-fn validate_imports(
+fn decode_imports(
     payload: &[u8],
     imports: usize,
     symbols: usize,
     count: u32,
     format: u32,
     libraries: usize,
-) -> Result<()> {
+) -> Result<Vec<Import>> {
     let size = match format {
         1 => 4,
         2 => 8,
@@ -102,9 +144,10 @@ fn validate_imports(
     );
     let strings = &payload[symbols..];
     let mut names = BTreeSet::new();
+    let mut records = Vec::with_capacity(count as usize);
     for index in 0..count as usize {
         let at = imports + index * size;
-        let (ordinal, name) = if format == 3 {
+        let (ordinal, weak, name, addend) = if format == 3 {
             let bits = u64_at(payload, at)?;
             ensure!(
                 (bits >> 17) & 0x7fff == 0,
@@ -117,7 +160,9 @@ fn validate_imports(
                 } else {
                     ordinal
                 },
+                bits & (1 << 16) != 0,
                 (bits >> 32) as usize,
+                u64_at(payload, at + 8)? as i64,
             )
         } else {
             let bits = u32_at(payload, at)?;
@@ -128,7 +173,13 @@ fn validate_imports(
                 } else {
                     ordinal
                 },
+                bits & (1 << 8) != 0,
                 (bits >> 9) as usize,
+                if format == 2 {
+                    i64::from(u32_at(payload, at + 4)? as i32)
+                } else {
+                    0
+                },
             )
         };
         ensure!(
@@ -140,10 +191,12 @@ fn validate_imports(
             "chained-fixup import {index} symbol offset exceeds pool"
         );
         names.insert(name);
+        records.push((ordinal, weak, name, addend));
     }
     // Sorted offsets allow suffix-interned names while scanning the pool only
     // once, avoiding repeated whole-pool searches on malicious import tables.
     let mut nul = None;
+    let mut ends = BTreeMap::new();
     for name in names {
         let end = match nul {
             Some(end) if end >= name => end,
@@ -156,11 +209,39 @@ fn validate_imports(
         };
         ensure!(end > name, "empty chained-fixup import symbol");
         nul = Some(end);
+        ends.insert(name, end);
     }
-    Ok(())
+    let mut result = Vec::with_capacity(count as usize);
+    let mut name_bytes = 0usize;
+    for (library_ordinal, weak, name, addend) in records {
+        let end = ends[&name];
+        name_bytes = name_bytes
+            .checked_add(end - name)
+            .context("chained-fixup decoded symbol bytes overflow")?;
+        ensure!(
+            name_bytes <= MAX_PAYLOAD,
+            "chained-fixup decoded symbol names exceed planner limit"
+        );
+        let name = std::str::from_utf8(&strings[name..end])
+            .context("unsupported non-UTF-8 chained-fixup import symbol")?
+            .to_owned();
+        result.push(Import {
+            library_ordinal,
+            weak,
+            name,
+            addend,
+        });
+    }
+    Ok(result)
 }
 
-fn pointer(raw: u64, format: u16, imports: u32, preferred: u64, loaded: u64) -> Result<(u64, u64)> {
+fn decode_pointer(
+    raw: u64,
+    format: u16,
+    imports: u32,
+    preferred: u64,
+    loaded: u64,
+) -> Result<(Pointer, u64)> {
     let arm64e = matches!(format, 1 | 9 | 12);
     let (target, high, next) = if arm64e {
         let bind = raw & (1 << 62) != 0;
@@ -182,10 +263,22 @@ fn pointer(raw: u64, format: u16, imports: u32, preferred: u64, loaded: u64) -> 
             !auth,
             "unsupported authenticated chained-fixup pointer (format {format}); PAC representation/signing is required"
         );
-        ensure!(
-            !bind,
-            "unsupported chained-fixup bind (format {format}); dependency/symbol resolution is required"
-        );
+        if bind {
+            let ordinal_mask = if format == 12 { 0xffffff } else { 0xffff };
+            let encoded = ((raw >> 32) & 0x7ffff) as i64;
+            let inline_addend = if encoded & 0x40000 != 0 {
+                encoded - 0x80000
+            } else {
+                encoded
+            };
+            return Ok((
+                Pointer::Bind {
+                    import_index: (raw & ordinal_mask) as u32,
+                    inline_addend,
+                },
+                ((raw >> 51) & 0x7ff) * 8,
+            ));
+        }
         (
             raw & ((1 << 43) - 1),
             (raw >> 43) & 0xff,
@@ -203,9 +296,13 @@ fn pointer(raw: u64, format: u16, imports: u32, preferred: u64, loaded: u64) -> 
                 ordinal < u64::from(imports),
                 "chained-fixup bind ordinal {ordinal} exceeds imports count {imports}"
             );
-            bail!(
-                "unsupported chained-fixup bind (format {format}); dependency/symbol resolution is required"
-            );
+            return Ok((
+                Pointer::Bind {
+                    import_index: ordinal as u32,
+                    inline_addend: ((raw >> 24) & 0xff) as i64,
+                },
+                ((raw >> 51) & 0xfff) * 4,
+            ));
         }
         ensure!(
             (raw >> 44) & 0x7f == 0,
@@ -229,18 +326,36 @@ fn pointer(raw: u64, format: u16, imports: u32, preferred: u64, loaded: u64) -> 
             .checked_add(loaded)
             .context("chained-fixup offset target overflows address range")?
     };
-    Ok((value, next))
+    Ok((Pointer::Rebase(value), next))
 }
 
-/// Decode one validated thin image's chained payload into immutable writes.
-///
-/// Absence of a payload is an empty plan, not proof that other loader work is
-/// complete. Binds, authenticated pointers, compressed symbol pools, multi-start
-/// 64-bit pages and non-userland formats fail explicitly. Input slots must be
-/// disjoint, fully file-backed and contained in their declared chain page.
-/// High8 address bits are retained; this plan does not authorize dereferencing
-/// tagged/noncanonical addresses under the native direct-RAM profile.
+/// Legacy rebase-only API and JSON: binds still require explicit resolution.
 pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> {
+    let decoded = decode(data, image, load_base)?;
+    if let Some(bind) = decoded.binds.first() {
+        bail!(
+            "unsupported chained-fixup bind (format {}) at slot {:#x}; dependency/symbol resolution is required",
+            bind.pointer_format,
+            bind.guest_address
+        );
+    }
+    Ok(FixupPlan {
+        preferred_base: decoded.preferred_base,
+        load_base: decoded.load_base,
+        pointer_formats: decoded.pointer_formats,
+        rebases: decoded.rebases,
+    })
+}
+
+/// Decode one validated thin image's chained payload without resolving symbols.
+///
+/// Absence of a payload is empty metadata, not proof of loader completeness.
+/// Authenticated pointers, compressed symbol pools, multi-start 64-bit pages
+/// and non-userland formats fail explicitly. All pointer slots are disjoint,
+/// fully file-backed and within their declared chain page. Bind addends combine
+/// import and inline values with checked i64 arithmetic. High8 address bits are
+/// retained; this does not authorize dereferencing tagged/noncanonical addresses.
+pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFixups> {
     ensure!(
         image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_core::sha256(data),
         "chained-fixup image identity differs from load plan"
@@ -255,11 +370,13 @@ pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> 
         "chained-fixup planning requires one preferred __TEXT base"
     );
     let preferred_base = text[0].guest.address;
-    let mut result = FixupPlan {
+    let mut result = DecodedFixups {
         preferred_base,
         load_base,
         pointer_formats: vec![],
         rebases: vec![],
+        imports: vec![],
+        binds: vec![],
     };
     let payloads: Vec<_> = image
         .payloads
@@ -304,7 +421,7 @@ pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> 
         starts >= 28 && starts < imports && imports <= symbols && symbols <= payload.len(),
         "invalid chained-fixup header table offsets"
     );
-    validate_imports(
+    result.imports = decode_imports(
         payload,
         imports,
         symbols,
@@ -497,20 +614,39 @@ pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> 
                     "chained-fixup guest slots",
                 )?;
                 ensure!(
-                    result.rebases.len() < MAX_FIXUPS,
-                    "chained-fixup rebase count exceeds planner limit"
+                    result.rebases.len() + result.binds.len() < MAX_FIXUPS,
+                    "chained-fixup pointer count exceeds planner limit"
                 );
                 let raw = u64_at(data, usize::try_from(file_offset)?)?;
-                let (value, next) = pointer(raw, format, imports_count, preferred_base, load_base)
+                let (pointer, next) = decode_pointer(raw, format, imports_count, preferred_base, load_base)
                     .with_context(|| format!("chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}"))?;
-                result.rebases.push(RebaseFixup {
-                    segment_index,
-                    file_offset,
-                    guest_address,
-                    raw,
-                    value,
-                    pointer_format: format,
-                });
+                match pointer {
+                    Pointer::Rebase(value) => result.rebases.push(RebaseFixup {
+                        segment_index,
+                        file_offset,
+                        guest_address,
+                        raw,
+                        value,
+                        pointer_format: format,
+                    }),
+                    Pointer::Bind {
+                        import_index,
+                        inline_addend,
+                    } => {
+                        let addend = result.imports[import_index as usize].addend.checked_add(inline_addend)
+                            .with_context(|| format!("chained-fixup bind addend overflows i64 at slot {guest_address:#x}"))?;
+                        result.binds.push(BindFixup {
+                            segment_index,
+                            file_offset,
+                            guest_address,
+                            raw,
+                            pointer_format: format,
+                            import_index,
+                            inline_addend,
+                            addend,
+                        });
+                    }
+                }
                 if next == 0 {
                     break;
                 }
@@ -530,6 +666,20 @@ mod tests {
     use crate::macho::load_plan::{
         Dependency, EntryPoint, FileRange, GuestRange, Payload, SegmentPlan,
     };
+
+    fn pointer(
+        raw: u64,
+        format: u16,
+        imports: u32,
+        preferred: u64,
+        loaded: u64,
+    ) -> Result<(u64, u64)> {
+        let (decoded, next) = decode_pointer(raw, format, imports, preferred, loaded)?;
+        match decoded {
+            Pointer::Rebase(value) => Ok((value, next)),
+            Pointer::Bind { .. } => bail!("test expected a rebase"),
+        }
+    }
 
     const BASE: u64 = 0x100000000;
     const PAYLOAD: usize = 0x5000;
@@ -609,17 +759,19 @@ mod tests {
                 "arm64".into()
             },
             header_flags: 0,
+            file_type: 2,
+            dylib_identity: None,
             segments: vec![
                 segment("__TEXT", BASE, 0, 0x1000),
                 segment("__DATA", BASE + 0x4000, 0x1000, 0x4000),
                 segment("__LINKEDIT", BASE + 0x8000, PAYLOAD as u64, 0x1000),
             ],
-            entry: EntryPoint {
+            entry: Some(EntryPoint {
                 image_offset: 0,
                 file_offset: 0,
                 guest_address: BASE,
                 stack_size: 0,
-            },
+            }),
             dependencies: vec![],
             dylinker: None,
             rpaths: vec![],
@@ -929,5 +1081,212 @@ mod tests {
                 .contains("offset target overflows")
             );
         }
+    }
+
+    fn bind_raw(format: u16, import_index: u32, addend: i64, next: u64) -> u64 {
+        if matches!(format, 1 | 9 | 12) {
+            (1 << 62) | u64::from(import_index) | (((addend as u64) & 0x7ffff) << 32) | (next << 51)
+        } else {
+            (1 << 63) | u64::from(import_index) | (((addend as u64) & 0xff) << 24) | (next << 51)
+        }
+    }
+
+    #[test]
+    fn decodes_all_bind_formats_import_addends_weak_flags_and_signed_extrema() {
+        for pointer_format in [1, 2, 6, 9, 12] {
+            let inline: &[i64] = if matches!(pointer_format, 1 | 9 | 12) {
+                &[-262144, -1, 0, 1, 262143]
+            } else {
+                &[0, 1, 127, 128, 255]
+            };
+            for import_format in [1, 2, 3] {
+                let table_addends: &[i64] = match import_format {
+                    1 => &[0],
+                    2 => &[i32::MIN as i64, -1, 0, i32::MAX as i64],
+                    _ => &[i64::MIN, -1, 0, i64::MAX],
+                };
+                for table_addend in table_addends {
+                    for inline_addend in inline {
+                        let (mut data, mut image) = fixture(pointer_format);
+                        let weak_bit = if import_format == 3 { 16 } else { 8 };
+                        imports(
+                            &mut data,
+                            &mut image,
+                            import_format,
+                            1 << weak_bit,
+                            b"_fixture\0",
+                        );
+                        match import_format {
+                            2 => put32(&mut data, PAYLOAD + 72, *table_addend as u32),
+                            3 => put64(&mut data, PAYLOAD + 76, *table_addend as u64),
+                            _ => (),
+                        }
+                        let raw = bind_raw(pointer_format, 0, *inline_addend, 0);
+                        put64(&mut data, SLOT, raw);
+                        refresh(&data, &mut image);
+                        let combined = i128::from(*table_addend) + i128::from(*inline_addend);
+                        if let Ok(combined) = i64::try_from(combined) {
+                            let decoded = decode(&data, &image, BASE + 0x100000).unwrap();
+                            assert_eq!(
+                                decoded.imports,
+                                [Import {
+                                    library_ordinal: 0,
+                                    weak: true,
+                                    name: "_fixture".into(),
+                                    addend: *table_addend
+                                }]
+                            );
+                            assert_eq!(
+                                decoded.binds,
+                                [BindFixup {
+                                    segment_index: 1,
+                                    file_offset: SLOT as u64,
+                                    guest_address: BASE + 0x104028,
+                                    raw,
+                                    pointer_format,
+                                    import_index: 0,
+                                    inline_addend: *inline_addend,
+                                    addend: combined
+                                }]
+                            );
+                            assert!(decoded.rebases.is_empty());
+                            assert_eq!(decoded.pointer_formats, [pointer_format]);
+                            assert!(
+                                error(&data, &image).contains("unsupported chained-fixup bind")
+                            );
+                        } else {
+                            assert!(
+                                format!("{:#}", decode(&data, &image, BASE).unwrap_err())
+                                    .contains("bind addend overflows i64")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_bind_rebase_chain_shares_slot_validation_and_retains_import_order() {
+        for format in [1, 2, 6, 9, 12] {
+            let (mut data, mut image) = fixture(format);
+            imports(&mut data, &mut image, 1, 0, b"_fixture\0");
+            let next = if matches!(format, 1 | 9 | 12) { 1 } else { 2 };
+            let base = if matches!(format, 1 | 2) { BASE } else { 0 };
+            put64(&mut data, SLOT, raw(format, base + 0x4120, 0, next));
+            put64(&mut data, SLOT + 8, bind_raw(format, 0, 0, next));
+            put64(&mut data, SLOT + 16, raw(format, base + 0x4130, 0, 0));
+            refresh(&data, &mut image);
+            let decoded = decode(&data, &image, BASE - 0x100000).unwrap();
+            assert_eq!(decoded.rebases.len(), 2);
+            assert_eq!(decoded.rebases[0].value, BASE - 0x100000 + 0x4120);
+            assert_eq!(decoded.binds[0].file_offset, SLOT as u64 + 8);
+            assert_eq!(decoded.rebases[1].file_offset, SLOT as u64 + 16);
+            assert_eq!(decoded.imports[0].name, "_fixture");
+            // A bind does not stop validation of later slots in the chain.
+            put64(&mut data, SLOT + 8, bind_raw(format, 0, 0, 0xfff));
+            refresh(&data, &mut image);
+            assert!(
+                format!("{:#}", decode(&data, &image, BASE).unwrap_err())
+                    .contains("slot escapes page")
+            );
+        }
+    }
+
+    #[test]
+    fn import_suffix_names_and_addend_records_keep_original_indices() {
+        let (mut data, mut image) = fixture(6);
+        let payload = &mut data[PAYLOAD..];
+        put32(payload, 12, 84); // two eight-byte import/addend records
+        put32(payload, 16, 2);
+        put32(payload, 20, 2);
+        put32(payload, 68, 1 << 9); // import 0 points to suffix "fixture"
+        put32(payload, 72, (-7i32) as u32);
+        put32(payload, 76, 1 << 8); // import 1 is weak and names "_fixture"
+        put32(payload, 80, 11);
+        payload[84..93].copy_from_slice(b"_fixture\0");
+        image.payloads[0].file.bytes = 93;
+        put64(&mut data, SLOT, bind_raw(6, 1, 255, 0));
+        refresh(&data, &mut image);
+        let decoded = decode(&data, &image, BASE).unwrap();
+        assert_eq!(
+            decoded.imports,
+            [
+                Import {
+                    library_ordinal: 0,
+                    weak: false,
+                    name: "fixture".into(),
+                    addend: -7
+                },
+                Import {
+                    library_ordinal: 0,
+                    weak: true,
+                    name: "_fixture".into(),
+                    addend: 11
+                }
+            ]
+        );
+        assert_eq!(decoded.binds[0].import_index, 1);
+        assert_eq!(decoded.binds[0].inline_addend, 255);
+        assert_eq!(decoded.binds[0].addend, 266);
+    }
+
+    #[test]
+    fn decoded_bind_reserved_bits_ordinals_pac_and_symbol_text_still_fail() {
+        for format in [1, 2, 6, 9, 12] {
+            let (mut data, mut image) = fixture(format);
+            imports(&mut data, &mut image, 1, 0, b"_fixture\0");
+            let reserved = match format {
+                1 | 9 => 16,
+                12 => 24,
+                _ => 32,
+            };
+            put64(&mut data, SLOT, bind_raw(format, 0, 0, 0) | (1 << reserved));
+            refresh(&data, &mut image);
+            assert!(
+                format!("{:#}", decode(&data, &image, BASE).unwrap_err()).contains("reserved bits")
+            );
+            put64(&mut data, SLOT, bind_raw(format, 1, 0, 0));
+            refresh(&data, &mut image);
+            assert!(
+                format!("{:#}", decode(&data, &image, BASE).unwrap_err())
+                    .contains("ordinal 1 exceeds imports")
+            );
+            if matches!(format, 1 | 9 | 12) {
+                put64(&mut data, SLOT, bind_raw(format, 0, 0, 0) | (1 << 63));
+                refresh(&data, &mut image);
+                assert!(
+                    format!("{:#}", decode(&data, &image, BASE).unwrap_err())
+                        .contains("unsupported authenticated")
+                );
+            }
+        }
+        let (mut data, mut image) = fixture(6);
+        imports(&mut data, &mut image, 1, 0, &[0xff, 0]);
+        assert!(format!("{:#}", decode(&data, &image, BASE).unwrap_err()).contains("non-UTF-8"));
+    }
+
+    #[test]
+    fn library_metadata_needs_no_entry_and_legacy_plan_json_remains_unchanged() {
+        let (data, mut image) = fixture(6);
+        image.file_type = 6;
+        image.entry = None;
+        image.dylib_identity = Some(Dependency {
+            command: 0xd,
+            name: "@rpath/libFixture.dylib".into(),
+            timestamp: 0,
+            current_version: 0,
+            compatibility_version: 0,
+        });
+        let decoded = decode(&data, &image, BASE).unwrap();
+        assert_eq!(decoded.rebases.len(), 1);
+        assert!(decoded.imports.is_empty() && decoded.binds.is_empty());
+        let legacy = serde_json::to_value(plan(&data, &image, BASE).unwrap()).unwrap();
+        let object = legacy.as_object().unwrap();
+        assert_eq!(object.len(), 4);
+        for field in ["preferred_base", "load_base", "pointer_formats", "rebases"] {
+            assert!(object.contains_key(field));
+        }
+        assert!(!object.contains_key("imports") && !object.contains_key("binds"));
     }
 }

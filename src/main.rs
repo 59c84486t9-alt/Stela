@@ -21,6 +21,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Bind explicit Apple images and probe cross-image native entry execution.
+    RunLinkedImages {
+        input: PathBuf,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+        #[arg(long, value_parser = parse_address)]
+        image_base: Option<u64>,
+        #[arg(long, value_parser = parse_library)]
+        library: Vec<LibraryInput>,
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long, default_value = "0xffff0000", value_parser = parse_address)]
+        stop_pc: u64,
+        #[arg(long, default_value_t = 10000)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+        #[arg(long, default_value = "0x80000000000", value_parser = parse_address)]
+        stack_base: u64,
+        #[arg(long, default_value_t = 65536)]
+        stack_bytes: u64,
+        #[arg(long, value_parser = parse_memory_query)]
+        read_memory: Vec<MemoryQuery>,
+    },
     /// Map a trusted image's initial segments and probe its translated entry.
     RunMappedImage {
         input: PathBuf,
@@ -189,6 +213,24 @@ struct MemoryQuery {
     bytes: usize,
 }
 
+#[derive(Debug, Clone)]
+struct LibraryInput {
+    path: PathBuf,
+    base: u64,
+}
+fn parse_library(value: &str) -> Result<LibraryInput, String> {
+    let (path, base) = value
+        .rsplit_once('@')
+        .ok_or("expected LIBRARY_PATH@ADDRESS")?;
+    if path.is_empty() {
+        return Err("library path is empty".into());
+    }
+    Ok(LibraryInput {
+        path: path.into(),
+        base: parse_address(base)?,
+    })
+}
+
 fn parse_memory_query(value: &str) -> Result<MemoryQuery, String> {
     let (address, bytes) = value.split_once(':').ok_or("expected ADDRESS:BYTES")?;
     let address = parse_address(address)?;
@@ -282,6 +324,125 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::RunLinkedImages {
+            input,
+            architecture,
+            image_base,
+            library,
+            state,
+            stop_pc,
+            block_budget,
+            cache_dir,
+            stack_base,
+            stack_bytes,
+            read_memory,
+        } => {
+            use macho::{
+                linked_images::{ImageInput, LinkedImages},
+                mapped_image::StackSpec,
+            };
+            use stela_runtime::blocks::ThreadState;
+            ensure!(
+                library.len() < 32,
+                "linked image set exceeds 32-image limit"
+            );
+            ensure!(
+                block_budget <= 1_000_000 && stop_pc.is_multiple_of(4),
+                "research block budget or return-address alignment is invalid"
+            );
+            let total = read_memory.iter().try_fold(0u64, |total, query| {
+                total
+                    .checked_add(query.bytes as u64)
+                    .context("snapshot byte count overflow")
+            })?;
+            ensure!(
+                total <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+                "combined memory snapshots exceed image memory limit"
+            );
+            let provided_state = state.is_some();
+            let registers: RegisterInput = if let Some(path) = state {
+                read_json(&path)?
+            } else {
+                RegisterInput::default()
+            };
+            ensure!(
+                registers.nzcv & !0xf0000000 == 0,
+                "only NZCV bits31:28 are supported"
+            );
+            ensure!(
+                !provided_state || registers.sp.is_multiple_of(16),
+                "research entry SP must be 16-byte aligned"
+            );
+            let mut inputs = Vec::new();
+            for (path, base) in std::iter::once((input, image_base))
+                .chain(library.into_iter().map(|lib| (lib.path, Some(lib.base))))
+            {
+                let container = std::fs::read(&path)?;
+                let (slice_offset, slice) =
+                    apple_slice(&container, &path, architecture.as_deref())?;
+                inputs.push(ImageInput {
+                    data: slice.to_vec(),
+                    container_sha256: stela_core::sha256(&container),
+                    slice_offset,
+                    load_base: base,
+                });
+            }
+            let mut images = LinkedImages::load(
+                inputs,
+                cache_dir,
+                StackSpec {
+                    base: stack_base,
+                    bytes: stack_bytes,
+                },
+            )?;
+            ensure!(
+                images
+                    .regions()
+                    .iter()
+                    .all(|region| stop_pc < region.guest_address
+                        || stop_pc - region.guest_address >= region.virtual_bytes),
+                "return address overlaps image memory"
+            );
+            let mut thread = ThreadState {
+                pc: stela_compiler::GuestAddress(images.entry()),
+                registers: stela_compiler::GuestState {
+                    x: registers.x,
+                    sp: if provided_state {
+                        registers.sp
+                    } else {
+                        images.stack().initial_sp
+                    },
+                    nzcv: registers.nzcv,
+                    reserved: registers.reserved,
+                },
+            };
+            thread.registers.x[30] = stop_pc;
+            let initial_state = register_json(&thread.registers);
+            // SAFETY: This command explicitly assumes trusted research entry code
+            // and ABI state; every supplied image and the stack remain owned while
+            // serialized dispatch runs. Pending launch/initializer work is excluded.
+            let outcome = unsafe {
+                images.run(
+                    &mut thread,
+                    Some(stela_compiler::GuestAddress(stop_pc)),
+                    block_budget,
+                )?
+            };
+            let memory = read_memory.iter().map(|query| -> Result<serde_json::Value> {
+                Ok(serde_json::json!({"address":query.address,"bytes_hex":hex::encode(images.read_snapshot(query.address,query.bytes)?)}))
+            }).collect::<Result<Vec<_>>>()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind":"linked_macho_entry_probe","images":images.images(),"mapped_entry":images.entry(),
+                    "memory_regions":images.regions(),"guard_segments_not_reserved":images.guards(),"stack":images.stack(),
+                    "host_execute":false,"initial_state":initial_state,"state":register_json(&thread.registers),
+                    "pc":thread.pc.0,"outcome":outcome,"memory":memory,
+                    "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                    "complete_binary_verified":false
+                }))?
+            );
+        }
         Command::PlanFixups {
             input,
             architecture,
@@ -529,7 +690,7 @@ fn run() -> Result<()> {
                     "mapping_generation":generation}));
             }
             let mut thread = ThreadState {
-                pc: stela_compiler::GuestAddress(image.plan().entry.guest_address),
+                pc: stela_compiler::GuestAddress(image.plan().executable_entry()?.guest_address),
                 registers: Default::default(),
             };
             thread.registers.x[30] = stop_pc;
