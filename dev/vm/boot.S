@@ -13,6 +13,16 @@ _start:
     movw %ax, %ss
     movw $0x7c00, %sp
     cld
+#ifdef STELA_TRANSLATED
+    /* BIOS overwrites low RAM during startup. Read native code from LBA 1
+     * into 0x1000:0000 after BIOS has handed us the boot sector. */
+    movw $disk_packet, %si
+    movb $0x42, %ah
+    sti
+    int $0x13
+    cli
+    jc disk_failure
+#endif
     inb $0x92, %al
     orb $2, %al
     outb %al, $0x92
@@ -47,9 +57,20 @@ long_mode:
     movw %ax, %ss
     movq $0x7000, %rsp
 payload:
-    /* Replace this function body with emitted native code in later stages. */
+#ifdef STELA_TRANSLATED
+    /* ABI v1: zero GuestState at 0x6000; call AOT code loaded at 0x10000. */
+    xorq %rax, %rax
+    movq $0x6000, %rdi
+    movq $33, %rcx
+    rep stosq
+    movq $0x6000, %rdi
+    movq $0x10000, %rax
+    call *%rax
+    movq 0x6000, %rax
+#else
     movq $40, %rax
     addq $2, %rax
+#endif
     movq %rax, 0x5000
     movw $0xe9, %dx
     movb $'O', %al
@@ -62,6 +83,22 @@ payload:
 completed:
     hlt
     jmp completed
+
+#ifdef STELA_TRANSLATED
+.code16
+disk_failure:
+    movw $0xe9, %dx
+    movb $'E', %al
+    outb %al, %dx
+    hlt
+    jmp disk_failure
+.balign 4
+disk_packet:
+    .byte 0x10, 0
+    .word STELA_NATIVE_SECTORS
+    .word 0, 0x1000
+    .quad 1
+#endif
 
 .balign 8
 gdt:

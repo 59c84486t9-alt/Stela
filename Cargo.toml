@@ -18,6 +18,7 @@ tempfile = "3"
 stela-core = { path = "crates/stela-core" }
 stela-apple = { path = "crates/stela-apple" }
 stela-macho = { path = "crates/stela-macho" }
+stela-compiler = { path = "crates/stela-compiler" }
 
 [profile.release]
 lto = "thin"

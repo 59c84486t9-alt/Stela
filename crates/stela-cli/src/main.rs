@@ -16,6 +16,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// AOT-compile a raw, straight-line ARM64 leaf function into native x86.
+    CompileLeaf {
+        input: PathBuf,
+        #[arg(long, default_value = "0x100000", value_parser = parse_address)]
+        guest_base: u64,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
     /// Discover and fetch restore images directly from Apple's public feed.
     Images {
         #[command(subcommand)]
@@ -36,6 +44,15 @@ enum Command {
         #[command(subcommand)]
         command: ProgressCommand,
     },
+}
+
+fn parse_address(value: &str) -> Result<u64, String> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    }
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand)]
@@ -82,6 +99,39 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::CompileLeaf {
+            input,
+            guest_base,
+            output_dir,
+        } => {
+            let source = std::fs::read(&input)?;
+            let block =
+                stela_compiler::compile(&source, stela_compiler::GuestAddress(guest_base))?;
+            ensure!(
+                !output_dir.exists(),
+                "output directory exists; choose a new one"
+            );
+            if let Some(parent) = output_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::create_dir(&output_dir)?;
+            std::fs::write(output_dir.join("native.bin"), &block.x86_64_code)?;
+            let manifest = serde_json::json!({
+                "schema_version": 1,
+                "kind": "raw_arm64_leaf_aot",
+                "source_sha256": stela_core::sha256(&source),
+                "guest_base": guest_base,
+                "guest_instructions": source.len() / 4,
+                "native_sha256": stela_core::sha256(&block.x86_64_code),
+                "native_bytes": block.x86_64_code.len(),
+                "source_map": block.source_map,
+                "abi": "x86_64-sysv-guest-state-v1",
+                "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "verified": false,
+            });
+            write_json(&output_dir.join("manifest.json"), &manifest)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
         Command::Images { command } => match command {
             Images::List { model } => {
                 let mut images = stela_apple::catalog()?;

@@ -1,0 +1,2 @@
+# Development oracle only. Not linked into Stela or used as a fallback.
+unicorn==2.1.4

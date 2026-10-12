@@ -1,7 +1,21 @@
-//! Compiler contracts. No ARM instruction is claimed translated yet.
-//! Keep unsupported semantics explicit instead of silently emitting NOPs.
+//! Ahead-of-time translation of a bounded ARM64 leaf-function subset.
+//! Unsupported instructions are errors; no interpreter fallback is emitted.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub mod aarch64;
+pub mod x86_64;
+
+use serde::{Deserialize, Serialize};
+
+/// Bind cached code and evidence to compiler implementation and dependencies.
+pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
+    include_str!("lib.rs"),
+    include_str!("aarch64.rs"),
+    include_str!("x86_64.rs"),
+    include_str!("../Cargo.toml"),
+    include_str!("../../../Cargo.lock"),
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestAddress(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,9 +44,65 @@ pub trait Lifter {
 }
 
 /// Emission must retain guest addresses for faults, debugging and evidence.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,
     pub source_map: Vec<(GuestAddress, usize)>,
+}
+
+/// Native ABI v1: System V x86-64 `void function(GuestState *state)`.
+/// Registers are initially memory-backed; register allocation is future work.
+/// Only NZCV bits 31:28 are modeled, not the complete PSTATE register.
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuestState {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub nzcv: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileError(pub String);
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for CompileError {}
+
+/// Compile one raw, straight-line ARM64 leaf function ending in RET X30.
+/// Input addresses are retained in the output map. No Mach-O loading, memory
+/// instructions, branches, PAC, privileged operations, or arbitrary RET targets.
+pub fn compile(code: &[u8], base: GuestAddress) -> Result<NativeBlock, CompileError> {
+    if code.is_empty() || !code.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "input and guest base must be nonempty/aligned to 4 bytes".into(),
+        ));
+    }
+    let mut instructions = vec![];
+    for (index, bytes) in code.as_chunks::<4>().0.iter().enumerate() {
+        let pc = GuestAddress(
+            base.0
+                .checked_add((index as u64) * 4)
+                .ok_or_else(|| CompileError("guest address overflow".into()))?,
+        );
+        let encoding = u32::from_le_bytes(*bytes);
+        let instruction = aarch64::Decoder
+            .lift(pc, encoding)
+            .map_err(|e| CompileError(format!("unsupported ARM64 semantics: {e:?}")))?;
+        let last = index == code.len() / 4 - 1;
+        if matches!(instruction.operation, aarch64::Operation::Return) != last {
+            return Err(CompileError(
+                "function must contain exactly one RET X30, at its end".into(),
+            ));
+        }
+        instructions.push(instruction);
+    }
+    x86_64::Emitter
+        .emit(&instructions)
+        .map_err(|e| CompileError(format!("x86 emission failed: {e:?}")))
 }
 
 pub trait Backend<I> {
@@ -52,5 +122,36 @@ pub mod platform {
         KernelBoot,
         Interrupts,
         Graphics,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn guest_state_layout_is_the_native_abi() {
+        assert_eq!(std::mem::size_of::<GuestState>(), 264);
+        assert_eq!(std::mem::offset_of!(GuestState, sp), 248);
+        assert_eq!(std::mem::offset_of!(GuestState, nzcv), 256);
+    }
+    #[test]
+    fn rejects_unknown_instructions_bad_boundaries_and_address_overflow() {
+        for words in [
+            vec![],
+            vec![0xd503201fu32],
+            vec![0xd65f03c0, 0xd65f03c0],
+            vec![0xf9400000, 0xd65f03c0],
+            vec![0xd65f0000],
+        ] {
+            let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert!(compile(&bytes, GuestAddress(0)).is_err());
+        }
+        assert!(compile(&[0, 0, 0], GuestAddress(0)).is_err());
+        assert!(compile(&0xd65f03c0u32.to_le_bytes(), GuestAddress(1)).is_err());
+        let code: Vec<_> = [0xd503201fu32, 0xd65f03c0]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        assert!(compile(&code, GuestAddress(u64::MAX - 3)).is_err());
     }
 }

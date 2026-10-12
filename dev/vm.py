@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build, launch, inspect, and smoke-test the x86 native-code development VM."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,10 +47,15 @@ def qemu_binary():
     return str(local) if local.exists() else shutil.which("qemu-system-x86_64")
 
 
-def build():
+def build(native=None):
     STATE.mkdir(parents=True, exist_ok=True)
     clang = shutil.which("clang") or "/usr/bin/clang"
-    subprocess.run([clang, "--target=i386-unknown-none-elf", "-g", "-c", str(ROOT / "dev/vm/boot.S"), "-o", str(STATE / "boot.o")], check=True)
+    native_data = Path(native).read_bytes() if native else None
+    if native_data is not None and not 0 < len(native_data) <= 32768:
+        raise RuntimeError("Native fixture must be between 1 and 32768 bytes")
+    sectors = (len(native_data) + 511) // 512 if native_data else 0
+    definitions = ["-DSTELA_TRANSLATED", f"-DSTELA_NATIVE_SECTORS={sectors}"] if native else []
+    subprocess.run([clang, "--target=i386-unknown-none-elf", *definitions, "-g", "-c", str(ROOT / "dev/vm/boot.S"), "-o", str(STATE / "boot.o")], check=True)
     lld = shutil.which("ld.lld") or shutil.which("rust-lld")
     if not lld:
         candidates = list((ROOT / ".tools/rust/rustup/toolchains").glob("*/lib/rustlib/*/bin/rust-lld"))
@@ -71,6 +77,8 @@ def build():
     data = (STATE / "boot.img").read_bytes()
     if len(data) != 512 or data[-2:] != b"\x55\xaa":
         raise SystemExit("Invalid boot fixture")
+    if native_data is not None:
+        (STATE / "boot.img").write_bytes(data + native_data.ljust(sectors * 512, b"\0"))
     symbols = fixture_symbols(STATE / "boot.elf")
     (STATE / "symbols.json").write_text(json.dumps(symbols, indent=2) + "\n")
     (STATE / "debug.lldb").write_text(
@@ -82,11 +90,11 @@ def build():
     return STATE / "boot.img"
 
 
-def command(paused=True):
+def command(paused=True, native=None):
     binary = qemu_binary()
     if not binary:
         raise SystemExit("Install QEMU or run python3 dev/bootstrap-qemu-macos.py first.")
-    image = build()
+    image = build(native)
     args = [binary, "-machine", "pc", "-accel", "tcg", "-cpu", "qemu64", "-smp", "1", "-m", "64M",
             "-drive", f"file={image},format=raw,if=ide", "-snapshot",
             "-display", "none", "-serial", "none", "-monitor", "none", "-nic", "none",
@@ -127,8 +135,8 @@ class Monitor:
         return self.execute("human-monitor-command", {"command-line": command})
 
 
-def smoke():
-    args = command(paused=True)
+def smoke(native=None, expected=42):
+    args = command(paused=True, native=native)
     for port in (QMP_PORT, GDB_PORT):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", port))
@@ -168,12 +176,15 @@ def smoke():
             monitor.execute("stop")
             memory = monitor.human("xp /1gx 0x5000")
             registers = monitor.human("info registers")
-            if "0x000000000000002a" not in memory or "RAX=000000000000002a" not in registers:
+            if f"0x{expected:016x}" not in memory or f"RAX={expected:016x}" not in registers:
                 raise RuntimeError(f"Unexpected guest state:\n{memory}\n{registers}")
-            report = {"test": "x86_64_long_mode_fixture", "passed": True, "expected_result": 42,
+            report = {"test": "x86_64_translated_leaf_fixture" if native else "x86_64_long_mode_fixture", "passed": True, "expected_result": expected,
                       "physical_memory": memory, "registers": registers, "debugger": "GDB remote stub handshake passed",
                       "qemu": subprocess.check_output([qemu_binary(), "--version"], text=True).splitlines()[0]}
-            (STATE / "smoke-report.json").write_text(json.dumps(report, indent=2) + "\n")
+            if native:
+                report["native_sha256"] = hashlib.sha256(Path(native).read_bytes()).hexdigest()
+            filename = "aot-smoke-report.json" if native else "smoke-report.json"
+            (STATE / filename).write_text(json.dumps(report, indent=2) + "\n")
             print(json.dumps(report, indent=2))
             monitor.execute("quit")
         finally:
@@ -192,8 +203,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("build")
-    sub.add_parser("run", help="start paused; GDB :1234, QMP :4444")
-    sub.add_parser("smoke", help="boot, inspect registers/memory, then stop QEMU")
+    run = sub.add_parser("run", help="start paused; GDB :1234, QMP :4444")
+    run.add_argument("--native", type=Path, help="AOT leaf native.bin to load at 0x10000")
+    smoke_parser = sub.add_parser("smoke", help="boot, inspect registers/memory, then stop QEMU")
+    smoke_parser.add_argument("--native", type=Path)
+    smoke_parser.add_argument("--expected", type=lambda value: int(value, 0), default=42)
     sub.add_parser("debug", help="attach LLDB and break at the native payload")
     inspect = sub.add_parser("monitor")
     inspect.add_argument("command", help="QEMU monitor command, e.g. 'info registers'")
@@ -202,10 +216,10 @@ def main():
         print(build())
     elif args.action == "run":
         print("Paused. Connect GDB/LLDB to 127.0.0.1:1234. QMP: 127.0.0.1:4444.", flush=True)
-        args = command()
+        args = command(native=args.native)
         os.execv(args[0], args)
     elif args.action == "smoke":
-        smoke()
+        smoke(args.native, args.expected)
     elif args.action == "debug":
         commands = STATE / "debug.lldb"
         if not commands.exists():

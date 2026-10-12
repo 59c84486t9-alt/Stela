@@ -1179,6 +1179,7 @@ dependencies = [
  "clap",
  "serde_json",
  "stela-apple",
+ "stela-compiler",
  "stela-core",
  "stela-macho",
  "tempfile",
@@ -1188,6 +1189,9 @@ dependencies = [
 [[package]]
 name = "stela-compiler"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "stela-core"
