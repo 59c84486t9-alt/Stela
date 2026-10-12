@@ -1,0 +1,31 @@
+#!/bin/sh
+# Shared local/CI Rust checks. Formatting is read-only unless --fix is explicit.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+usage() {
+    cat <<'USAGE'
+Usage: ./dev/check [--fix]
+
+Run Rust formatting checks, strict workspace Clippy, then workspace tests.
+Default checks do not format source files. --fix formats Rust sources first.
+USAGE
+}
+fix=false
+case "$#" in
+    0) ;;
+    1)
+        case "$1" in
+            --fix) fix=true ;;
+            --help|-h) usage; exit 0 ;;
+            *) usage >&2; exit 2 ;;
+        esac
+        ;;
+    *) usage >&2; exit 2 ;;
+esac
+cd "$root"
+if [ "$fix" = true ]; then
+    ./dev/cargo fmt --all
+fi
+./dev/cargo fmt --all -- --check
+./dev/cargo clippy --workspace --all-targets --locked -- -D warnings
+./dev/cargo test --workspace --locked

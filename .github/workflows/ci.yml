@@ -8,23 +8,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: ./dev/check
       - run: python3 -m pip install -r dev/requirements-test.txt
-      - run: python3 dev/differential.py
       - run: python3 -m unittest discover -s dev -p 'test_*.py'
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 clang
       - run: python3 dev/vm.py smoke
       - run: |
           python3 -c 'import struct; from pathlib import Path; Path(".stela/leaf.arm64").write_bytes(struct.pack("<III",0xd2800500,0x91000800,0xd65f03c0))'
-          cargo run --locked -p stela-cli -- compile-leaf .stela/leaf.arm64 --output-dir .stela/leaf-aot
+          ./dev/cargo run --locked -p stela-cli -- compile-leaf .stela/leaf.arm64 --output-dir .stela/leaf-aot
           python3 dev/vm.py smoke --native .stela/leaf-aot/native.bin
           python3 -c 'import struct; from pathlib import Path; Path(".stela/loop.arm64").write_bytes(struct.pack("<7I",0xd28000e0,0xd2800001,0x91000c21,0xf1000400,0x54ffffc1,0xaa0103e0,0xd65f03c0))'
-          cargo run --locked -p stela-cli -- compile-leaf .stela/loop.arm64 --output-dir .stela/loop-aot
+          ./dev/cargo run --locked -p stela-cli -- compile-leaf .stela/loop.arm64 --output-dir .stela/loop-aot
           python3 dev/vm.py smoke --native .stela/loop-aot/native.bin --expected 21
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: debug-vm-evidence
           path: .stela/vm/
+  instruction-correctness:
+    name: Native correctness (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - differential
+          - logical-immediate-differential
+          - carry-differential
+          - register-offset-differential
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python3 -m pip install -r dev/requirements-test.txt
+      - run: python3 dev/${{ matrix.suite }}.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: instruction-evidence-${{ matrix.suite }}
+          path: |
+            .stela/*-report.json
+            .stela/evidence/
