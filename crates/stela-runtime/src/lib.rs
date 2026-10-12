@@ -3,6 +3,7 @@
 pub mod blocks;
 pub mod dispatch;
 pub mod execution;
+pub mod memory;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
