@@ -10,7 +10,7 @@ import struct
 import subprocess
 import tempfile
 
-from differential import ROOT, BASE, State, move
+from differential import compiler_cli, ROOT, BASE, State, move
 from evidence import write_evidence
 
 
@@ -69,8 +69,7 @@ def source_for(case):
 
 
 def main():
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
-    cli = ROOT / "target/debug/stela"
+    cli = compiler_cli(__doc__)
     compiler = None
     reports = []
     corpus = hashlib.sha256()

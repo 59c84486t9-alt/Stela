@@ -17,7 +17,7 @@ import tempfile
 
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_MEM_INVALID, UC_PROT_READ
 from unicorn import arm64_const as arm
-from differential import ROOT, BASE, State, ARM_REGISTERS, move
+from differential import compiler_cli, ROOT, BASE, State, ARM_REGISTERS, move
 from evidence import write_evidence
 
 spec = importlib.util.spec_from_file_location("memory_suite", ROOT / "dev/memory-differential.py")
@@ -87,8 +87,7 @@ def cases():
 
 
 def main():
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
-    cli = ROOT / "target/debug/stela"
+    cli = compiler_cli(__doc__)
     reports = []
     compiler = None
     with tempfile.TemporaryDirectory(prefix="stela-faults-") as temporary:

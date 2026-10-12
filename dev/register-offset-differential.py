@@ -13,7 +13,7 @@ import tempfile
 import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from differential import ROOT, MASK, State, native, reference, states
+from differential import compiler_cli, ROOT, MASK, State, native, reference, states
 from evidence import write_evidence
 
 RAM_SIZE = 0x10000
@@ -149,8 +149,7 @@ def bounded_cases(compiled, timeout=180):
 
 
 def main():
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
-    cli = ROOT / "target/debug/stela"
+    cli = compiler_cli(__doc__)
     compiled = cases()
     compiler = None
     corpus = hashlib.sha256()

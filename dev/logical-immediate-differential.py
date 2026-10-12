@@ -12,7 +12,7 @@ import time
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_ERR_EXCEPTION
 from unicorn import arm64_const as arm
-from differential import ARM_REGISTERS, BASE, MASK, ROOT, State, native, reference, states
+from differential import compiler_cli, ARM_REGISTERS, BASE, MASK, ROOT, State, native, reference, states
 from evidence import write_evidence
 
 RET = 0xd65f03c0
@@ -196,8 +196,7 @@ def verify_undefined(cli, directory):
 
 
 def main():
-    subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
-    cli = ROOT / 'target/debug/stela'
+    cli = compiler_cli(__doc__)
     compiled = cases()
     compiler = None
     corpus = hashlib.sha256()

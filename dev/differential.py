@@ -5,6 +5,7 @@ Unicorn executes the original instructions as a development oracle only.
 The native output is produced by the CLI before being mapped RX and called.
 No ARM decoder, interpreter or runtime recompiler runs on the native path.
 """
+import argparse
 import ctypes
 from contextlib import contextmanager
 import hashlib
@@ -204,9 +205,17 @@ def states(all_flags=False):
     return result
 
 
+def compiler_cli(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--no-build', action='store_true', help='Use the already built, frozen CLI')
+    arguments = parser.parse_args()
+    if not arguments.no_build:
+        subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
+    return ROOT / 'target/debug/stela'
+
+
 def main():
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
-    cli = ROOT / "target/debug/stela"
+    cli = compiler_cli(__doc__)
     cases = 0
     corpus = hashlib.sha256()
     compiler_source = None
