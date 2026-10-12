@@ -32,10 +32,14 @@ class State(ctypes.Structure):
     _fields_ = [("x", ctypes.c_uint64 * 31), ("sp", ctypes.c_uint64), ("nzcv", ctypes.c_uint32), ("reserved", ctypes.c_uint32)]
 
 
-def reference(code, initial):
+def reference(code, initial, memory=None):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     machine.mem_map(BASE, 0x10000)
     machine.mem_write(BASE, code)
+    if memory is not None:
+        address, data = memory
+        machine.mem_map(address, len(data))
+        machine.mem_write(address, data)
     for register, value in zip(ARM_REGISTERS, initial.x):
         machine.reg_write(register, value)
     machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
@@ -51,9 +55,12 @@ def reference(code, initial):
     machine.emu_start(BASE, BASE + len(code), count=10000)
     if not returned:
         raise AssertionError("ARM reference did not return within its instruction budget")
-    return {"x": [machine.reg_read(r) for r in ARM_REGISTERS],
+    result = {"x": [machine.reg_read(r) for r in ARM_REGISTERS],
             "sp": machine.reg_read(arm.UC_ARM64_REG_SP),
             "nzcv": machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000}
+    if memory is not None:
+        result["memory"] = bytes(machine.mem_read(address, len(data)))
+    return result
 
 
 @contextmanager
@@ -205,7 +212,7 @@ def main():
     compiler_source = None
     report = {"kind": "arm64_leaf_differential", "source_oracle": "Unicorn ARM64 2.1.4",
               "target": "native x86-64 SysV", "tested_state": ["x0..x30", "sp", "nzcv"],
-              "limits": "Internal leaf branches only. No guest memory operations, external calls, faults, SIMD, PAC, or OS ABI are supported."}
+              "limits": "Integer/register/internal-branch suite only. Guest memory operations, faults, external calls, SIMD, PAC and OS ABI are not exercised here; memory and fault suites are separate."}
     with tempfile.TemporaryDirectory(prefix="stela-diff-") as temporary:
         directory = Path(temporary)
         for index, words in enumerate(programs()):

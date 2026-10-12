@@ -36,8 +36,29 @@ pub enum Logical {
     Xor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTransfer {
+    Store,
+    Load { signed: bool, width: Width },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressMode {
+    Offset,
+    PreIndex,
+    PostIndex,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    Memory {
+        transfer: MemoryTransfer,
+        bytes: u8,
+        data: Register,
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    },
     AddSubRegister {
         width: Width,
         subtract: bool,
@@ -142,6 +163,53 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if word & 0x3f000000 == 0x39000000 || word & 0x3f200000 == 0x38000000 {
+            // Scalar integer loads/stores only: VR=0. Reject PRFM, reserved
+            // signed sizes, register offsets, atomics and unprivileged forms.
+            let size = word >> 30;
+            let transfer = match (word >> 22) & 3 {
+                0 => MemoryTransfer::Store,
+                1 => MemoryTransfer::Load {
+                    signed: false,
+                    width: if size == 3 { Width::X64 } else { Width::W32 },
+                },
+                2 if size < 3 => MemoryTransfer::Load {
+                    signed: true,
+                    width: Width::X64,
+                },
+                3 if size < 2 => MemoryTransfer::Load {
+                    signed: true,
+                    width: Width::W32,
+                },
+                _ => return Err(unsupported()),
+            };
+            let (displacement, mode) = if word & (1 << 24) != 0 {
+                ((((word >> 10) & 0xfff) << size) as i32, AddressMode::Offset)
+            } else {
+                let immediate = ((word >> 12) & 0x1ff) as i32;
+                let mode = match (word >> 10) & 3 {
+                    0 => AddressMode::Offset,
+                    1 => AddressMode::PostIndex,
+                    3 => AddressMode::PreIndex,
+                    _ => return Err(unsupported()),
+                };
+                ((immediate << 23) >> 23, mode)
+            };
+            let rn = (word >> 5) & 31;
+            let rt = word & 31;
+            // Writeback overlap has constrained-unpredictable semantics.
+            // Reject it rather than choosing one possible architectural result.
+            if mode != AddressMode::Offset && rn == rt && rn != 31 {
+                return Err(unsupported());
+            }
+            Operation::Memory {
+                transfer,
+                bytes: 1 << size,
+                data: register(rt, false),
+                base: register(rn, true),
+                displacement,
+                mode,
+            }
         } else if word & 0xfc000000 == 0x14000000 {
             Operation::Branch {
                 target: target(word & 0x03ffffff, 26)?,
@@ -238,6 +306,30 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memory_neighbors_and_unpredictable_writeback_fail_closed() {
+        for word in [
+            0xf9800000, // PRFM: same unsigned-immediate family, no load result
+            0xf8800000, // PRFUM
+            0xb9c00000, // unallocated signed word -> W32
+            0xf9c00000, // unallocated signed doubleword
+            0xf8400800, // LDTR: unprivileged access is a different policy
+            0xf8000800, // STTR
+            0xf8606800, // register-offset LDR
+            0x3d400000, // SIMD/FP LDR
+            0xf8400c00, // pre-index LDR with base/target overlap
+            0xf8400400, // post-index LDR with base/target overlap
+            0xf8000c00, // pre-index STR with base/target overlap
+            0xf8000400, // post-index STR with base/target overlap
+        ] {
+            assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
+        }
+        // The same register as base and destination is defined without writeback.
+        assert!(Decoder.lift(GuestAddress(0), 0xf9400000).is_ok());
+        // Rt=31 is ZR, Rn=31 is SP; they do not overlap.
+        assert!(Decoder.lift(GuestAddress(0), 0xf8400fff).is_ok());
+    }
+
     #[test]
     fn sp_and_zero_are_decoded_by_instruction_role() {
         let add = Decoder.lift(GuestAddress(0), 0x910003ff).unwrap(); // add sp,sp,#0

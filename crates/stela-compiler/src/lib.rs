@@ -54,7 +54,10 @@ pub struct NativeBlock {
     pub source_map: Vec<(GuestAddress, usize)>,
 }
 
-/// Native ABI v1: System V x86-64 `void function(GuestState *state)`.
+/// Native code requires the direct ordinary-RAM profile documented in compiler.md.
+pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v2-direct-ram";
+
+/// Native ABI v2: System V x86-64 `void function(GuestState *state)`.
 /// Registers are initially memory-backed; register allocation is future work.
 /// Only NZCV bits 31:28 are modeled, not the complete PSTATE register.
 #[repr(C)]
@@ -77,8 +80,8 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// Compile one raw ARM64 leaf region ending in RET X30.
-/// Input addresses are retained in the output map. No Mach-O loading, memory
-/// instructions, external calls, PAC, privileged operations, or arbitrary RET targets.
+/// Input addresses are retained in the output map. No Mach-O loading, external
+/// calls, PAC, privileged operations, or arbitrary RET targets.
 pub fn compile(code: &[u8], base: GuestAddress) -> Result<NativeBlock, CompileError> {
     if code.is_empty() || !code.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(CompileError(
@@ -144,7 +147,7 @@ mod tests {
             vec![],
             vec![0xd503201fu32],
             vec![0x14000002, 0xd65f03c0], // branch falls outside the region
-            vec![0xf9400000, 0xd65f03c0],
+            vec![0xf9800000, 0xd65f03c0], // PRFM is not a data load
             vec![0xd65f0000],
         ] {
             let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();

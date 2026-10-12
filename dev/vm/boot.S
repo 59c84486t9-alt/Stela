@@ -58,7 +58,7 @@ long_mode:
     movq $0x7000, %rsp
 payload:
 #ifdef STELA_TRANSLATED
-    /* ABI v1: zero GuestState at 0x6000; call AOT code loaded at 0x10000. */
+    /* ABI v2: zero GuestState at 0x6000; call AOT code loaded at 0x10000. */
     xorq %rax, %rax
     movq $0x6000, %rdi
     movq $33, %rcx

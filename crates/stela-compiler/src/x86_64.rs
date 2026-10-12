@@ -1,7 +1,10 @@
 //! Native x86-64 emitter. Guest state pointer remains in RDI throughout.
 use crate::{
     Backend, GuestAddress, NativeBlock, UnsupportedReason,
-    aarch64::{Instruction, Logical, Operation, Register, Shift, WideMove, Width},
+    aarch64::{
+        AddressMode, Instruction, Logical, MemoryTransfer, Operation, Register, Shift, WideMove,
+        Width,
+    },
 };
 
 pub struct Emitter;
@@ -27,6 +30,70 @@ fn store(code: &mut Vec<u8>, register: Register) {
     if let Some(offset) = offset(register) {
         code.extend([0x48, 0x89, 0x87]); // mov [rdi+disp32],rax
         code.extend(offset.to_le_bytes());
+    }
+}
+
+/// Direct ordinary-RAM profile. Guest virtual addresses equal native addresses;
+/// the caller keeps code/state separate from guest mappings. Guest NZCV is untouched.
+fn memory(
+    code: &mut Vec<u8>,
+    transfer: MemoryTransfer,
+    bytes: u8,
+    data: Register,
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+) {
+    load(code, base);
+    if base == Register::Sp {
+        // The profile enables ARM SP alignment checks, before address addition.
+        // A native UD2 is a mapped fault boundary, not guest exception delivery.
+        code.extend([0xa8, 15, 0x74, 2, 0x0f, 0x0b]); // test al,15; jz +2; ud2
+    }
+    code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
+    code.extend(displacement.to_le_bytes());
+    if mode != AddressMode::PostIndex {
+        code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
+    }
+    match transfer {
+        MemoryTransfer::Store => {
+            right_operand(code, data, Width::X64, Shift::Lsl, 0);
+            match bytes {
+                1 => code.extend([0x88, 0x08]), // mov [rax],cl
+                2 => code.extend([0x66, 0x89, 0x08]),
+                4 => code.extend([0x89, 0x08]),
+                8 => code.extend([0x48, 0x89, 0x08]),
+                _ => unreachable!("decoder validates scalar size"),
+            }
+        }
+        MemoryTransfer::Load { signed, width } => {
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            match (bytes, signed) {
+                (1, false) => code.extend([0x0f, 0xb6, 0x08]),
+                (2, false) => code.extend([0x0f, 0xb7, 0x08]),
+                (1, true) => code.extend([0x0f, 0xbe, 0x08]),
+                (2, true) => code.extend([0x0f, 0xbf, 0x08]),
+                (4, true) => code.extend([0x63, 0x08]), // movsxd rcx,[rax]
+                (4 | 8, false) => code.extend([0x8b, 0x08]),
+                _ => unreachable!("decoder validates signed scalar size"),
+            }
+            // Even a discarded load performs the memory access and can fault.
+            if let Some(offset) = offset(data) {
+                code.extend([0x48, 0x89, 0x8f]); // mov [rdi+disp32],rcx
+                code.extend(offset.to_le_bytes());
+            }
+        }
+    }
+    // A failed native memory instruction cannot update the base register.
+    if mode != AddressMode::Offset {
+        code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32],rdx
+        code.extend(
+            offset(base)
+                .expect("memory base cannot be ZR")
+                .to_le_bytes(),
+        );
     }
 }
 
@@ -145,6 +212,16 @@ impl Backend<Instruction> for Emitter {
         for instruction in instructions {
             block.source_map.push((instruction.pc, code.len()));
             match instruction.operation {
+                Operation::Memory {
+                    transfer,
+                    bytes,
+                    data,
+                    base,
+                    displacement,
+                    mode,
+                } => {
+                    memory(code, transfer, bytes, data, base, displacement, mode);
+                }
                 Operation::Branch { target } => {
                     jump(code, None, instruction.pc, target, &mut fixups)
                 }

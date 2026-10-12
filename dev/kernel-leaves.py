@@ -47,7 +47,7 @@ def starts(data,base):
     raise ValueError("Missing function-start terminator")
 
 
-def candidates(data,image):
+def candidates(data,image,allowed=ALLOWED):
     symbol_names=defaultdict(list)
     string_offset=image["string_table_file_offset"]
     string_size=image["string_table_bytes"]
@@ -91,7 +91,7 @@ def candidates(data,image):
         decoded=list(decoder.disasm_lite(code,address))
         if sum(i[1] for i in decoded)!=len(code):
             continue
-        if any(i[2] not in ALLOWED and not i[2].startswith("b.") for i in decoded):
+        if any(i[2] not in allowed and not i[2].startswith("b.") for i in decoded):
             continue
         rows.append({"names":symbol_names[address],"address":address,"file_offset":file_offset,"function_extent_bytes":size,"source_bytes":len(code),"code":code})
     return addresses,rows

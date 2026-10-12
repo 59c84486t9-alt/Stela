@@ -297,7 +297,7 @@ fn run() -> Result<()> {
                 "native_sha256": stela_core::sha256(&block.x86_64_code),
                 "native_bytes": block.x86_64_code.len(),
                 "source_map": block.source_map,
-                "abi": "x86_64-sysv-guest-state-v1",
+                "abi": stela_compiler::NATIVE_ABI,
                 "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "verified": false,
             });

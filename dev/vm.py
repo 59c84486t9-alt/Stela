@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -136,7 +137,25 @@ class Monitor:
         return self.execute("human-monitor-command", {"command-line": command})
 
 
-def smoke(native=None, expected=42):
+def physical_u64(monitor, address):
+    output = monitor.human(f"xp /1gx {address:#x}")
+    match = re.search(r":\s+(0x[0-9a-fA-F]+)", output)
+    if match is None:
+        raise RuntimeError(f"Cannot read physical memory: {output}")
+    return int(match.group(1), 16), output
+
+
+def memory_expectation(value):
+    try:
+        address, expected = (int(part, 0) for part in value.split("="))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected ADDRESS=VALUE (decimal or hexadecimal)") from error
+    if not 0 <= address <= (1 << 64) - 8 or not 0 <= expected < (1 << 64):
+        raise argparse.ArgumentTypeError("address/value exceeds unsigned 64-bit range")
+    return address, expected
+
+
+def smoke(native=None, expected=42, expect_memory=()):
     args = command(paused=True, native=native)
     for port in (QMP_PORT, GDB_PORT):
         with socket.socket() as probe:
@@ -175,13 +194,20 @@ def smoke(native=None, expected=42):
                     break
                 time.sleep(0.05)
             monitor.execute("stop")
-            memory = monitor.human("xp /1gx 0x5000")
+            result, memory = physical_u64(monitor, 0x5000)
             registers = monitor.human("info registers")
-            if f"0x{expected:016x}" not in memory or f"RAX={expected:016x}" not in registers:
+            if result != expected or f"RAX={expected:016x}" not in registers:
                 raise RuntimeError(f"Unexpected guest state:\n{memory}\n{registers}")
+            memory_checks = []
+            for address, value in expect_memory:
+                actual, observation = physical_u64(monitor, address)
+                if actual != value:
+                    raise RuntimeError(f"Unexpected memory at {address:#x}: {actual:#x}, expected {value:#x}")
+                memory_checks.append({"address": address, "expected": value, "actual": actual, "observation": observation})
             report = {"test": "x86_64_translated_leaf_fixture" if native else "x86_64_long_mode_fixture", "passed": True, "expected_result": expected,
                       "physical_memory": memory, "registers": registers, "debugger": "GDB remote stub handshake passed",
                       "qemu": subprocess.check_output([qemu_binary(), "--version"], text=True).splitlines()[0]}
+            report["memory_checks"] = memory_checks
             if native:
                 report["native_sha256"] = hashlib.sha256(Path(native).read_bytes()).hexdigest()
             filename = "aot-smoke-report.json" if native else "smoke-report.json"
@@ -209,6 +235,7 @@ def main():
     smoke_parser = sub.add_parser("smoke", help="boot, inspect registers/memory, then stop QEMU")
     smoke_parser.add_argument("--native", type=Path)
     smoke_parser.add_argument("--expected", type=lambda value: int(value, 0), default=42)
+    smoke_parser.add_argument("--expect-memory", type=memory_expectation, action="append", default=[], metavar="ADDRESS=VALUE")
     sub.add_parser("debug", help="attach LLDB and break at the native payload")
     inspect = sub.add_parser("monitor")
     inspect.add_argument("command", help="QEMU monitor command, e.g. 'info registers'")
@@ -220,7 +247,7 @@ def main():
         args = command(native=args.native)
         os.execv(args[0], args)
     elif args.action == "smoke":
-        smoke(args.native, args.expected)
+        smoke(args.native, args.expected, args.expect_memory)
     elif args.action == "debug":
         commands = STATE / "debug.lldb"
         if not commands.exists():

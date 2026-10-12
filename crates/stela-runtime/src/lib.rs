@@ -2,11 +2,9 @@
 //! Full application launch, Mach-O linking and dynamic code dispatch are future work.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use stela_compiler::{GuestAddress, NativeBlock};
+use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
 use stela_core::{read_json, sha256, write_json};
 use std::path::{Path, PathBuf};
-
-const ABI: &str = "x86_64-sysv-guest-state-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
@@ -65,7 +63,7 @@ pub fn prepare_leaf(source: &[u8], base: GuestAddress, root: &Path) -> Result<Pr
         source_sha256: sha256(source),
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
-        abi: ABI.into(),
+        abi: NATIVE_ABI.into(),
         target_cpu: "x86_64-baseline".into(),
     };
     let key = sha256(&serde_json::to_vec(&identity)?);
