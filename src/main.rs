@@ -216,6 +216,16 @@ enum Command {
         #[arg(long, value_parser = parse_address)]
         cache_base: Option<u64>,
     },
+    /// Read typed exports and function boundaries from an unchanged cache image.
+    CacheExports {
+        input: PathBuf,
+        #[arg(long)]
+        image: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        cache_base: Option<u64>,
+    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -1053,6 +1063,29 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&apple::aea::fetch_key(&input, &output)?)?
+            );
+        }
+        Command::CacheExports {
+            input,
+            image,
+            output,
+            cache_base,
+        } => {
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            let set = macho::shared_cache::manifest_set(&input)?;
+            let preferred = set["files"][0]["header"]["shared_region_start"]
+                .as_u64()
+                .context("cache shared-region base is unavailable")?;
+            let exports =
+                macho::shared_cache_exports::read(&set, &image, cache_base.unwrap_or(preferred))?;
+            let mut report = serde_json::to_value(exports)?;
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"complete_binary_verified":false})
             );
         }
         Command::BinaryText { input } => {
