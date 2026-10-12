@@ -696,6 +696,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "lzfse_rust"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5edeac3ec657925dececc672bdd58fa2212291886ddcb3e08aa46924c78340c6"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1182,6 +1188,7 @@ dependencies = [
  "sha2",
  "stela-apple",
  "stela-compiler",
+ "stela-containers",
  "stela-core",
  "stela-macho",
  "stela-runtime",
@@ -1194,6 +1201,18 @@ name = "stela-compiler"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "stela-containers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "lzfse_rust",
+ "serde",
+ "sha2",
+ "stela-core",
 ]
 
 [[package]]

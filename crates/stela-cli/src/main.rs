@@ -17,6 +17,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect kernel collection images using collection-relative offsets.
+    FilesetManifest {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Decode a bare plaintext kernel IM4P payload into a bounded output file.
+    DecodeIm4p {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 512 * 1024 * 1024)]
+        max_input_bytes: u64,
+        #[arg(long, default_value_t = 1024 * 1024 * 1024)]
+        max_output_bytes: u64,
+    },
     /// Inspect BuildManifest identities and model-specific component paths.
     ImageManifest {
         image: PathBuf,
@@ -128,6 +144,56 @@ enum ProgressCommand {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::FilesetManifest { input, output } => {
+            ensure!(
+                !output.exists(),
+                "report exists; choose a new --output path"
+            );
+            let report = stela_macho::fileset::inspect(&std::fs::read(input)?)?;
+            write_json(&output, &report)?;
+            eprintln!(
+                "{} embedded images, {} unique instruction-section bytes; {}",
+                report.images.len(),
+                report.unique_executable_file_bytes,
+                output.display()
+            );
+        }
+        Command::DecodeIm4p {
+            input,
+            output,
+            max_input_bytes,
+            max_output_bytes,
+        } => {
+            use std::io::Read;
+            ensure!(max_input_bytes < u64::MAX, "invalid input limit");
+            let mut bytes = vec![];
+            File::open(input)?
+                .take(max_input_bytes + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() as u64 <= max_input_bytes,
+                "input exceeds --max-input-bytes"
+            );
+            let mut receipt_path = output.as_os_str().to_owned();
+            receipt_path.push(".json");
+            let receipt_path = PathBuf::from(receipt_path);
+            ensure!(
+                !output.exists() && !receipt_path.exists(),
+                "output or receipt exists"
+            );
+            let parent = output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            std::fs::create_dir_all(parent)?;
+            let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+            let receipt =
+                stela_containers::decode_kernel(&bytes, &mut pending, max_output_bytes)?;
+            pending.as_file().sync_all()?;
+            pending.persist_noclobber(output).map_err(|e| e.error)?;
+            write_json(&receipt_path, &receipt)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
         Command::ImageManifest {
             image: input,
             model,
