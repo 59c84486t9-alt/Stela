@@ -88,6 +88,14 @@ pub enum Operation {
         shift: Shift,
         amount: u8,
     },
+    LogicalImmediate {
+        width: Width,
+        kind: Logical,
+        flags: bool,
+        destination: Register,
+        source: Register,
+        immediate: u64,
+    },
     Branch {
         target: GuestAddress,
     },
@@ -140,6 +148,44 @@ fn register(value: u32, sp: bool) -> Register {
     } else {
         Register::X(value as u8)
     }
+}
+
+/// Decode the logical-immediate subset of Arm's DecodeBitMasks operation.
+/// Each element contains a rotated, nonempty run of ones shorter than the
+/// element, then repeats to the operand width. High rotation bits are ignored.
+fn logical_mask(width: Width, n: u32, rotation: u32, size: u32) -> Option<u64> {
+    if width == Width::W32 && n != 0 {
+        return None;
+    }
+    let selector = (n << 6) | ((!size) & 63);
+    if selector < 2 {
+        return None;
+    }
+    let element_bits = 1u32 << (31 - selector.leading_zeros());
+    let levels = element_bits - 1;
+    let ones = (size & levels) + 1;
+    if ones == element_bits {
+        return None;
+    }
+    let rotation = rotation & levels;
+    // A valid run never fills a 64-bit element, so this shift cannot be 64.
+    let run = (1u64 << ones) - 1;
+    let rotated = if rotation == 0 {
+        run
+    } else {
+        (run >> rotation) | (run << (element_bits - rotation))
+    };
+    let element = if element_bits == 64 {
+        rotated
+    } else {
+        rotated & ((1u64 << element_bits) - 1)
+    };
+    let operand_bits = if width == Width::W32 { 32 } else { 64 };
+    let mut mask = 0;
+    for position in (0..operand_bits).step_by(element_bits as usize) {
+        mask |= element << position;
+    }
+    Some(mask)
 }
 
 impl Lifter for Decoder {
@@ -316,6 +362,26 @@ impl Lifter for Decoder {
                 shift,
                 amount,
             }
+        } else if word & 0x1f800000 == 0x12000000 {
+            let opcode = (word >> 29) & 3;
+            Operation::LogicalImmediate {
+                width,
+                kind: match opcode {
+                    0 | 3 => Logical::And,
+                    1 => Logical::Or,
+                    _ => Logical::Xor,
+                },
+                flags: opcode == 3,
+                destination: register(word & 31, opcode != 3),
+                source: register((word >> 5) & 31, false),
+                immediate: logical_mask(
+                    width,
+                    (word >> 22) & 1,
+                    (word >> 16) & 63,
+                    (word >> 10) & 63,
+                )
+                .ok_or_else(unsupported)?,
+            }
         } else if word & 0x1f800000 == 0x12800000 {
             let kind = match (word >> 29) & 3 {
                 0 => WideMove::Not,
@@ -355,6 +421,79 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn logical_immediate_masks_match_all_rotated_runs_and_reserved_encodings() {
+        for (width, bits) in [(Width::W32, 32), (Width::X64, 64)] {
+            let mut expected = std::collections::BTreeMap::new();
+            for element_bits in [2, 4, 8, 16, 32, 64] {
+                if element_bits > bits {
+                    continue;
+                }
+                for ones in 1..element_bits {
+                    for rotation in 0..64 {
+                        // Construct the reference bit-by-bit instead of using
+                        // the decoder's shift/rotate/replication arithmetic.
+                        let mut mask = 0u64;
+                        for position in 0..bits {
+                            if (position + rotation) % element_bits < ones {
+                                mask |= 1 << position;
+                            }
+                        }
+                        let n = u32::from(element_bits == 64);
+                        let size = ((-2 * element_bits) | (ones - 1)) as u32 & 63;
+                        expected.insert((n, rotation as u32, size), mask);
+                    }
+                }
+            }
+            for n in 0..=1 {
+                for rotation in 0..64 {
+                    for size in 0..64 {
+                        let key = (n, rotation, size);
+                        assert_eq!(
+                            logical_mask(width, n, rotation, size),
+                            expected.get(&key).copied(),
+                            "{width:?} N={n} immr={rotation} imms={size}"
+                        );
+                        for opcode in 0..4 {
+                            let word = (u32::from(width == Width::X64) << 31)
+                                | (opcode << 29)
+                                | 0x12000000
+                                | (n << 22)
+                                | (rotation << 16)
+                                | (size << 10);
+                            assert_eq!(
+                                Decoder.lift(GuestAddress(0), word).is_ok(),
+                                expected.contains_key(&key),
+                                "word {word:#x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn logical_immediate_distinguishes_sp_destination_and_zero_source() {
+        for (word, destination, flags) in [
+            (0x92401fff, Register::Sp, false),  // and sp,xzr,#0xff
+            (0x32001fff, Register::Sp, false),  // orr wsp,wzr,#0xff
+            (0xd2401fff, Register::Sp, false),  // eor sp,xzr,#0xff
+            (0xf2401fff, Register::Zero, true), // tst xzr,#0xff
+        ] {
+            assert!(matches!(
+                Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                Operation::LogicalImmediate {
+                    destination: actual_destination,
+                    source: Register::Zero,
+                    flags: actual_flags,
+                    immediate: 255,
+                    ..
+                } if actual_destination == destination && actual_flags == flags
+            ));
+        }
+    }
+
     #[test]
     fn pair_neighbors_and_unpredictable_operands_are_rejected() {
         for word in [

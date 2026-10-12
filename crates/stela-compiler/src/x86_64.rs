@@ -358,6 +358,33 @@ impl Backend<Instruction> for Emitter {
                         nzcv(code, subtract);
                     }
                 }
+                Operation::LogicalImmediate {
+                    width,
+                    kind,
+                    flags,
+                    destination,
+                    source,
+                    immediate,
+                } => {
+                    load(code, source);
+                    code.extend([0x48, 0xb9]); // movabs rcx,logical bitmask
+                    code.extend(immediate.to_le_bytes());
+                    if width == Width::X64 {
+                        code.push(0x48);
+                    }
+                    code.extend([
+                        match kind {
+                            Logical::And => 0x21,
+                            Logical::Or => 0x09,
+                            Logical::Xor => 0x31,
+                        },
+                        0xc8,
+                    ]);
+                    store(code, destination); // MOV preserves the logical result flags.
+                    if flags {
+                        nzcv(code, false); // AND clears CF/OF, matching ARM C/V=0.
+                    }
+                }
                 Operation::LogicalRegister {
                     width,
                     kind,
