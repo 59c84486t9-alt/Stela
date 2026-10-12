@@ -1,6 +1,7 @@
 //! Persistent AOT storage and serialized native leaf/basic-block execution.
 //! Full application launch, platform ABI and Mach-O linking remain future work.
 pub mod blocks;
+pub mod darwin;
 pub mod dispatch;
 pub mod execution;
 pub mod memory;
