@@ -31,6 +31,7 @@ def main():
         raise SystemExit("Report exists; use a new --output path to preserve evidence.")
     subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
     reports = []
+    compiler_source = None
     combined = {"arm64": Counter(), "x86_64": Counter()}
     for path in args.files or map(Path, DEFAULT_INPUTS):
         process = subprocess.run([str(ROOT / "target/debug/stela"), "binary-text", str(path)], capture_output=True, text=True)
@@ -41,6 +42,10 @@ def main():
         rows = []
         symbol_sets = {}
         for entry in slices:
+            if compiler_source is None:
+                compiler_source = entry["compiler_source_sha256"]
+            if compiler_source != entry["compiler_source_sha256"]:
+                raise RuntimeError("Compiler changed during corpus scan")
             row = entry["slice"]
             architecture = row["artifact"]["architecture"]
             if architecture not in ("arm64", "arm64e", "x86_64"):
@@ -72,6 +77,7 @@ def main():
                         "paired_architectures":set(symbol_sets)=={"arm64","x86_64"},
                         "common_defined_text_symbols":len(common),"common_symbol_sample":common[:20],"slices":rows})
     result = {"schema_version":1,"kind":"universal_macho_instruction_corpus", "files":reports,
+              "compiler_source_sha256":compiler_source,
               "histograms":{k:dict(v.most_common()) for k,v in combined.items()},
               "limits":"Linear text disassembly and leaf-encoding recognition only; no app has been translated or behaviorally verified by this report."}
     args.output.parent.mkdir(parents=True,exist_ok=True)

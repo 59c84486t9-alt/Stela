@@ -19,6 +19,9 @@ jobs:
           python3 -c 'import struct; from pathlib import Path; Path(".stela/leaf.arm64").write_bytes(struct.pack("<III",0xd2800500,0x91000800,0xd65f03c0))'
           cargo run --locked -p stela-cli -- compile-leaf .stela/leaf.arm64 --output-dir .stela/leaf-aot
           python3 dev/vm.py smoke --native .stela/leaf-aot/native.bin
+          python3 -c 'import struct; from pathlib import Path; Path(".stela/loop.arm64").write_bytes(struct.pack("<7I",0xd28000e0,0xd2800001,0x91000c21,0xf1000400,0x54ffffc1,0xaa0103e0,0xd65f03c0))'
+          cargo run --locked -p stela-cli -- compile-leaf .stela/loop.arm64 --output-dir .stela/loop-aot
+          python3 dev/vm.py smoke --native .stela/loop-aot/native.bin --expected 21
       - uses: actions/upload-artifact@v4
         if: always()
         with:

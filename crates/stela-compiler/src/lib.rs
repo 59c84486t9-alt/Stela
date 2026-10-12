@@ -33,6 +33,10 @@ pub enum UnsupportedReason {
     UnresolvedIndirectTarget {
         address: GuestAddress,
     },
+    UnresolvedDirectTarget {
+        address: GuestAddress,
+        target: GuestAddress,
+    },
     RuntimeGeneratedCode,
 }
 
@@ -72,9 +76,9 @@ impl std::fmt::Display for CompileError {
 }
 impl std::error::Error for CompileError {}
 
-/// Compile one raw, straight-line ARM64 leaf function ending in RET X30.
+/// Compile one raw ARM64 leaf region ending in RET X30.
 /// Input addresses are retained in the output map. No Mach-O loading, memory
-/// instructions, branches, PAC, privileged operations, or arbitrary RET targets.
+/// instructions, external calls, PAC, privileged operations, or arbitrary RET targets.
 pub fn compile(code: &[u8], base: GuestAddress) -> Result<NativeBlock, CompileError> {
     if code.is_empty() || !code.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(CompileError(
@@ -92,13 +96,13 @@ pub fn compile(code: &[u8], base: GuestAddress) -> Result<NativeBlock, CompileEr
         let instruction = aarch64::Decoder
             .lift(pc, encoding)
             .map_err(|e| CompileError(format!("unsupported ARM64 semantics: {e:?}")))?;
-        let last = index == code.len() / 4 - 1;
-        if matches!(instruction.operation, aarch64::Operation::Return) != last {
-            return Err(CompileError(
-                "function must contain exactly one RET X30, at its end".into(),
-            ));
-        }
         instructions.push(instruction);
+    }
+    if !matches!(
+        instructions.last().unwrap().operation,
+        aarch64::Operation::Return
+    ) {
+        return Err(CompileError("leaf region must end in RET X30".into()));
     }
     x86_64::Emitter
         .emit(&instructions)
@@ -139,7 +143,7 @@ mod tests {
         for words in [
             vec![],
             vec![0xd503201fu32],
-            vec![0xd65f03c0, 0xd65f03c0],
+            vec![0x14000002, 0xd65f03c0], // branch falls outside the region
             vec![0xf9400000, 0xd65f03c0],
             vec![0xd65f0000],
         ] {

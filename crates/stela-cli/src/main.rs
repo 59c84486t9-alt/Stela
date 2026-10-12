@@ -26,7 +26,7 @@ enum Command {
         #[arg(long, default_value = ".stela/cache/leaf-v1")]
         cache_dir: PathBuf,
     },
-    /// AOT-compile a raw, straight-line ARM64 leaf function into native x86.
+    /// AOT-compile a raw ARM64 leaf region with internal branches into x86.
     CompileLeaf {
         input: PathBuf,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
@@ -140,6 +140,7 @@ fn run() -> Result<()> {
                     }
                 }
                 output.push(serde_json::json!({"slice": slice, "arm64_text_words": words, "recognized_leaf_words": recognized,
+                    "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                     "note": "Word recognition is not function translation, reachability, or verified application coverage."}));
             }
             println!("{}", serde_json::to_string(&output)?);

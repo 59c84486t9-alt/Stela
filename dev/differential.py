@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import mmap
+import multiprocessing
 import platform
 from pathlib import Path
 import random
@@ -17,7 +18,7 @@ import struct
 import subprocess
 import tempfile
 
-from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
 from unicorn import arm64_const as arm
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +39,17 @@ def reference(code, initial):
         machine.reg_write(register, value)
     machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
     machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
-    # Stop before the terminal RET; the harness supplies the function boundary.
-    machine.emu_start(BASE, BASE + len(code) - 4, count=len(code) // 4)
+    returned = False
+    def boundary(machine, address, size, _):
+        nonlocal returned
+        if bytes(machine.mem_read(address,size)) == b"\xc0\x03\x5f\xd6":
+            returned = True
+            machine.emu_stop()
+    machine.hook_add(UC_HOOK_CODE,boundary)
+    # The harness owns leaf returns, including early RET paths. Bound loops.
+    machine.emu_start(BASE, BASE + len(code), count=10000)
+    if not returned:
+        raise AssertionError("ARM reference did not return within its instruction budget")
     return {"x": [machine.reg_read(r) for r in ARM_REGISTERS],
             "sp": machine.reg_read(arm.UC_ARM64_REG_SP),
             "nzcv": machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000}
@@ -72,12 +82,49 @@ def native(code, initial):
     return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv}
 
 
+def native_worker(pipe, code, initial_states):
+    try:
+        pipe.send([native(code,State.from_buffer_copy(state)) for state in initial_states])
+    except BaseException as error:
+        pipe.send({"error":repr(error)})
+    finally:
+        pipe.close()
+
+
+def bounded_native(code, initial_states):
+    """A branch-emission bug must fail a test instead of hanging the runner."""
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    process = context.Process(target=native_worker,args=(send,code,[bytes(s) for s in initial_states]))
+    process.start()
+    send.close()
+    try:
+        if not receive.poll(10):
+            raise AssertionError("Native control-flow test timed out")
+        results = receive.recv()
+        process.join(timeout=2)
+        if process.exitcode != 0 or isinstance(results,dict):
+            raise AssertionError(f"Native worker failed: {results}, exit={process.exitcode}")
+        return results
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join()
+        receive.close()
+
+
 def move(kind, width, destination, immediate, shift=0):
     return (width << 31) | (kind << 29) | 0x12800000 | ((shift // 16) << 21) | (immediate << 5) | destination
 
 
 def arithmetic(subtract, flags, width, destination, source, immediate, shifted=False):
     return (width << 31) | (subtract << 30) | (flags << 29) | 0x11000000 | (int(shifted) << 22) | (immediate << 10) | (source << 5) | destination
+
+
+def register_operation(logical, operation, flags_or_invert, width, destination, left, right, shift, amount):
+    fixed = 0x0a000000 if logical else 0x0b000000
+    flags = (flags_or_invert << 21) if logical else (flags_or_invert << 29)
+    return (width << 31) | (operation << (29 if logical else 30)) | flags | fixed | (shift << 22) | (right << 16) | (amount << 10) | (left << 5) | destination
 
 
 def programs():
@@ -102,10 +149,35 @@ def programs():
         [arithmetic(1,1,0,31,31,1), move(0,0,31,0), arithmetic(0,0,0,31,7,1)],
         [0xd503201f],
     ])
+    for width in (0,1):
+        for logical in (False,True):
+            for operation in range(4 if logical else 2):
+                for flags in (0,1):
+                    for shift in range(4 if logical else 3):
+                        for amount in (0,1,31 if width == 0 else 63):
+                            for destination,left,right in ((0,0,7),(7,7,0),(31,31,7),(30,0,31)):
+                                result.append([register_operation(logical,operation,flags,width,destination,left,right,shift,amount)])
+    # Both outcomes of all ARM conditions, with non-adjacent targets.
+    for condition in range(16):
+        result.append([0x54000000 | (3 << 5) | condition, move(2,1,0,0), 0x14000002, move(2,1,0,1)])
+    for width in (0,1):
+        for nonzero in (0,1):
+            for source in (0,7,31):
+                result.append([(width<<31)|(nonzero<<24)|0x34000000|(3<<5)|source,move(2,1,0,0),0x14000002,move(2,1,0,1)])
+    for bit in (0,31,32,63):
+        for nonzero in (0,1):
+            for source in (0,7,31):
+                result.append([((bit>>5)<<31)|(nonzero<<24)|0x36000000|((bit&31)<<19)|(3<<5)|source,move(2,1,0,0),0x14000002,move(2,1,0,1)])
+    result.extend([
+        # Finite backward branch: x1 += 3, seven times; x0 <- x1.
+        [move(2,1,0,7),move(2,1,1,0),arithmetic(0,0,1,1,1,3),arithmetic(1,1,1,0,0,1),0x54ffffc1,0xaa0103e0],
+        # Early return when x7 == 0, later return on the other path.
+        [0xb5000047,0xd65f03c0,move(2,1,0,99)],
+    ])
     return result
 
 
-def states():
+def states(all_flags=False):
     randomizer = random.Random(0x50e77a)
     values = (0,1,MASK,MASK-1,0x7fffffffffffffff,0x8000000000000000,
               0xffffffff,0x7fffffff,0x80000000,0xfffffffffffff000)
@@ -117,6 +189,10 @@ def states():
         state.sp = value
         state.nzcv = randomizer.randrange(16) << 28
         result.append(state)
+    if all_flags:
+        result = [State.from_buffer_copy(result[index % len(result)]) for index in range(16)]
+        for flags,state in enumerate(result):
+            state.nzcv = flags << 28
     return result
 
 
@@ -128,7 +204,7 @@ def main():
     compiler_source = None
     report = {"kind": "arm64_leaf_differential", "source_oracle": "Unicorn ARM64 2.1.4",
               "target": "native x86-64 SysV", "tested_state": ["x0..x30", "sp", "nzcv"],
-              "limits": "No guest memory operations, arbitrary branches, faults, SIMD, PAC, or OS ABI are supported."}
+              "limits": "Internal leaf branches only. No guest memory operations, external calls, faults, SIMD, PAC, or OS ABI are supported."}
     with tempfile.TemporaryDirectory(prefix="stela-diff-") as temporary:
         directory = Path(temporary)
         for index, words in enumerate(programs()):
@@ -144,9 +220,11 @@ def main():
             if compiler_source != manifest["compiler_source_sha256"]:
                 raise AssertionError("Compiler implementation changed during differential run")
             corpus.update(code)
-            for initial in states():
-                expected = reference(code, initial)
-                actual = native(emitted, initial)
+            control_flow = any((word & 0xfc000000 == 0x14000000) or (word & 0xff000010 == 0x54000000) or (word & 0x7e000000 in (0x34000000,0x36000000)) for word in words)
+            initial_states = states(all_flags=control_flow)
+            expected_states = [reference(code,initial) for initial in initial_states]
+            actual_states = bounded_native(emitted,initial_states) if control_flow else [native(emitted,initial) for initial in initial_states]
+            for initial,expected,actual in zip(initial_states,expected_states,actual_states):
                 if expected != actual:
                     raise AssertionError(json.dumps({"words": [hex(w) for w in words], "initial": {"x":list(initial.x), "sp":initial.sp, "nzcv":initial.nzcv}, "expected":expected, "actual":actual}, indent=2))
                 cases += 1
