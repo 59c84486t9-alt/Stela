@@ -238,7 +238,8 @@ def main():
                 cases += 1
     report.update({"passed":True,"programs":len(programs()),"state_comparisons":cases,
                    "corpus_sha256":corpus.hexdigest(), "compiler_source_sha256":compiler_source,
-                   "compiler_executable_sha256":hashlib.sha256(cli.read_bytes()).hexdigest()})
+                   "compiler_executable_sha256":hashlib.sha256(cli.read_bytes()).hexdigest(),
+                   "harness_source_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
     destination = ROOT / ".stela/differential-report.json"
     destination.parent.mkdir(exist_ok=True)
     write_evidence(destination,report)
