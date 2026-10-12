@@ -64,6 +64,45 @@ void bench_copy_sum(GuestState *restrict state) {
     state->x[4] = state->x[11] + count * sizeof(uint64_t);
 }
 
+/* Mirrors every touched register, including skipped-loop temporaries and the
+ * final CMP flags. All products, subtraction and negation use uint64_t modulo
+ * arithmetic; signed overflow is detected from bit patterns without C UB.
+ */
+void bench_mix(GuestState *restrict state) {
+    uint64_t count = state->x[12];
+    const uint64_t *input = (const uint64_t *)(uintptr_t)state->x[10];
+    uint64_t hash = state->x[13];
+    uint64_t last = state->x[2];
+    uint64_t product = state->x[4];
+    uint64_t selected = state->x[7];
+    uint64_t tweaked = state->x[8];
+    uint32_t nzcv = state->nzcv;
+    for (uint64_t i = 0; i < count; ++i) {
+        last = input[i];
+        hash = hash * UINT64_C(0x9e37) + last;
+        product = last * UINT64_C(0x85eb);
+        uint64_t difference = hash - product;
+        uint64_t negative = difference >> 63;
+        uint64_t zero = difference == 0;
+        uint64_t carry = hash >= product;
+        uint64_t overflow = ((hash ^ product) & (hash ^ difference)) >> 63;
+        nzcv = (uint32_t)((negative << 31) | (zero << 30) | (carry << 29) | (overflow << 28));
+        selected = carry && !zero ? hash : product;
+        tweaked = carry ? selected : ~hash;
+        hash = negative ? tweaked : UINT64_C(0) - selected;
+    }
+    state->x[0] = hash;
+    state->x[1] = 0;
+    state->x[2] = last;
+    state->x[3] = state->x[10] + count * sizeof(uint64_t);
+    state->x[4] = product;
+    state->x[5] = UINT64_C(0x9e37);
+    state->x[6] = UINT64_C(0x85eb);
+    state->x[7] = selected;
+    state->x[8] = tweaked;
+    state->nzcv = nzcv;
+}
+
 /* Empty body for indirect-call/checksum/timer overhead context. Its result is
  * retained GuestState x0; no subtraction from workload timings is performed. */
 void bench_empty(GuestState *state) {

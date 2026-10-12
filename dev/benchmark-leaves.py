@@ -25,7 +25,7 @@ import time
 from differential import BASE, MASK, ROOT, State, executable, reference, states
 from evidence import write_evidence
 
-NAMES = ("bench_integer", "bench_sum", "bench_copy_sum")
+NAMES = ("bench_integer", "bench_sum", "bench_copy_sum", "bench_mix")
 COUNTS = (1, 16, 64, 256, 1024)
 RAM_SIZE = 65536
 INPUT = 1024
@@ -114,7 +114,8 @@ def prepare(artifact_root, clang):
 
 
 def state_result(state, ram):
-    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv, "memory": bytes(ram)}
+    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv,
+            "reserved": state.reserved, "memory": bytes(ram)}
 
 
 def initial_state(original, address, count, seed=None):
@@ -127,10 +128,20 @@ def initial_state(original, address, count, seed=None):
     return state
 
 
-def independent_sum(name, count, state, ram):
+def independent_result(name, count, state, ram):
     if name == "bench_integer":
         return (count * state.x[13] + 3 * count * (count - 1) // 2) & MASK
-    return sum(struct.unpack_from("<" + "Q" * count, ram, INPUT)) & MASK if count else 0
+    words = struct.unpack_from("<" + "Q" * count, ram, INPUT)
+    if name == "bench_mix":
+        value = state.x[13]
+        for word in words:
+            mixed = (value * 0x9e37 + word) & MASK
+            product = (word * 0x85eb) & MASK
+            selected = max(mixed, product)
+            tweaked = selected if mixed >= product else (~mixed & MASK)
+            value = tweaked if ((mixed - product) & MASK) >> 63 else (-selected & MASK)
+        return value
+    return sum(words) & MASK
 
 
 def measured_batch(timer, function, state, calls, expected):
@@ -166,6 +177,8 @@ def execute(benchmarks, metadata, calls, warmup, trials, verify_only, min_trial_
     original_ram = randomizer.randbytes(RAM_SIZE)
     edge_seeds = (0, 1, MASK, 0x8000000000000000, 0x7fffffffffffffff, 0xffffffff, 0x100000000, 0xdeadbeef01234567)
     all_states = states(all_flags=True)
+    for index, state in enumerate(all_states):
+        state.reserved = 0xa5a50000 | index
     comparisons = 0
     results = []
     overhead = None
@@ -206,9 +219,10 @@ def execute(benchmarks, metadata, calls, warmup, trials, verify_only, min_trial_
             for count in (0, 1, 2, 16, 64, 256, 1024):
                 for index, original in enumerate(all_states):
                     state = initial_state(original, ram_address, count, edge_seeds[index % len(edge_seeds)])
-                    expected = reference(benchmark["source"], state, (ram_address, original_ram))
-                    if expected["x"][0] != independent_sum(benchmark["name"], count, state, original_ram):
-                        raise AssertionError("original ARM differs from independent sum contract")
+                    expected = {**reference(benchmark["source"], state, (ram_address, original_ram)),
+                                "reserved": state.reserved}
+                    if expected["x"][0] != independent_result(benchmark["name"], count, state, original_ram):
+                        raise AssertionError("original ARM differs from independent result contract")
                     for function in (native_function, c_function):
                         actual_state = State.from_buffer_copy(state)
                         region[:] = original_ram
@@ -220,8 +234,9 @@ def execute(benchmarks, metadata, calls, warmup, trials, verify_only, min_trial_
                 continue
             for count in COUNTS:
                 initial = initial_state(all_states[0], ram_address, count, 0x123456789abcdef0)
-                expected = reference(benchmark["source"], initial, (ram_address, original_ram))
-                expected_sum = independent_sum(benchmark["name"], count, initial, original_ram)
+                expected = {**reference(benchmark["source"], initial, (ram_address, original_ram)),
+                            "reserved": initial.reserved}
+                expected_sum = independent_result(benchmark["name"], count, initial, original_ram)
                 functions = {"stela": native_address, "clang_o3": c_address}
                 samples = {key: [] for key in functions}
                 for pointer in functions.values():
@@ -313,13 +328,15 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--clang", default="/usr/bin/clang")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--no-build", action="store_true", help="Use the already built CLI")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if platform.machine() not in ("x86_64", "AMD64") or platform.system() not in ("Darwin", "Linux"):
         parser.error("benchmarks require native x86-64 macOS or Linux")
     if not 1 <= args.calls <= 10000000 or not 1 <= args.warmup <= 1000000 or not 3 <= args.trials <= 31 or not 1 <= args.timeout <= 3600 or not args.calls <= args.max_calls <= 10000000 or not 0 <= args.min_trial_ms <= 100:
         parser.error("calls/warmup/trials/timeout exceed bounded research limits")
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True, timeout=180)
+    if not args.no_build:
+        subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True, timeout=180)
     artifacts = ROOT / ".stela/benchmarks/artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     import tempfile
@@ -338,8 +355,8 @@ def main():
               "ratio_interpretation": "Stela/clang-O3 median time: above 1 means Stela is slower on this fixture.",
               "empty_overhead_scope": "clang-compiled empty function through the same C indirect-call/checksum batch, reported for context only; never subtracted from workload timings.",
               "timing_scope": "Warm RX code and ordinary RAM, C batches indirect function calls plus checksum/state reads. Python, Unicorn, correctness comparison and compilation are outside native execution timers. No CPU pinning or frequency control; short trials and host noise limit precision. Trial order alternates; raw times and spread retained. C reference is an optimizing compiler baseline, not Rosetta performance.",
-              "correctness_scope": "Original ARM Unicorn versus each native implementation: all x0..x30, SP, all16 NZCV initial combinations, entire64KiB RAM; seven counts0..1024 plus arithmetic seed edges. Independent result sums, warmup and repeated-call final-state checks.",
-              "limits": "Three own microfixtures with the memory-backed GuestState/direct-RAM ABI, fixed count at most1024, disjoint aligned input/output/state, finite execution. No application, OS, boot, PAC, SIMD translation, runtime helper, syscall, concurrent invalidation or cross-ISA hardware performance claim. Optimizing C may strength-reduce/vectorize these loops; current Stela retains guest-register memory traffic."}
+              "correctness_scope": "Original ARM Unicorn versus each native implementation: all x0..x30, SP, reserved ABI field, all16 NZCV initial combinations, entire64KiB RAM; seven counts0..1024 plus arithmetic seed edges. Independent sums/nonlinear hash results, warmup and repeated-call final-state checks.",
+              "limits": "Four own microfixtures with the memory-backed GuestState/direct-RAM ABI, fixed count at most1024, disjoint aligned input/output/state, finite execution. No application, OS, boot, PAC, SIMD translation, runtime helper, syscall, concurrent invalidation or cross-ISA hardware performance claim. Optimizing C may strength-reduce/vectorize applicable loops; the supplied-word nonlinear multiply/select hash retains a data-dependent recurrence. Current Stela retains guest-register memory traffic."}
     output = args.output or ROOT / ".stela/benchmarks" / ("leaf-correctness.json" if args.verify_only else "leaf-baseline.json")
     snapshot = write_evidence(output, report)
     print(json.dumps({"report": str(output), "evidence": str(snapshot), "timing_completed": report["timing_completed"],
