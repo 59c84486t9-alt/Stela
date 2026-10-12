@@ -1,4 +1,5 @@
 //! Read Apple's public macOS IPSW feed and download original images.
+pub mod aea;
 pub mod restore;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;

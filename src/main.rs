@@ -188,6 +188,14 @@ enum Command {
     },
     /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
     BinaryText { input: PathBuf },
+    /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
+    InspectAea { input: PathBuf },
+    /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
+    FetchAeaKey {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Measure actual isolated native emission over pinned ARM instruction words.
     #[command(alias = "instruction-progress")]
     CorpusProgress {
@@ -911,6 +919,18 @@ fn run() -> Result<()> {
         } => {
             let report = corpus_progress::measure(&input, fileset_manifest.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::InspectAea { input } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&apple::aea::inspect(&input)?)?
+            );
+        }
+        Command::FetchAeaKey { input, output } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&apple::aea::fetch_key(&input, &output)?)?
+            );
         }
         Command::BinaryText { input } => {
             use stela_compiler::Lifter;
