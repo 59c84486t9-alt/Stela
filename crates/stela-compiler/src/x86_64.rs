@@ -11,6 +11,7 @@ pub struct Emitter;
 pub(crate) mod block;
 mod conditional_select;
 mod multiply;
+mod pc_relative;
 mod register_offset;
 
 fn offset(register: Register) -> Option<u32> {
@@ -272,6 +273,7 @@ fn emit_instruction(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) {
     match instruction.operation {
+        Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
         Operation::Multiply(operand) => multiply::emit(code, &operand),
         Operation::MemoryPair {

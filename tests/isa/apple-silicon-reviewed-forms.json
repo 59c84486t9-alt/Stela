@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v3",
+  "registry_version": "apple-silicon-reviewed-forms-v4",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -81,6 +81,11 @@
       "harness": "dev/multiply-differential.py",
       "report": ".stela/multiply-differential-report.json",
       "kind": "integer_multiply_arm_vs_native_x86"
+    },
+    "pc_relative": {
+      "harness": "dev/pc-relative-differential.py",
+      "report": ".stela/pc-relative-differential-report.json",
+      "kind": "pc_relative_arm_vs_native_x86"
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -544,6 +549,86 @@
       ],
       "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
       "scope": "All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."
+    },
+    {
+      "id": "ADRP_only_pcreladdr",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0x9f000000",
+      "encoding_value": "0x90000000",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "general",
+        "isa": "A64",
+        "offset-type": "off19s",
+        "mnemonic": "ADRP"
+      },
+      "source_file": "adrp.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/adrp.xml",
+      "source_sha256": "b1faa4d1059f81fb86593247d7583c285adc52acd3885366ec0f545f57978384",
+      "mnemonic": "ADRP",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "pc_relative"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/pc_relative.rs",
+        "crates/stela-compiler/src/x86_64/pc_relative.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x90000000",
+          "expected_mnemonics": [
+            "adrp"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer fixed bits, immediate layout and operand roles reviewed against the selected official June XML. Differential evidence compares original ARM, independent fixture arithmetic and native leaf/block output; wrapping address-boundary cases retain separate native/math-only evidence. Aliases excluded; smoke checks emission only.",
+      "scope": "All signed 21-bit immhi:immlo values and Xd destinations including discarded XZR; guest per-instruction PC, modulo-64-bit address formation, architectural 4 KiB ADRP granule regardless of mapping page size, and SP/NZCV/reserved-word preservation. Native output maintains ordered nonempty source-map intervals. No address dereference or platform ABI support is implied."
+    },
+    {
+      "id": "ADR_only_pcreladdr",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0x9f000000",
+      "encoding_value": "0x10000000",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "general",
+        "isa": "A64",
+        "offset-type": "off19s",
+        "mnemonic": "ADR"
+      },
+      "source_file": "adr.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/adr.xml",
+      "source_sha256": "659d6569c7afefdc44c7cc4cf5cd2acff8da94f07f65ebae05afd965ac0b91b4",
+      "mnemonic": "ADR",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "pc_relative"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/pc_relative.rs",
+        "crates/stela-compiler/src/x86_64/pc_relative.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x10000000",
+          "expected_mnemonics": [
+            "adr"
+          ]
+        }
+      ],
+      "review": "Canonical base-integer fixed bits, immediate layout and operand roles reviewed against the selected official June XML. Differential evidence compares original ARM, independent fixture arithmetic and native leaf/block output; wrapping address-boundary cases retain separate native/math-only evidence. Aliases excluded; smoke checks emission only.",
+      "scope": "All signed 21-bit immhi:immlo values and Xd destinations including discarded XZR; guest per-instruction PC, modulo-64-bit address formation, architectural 4 KiB ADRP granule regardless of mapping page size, and SP/NZCV/reserved-word preservation. Native output maintains ordered nonempty source-map intervals. No address dereference or platform ABI support is implied."
     },
     {
       "id": "ANDS_32S_log_imm",
@@ -6710,6 +6795,8 @@
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/multiply.rs",
     "crates/stela-compiler/src/x86_64/multiply.rs",
+    "crates/stela-compiler/src/aarch64/pc_relative.rs",
+    "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/Cargo.toml",

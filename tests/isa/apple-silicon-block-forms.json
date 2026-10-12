@@ -39,12 +39,14 @@
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/multiply.rs",
     "crates/stela-compiler/src/x86_64/multiply.rs",
+    "crates/stela-compiler/src/aarch64/pc_relative.rs",
+    "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v1",
+  "registry_version": "apple-silicon-block-forms-v2",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",

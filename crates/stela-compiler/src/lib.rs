@@ -18,6 +18,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/conditional_select.rs"),
     include_str!("aarch64/multiply.rs"),
     include_str!("x86_64/multiply.rs"),
+    include_str!("aarch64/pc_relative.rs"),
+    include_str!("x86_64/pc_relative.rs"),
     include_str!("aarch64/register_offset.rs"),
     include_str!("x86_64/register_offset.rs"),
     include_str!("../Cargo.toml"),

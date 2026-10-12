@@ -2,6 +2,7 @@
 use crate::{GuestAddress, Lifter, UnsupportedReason};
 pub mod conditional_select;
 pub mod multiply;
+pub mod pc_relative;
 pub mod register_offset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    PcRelative(pc_relative::Operand),
     ConditionalSelect(conditional_select::Operand),
     Multiply(multiply::Operand),
     MemoryRegisterOffset(register_offset::Operand),
@@ -231,6 +233,8 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if let Some(decoded) = pc_relative::decode(pc, word) {
+            Operation::PcRelative(decoded)
         } else if let Some(decoded) = conditional_select::decode(word) {
             Operation::ConditionalSelect(decoded)
         } else if let Some(decoded) = multiply::decode(word) {
