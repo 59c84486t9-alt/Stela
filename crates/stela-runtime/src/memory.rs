@@ -6,10 +6,15 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use std::fs::File;
 use std::marker::PhantomData;
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 pub const MAX_IMAGE_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+/// File-backed research mappings have a separate virtual-space budget. Safe
+/// snapshot/write operations retain the smaller MAX_IMAGE_MEMORY_BYTES bound.
+pub const MAX_FILE_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 // The initial x86-64 profile uses the lower, 48-bit canonical address range.
 const USER_ADDRESS_END: u64 = 1 << 47;
 
@@ -21,6 +26,69 @@ pub struct MemoryRegionSpec {
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
+}
+
+/// Exact-address private mapping of existing ordinary file bytes, without a
+/// heap copy or implicit guest-visible BSS. The logical extent must fit the file;
+/// host-page rounding may include the file's final partial page, whose padding
+/// is never exposed through the safe guest-memory API.
+///
+/// OwnedMemory retains the file descriptor. MAP_PRIVATE prevents our writes
+/// from modifying the file; it does not freeze unrelated writes/truncation to
+/// that inode. Source identity, provenance and stability for the entire mapping
+/// lifetime are the caller's responsibility. Truncation can cause native faults.
+#[derive(Debug)]
+pub struct FileMemoryRegionSpec {
+    pub guest_address: u64,
+    pub virtual_bytes: u64,
+    pub file: File,
+    pub file_offset: u64,
+    pub readable: bool,
+    pub writable: bool,
+    pub executable: bool,
+}
+
+enum InitialMemory {
+    Anonymous(Vec<u8>),
+    File { file: File, offset: u64 },
+}
+
+struct MappingSpec {
+    guest_address: u64,
+    virtual_bytes: u64,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+    initial: InitialMemory,
+}
+
+impl From<MemoryRegionSpec> for MappingSpec {
+    fn from(spec: MemoryRegionSpec) -> Self {
+        Self {
+            guest_address: spec.guest_address,
+            virtual_bytes: spec.virtual_bytes,
+            readable: spec.readable,
+            writable: spec.writable,
+            executable: spec.executable,
+            initial: InitialMemory::Anonymous(spec.initial_bytes),
+        }
+    }
+}
+
+impl From<FileMemoryRegionSpec> for MappingSpec {
+    fn from(spec: FileMemoryRegionSpec) -> Self {
+        Self {
+            guest_address: spec.guest_address,
+            virtual_bytes: spec.virtual_bytes,
+            readable: spec.readable,
+            writable: spec.writable,
+            executable: spec.executable,
+            initial: InitialMemory::File {
+                file: spec.file,
+                offset: spec.file_offset,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,6 +120,7 @@ impl MemoryRegion {
 #[derive(Debug)]
 pub struct OwnedMemory {
     regions: Vec<MemoryRegion>,
+    backing_files: Vec<File>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
@@ -72,7 +141,30 @@ fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
 }
 
 impl OwnedMemory {
-    pub fn map(mut specs: Vec<MemoryRegionSpec>) -> Result<Self> {
+    pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
+        Self::map_specs(
+            specs.into_iter().map(MappingSpec::from).collect(),
+            MAX_IMAGE_MEMORY_BYTES,
+        )
+    }
+
+    /// Map owned file-backed regions without copying their contents.
+    ///
+    /// # Safety
+    /// Every backing inode's contents and length must remain unchanged for the
+    /// complete lifetime of the returned owner, including during construction.
+    /// This excludes writes/truncation through other descriptors or processes;
+    /// private COW writes through this owner do not modify the backing inode.
+    /// Retained File handles and pre/post hashes cannot enforce this condition.
+    /// Changing a pathname to name another inode does not change the mapped one.
+    pub unsafe fn map_files(specs: Vec<FileMemoryRegionSpec>) -> Result<Self> {
+        Self::map_specs(
+            specs.into_iter().map(MappingSpec::from).collect(),
+            MAX_FILE_MEMORY_BYTES,
+        )
+    }
+
+    fn map_specs(mut specs: Vec<MappingSpec>, limit: u64) -> Result<Self> {
         ensure!(
             cfg!(all(
                 target_arch = "x86_64",
@@ -105,10 +197,40 @@ impl OwnedMemory {
             );
             usize::try_from(end).context("guest mapping exceeds native address range")?;
             ensure!(spec.guest_address >= previous_end, "guest mappings overlap");
-            ensure!(
-                spec.initial_bytes.len() as u64 <= spec.virtual_bytes,
-                "initial bytes exceed guest virtual size"
-            );
+            match &spec.initial {
+                InitialMemory::Anonymous(bytes) => ensure!(
+                    bytes.len() as u64 <= spec.virtual_bytes,
+                    "initial bytes exceed guest virtual size"
+                ),
+                InitialMemory::File { file, offset } => {
+                    ensure!(
+                        offset.is_multiple_of(page),
+                        "file mapping offset must be host-page aligned"
+                    );
+                    libc::off_t::try_from(*offset)
+                        .context("file mapping offset exceeds native range")?;
+                    let metadata = file.metadata().context("cannot inspect backing file")?;
+                    ensure!(metadata.is_file(), "file mapping requires an ordinary file");
+                    let file_end = offset
+                        .checked_add(spec.virtual_bytes)
+                        .context("file mapping extent overflow")?;
+                    ensure!(
+                        file_end <= metadata.len(),
+                        "file mapping exceeds backing file bytes"
+                    );
+                    // SAFETY: File owns a live descriptor; F_GETFL has no extra
+                    // arguments and does not mutate file contents or position.
+                    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+                    if flags == -1 {
+                        return Err(std::io::Error::last_os_error())
+                            .context("cannot inspect backing file access mode");
+                    }
+                    ensure!(
+                        flags & libc::O_ACCMODE != libc::O_WRONLY,
+                        "backing file descriptor is not readable"
+                    );
+                }
+            }
             ensure!(
                 !(spec.writable && spec.executable),
                 "writable guest code is unsupported"
@@ -120,37 +242,46 @@ impl OwnedMemory {
             total = total
                 .checked_add(mapped_bytes)
                 .context("guest mapping size overflow")?;
-            ensure!(
-                total <= MAX_IMAGE_MEMORY_BYTES,
-                "guest mappings exceed image memory limit"
-            );
+            ensure!(total <= limit, "guest mappings exceed memory limit");
             previous_end = end;
         }
 
         let mut memory = Self {
             regions: Vec::new(),
+            backing_files: Vec::new(),
             _not_send_sync: PhantomData,
         };
         for spec in specs {
             let mapped_bytes = page_rounded(spec.virtual_bytes, page)?;
             let length = mapped_bytes as usize;
             let requested = spec.guest_address as usize as *mut libc::c_void;
-            let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
+            let (source_flags, descriptor, file_offset, initial_bytes) = match &spec.initial {
+                InitialMemory::Anonymous(bytes) => (libc::MAP_ANON, -1, 0, bytes.len()),
+                InitialMemory::File { file, offset } => (
+                    0,
+                    file.as_raw_fd(),
+                    libc::off_t::try_from(*offset)
+                        .context("file mapping offset exceeds native range")?,
+                    usize::try_from(spec.virtual_bytes)?,
+                ),
+            };
+            let flags = libc::MAP_PRIVATE | source_flags;
             #[cfg(target_os = "linux")]
             // Linux >=4.17 refuses occupied addresses atomically. Older
             // kernels may ignore this flag; the exact-address check below
             // also handles that case without ever using MAP_FIXED.
             let flags = flags | libc::MAP_FIXED_NOREPLACE;
-            // SAFETY: anonymous private allocation, no host mapping replacement,
-            // validated bounded size. The returned pointer is checked before use.
+            // SAFETY: private allocation with no host mapping replacement and
+            // validated size/source extent. File descriptors remain owned and
+            // live. The returned pointer is checked before any byte access.
             let mapped = unsafe {
                 libc::mmap(
                     requested,
                     length,
                     libc::PROT_READ | libc::PROT_WRITE,
                     flags,
-                    -1,
-                    0,
+                    descriptor,
+                    file_offset,
                 )
             };
             if mapped == libc::MAP_FAILED {
@@ -173,21 +304,26 @@ impl OwnedMemory {
                 guest_address: spec.guest_address,
                 virtual_bytes: spec.virtual_bytes,
                 mapped_bytes,
-                initial_bytes: spec.initial_bytes.len(),
+                initial_bytes,
                 readable: spec.readable,
                 writable: spec.writable,
                 executable: spec.executable,
             });
-            // SAFETY: the exact anonymous allocation is RW, initial bytes fit,
-            // and the source Vec cannot overlap this freshly allocated range.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    spec.initial_bytes.as_ptr(),
-                    mapped.cast::<u8>(),
-                    spec.initial_bytes.len(),
-                );
+            match spec.initial {
+                InitialMemory::Anonymous(bytes) => {
+                    // SAFETY: this exact anonymous allocation is RW, bytes fit,
+                    // and the independent source Vec cannot overlap it.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            mapped.cast::<u8>(),
+                            bytes.len(),
+                        );
+                    }
+                    // Anonymous mmap supplies zeros for the virtual tail.
+                }
+                InitialMemory::File { file, .. } => memory.backing_files.push(file),
             }
-            // Anonymous mmap supplies zeros for the remaining virtual tail.
             let protection = if spec.readable {
                 libc::PROT_READ
             } else {
@@ -315,6 +451,7 @@ impl Drop for OwnedMemory {
 ))]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     fn spec(address: u64, size: u64) -> MemoryRegionSpec {
         MemoryRegionSpec {
@@ -360,6 +497,307 @@ mod tests {
             }
         }
         panic!("cannot allocate test guest mapping after 32 attempts");
+    }
+
+    fn file_spec(address: u64, size: u64, file: File, offset: u64) -> FileMemoryRegionSpec {
+        FileMemoryRegionSpec {
+            guest_address: address,
+            virtual_bytes: size,
+            file,
+            file_offset: offset,
+            readable: true,
+            writable: true,
+            executable: false,
+        }
+    }
+
+    fn backing_file(bytes: &[u8], size: u64) -> File {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file.set_len(size).unwrap();
+        file
+    }
+
+    fn allocate_files(
+        mut make: impl FnMut(u64, u64) -> Vec<FileMemoryRegionSpec>,
+        pages: usize,
+    ) -> OwnedMemory {
+        let page = host_page_size().unwrap();
+        for _ in 0..32 {
+            let address = candidate(page * pages);
+            // SAFETY: callers provide exclusively owned temporary backing files;
+            // no test modifies/truncates their mapped inodes while owners live.
+            if let Ok(memory) = unsafe { OwnedMemory::map_files(make(address, page as u64)) } {
+                return memory;
+            }
+        }
+        panic!("cannot allocate test file mapping after 32 attempts");
+    }
+
+    #[test]
+    fn file_offset_and_private_writes_preserve_original_file_bytes() {
+        let page = host_page_size().unwrap();
+        let mut bytes = vec![0xa5; page * 2];
+        bytes[page..page + 3].copy_from_slice(&[1, 2, 3]);
+        let mut file = backing_file(&bytes, bytes.len() as u64);
+        let mut memory = allocate_files(
+            |address, page| vec![file_spec(address, page, file.try_clone().unwrap(), page)],
+            1,
+        );
+        let address = memory.regions()[0].guest_address;
+        assert_eq!(memory.regions()[0].initial_bytes, page);
+        assert_eq!(memory.backing_files.len(), 1);
+        assert_eq!(memory.read_snapshot(address, 4).unwrap(), [1, 2, 3, 0xa5]);
+        memory.write(address + 1, &[8, 9]).unwrap();
+        assert_eq!(memory.read_snapshot(address, 4).unwrap(), [1, 8, 9, 0xa5]);
+        file.seek(SeekFrom::Start(page as u64)).unwrap();
+        let mut source = [0; 4];
+        file.read_exact(&mut source).unwrap();
+        assert_eq!(source, [1, 2, 3, 0xa5]);
+    }
+
+    #[test]
+    fn file_partial_page_eof_keeps_logical_guest_bounds() {
+        let page = host_page_size().unwrap();
+        let mut bytes = vec![0x6b; page + 3];
+        bytes[page..].copy_from_slice(&[4, 5, 6]);
+        let file = backing_file(&bytes, bytes.len() as u64);
+        let mut memory = allocate_files(
+            |address, page| vec![file_spec(address, page + 3, file.try_clone().unwrap(), 0)],
+            2,
+        );
+        let region = &memory.regions()[0];
+        let address = region.guest_address;
+        assert_eq!(region.mapped_bytes, 2 * page as u64);
+        assert_eq!(
+            memory.read_snapshot(address + page as u64, 3).unwrap(),
+            [4, 5, 6]
+        );
+        assert!(memory.read_snapshot(address + page as u64 + 3, 1).is_err());
+        assert!(memory.write(address + page as u64 + 3, &[1]).is_err());
+        memory.write(address + page as u64 + 2, &[42]).unwrap();
+        assert_eq!(
+            memory.read_snapshot(address + page as u64 + 2, 1).unwrap(),
+            [42]
+        );
+    }
+
+    #[test]
+    fn file_guest_code_and_noaccess_regions_never_receive_host_execute() {
+        let page = host_page_size().unwrap() as u64;
+        let file = backing_file(&[0x1f, 0x20, 0x03, 0xd5], page);
+        let mut memory = allocate_files(
+            |address, page| {
+                let mut code = file_spec(address, page, file.try_clone().unwrap(), 0);
+                code.writable = false;
+                code.executable = true;
+                let mut guard = file_spec(address + page, page, file.try_clone().unwrap(), 0);
+                guard.readable = false;
+                guard.writable = false;
+                vec![code, guard]
+            },
+            2,
+        );
+        let address = memory.regions()[0].guest_address;
+        assert_eq!(os_protection(address), libc::PROT_READ);
+        assert_eq!(os_protection(address + page), libc::PROT_NONE);
+        assert_eq!(
+            memory.read_snapshot(address, 4).unwrap(),
+            [0x1f, 0x20, 0x03, 0xd5]
+        );
+        assert!(memory.write(address, &[0]).is_err());
+        assert!(memory.read_snapshot(address + page, 1).is_err());
+        assert!(memory.write(address + page, &[0]).is_err());
+        assert!(memory.write(address + page - 1, &[1, 2]).is_err());
+        assert_eq!(memory.read_snapshot(address + page - 1, 1).unwrap(), [0]);
+    }
+
+    #[test]
+    fn file_mapping_budget_is_separate_from_bounded_copy_access() {
+        let page = host_page_size().unwrap();
+        let bytes = MAX_IMAGE_MEMORY_BYTES + page as u64;
+        let file = backing_file(&[], bytes);
+        let memory = allocate_files(
+            |address, _| vec![file_spec(address, bytes, file.try_clone().unwrap(), 0)],
+            bytes as usize / page,
+        );
+        let address = memory.regions()[0].guest_address;
+        assert_eq!(memory.regions()[0].virtual_bytes, bytes);
+        assert_eq!(memory.read_snapshot(address + bytes - 1, 1).unwrap(), [0]);
+        assert!(
+            memory
+                .read_snapshot(address, MAX_IMAGE_MEMORY_BYTES as usize + 1)
+                .is_err()
+        );
+        // SAFETY: an empty mapping set has no backing-inode lifetime obligation.
+        let empty = unsafe { OwnedMemory::map_files(vec![]) }.unwrap();
+        assert!(empty.regions().is_empty() && empty.backing_files.is_empty());
+    }
+
+    #[test]
+    fn invalid_file_extents_offsets_types_and_access_decline_before_mapping() {
+        let page = host_page_size().unwrap() as u64;
+        let file = backing_file(&[1, 2, 3], page);
+        let address = candidate(page as usize);
+        for (base, bytes, offset) in [
+            (0, page, 0),
+            (address + 1, page, 0),
+            (address, 0, 0),
+            (USER_ADDRESS_END, page, 0),
+            (address, page, 1),
+            (address, page + 1, 0),
+            (address, page, page),
+            (address, page, u64::MAX - page + 1),
+        ] {
+            // SAFETY: this test exclusively owns the unchanged temporary inode.
+            assert!(
+                unsafe {
+                    OwnedMemory::map_files(vec![file_spec(
+                        base,
+                        bytes,
+                        file.try_clone().unwrap(),
+                        offset,
+                    )])
+                }
+                .is_err()
+            );
+        }
+        let mut rwx = file_spec(address, page, file.try_clone().unwrap(), 0);
+        rwx.executable = true;
+        // SAFETY: this test exclusively owns the unchanged temporary inode.
+        assert!(unsafe { OwnedMemory::map_files(vec![rwx]) }.is_err());
+        let mut write_only_memory = file_spec(address, page, file.try_clone().unwrap(), 0);
+        write_only_memory.readable = false;
+        // SAFETY: this test exclusively owns the unchanged temporary inode.
+        assert!(unsafe { OwnedMemory::map_files(vec![write_only_memory]) }.is_err());
+        // SAFETY: the non-regular descriptor is declined before mapping.
+        assert!(
+            unsafe {
+                OwnedMemory::map_files(vec![file_spec(
+                    address,
+                    page,
+                    File::open("/dev/null").unwrap(),
+                    0,
+                )])
+            }
+            .is_err()
+        );
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        temporary.as_file().set_len(page).unwrap();
+        let write_only_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(temporary.path())
+            .unwrap();
+        // SAFETY: this test exclusively owns the unchanged temporary inode.
+        assert!(
+            unsafe { OwnedMemory::map_files(vec![file_spec(address, page, write_only_file, 0)]) }
+                .is_err()
+        );
+        // SAFETY: the cloned descriptors refer to one unchanged temporary inode.
+        assert!(
+            unsafe {
+                OwnedMemory::map_files(vec![
+                    file_spec(address, page, file.try_clone().unwrap(), 0),
+                    file_spec(address, page, file.try_clone().unwrap(), 0),
+                ])
+            }
+            .is_err()
+        );
+        let too_large = backing_file(&[], MAX_FILE_MEMORY_BYTES + page);
+        // SAFETY: this test exclusively owns the unchanged sparse temporary inode.
+        let error = unsafe {
+            OwnedMemory::map_files(vec![file_spec(
+                page,
+                MAX_FILE_MEMORY_BYTES + page,
+                too_large,
+                0,
+            )])
+        }
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("guest mappings exceed memory limit"));
+    }
+
+    #[test]
+    fn file_collision_preserves_existing_mapping_and_source() {
+        let occupied = allocate(|address, page| vec![spec(address, page)], 1);
+        let region = &occupied.regions()[0];
+        let file = backing_file(&[1, 2, 3], region.virtual_bytes);
+        // SAFETY: this test exclusively owns the unchanged temporary inode.
+        assert!(
+            unsafe {
+                OwnedMemory::map_files(vec![file_spec(
+                    region.guest_address,
+                    region.virtual_bytes,
+                    file,
+                    0,
+                )])
+            }
+            .is_err()
+        );
+        assert_eq!(
+            occupied.read_snapshot(region.guest_address, 3).unwrap(),
+            [7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn partial_file_mapping_failure_rolls_back_owned_ranges() {
+        for _ in 0..32 {
+            let occupied = allocate(|address, page| vec![spec(address + page, page)], 2);
+            let page = occupied.regions()[0].virtual_bytes;
+            let address = occupied.regions()[0].guest_address - page;
+            let file = backing_file(&[1, 2, 3], page);
+            // SAFETY: this test exclusively owns the unchanged temporary inode.
+            let error = unsafe {
+                OwnedMemory::map_files(vec![
+                    file_spec(address, page, file.try_clone().unwrap(), 0),
+                    file_spec(address + page, page, file.try_clone().unwrap(), 0),
+                ])
+            }
+            .unwrap_err();
+            assert_eq!(
+                occupied.read_snapshot(address + page, 3).unwrap(),
+                [7, 8, 9]
+            );
+            if !format!("{error:#}").contains(&format!("{:#x}", address + page)) {
+                continue;
+            }
+            // SAFETY: the temporary inode remains unchanged until restored drops.
+            if let Ok(restored) =
+                unsafe { OwnedMemory::map_files(vec![file_spec(address, page, file, 0)]) }
+            {
+                assert_eq!(restored.read_snapshot(address, 3).unwrap(), [1, 2, 3]);
+                return;
+            }
+        }
+        panic!("cannot verify file mapping rollback after 32 attempts");
+    }
+
+    #[test]
+    fn retained_file_descriptor_maps_original_inode_after_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&[1, 2, 3]).unwrap();
+        file.set_len(host_page_size().unwrap() as u64).unwrap();
+        drop(file);
+        let source = File::open(&path).unwrap();
+        let memory = allocate_files(
+            |address, page| vec![file_spec(address, page, source.try_clone().unwrap(), 0)],
+            1,
+        );
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, [4, 5, 6]).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert_eq!(
+            memory
+                .read_snapshot(memory.regions()[0].guest_address, 3)
+                .unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(std::fs::read(path).unwrap(), [4, 5, 6]);
+        // This only proves descriptor ownership. External writes/truncation to
+        // the original inode still require caller-side lifetime guards.
     }
 
     #[test]
