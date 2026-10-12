@@ -155,7 +155,19 @@ def memory_expectation(value):
     return address, expected
 
 
-def smoke(native=None, expected=42, expect_memory=()):
+def block_exit_expectation(value):
+    try:
+        pc, kind = (int(part, 0) for part in value.split("="))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected PC=KIND (decimal or hexadecimal)") from error
+    if not 0 <= pc < (1 << 64) or not 0 <= kind <= 5:
+        raise argparse.ArgumentTypeError("block PC must fit u64 and KIND must be in 0..5")
+    return pc, kind
+
+
+def smoke(native=None, expected=42, expect_memory=(), expect_block_exit=None):
+    if expect_block_exit is not None and native is None:
+        raise ValueError("block-exit checks require a native block fixture")
     args = command(paused=True, native=native)
     for port in (QMP_PORT, GDB_PORT):
         with socket.socket() as probe:
@@ -204,13 +216,44 @@ def smoke(native=None, expected=42, expect_memory=()):
                 if actual != value:
                     raise RuntimeError(f"Unexpected memory at {address:#x}: {actual:#x}, expected {value:#x}")
                 memory_checks.append({"address": address, "expected": value, "actual": actual, "observation": observation})
-            report = {"test": "x86_64_translated_leaf_fixture" if native else "x86_64_long_mode_fixture", "passed": True, "expected_result": expected,
+            observed_exit = None
+            exit_observations = None
+            if expect_block_exit is not None:
+                next_pc, pc_observation = physical_u64(monitor, 0x5010)
+                kind, kind_observation = physical_u64(monitor, 0x5018)
+                observed_exit = (next_pc, kind)
+                if observed_exit != expect_block_exit:
+                    raise RuntimeError(f"Unexpected native block exit: {observed_exit}, expected {expect_block_exit}")
+                exit_observations = {"next_pc_physical_address": 0x5010,
+                                     "kind_physical_address": 0x5018,
+                                     "next_pc": pc_observation, "kind": kind_observation}
+            test = ("x86_64_translated_block_fixture" if expect_block_exit is not None else
+                    "x86_64_translated_leaf_fixture" if native else "x86_64_long_mode_fixture")
+            report = {"test": test, "passed": True, "expected_result": expected,
                       "physical_memory": memory, "registers": registers, "debugger": "GDB remote stub handshake passed",
                       "qemu": subprocess.check_output([qemu_binary(), "--version"], text=True).splitlines()[0]}
             report["memory_checks"] = memory_checks
+            report["source_sha256"] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+                                       for name in ("dev/vm.py", "dev/vm/boot.S")}
+            report["boot_image_sha256"] = hashlib.sha256((STATE / "boot.img").read_bytes()).hexdigest()
+            report["boot_elf_sha256"] = hashlib.sha256((STATE / "boot.elf").read_bytes()).hexdigest()
+            if observed_exit is not None:
+                report["block_exit"] = observed_exit
+                report["expected_block_exit"] = expect_block_exit
+                report["block_exit_observations"] = exit_observations
+                report["limits"] = "Native block ABI/debugger proof only; no architectural exception entry, host syscall delivery or macOS boot."
             if native:
                 report["native_sha256"] = hashlib.sha256(Path(native).read_bytes()).hexdigest()
-            filename = "aot-smoke-report.json" if native else "smoke-report.json"
+                manifest = Path(native).parent / "manifest.json"
+                if manifest.is_file():
+                    manifest_bytes = manifest.read_bytes()
+                    receipt = json.loads(manifest_bytes)
+                    if receipt.get("native_sha256") != report["native_sha256"]:
+                        raise RuntimeError("Native fixture manifest hash does not match executed bytes")
+                    report["native_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+                    report["native_manifest"] = receipt
+            filename = ("block-smoke-report.json" if expect_block_exit is not None else
+                        "aot-smoke-report.json" if native else "smoke-report.json")
             write_evidence(STATE / filename,report)
             print(json.dumps(report, indent=2))
             monitor.execute("quit")
@@ -231,15 +274,19 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("build")
     run = sub.add_parser("run", help="start paused; GDB :1234, QMP :4444")
-    run.add_argument("--native", type=Path, help="AOT leaf native.bin to load at 0x10000")
+    run.add_argument("--native", type=Path, help="AOT leaf/block native.bin to load at 0x10000")
     smoke_parser = sub.add_parser("smoke", help="boot, inspect registers/memory, then stop QEMU")
     smoke_parser.add_argument("--native", type=Path)
     smoke_parser.add_argument("--expected", type=lambda value: int(value, 0), default=42)
     smoke_parser.add_argument("--expect-memory", type=memory_expectation, action="append", default=[], metavar="ADDRESS=VALUE")
+    smoke_parser.add_argument("--expect-block-exit", type=block_exit_expectation, metavar="PC=KIND",
+                              help="check native block RAX/RDX return tuple; requires --native")
     sub.add_parser("debug", help="attach LLDB and break at the native payload")
     inspect = sub.add_parser("monitor")
     inspect.add_argument("command", help="QEMU monitor command, e.g. 'info registers'")
     args = parser.parse_args()
+    if args.action == "smoke" and args.expect_block_exit is not None and args.native is None:
+        parser.error("--expect-block-exit requires --native")
     if args.action == "build":
         print(build())
     elif args.action == "run":
@@ -247,7 +294,7 @@ def main():
         args = command(native=args.native)
         os.execv(args[0], args)
     elif args.action == "smoke":
-        smoke(args.native, args.expected, args.expect_memory)
+        smoke(args.native, args.expected, args.expect_memory, args.expect_block_exit)
     elif args.action == "debug":
         commands = STATE / "debug.lldb"
         if not commands.exists():

@@ -66,6 +66,10 @@ payload:
     movq $0x6000, %rdi
     movq $0x10000, %rax
     call *%rax
+    /* Block ABI: preserve the RAX/RDX next-PC/kind tuple before leaf-result
+     * handling or debug-port writes clobber either return register. */
+    movq %rax, 0x5010
+    movq %rdx, 0x5018
     movq 0x6000, %rax
 #else
     movq $40, %rax
