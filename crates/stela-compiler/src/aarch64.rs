@@ -77,6 +77,14 @@ pub enum Operation {
         shift: Shift,
         amount: u8,
     },
+    AddSubCarry {
+        width: Width,
+        subtract: bool,
+        flags: bool,
+        destination: Register,
+        left: Register,
+        right: Register,
+    },
     LogicalRegister {
         width: Width,
         kind: Logical,
@@ -328,6 +336,15 @@ impl Lifter for Decoder {
                 bit: (((word >> 26) & 32) | ((word >> 19) & 31)) as u8,
                 nonzero: word & (1 << 24) != 0,
             }
+        } else if word & 0x1fe0fc00 == 0x1a000000 {
+            Operation::AddSubCarry {
+                width,
+                subtract: word & (1 << 30) != 0,
+                flags: word & (1 << 29) != 0,
+                destination: register(word & 31, false),
+                left: register((word >> 5) & 31, false),
+                right: register((word >> 16) & 31, false),
+            }
         } else if word & 0x1f200000 == 0x0b000000 {
             if shift == Shift::Ror || (width == Width::W32 && amount >= 32) {
                 return Err(unsupported());
@@ -421,6 +438,49 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn carry_operands_use_zero_and_require_the_exact_instruction_encoding() {
+        for width in [Width::W32, Width::X64] {
+            for subtract in [false, true] {
+                for flags in [false, true] {
+                    let word = (u32::from(width == Width::X64) << 31)
+                        | (u32::from(subtract) << 30)
+                        | (u32::from(flags) << 29)
+                        | 0x1a1f03ff;
+                    assert_eq!(
+                        Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                        Operation::AddSubCarry {
+                            width,
+                            subtract,
+                            flags,
+                            destination: Register::Zero,
+                            left: Register::Zero,
+                            right: Register::Zero,
+                        }
+                    );
+                    // Bits 15:10 are fixed, not a shift or ignored field.
+                    for reserved in 1..64 {
+                        assert!(
+                            Decoder
+                                .lift(GuestAddress(0), word | (reserved << 10))
+                                .is_err()
+                        );
+                    }
+                }
+            }
+        }
+        for word in [
+            0xd500401f, // CFINV
+            0xba008400, // RMIF
+            0x3a00080d, // SETF8
+            0x3a00480d, // SETF16
+            0x9a820020, // CSEL
+            0xfa420000, // CCMP
+        ] {
+            assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
+        }
+    }
+
     #[test]
     fn logical_immediate_masks_match_all_rotated_runs_and_reserved_encodings() {
         for (width, bits) in [(Width::W32, 32), (Width::X64, 64)] {

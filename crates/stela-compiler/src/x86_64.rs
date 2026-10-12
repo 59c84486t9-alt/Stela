@@ -337,6 +337,31 @@ impl Backend<Instruction> for Emitter {
                         &mut fixups,
                     );
                 }
+                Operation::AddSubCarry {
+                    width,
+                    subtract,
+                    flags,
+                    destination,
+                    left,
+                    right,
+                } => {
+                    load(code, left);
+                    right_operand(code, right, width, Shift::Lsl, 0);
+                    // Recover guest C after operand loads, including XOR-based
+                    // ZR loads that clobber host flags. SBC consumes !C as borrow.
+                    code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
+                    if subtract {
+                        code.push(0xf5); // cmc: ARM no-borrow -> x86 borrow
+                    }
+                    if width == Width::X64 {
+                        code.push(0x48);
+                    }
+                    code.extend([if subtract { 0x19 } else { 0x11 }, 0xc8]); // sbb/adc (e/r)ax,(e/r)cx
+                    store(code, destination);
+                    if flags {
+                        nzcv(code, subtract);
+                    }
+                }
                 Operation::AddSubRegister {
                     width,
                     subtract,
