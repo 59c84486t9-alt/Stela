@@ -38,6 +38,7 @@ jobs:
           - register-offset-differential
           - conditional-select-differential
           - multiply-differential
+          - pc-relative-differential
           - block-differential
     steps:
       - uses: actions/checkout@v4
