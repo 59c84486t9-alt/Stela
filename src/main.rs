@@ -226,6 +226,24 @@ enum Command {
         #[arg(long, value_parser = parse_address)]
         cache_base: Option<u64>,
     },
+    /// Execute complete original cached register-only functions against case inputs.
+    ProbeCachedFunctions {
+        input: PathBuf,
+        #[arg(long)]
+        image: String,
+        #[arg(long, value_parser = parse_cached_function, required = true)]
+        function: Vec<macho::cached_functions::FunctionInput>,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        cache_base: Option<u64>,
+        #[arg(long, default_value = "0x220000100000", value_parser = parse_address)]
+        stop_pc: u64,
+        #[arg(long, default_value_t = 128)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -286,6 +304,17 @@ fn parse_address(value: &str) -> Result<u64, String> {
         value.parse()
     }
     .map_err(|e| e.to_string())
+}
+
+fn parse_cached_function(value: &str) -> Result<macho::cached_functions::FunctionInput, String> {
+    let (symbol, cases) = value.split_once('=').ok_or("expected SYMBOL=CASES_JSON")?;
+    if symbol.is_empty() || symbol.len() > 4096 || cases.is_empty() {
+        return Err("expected a bounded nonempty symbol and case-file path".into());
+    }
+    Ok(macho::cached_functions::FunctionInput {
+        symbol: symbol.into(),
+        cases: cases.into(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1086,6 +1115,36 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 serde_json::json!({"report":output,"complete_binary_verified":false})
+            );
+        }
+        Command::ProbeCachedFunctions {
+            input,
+            image,
+            function,
+            output,
+            cache_base,
+            stop_pc,
+            block_budget,
+            cache_dir,
+        } => {
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            let mut report = macho::cached_functions::probe(
+                &input,
+                &image,
+                cache_base,
+                &function,
+                stop_pc,
+                block_budget,
+                &cache_dir,
+            )?;
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"total_cases":report["total_cases"],
+                "complete_binary_verified":false})
             );
         }
         Command::BinaryText { input } => {
