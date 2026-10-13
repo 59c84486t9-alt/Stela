@@ -17,7 +17,7 @@ import tempfile
 
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_MEM_INVALID, UC_PROT_READ
 from unicorn import arm64_const as arm
-from differential import compiler_cli, ROOT, BASE, State, ARM_REGISTERS, move
+from differential import initialize_arm, capture_arm, parse_fault_record, compiler_cli, ROOT, BASE, State, ARM_REGISTERS, move
 from evidence import write_evidence
 
 spec = importlib.util.spec_from_file_location("memory_suite", ROOT / "dev/memory-differential.py")
@@ -36,10 +36,7 @@ def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly
         machine.mem_protect(ram_address + page_size, page_size, UC_PROT_READ)
     if readonly:
         machine.mem_protect(ram_address, page_size, UC_PROT_READ)
-    for register, value in zip(ARM_REGISTERS, initial.x):
-        machine.reg_write(register, value)
-    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
-    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    initialize_arm(machine, initial)
     faults = []
     def fault(machine, access, address, size, value, _):
         faults.append({"access": access, "address": address, "size": size, "pc": machine.reg_read(arm.UC_ARM64_REG_PC)})
@@ -52,11 +49,7 @@ def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly
             raise
     if not faults:
         raise AssertionError("ARM reference did not fault")
-    final = State()
-    for index, register in enumerate(ARM_REGISTERS):
-        final.x[index] = machine.reg_read(register)
-    final.sp = machine.reg_read(arm.UC_ARM64_REG_SP)
-    final.nzcv = machine.reg_read(arm.UC_ARM64_REG_NZCV)
+    final = capture_arm(machine, initial)
     return final, bytes(machine.mem_read(ram_address, observed_bytes)), faults
 
 
@@ -109,11 +102,7 @@ def main():
             compiler = manifest["compiler_source_sha256"]
             pre_offset = case["offset"] if case["mode"] in ("pre", "unscaled") else 0
             data = subprocess.check_output([str(observer), str(output / "native.bin"), case["protection"], str(case["rn"]), str(pre_offset)], timeout=10)
-            code_address, ram_address, page_size = struct.unpack_from("<3Q", data)
-            initial = State.from_buffer_copy(data[24:288])
-            number, native_pc, fault_address = struct.unpack_from("<3Q", data, 288)
-            final = State.from_buffer_copy(data[312:576])
-            ram = data[576:]
+            (code_address, ram_address, page_size), initial, (number, native_pc, fault_address), final, ram = parse_fault_record(data)
             if len(ram) != page_size:
                 raise AssertionError("Truncated fault observer output")
             if number == 0:

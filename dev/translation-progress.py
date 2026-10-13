@@ -17,7 +17,7 @@ from evidence import write_evidence
 ROOT = Path(__file__).resolve().parents[1]
 STATUSES = ('implemented', 'partial', 'unsupported')
 RET = 0xd65f03c0
-BLOCK_ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
+BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 
 
 def sha256(path):

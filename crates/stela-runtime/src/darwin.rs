@@ -286,6 +286,14 @@ mod tests {
         for index in 0..31 {
             registers.x[index] = 0xdeadbeef12340000 + index as u64;
         }
+        registers.v = std::array::from_fn(|index| {
+            [
+                0x0123456789abcdefu64.rotate_left(index as u32),
+                0xfedcba9876543210u64.rotate_right(index as u32),
+            ]
+        });
+        registers.fpcr = 0xa5c39e71 ^ flags;
+        registers.fpsr = 0x5a3c618e ^ flags;
         registers.x[16] = selector;
         ThreadState {
             registers,
@@ -513,7 +521,7 @@ mod tests {
 
     #[test]
     fn state_drift_invalid_errno_and_just_return_fail_atomically() {
-        for change in 0..6 {
+        for change in 0..9 {
             let mut input = state(4, 15);
             let pending =
                 PendingBsdCall::from_trap(&input, &trap(), prototype(BsdReturnType::SignedSize, 3))
@@ -524,7 +532,10 @@ mod tests {
                 2 => input.registers.x[16] ^= 1,
                 3 => input.registers.sp += 16,
                 4 => input.registers.nzcv ^= CARRY,
-                _ => input.registers.reserved ^= 1,
+                5 => input.registers.reserved ^= 1,
+                6 => input.registers.v[31][1] ^= 1,
+                7 => input.registers.fpcr ^= 1,
+                _ => input.registers.fpsr ^= 1,
             }
             let changed = input.clone();
             assert_eq!(

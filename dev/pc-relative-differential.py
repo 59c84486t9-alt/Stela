@@ -18,6 +18,7 @@ import time
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
 from unicorn import arm64_const as arm
+from differential import capture_arm, initialize_arm, state_dict as complete_state
 from differential import ROOT, MASK, ARM_REGISTERS, State, executable, states, arithmetic
 from evidence import write_evidence
 
@@ -86,7 +87,7 @@ def cases():
 
 
 def snapshot(state):
-    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+    return complete_state(state)
 
 
 def mathematical_reference(case, initial):
@@ -109,20 +110,14 @@ def mathematical_reference(case, initial):
 
 
 def original_arm(machine, case, initial):
-    for register, value in zip(ARM_REGISTERS, initial.x):
-        machine.reg_write(register, value)
-    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
-    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    initialize_arm(machine, initial)
     # Execute the actual address instructions, stopping before the harness-owned
     # RET. X30 is free to be an instruction destination and may be noncanonical.
     end = case['base'] + len(case['operations']) * 4
     machine.emu_start(case['base'], end, count=len(case['operations']))
     if machine.reg_read(arm.UC_ARM64_REG_PC) != end:
         raise AssertionError('ARM reference did not reach the expected leaf boundary')
-    return {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
-            'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
-            'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
-            'reserved': initial.reserved}
+    return complete_state(capture_arm(machine, initial))
 
 
 def execute_cases(compiled):
@@ -240,7 +235,7 @@ def main():
               'operations': ['ADR', 'ADRP'],
               'reference': 'Unicorn ARM64 2.1.4 and independent unbounded fixture arithmetic',
               'native': 'baseline x86-64 leaf and block ABIs in isolated worker',
-              'tested_state': ['x0..x30', 'SP, NZCV and reserved-word preservation', 'all 16 incoming NZCV combinations',
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP, NZCV and reserved-word preservation', 'all 16 incoming NZCV combinations',
                                'all destinations including discarded XZR', 'dirty GPR upper halves', 'per-instruction guest PC and source maps',
                                '4 KiB ADRP granule across 4 KiB and 16 KiB boundaries', 'signed 21-bit extrema and immlo combinations',
                                'address result consumption and repeated destination writes', 'native block RET result after X30 replacement'],

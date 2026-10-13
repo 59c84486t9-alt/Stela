@@ -398,10 +398,18 @@ struct RegisterInput {
     nzcv: u32,
     #[serde(default)]
     reserved: u32,
+    /// Little-endian low/high 64-bit limbs of each architectural V register.
+    #[serde(default)]
+    v: [[u64; 2]; 32],
+    #[serde(default)]
+    fpcr: u32,
+    #[serde(default)]
+    fpsr: u32,
 }
 
 fn register_json(state: &stela_compiler::GuestState) -> serde_json::Value {
-    serde_json::json!({"x":state.x,"sp":state.sp,"nzcv":state.nzcv,"reserved":state.reserved})
+    serde_json::json!({"x":state.x,"sp":state.sp,"nzcv":state.nzcv,"reserved":state.reserved,
+        "v":state.v,"fpcr":state.fpcr,"fpsr":state.fpsr})
 }
 
 fn apple_slice<'a>(
@@ -647,6 +655,9 @@ fn run() -> Result<()> {
                     },
                     nzcv: registers.nzcv,
                     reserved: registers.reserved,
+                    v: registers.v,
+                    fpcr: registers.fpcr,
+                    fpsr: registers.fpsr,
                 },
             };
             thread.registers.x[30] = stop_pc;
@@ -769,6 +780,9 @@ fn run() -> Result<()> {
                     sp: registers.sp,
                     nzcv: registers.nzcv,
                     reserved: registers.reserved,
+                    v: registers.v,
+                    fpcr: registers.fpcr,
+                    fpsr: registers.fpsr,
                 },
             };
             if !provided_state {
@@ -867,6 +881,9 @@ fn run() -> Result<()> {
                     sp: registers.sp,
                     nzcv: registers.nzcv,
                     reserved: registers.reserved,
+                    v: registers.v,
+                    fpcr: registers.fpcr,
+                    fpsr: registers.fpsr,
                 },
             };
             let source = std::fs::read(input)?;
@@ -1510,5 +1527,38 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod register_state_tests {
+    use super::*;
+
+    #[test]
+    fn research_state_json_retains_vector_bits_and_fp_status() -> Result<()> {
+        let mut state = stela_compiler::GuestState::default();
+        state.v[0] = [u64::MAX, 0x7ff8000000001234];
+        state.v[31] = [0x0123456789abcdef, 0xfedcba9876543210];
+        state.fpcr = 0x03c00000;
+        state.fpsr = 0x0800009f;
+        let input: RegisterInput = serde_json::from_value(register_json(&state))?;
+        assert_eq!(input.v, state.v);
+        assert_eq!(input.fpcr, state.fpcr);
+        assert_eq!(input.fpsr, state.fpsr);
+        // Scalar-only older inputs are accepted with explicitly zero initial SIMD state.
+        let scalar: RegisterInput = serde_json::from_value(serde_json::json!({"x":([0u64;31])}))?;
+        assert_eq!(scalar.v, [[0; 2]; 32]);
+        assert_eq!((scalar.fpcr, scalar.fpsr), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn research_state_rejects_truncated_vectors_and_unknown_fields() {
+        for value in [
+            serde_json::json!({"x":([0u64;31]),"v":[[0,0]]}),
+            serde_json::json!({"x":([0u64;31]),"fpcrr":0}),
+        ] {
+            assert!(serde_json::from_value::<RegisterInput>(value).is_err());
+        }
     }
 }

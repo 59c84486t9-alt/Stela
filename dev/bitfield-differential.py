@@ -24,13 +24,14 @@ from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
 from unicorn import arm64_const as arm
 import unicorn
 
+from differential import initialize_arm, capture_arm, state_dict as complete_state
 from differential import ROOT, BASE, MASK, ARM_REGISTERS, State, executable
 from evidence import write_evidence
 
 RET = 0xd65f03c0
 STOP = 0x700000
-LEAF_ABI = 'x86_64-sysv-guest-state-v2-direct-ram'
-BLOCK_ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
+LEAF_ABI = 'x86_64-sysv-guest-state-v3-direct-ram'
+BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 FORMS = {'SBFM32': 0x13000000, 'BFM32': 0x33000000, 'UBFM32': 0x53000000,
          'SBFM64': 0x93400000, 'BFM64': 0xb3400000, 'UBFM64': 0xd3400000}
 ROLES = {'distinct': (0, 1), 'alias': (7, 7), 'zero_source': (30, 31), 'discard': (31, 1)}
@@ -258,20 +259,16 @@ def compile_batch(cli, directory, functions, index, block=False):
 
 
 def original_state(machine, initial, start, instruction_count, block):
-    machine.reg_write_batch(list(zip(REGISTERS, [*initial.x, initial.sp, initial.nzcv])))
+    initialize_arm(machine, initial)
     end = STOP if block else start + instruction_count * 4
     machine.emu_start(start, end, count=instruction_count + int(block))
     if machine.reg_read(arm.UC_ARM64_REG_PC) != end:
         raise AssertionError('Original ARM did not reach the exact owned return boundary')
-    values = machine.reg_read_batch(REGISTERS)
-    state = State()
-    state.x[:] = values[:31]
-    state.sp, state.nzcv, state.reserved = values[31], values[32], initial.reserved
-    return state
+    return capture_arm(machine, initial)
 
 
 def describe(state):
-    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+    return complete_state(state)
 
 
 def execute_batches(batches, progress):
@@ -408,7 +405,7 @@ def main():
               'reference': f'Unchanged original ARM instructions in Unicorn {unicorn.__version__}; independent per-bit linear field copy/sign-fill oracle',
               'native': 'Direct baseline x86-64 leaf mini-functions and block ABI in a bounded isolated process',
               'incoming_nzcv_combinations': 16, 'roles': ROLES,
-              'tested_state': ['all 31 GPRs, SP, all saved NZCV bits and ABI reserved field',
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'all 31 GPRs, SP, all saved NZCV bits and ABI reserved field',
                                'every valid immr/imms in SBFM/BFM/UBFM W32 and X64',
                                'each result observed separately, including zero and aliased operands',
                                'deliberately dirty W source/destination upper halves',

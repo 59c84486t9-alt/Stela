@@ -45,6 +45,8 @@
     "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
+    "crates/stela-compiler/src/aarch64/simd.rs",
+    "crates/stela-compiler/src/x86_64/simd.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
@@ -52,7 +54,7 @@
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
-    "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+    "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
     "description": "Reviewed ordinary control-flow forms under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind is returned in RAX/RDX. The mapped guest code/address profile is nonwrapping, GCS disabled, executable pages unguarded and ordinary data addresses use private direct RAM. SVC/BRK partially support a precise typed boundary: native kind 5 returns the instruction PC, and immutable source decoding retains kind, imm16 and the preferred exception return PC. Architectural exception entry is pending.",
     "outside_scope": [
       "PAC and tagged/authenticated pointers",
@@ -68,7 +70,7 @@
       "harness": "dev/block-differential.py",
       "report": ".stela/block-differential-report.json",
       "kind": "arm64_block_control_flow_differential",
-      "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
       "required_shared_sources": [
         "dev/differential.py",
         "crates/stela-runtime/src/blocks.rs",
@@ -80,7 +82,7 @@
       "harness": "dev/block-differential.py",
       "report": ".stela/block-differential-report.json",
       "kind": "arm64_block_control_flow_differential",
-      "abi": "x86_64-sysv-guest-state-v1-block-exit-direct-ram",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
       "required_shared_sources": [
         "dev/differential.py",
         "crates/stela-runtime/src/blocks.rs",

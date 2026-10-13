@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from differential import state_dict as complete_state
 from differential import ROOT, State, arithmetic, native, reference, states
 from evidence import write_evidence
 
@@ -90,7 +91,7 @@ def mathematical_reference(words, initial):
             value = (first if holds((word >> 12) & 15, nzcv) else false_values[operation]) & mask
         if destination != 31:
             registers[destination] = value
-    return {'x': registers, 'sp': initial.sp, 'nzcv': nzcv}
+    return {**complete_state(initial), 'x': registers, 'sp': initial.sp, 'nzcv': nzcv}
 
 
 def execute_cases(compiled):
@@ -186,7 +187,7 @@ def main():
               'operations': ['CSEL', 'CSINC/CINC/CSET', 'CSINV/CINV/CSETM', 'CSNEG/CNEG'],
               'reference': 'Unicorn ARM64 2.1.4 and independent Boolean/integer arithmetic',
               'native': 'branchless baseline x86-64 selection in isolated worker',
-              'tested_state': ['x0..x30', 'SP and NZCV preservation', 'all 16 conditions including AL/NV',
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP and NZCV preservation', 'all 16 conditions including AL/NV',
                                'all 16 incoming NZCV combinations', 'freshly generated guest flags',
                                'W32 upper-half clearing', 'ZR sources and discarded destinations',
                                'source/destination overlap', 'increment and negation wraparound'],

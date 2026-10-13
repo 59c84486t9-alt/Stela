@@ -10,7 +10,7 @@ import struct
 import subprocess
 import tempfile
 
-from differential import compiler_cli, ROOT, BASE, State, move
+from differential import parse_fault_record, compiler_cli, ROOT, BASE, State, move
 from evidence import write_evidence
 
 
@@ -93,11 +93,7 @@ def main():
             compiler = manifest["compiler_source_sha256"]
             data = subprocess.check_output([str(observer), str(output / "native.bin"), case["protection"],
                                             str(case["rn"]), str(displacement)], timeout=10)
-            code_address, ram_address, page_size = struct.unpack_from("<3Q", data)
-            initial = State.from_buffer_copy(data[24:288])
-            number, native_pc, fault_address = struct.unpack_from("<3Q", data, 288)
-            final = State.from_buffer_copy(data[312:576])
-            ram = data[576:]
+            (code_address, ram_address, page_size), initial, (number, native_pc, fault_address), final, ram = parse_fault_record(data)
             if len(ram) != page_size or number == 0:
                 raise AssertionError(f"Missing fault or truncated observer output: {case}")
             native_offset = native_pc - code_address

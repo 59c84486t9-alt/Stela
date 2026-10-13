@@ -55,6 +55,14 @@ fn state(value: u64, flags: u32) -> ThreadState {
             .wrapping_mul(index as u64 + 1)
             .rotate_left(flags);
     }
+    registers.v = std::array::from_fn(|index| {
+        [
+            0x0123456789abcdefu64.rotate_left(index as u32),
+            0xfedcba9876543210u64.rotate_right(index as u32),
+        ]
+    });
+    registers.fpcr = 0xa5c39e71 ^ flags;
+    registers.fpsr = 0x5a3c618e ^ flags;
     registers.x[0] = value;
     registers.x[30] = STOP;
     ThreadState {

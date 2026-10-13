@@ -24,6 +24,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/pc_relative.rs"),
     include_str!("aarch64/register_offset.rs"),
     include_str!("x86_64/register_offset.rs"),
+    include_str!("aarch64/simd.rs"),
+    include_str!("x86_64/simd.rs"),
     include_str!("../Cargo.toml"),
     include_str!("../../../Cargo.lock"),
 );
@@ -68,11 +70,13 @@ pub struct NativeBlock {
 }
 
 /// Native code requires the direct ordinary-RAM profile documented in compiler.md.
-pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v2-direct-ram";
+pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v3-direct-ram";
 
-/// Native ABI v2: System V x86-64 `void function(GuestState *state)`.
+/// Native ABI v3: System V x86-64 `void function(GuestState *state)`.
 /// Registers are initially memory-backed; register allocation is future work.
 /// Only NZCV bits 31:28 are modeled, not the complete PSTATE register.
+/// V registers are little-endian low/high 64-bit limbs. FPCR/FPSR are opaque
+/// preserved state; their storage does not implement floating-point arithmetic.
 #[repr(C)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestState {
@@ -80,6 +84,9 @@ pub struct GuestState {
     pub sp: u64,
     pub nzcv: u32,
     pub reserved: u32,
+    pub v: [[u64; 2]; 32],
+    pub fpcr: u32,
+    pub fpsr: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,9 +157,16 @@ mod tests {
     use super::*;
     #[test]
     fn guest_state_layout_is_the_native_abi() {
-        assert_eq!(std::mem::size_of::<GuestState>(), 264);
+        assert_eq!(std::mem::size_of::<GuestState>(), 784);
+        assert_eq!(std::mem::align_of::<GuestState>(), 8);
+        assert_eq!(std::mem::offset_of!(GuestState, x), 0);
         assert_eq!(std::mem::offset_of!(GuestState, sp), 248);
         assert_eq!(std::mem::offset_of!(GuestState, nzcv), 256);
+        assert_eq!(std::mem::offset_of!(GuestState, reserved), 260);
+        assert_eq!(std::mem::offset_of!(GuestState, v), 264);
+        assert_eq!(std::mem::size_of::<[[u64; 2]; 32]>(), 512);
+        assert_eq!(std::mem::offset_of!(GuestState, fpcr), 776);
+        assert_eq!(std::mem::offset_of!(GuestState, fpsr), 780);
     }
     #[test]
     fn rejects_unknown_instructions_bad_boundaries_and_address_overflow() {

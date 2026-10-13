@@ -20,6 +20,7 @@ from unicorn import (
 from unicorn import arm64_const as arm
 
 from evidence import write_evidence
+from differential import State, state_dict, capture_arm, initialize_extended_arm
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,7 @@ def guest_state(data, pc=None):
             "sp": u64(data, 0x100),
             "nzcv": u32(data, 0x110),
             "reserved": u32(data, 0x114),
+            "v": [[0, 0] for _ in range(32)], "fpcr": 0, "fpsr": 0,
         },
         "pc": u64(data, 0x108) if pc is None else pc,
     }
@@ -80,15 +82,7 @@ def guest_state(data, pc=None):
 def cpu_state(uc):
     """Actual modeled CPU fields, distinct from the saved guest-state buffer."""
     return {
-        "registers": {
-            "x": [
-                uc.reg_read(getattr(arm, "UC_ARM64_REG_X" + str(index)))
-                for index in range(31)
-            ],
-            "sp": uc.reg_read(arm.UC_ARM64_REG_SP),
-            "nzcv": uc.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
-            "reserved": CPU_RESERVED,
-        },
+        "registers": state_dict(capture_arm(uc, reserved=CPU_RESERVED)),
         "pc": uc.reg_read(arm.UC_ARM64_REG_PC),
     }
 
@@ -204,6 +198,13 @@ class FormatterProbe:
                 getattr(arm, "UC_ARM64_REG_X" + str(index)),
                 (0x456789ab00000000 + index * 0x10101) & MASK64,
             )
+        extended = State()
+        for index in range(32):
+            low, high = 0x0123456789abcdef, 0xfedcba9876543210
+            extended.v[index][:] = [((low << index) | (low >> ((64 - index) % 64))) & MASK64,
+                                    ((high >> index) | (high << ((64 - index) % 64))) & MASK64]
+        extended.fpcr, extended.fpsr = 0x03c00000, 0x0800001f
+        initialize_extended_arm(self.uc, extended)
         self.uc.reg_write(arm.UC_ARM64_REG_SP, 0x40400000)
         self.uc.reg_write(arm.UC_ARM64_REG_PSTATE, 0x3c5)
         self.uc.reg_write(arm.UC_ARM64_REG_X19, SAVED)

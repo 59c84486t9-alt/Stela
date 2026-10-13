@@ -349,12 +349,20 @@ fn states(addresses: Addresses) -> Vec<GuestState> {
                 sp: addresses.stack_top,
                 nzcv: flags << 28,
                 reserved: 0xa5c39e71,
+                fpcr: (flags & 3) << 22,
+                fpsr: flags & 0x1f,
                 ..GuestState::default()
             };
             for index in 0..31 {
                 state.x[index] = 0xdeadbeef12345678u64
                     .wrapping_mul(index as u64 + 1)
                     .rotate_left(flags * 3);
+            }
+            for (index, vector) in state.v.iter_mut().enumerate() {
+                *vector = [
+                    0x0123456789abcdefu64.rotate_left(flags + index as u32),
+                    0xfedcba9876543210u64.rotate_right(flags + index as u32),
+                ];
             }
             state.x[0] = [
                 0,
@@ -979,7 +987,7 @@ pub fn run(main: &Path, library: &Path, output: &Path) -> Result<()> {
         "inputs":[{"path":main,"container_sha256":inputs[0].container_hash,"slice_sha256":sha256(&inputs[0].data),"text_sha256":inputs[0].text_hash},
                   {"path":library,"container_sha256":inputs[1].container_hash,"slice_sha256":sha256(&inputs[1].data),"text_sha256":inputs[1].text_hash}],
         "placements":BASES,"addresses":addresses,"image_receipts":receipts,"translation_cache_receipts":cache_receipts(cache.path())?,
-        "verification":{"preflight_full_state_memory_comparisons":34,"modeled_state":"all 31 GPRs, SP, NZCV, reserved and actual return PC", "data_bytes_per_comparison":131072,"stack_frame_bytes_per_comparison":16,
+        "verification":{"preflight_full_state_memory_comparisons":34,"modeled_state":"all 31 GPRs, SP, NZCV, reserved, 32 V registers, FPCR, FPSR and actual return PC", "data_bytes_per_comparison":131072,"stack_frame_bytes_per_comparison":16,
                         "instruction_count_per_entry":21,"native_blocks_per_entry":3,"batch_checksum_and_final_full_state_memory_verified":true,
                         "checksum":"iteration index salt, rotated state samples and wrapping multiply/add"},
         "cold":{"fresh_load_plan_bind_map_ns":cold_load_ns,"first_compile_dispatch_ns":cold_first_run_ns,"combined_ns":cold_load_ns+cold_first_run_ns,"outcome":first},

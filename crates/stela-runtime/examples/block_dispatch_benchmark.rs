@@ -49,6 +49,14 @@ fn initial_state(count: u64, run_id: u64) -> ThreadState {
             .rotate_left(index as u32)
             .wrapping_add(run_id);
     }
+    registers.v = std::array::from_fn(|index| {
+        [
+            0x0123456789abcdefu64.rotate_left(index as u32) ^ run_id,
+            0xfedcba9876543210u64.rotate_right(index as u32) ^ run_id,
+        ]
+    });
+    registers.fpcr = 0xa5c39e71 ^ run_id as u32;
+    registers.fpsr = 0x5a3c618e ^ run_id as u32;
     registers.x[0] = count;
     registers.x[30] = STOP.0;
     ThreadState {

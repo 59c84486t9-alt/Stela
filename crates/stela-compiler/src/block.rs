@@ -13,7 +13,7 @@ use crate::{
 use serde::Serialize;
 
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
-pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v1-block-exit-direct-ram";
+pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
 /// Maximum input window; a terminator can consume a shorter prefix.
 pub const MAX_BLOCK_INSTRUCTIONS: usize = 256;
 

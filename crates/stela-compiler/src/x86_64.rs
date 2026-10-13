@@ -14,6 +14,7 @@ mod conditional_select;
 mod integer_math;
 mod pc_relative;
 mod register_offset;
+mod simd;
 
 fn offset(register: Register) -> Option<u32> {
     match register {
@@ -274,6 +275,7 @@ fn emit_instruction(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) {
     match instruction.operation {
+        Operation::Simd(operand) => simd::emit(code, &operand),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),

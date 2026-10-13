@@ -22,6 +22,7 @@ import struct
 import subprocess
 import time
 
+from differential import state_dict as complete_state
 from differential import BASE, MASK, ROOT, State, executable, reference, states
 from evidence import write_evidence
 
@@ -114,8 +115,7 @@ def prepare(artifact_root, clang):
 
 
 def state_result(state, ram):
-    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv,
-            "reserved": state.reserved, "memory": bytes(ram)}
+    return {**complete_state(state), 'memory': bytes(ram)}
 
 
 def initial_state(original, address, count, seed=None):

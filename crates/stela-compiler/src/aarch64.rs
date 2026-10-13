@@ -5,6 +5,7 @@ pub mod conditional_select;
 pub mod integer_math;
 pub mod pc_relative;
 pub mod register_offset;
+pub mod simd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
@@ -56,6 +57,7 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    Simd(simd::Operand),
     Bitfield(bitfield::Operand),
     PcRelative(pc_relative::Operand),
     ConditionalSelect(conditional_select::Operand),
@@ -243,6 +245,8 @@ impl Lifter for Decoder {
             Operation::ConditionalSelect(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = simd::decode(word) {
+            Operation::Simd(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = register_offset::decode(word) {
             Operation::MemoryRegisterOffset(decoded.map_err(|()| unsupported())?)
         } else if word & 0x3e000000 == 0x28000000 {
@@ -604,7 +608,7 @@ mod tests {
             0xf9c00000, // unallocated signed doubleword
             0xf8400800, // LDTR: unprivileged access is a different policy
             0xf8000800, // STTR
-            0x3d400000, // SIMD/FP LDR
+            0x3cc00800, // SIMD unprivileged/reserved mode
             0xf8400c00, // pre-index LDR with base/target overlap
             0xf8400400, // post-index LDR with base/target overlap
             0xf8000c00, // pre-index STR with base/target overlap
@@ -616,6 +620,11 @@ mod tests {
         assert!(Decoder.lift(GuestAddress(0), 0xf9400000).is_ok());
         // Rt=31 is ZR, Rn=31 is SP; they do not overlap.
         assert!(Decoder.lift(GuestAddress(0), 0xf8400fff).is_ok());
+        // SIMD Rt0 is V0, independent of the X0 address/writeback register.
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0x3c400c00).unwrap().operation,
+            Operation::Simd(simd::Operand::Memory { .. })
+        ));
     }
 
     #[test]

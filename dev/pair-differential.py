@@ -177,12 +177,12 @@ def main():
         result = bounded_cases(compiled)
     report = {"kind": "integer_pairs_arm_vs_native_x86", "passed": True, **result,
               "reference": "Unicorn ARM64 2.1.4", "native": "direct x86-64 calls in isolated worker",
-              "tested_state": ["x0..x30", "SP", "all 16 NZCV combinations", "all 65536 mapped RAM bytes"],
+              "tested_state": ["V0..V31, FPCR and FPSR preservation", "x0..x30", "SP", "all 16 NZCV combinations", "all 65536 mapped RAM bytes"],
               "corpus_sha256": corpus.hexdigest(), "compiler_source_sha256": compiler,
               "compiler_executable_sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
               "harness_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "shared_runner_sha256": hashlib.sha256((ROOT / "dev/differential.py").read_bytes()).hexdigest(),
-              "limits": "Private ordinary RAM with identical guest/native addresses and enabled SP alignment checks. No concurrency or FEAT_LSE2 single-copy atomicity, MMIO, SIMD, guest exception delivery or OS boot. Fault tests are separate."}
+              "limits": "Private ordinary RAM with identical guest/native addresses and enabled SP alignment checks. No concurrency or FEAT_LSE2 single-copy atomicity, MMIO, SIMD instructions, guest exception delivery or OS boot. Fault tests are separate."}
     write_evidence(ROOT / ".stela/pair-differential-report.json", report)
     print(json.dumps(report, indent=2))
 

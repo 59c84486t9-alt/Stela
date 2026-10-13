@@ -13,7 +13,7 @@ import struct
 import subprocess
 import tempfile
 
-from differential import compiler_cli, ROOT, BASE, State, move
+from differential import parse_fault_record, compiler_cli, ROOT, BASE, State, move
 from evidence import write_evidence
 
 
@@ -79,11 +79,7 @@ def main():
             if case["protection"] in ("pair_second", "pair_readonly"):
                 arguments.append(str(case["bytes"]))
             data = subprocess.check_output(arguments, timeout=10)
-            code_address, ram_address, page_size = struct.unpack_from("<3Q", data)
-            initial = State.from_buffer_copy(data[24:288])
-            number, native_pc, fault_address = struct.unpack_from("<3Q", data, 288)
-            final = State.from_buffer_copy(data[312:576])
-            ram = data[576:]
+            (code_address, ram_address, page_size), initial, (number, native_pc, fault_address), final, ram = parse_fault_record(data)
             observed_bytes = page_size * (2 if case["protection"] == "pair_readonly" else 1)
             if len(ram) != observed_bytes or number == 0:
                 raise AssertionError(f"Missing/truncated native pair fault: {case}")

@@ -12,7 +12,7 @@ import time
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_ERR_EXCEPTION
 from unicorn import arm64_const as arm
-from differential import compiler_cli, ARM_REGISTERS, BASE, MASK, ROOT, State, native, reference, states
+from differential import initialize_arm, capture_arm, state_dict, compiler_cli, ARM_REGISTERS, BASE, MASK, ROOT, State, native, reference, states
 from evidence import write_evidence
 
 RET = 0xd65f03c0
@@ -166,10 +166,7 @@ def verify_undefined(cli, directory):
         machine.mem_map(BASE, 0x1000)
         machine.mem_write(BASE, source)
         state = states()[0]
-        for register, value in zip(ARM_REGISTERS, state.x):
-            machine.reg_write(register, value)
-        machine.reg_write(arm.UC_ARM64_REG_SP, state.sp)
-        machine.reg_write(arm.UC_ARM64_REG_NZCV, state.nzcv)
+        initialize_arm(machine, state)
         try:
             machine.emu_start(BASE, BASE + len(source), count=1)
         except UcError as error:
@@ -178,9 +175,7 @@ def verify_undefined(cli, directory):
         else:
             raise AssertionError(f'ARM accepted reserved encoding {word:#x}')
         if (machine.reg_read(arm.UC_ARM64_REG_PC) != BASE or
-                [machine.reg_read(register) for register in ARM_REGISTERS] != list(state.x) or
-                machine.reg_read(arm.UC_ARM64_REG_SP) != state.sp or
-                machine.reg_read(arm.UC_ARM64_REG_NZCV) != state.nzcv):
+                state_dict(capture_arm(machine, state)) != state_dict(state)):
             raise AssertionError('Undefined instruction changed architectural state')
         input_path = directory / 'undefined.bin'
         input_path.write_bytes(source)
@@ -223,12 +218,12 @@ def main():
               'undefined_instruction_rejections': rejected,
               'reference': 'Unicorn ARM64 2.1.4 and independent bit-by-bit mask construction',
               'native': 'direct x86-64 calls in isolated worker',
-              'tested_state': ['x0..x30', 'SP/WSP destinations and ZR sources', 'all 16 incoming NZCV combinations'],
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP/WSP destinations and ZR sources', 'all 16 incoming NZCV combinations'],
               'corpus_sha256': corpus.hexdigest(), 'compiler_source_sha256': compiler,
               'compiler_executable_sha256': hashlib.sha256(cli.read_bytes()).hexdigest(),
               'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
-              'limits': 'All legal immediate encodings and operation results are exercised in register batches. NZCV is checked after each batch and after directed individual cases, not at every intermediate instruction. Undefined instructions are rejected at compilation; no native guest exception delivery. No memory accesses, SIMD, PAC, runtime dispatch or OS boot.'}
+              'limits': 'All legal immediate encodings and operation results are exercised in register batches. NZCV is checked after each batch and after directed individual cases, not at every intermediate instruction. Undefined instructions are rejected at compilation; no native guest exception delivery. No memory accesses, SIMD instructions, PAC, runtime dispatch or OS boot.'}
     write_evidence(ROOT / '.stela/logical-immediate-differential-report.json', report)
     print(json.dumps(report, indent=2))
 

@@ -24,10 +24,11 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_ARCH_X86, CS_MODE_64
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_ERR_FETCH_UNMAPPED
 from unicorn import arm64_const as arm
 
+from differential import capture_arm, initialize_arm, state_dict as complete_state
 from differential import ROOT, BASE, MASK, ARM_REGISTERS, State, executable, arithmetic, move, states
 from evidence import write_evidence
 
-ABI = 'x86_64-sysv-guest-state-v1-block-exit-direct-ram'
+ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 KINDS = {'fallthrough': 0, 'direct': 1, 'indirect': 2, 'call': 3, 'return': 4, 'trap': 5}
 
 
@@ -36,7 +37,7 @@ class BlockExit(ctypes.Structure):
 
 
 def snapshot(state):
-    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+    return complete_state(state)
 
 
 def holds(condition, flags):
@@ -220,10 +221,7 @@ def machine_for(blocks, initial):
         machine.mem_map(page, 0x1000)
     for case in blocks.values():
         machine.mem_write(case['base'], struct.pack('<' + 'I' * len(case['words']), *case['words'])[:case['source_bytes']])
-    for register, value in zip(ARM_REGISTERS, initial.x):
-        machine.reg_write(register, value)
-    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
-    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    initialize_arm(machine, initial)
     return machine
 
 
@@ -244,10 +242,7 @@ def original_block(machine, case, reserved):
     expected_addresses = list(range(case['base'], case['base'] + case['source_bytes'], 4))
     if addresses != expected_addresses:
         raise AssertionError(f'Original did not execute exactly the consumed block: {addresses}, expected {expected_addresses}')
-    return {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
-            'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
-            'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
-            'reserved': reserved}, machine.reg_read(arm.UC_ARM64_REG_PC)
+    return complete_state(capture_arm(machine, reserved=reserved)), machine.reg_read(arm.UC_ARM64_REG_PC)
 
 
 def trap_cases():
@@ -301,9 +296,7 @@ def original_trap(case, initial):
     expected_number = 2 if case['transfer']['op'] == 'svc' else 7
     if trace != expected_addresses or interrupts != [{'number': expected_number, 'observed_pc': record['exception_return_pc']}]:
         raise AssertionError(f'Original trap observation differs: {case["name"]}, {trace}, {interrupts}')
-    state = {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
-             'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
-             'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000, 'reserved': initial.reserved}
+    state = complete_state(capture_arm(machine, initial))
     return state, {'trap': record, 'interrupt': interrupts[0], 'executed_addresses': trace}
 
 
@@ -636,7 +629,7 @@ def main():
               'programs': len(compiled), 'multiblock_fixtures': len(multi), **result,
               'reference': 'Original A64 Unicorn execution and independent integer/control-flow oracle',
               'native': 'Native x86-64 BlockExit SysV RAX/RDX return, RX mappings, Python host dispatch and actual Rust runtime',
-              'abi': ABI, 'tested_state': ['x0..x30', 'SP', 'NZCV', 'reserved ABI field', 'actual next guest PC',
+              'abi': ABI, 'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP', 'NZCV', 'reserved ABI field', 'actual next guest PC',
                                             'taken/untaken exit kind', 'BL/BLR link register', 'BLR X30 target capture',
                                             'all 16 conditions and all 16 NZCV states', 'fresh flags before branch',
                                             'CBZ/CBNZ W32/X64 and XZR', 'TBZ/TBNZ bits0/31/32/63 and XZR',

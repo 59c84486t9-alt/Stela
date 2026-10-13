@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v7",
+  "registry_version": "apple-silicon-reviewed-forms-v8",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -95,6 +95,22 @@
       "harness": "dev/integer-math-differential.py",
       "report": ".stela/integer-math-differential-report.json",
       "kind": "integer_math_arm_vs_native_x86"
+    },
+    "simd_data_movement": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-differential-report.json",
+      "kind": "simd_arm_vs_native_x86",
+      "comparison_field": "three_way_register_state_comparisons",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/memory-faults.py",
+        "dev/native-memory-faults.c"
+      ],
+      "required_positive_counts": [
+        "state_memory_comparisons",
+        "native_block_exit_checks",
+        "fault_boundary_comparisons"
+      ]
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -7344,6 +7360,2314 @@
       ],
       "review": "Canonical base-integer encoding and operands reviewed against official source metadata, decoder/emitter and original-ARM/native-x86/independent-mathematics differential suite; aliases excluded and smoke checks emission only.",
       "scope": "All defined X64 operands and overlaps, signed/unsigned high-product bits, ZR sources/discarded destinations, ignored Ra bits14:10 and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-8-fsreg",
+        "atomic-ops": "LDR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c400400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_B_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c4007ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-8-fsreg",
+        "atomic-ops": "LDR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c400c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_B_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c400fff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-8-fsreg",
+        "atomic-ops": "LDR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off12u_s",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x3d400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_B_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3d4003ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-64-fsreg",
+        "atomic-ops": "LDR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc400400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_D_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc4007ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-64-fsreg",
+        "atomic-ops": "LDR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc400c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_D_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc400fff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-64-fsreg",
+        "atomic-ops": "LDR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off12u_s",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xfd400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_D_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfd4003ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-16-fsreg",
+        "atomic-ops": "LDR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c400400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_H_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c4007ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-16-fsreg",
+        "atomic-ops": "LDR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c400c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_H_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c400fff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-16-fsreg",
+        "atomic-ops": "LDR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off12u_s",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x7d400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_H_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7d4003ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 11",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-128-fsreg",
+        "atomic-ops": "LDR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3cc00400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_Q_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3cc007ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 11",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-128-fsreg",
+        "atomic-ops": "LDR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3cc00c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_Q_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3cc00fff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 11",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-128-fsreg",
+        "atomic-ops": "LDR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off12u_s",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x3dc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_Q_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3dc003ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-32-fsreg",
+        "atomic-ops": "LDR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc400400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_S_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc4007ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-32-fsreg",
+        "atomic-ops": "LDR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc400c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_S_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc400fff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-32-fsreg",
+        "atomic-ops": "LDR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off12u_s",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xbd400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDR_S_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDR",
+      "name": "LDR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_imm_fpsimd.xml",
+      "source_file": "ldr_imm_fpsimd.xml",
+      "source_sha256": "a192e6b2585a3dd041e1ab501703675cc173013a1c71dfa3f55df68bb0ce8134",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbd4003ff",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-8-fsreg",
+        "atomic-ops": "LDUR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDUR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDUR_B_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDUR_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "LDUR",
+      "name": "LDUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldur_fpsimd.xml",
+      "source_file": "ldur_fpsimd.xml",
+      "source_sha256": "ff70166bfbd9fa2bde6c08ec61559e84c1963b70da119add97290e629cd9b419",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c4003ff",
+          "expected_mnemonics": [
+            "ldur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-64-fsreg",
+        "atomic-ops": "LDUR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDUR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDUR_D_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDUR_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDUR",
+      "name": "LDUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldur_fpsimd.xml",
+      "source_file": "ldur_fpsimd.xml",
+      "source_sha256": "ff70166bfbd9fa2bde6c08ec61559e84c1963b70da119add97290e629cd9b419",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc4003ff",
+          "expected_mnemonics": [
+            "ldur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-16-fsreg",
+        "atomic-ops": "LDUR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDUR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDUR_H_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDUR_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "LDUR",
+      "name": "LDUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldur_fpsimd.xml",
+      "source_file": "ldur_fpsimd.xml",
+      "source_sha256": "ff70166bfbd9fa2bde6c08ec61559e84c1963b70da119add97290e629cd9b419",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c4003ff",
+          "expected_mnemonics": [
+            "ldur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 11",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-128-fsreg",
+        "atomic-ops": "LDUR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDUR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3cc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDUR_Q_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDUR_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDUR",
+      "name": "LDUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldur_fpsimd.xml",
+      "source_file": "ldur_fpsimd.xml",
+      "source_sha256": "ff70166bfbd9fa2bde6c08ec61559e84c1963b70da119add97290e629cd9b419",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3cc003ff",
+          "expected_mnemonics": [
+            "ldur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-32-fsreg",
+        "atomic-ops": "LDUR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDUR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDUR_S_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDUR_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDUR",
+      "name": "LDUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldur_fpsimd.xml",
+      "source_file": "ldur_fpsimd.xml",
+      "source_sha256": "ff70166bfbd9fa2bde6c08ec61559e84c1963b70da119add97290e629cd9b419",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc4003ff",
+          "expected_mnemonics": [
+            "ldur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "Q == 1 && op == 1 && cmode == 1110",
+      "category": "fp_simd",
+      "docvars": {
+        "asimdimm-datatype": "per-doubleword",
+        "asimdimm-immtype": "immediate",
+        "asimdimm-mask": "byte-mask",
+        "asimdimm-type": "per-doubleword-immediate",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "MOVI"
+      },
+      "encoding_class_id": "iclass_advanced_simd",
+      "encoding_class_name": "Advanced SIMD",
+      "encoding_mask": "0xfff8fc00",
+      "encoding_value": "0x6f00e400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "MOVI_asimdimm_D2_d",
+      "instruction_class": "advsimd",
+      "instruction_id": "MOVI_advsimd",
+      "label": "64-bit vector",
+      "mnemonic": "MOVI",
+      "name": "MOVI",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movi_advsimd.xml",
+      "source_file": "movi_advsimd.xml",
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x6f00e41f",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "Q == 0 && op == 1 && cmode == 1110",
+      "category": "fp_simd",
+      "docvars": {
+        "asimdimm-datatype": "doubleword",
+        "asimdimm-immtype": "immediate",
+        "asimdimm-mask": "byte-mask",
+        "asimdimm-type": "doubleword-immediate",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "MOVI"
+      },
+      "encoding_class_id": "iclass_advanced_simd",
+      "encoding_class_name": "Advanced SIMD",
+      "encoding_mask": "0xfff8fc00",
+      "encoding_value": "0x2f00e400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "MOVI_asimdimm_D_ds",
+      "instruction_class": "advsimd",
+      "instruction_id": "MOVI_advsimd",
+      "label": "64-bit scalar",
+      "mnemonic": "MOVI",
+      "name": "MOVI",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movi_advsimd.xml",
+      "source_file": "movi_advsimd.xml",
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x2f00e41f",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-8-fsreg",
+        "atomic-ops": "STR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c000400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_B_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c0007ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-8-fsreg",
+        "atomic-ops": "STR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c000c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_B_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c000fff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-8-fsreg",
+        "atomic-ops": "STR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off12u_s",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x3d000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_B_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3d0003ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-64-fsreg",
+        "atomic-ops": "STR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc000400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_D_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc0007ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-64-fsreg",
+        "atomic-ops": "STR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc000c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_D_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc000fff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-64-fsreg",
+        "atomic-ops": "STR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off12u_s",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xfd000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_D_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfd0003ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-16-fsreg",
+        "atomic-ops": "STR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c000400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_H_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c0007ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-16-fsreg",
+        "atomic-ops": "STR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c000c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_H_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c000fff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-16-fsreg",
+        "atomic-ops": "STR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off12u_s",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x7d000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_H_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7d0003ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-128-fsreg",
+        "atomic-ops": "STR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c800400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_Q_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c8007ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-128-fsreg",
+        "atomic-ops": "STR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c800c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_Q_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c800fff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-128-fsreg",
+        "atomic-ops": "STR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off12u_s",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x3d800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_Q_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3d8003ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-32-fsreg",
+        "atomic-ops": "STR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc000400",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_S_ldst_immpost",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc0007ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-32-fsreg",
+        "atomic-ops": "STR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc000c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_S_ldst_immpre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc000fff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "unsigned-scaled-offset",
+        "address-form-reg-type": "unsigned-scaled-offset-32-fsreg",
+        "atomic-ops": "STR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off12u_s",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_unsigned_offset",
+      "encoding_class_name": "Unsigned offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xbd000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STR_S_ldst_pos",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STR_imm_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STR",
+      "name": "STR (immediate, SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_imm_fpsimd.xml",
+      "source_file": "str_imm_fpsimd.xml",
+      "source_sha256": "e833002739bf43818b05eff0be65295c12d3761c02587f366a28ad6ca1013365",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbd0003ff",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-8-fsreg",
+        "atomic-ops": "STUR-8-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STUR",
+        "offset-type": "off9s_u",
+        "reg-type": "8-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STUR_B_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STUR_fpsimd",
+      "label": "8-bit",
+      "mnemonic": "STUR",
+      "name": "STUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stur_fpsimd.xml",
+      "source_file": "stur_fpsimd.xml",
+      "source_sha256": "4d13de13dff8dc744b3e5b72cabdff1054af0c3de755766459a512aba81b9a23",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c0003ff",
+          "expected_mnemonics": [
+            "stur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 11 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-64-fsreg",
+        "atomic-ops": "STUR-64-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STUR",
+        "offset-type": "off9s_u",
+        "reg-type": "64-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STUR_D_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STUR_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STUR",
+      "name": "STUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stur_fpsimd.xml",
+      "source_file": "stur_fpsimd.xml",
+      "source_sha256": "4d13de13dff8dc744b3e5b72cabdff1054af0c3de755766459a512aba81b9a23",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xfc0003ff",
+          "expected_mnemonics": [
+            "stur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 01 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-16-fsreg",
+        "atomic-ops": "STUR-16-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STUR",
+        "offset-type": "off9s_u",
+        "reg-type": "16-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STUR_H_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STUR_fpsimd",
+      "label": "16-bit",
+      "mnemonic": "STUR",
+      "name": "STUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stur_fpsimd.xml",
+      "source_file": "stur_fpsimd.xml",
+      "source_sha256": "4d13de13dff8dc744b3e5b72cabdff1054af0c3de755766459a512aba81b9a23",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x7c0003ff",
+          "expected_mnemonics": [
+            "stur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 00 && opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-128-fsreg",
+        "atomic-ops": "STUR-128-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STUR",
+        "offset-type": "off9s_u",
+        "reg-type": "128-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STUR_Q_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STUR_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STUR",
+      "name": "STUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stur_fpsimd.xml",
+      "source_file": "stur_fpsimd.xml",
+      "source_sha256": "4d13de13dff8dc744b3e5b72cabdff1054af0c3de755766459a512aba81b9a23",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0x3c8003ff",
+          "expected_mnemonics": [
+            "stur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "size == 10 && opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "base-plus-offset",
+        "address-form-reg-type": "base-plus-offset-32-fsreg",
+        "atomic-ops": "STUR-32-fsreg",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STUR",
+        "offset-type": "off9s_u",
+        "reg-type": "32-fsreg"
+      },
+      "encoding_class_id": "iclass_unscaled_offset",
+      "encoding_class_name": "Unscaled offset",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STUR_S_ldst_unscaled",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STUR_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STUR",
+      "name": "STUR (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stur_fpsimd.xml",
+      "source_file": "stur_fpsimd.xml",
+      "source_sha256": "4d13de13dff8dc744b3e5b72cabdff1054af0c3de755766459a512aba81b9a23",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_data_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
+      "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
+      "smoke_samples": [
+        {
+          "word": "0xbc0003ff",
+          "expected_mnemonics": [
+            "stur"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -7362,6 +9686,8 @@
     "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
+    "crates/stela-compiler/src/aarch64/simd.rs",
+    "crates/stela-compiler/src/x86_64/simd.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

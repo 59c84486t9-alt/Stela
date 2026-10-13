@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,8 +13,11 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-struct guest_state { uint64_t x[31], sp; uint32_t nzcv, reserved; };
-_Static_assert(sizeof(struct guest_state) == 264, "GuestState ABI");
+struct guest_state { uint64_t x[31], sp; uint32_t nzcv, reserved; uint64_t v[32][2]; uint32_t fpcr, fpsr; };
+_Static_assert(sizeof(struct guest_state) == 784, "GuestState ABI");
+_Static_assert(offsetof(struct guest_state, v) == 264, "V register ABI offset");
+_Static_assert(offsetof(struct guest_state, fpcr) == 776, "FPCR ABI offset");
+_Static_assert(offsetof(struct guest_state, fpsr) == 780, "FPSR ABI offset");
 static struct guest_state state;
 static unsigned char *ram;
 static size_t page_size, observed_bytes;
@@ -65,6 +69,12 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 31; i++) state.x[i] = UINT64_C(0xf0123456789abcd0) + i;
     state.sp = (uintptr_t)(ram + 512);
     state.nzcv = 0xa0000000;
+    for (unsigned i = 0; i < 32; i++) {
+        state.v[i][0] = UINT64_C(0x123456789abcdef0) ^ i;
+        state.v[i][1] = UINT64_C(0xfedcba9876543210) ^ ((uint64_t)i << 32);
+    }
+    state.fpcr = 0x03c00000;
+    state.fpsr = 0x0800001f;
     uintptr_t target = (uintptr_t)(ram + page_size);
     if (!strcmp(argv[2], "readonly")) {
         target = (uintptr_t)(ram + 512);

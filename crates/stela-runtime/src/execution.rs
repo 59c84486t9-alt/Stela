@@ -139,7 +139,7 @@ pub(crate) mod platform {
     use std::ptr::NonNull;
 
     pub fn ensure_supported() -> Result<()> {
-        // Every x86-64 CPU implements the integer baseline emitted by Stela.
+        // Every x86-64 CPU implements Stela's integer and SSE2 baseline.
         // Mac x86-64 and Linux x86-64 both use the required System V C ABI.
         Ok(())
     }

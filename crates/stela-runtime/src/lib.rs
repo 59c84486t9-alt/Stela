@@ -199,6 +199,43 @@ mod tests {
             .collect()
     }
     #[test]
+    fn validly_checksummed_legacy_state_abis_are_rejected_without_loading_code() -> Result<()> {
+        for (block, legacy_abi) in [
+            (false, "x86_64-sysv-guest-state-v2-direct-ram"),
+            (true, "x86_64-sysv-guest-state-v1-block-exit-direct-ram"),
+        ] {
+            let root = tempfile::tempdir()?;
+            let input = source(42);
+            let current = if block {
+                prepare_block(&input, GuestAddress(0x1000), root.path())?.prepared
+            } else {
+                prepare_leaf(&input, GuestAddress(0x1000), root.path())?
+            };
+            let mut manifest = current.manifest;
+            assert_ne!(manifest.identity.abi, legacy_abi);
+            manifest.identity.abi = legacy_abi.into();
+            assert_ne!(
+                current.key,
+                sha256(&serde_json::to_vec(&manifest.identity)?)
+            );
+            // Model an intact legacy metadata receipt, not simple checksum damage.
+            // Neither this test nor preparation maps or invokes the native payload.
+            write_json(&current.directory.join("manifest.json"), &manifest)?;
+            let metadata = std::fs::read(current.directory.join("manifest.json"))?;
+            write_json(
+                &current.directory.join("manifest.sha256.json"),
+                &sha256(&metadata),
+            )?;
+            let observed = if block {
+                prepare_block(&input, GuestAddress(0x1000), root.path()).map(|p| p.prepared)
+            } else {
+                prepare_leaf(&input, GuestAddress(0x1000), root.path())
+            };
+            assert!(observed.is_err());
+        }
+        Ok(())
+    }
+    #[test]
     fn oversized_cache_files_are_rejected_before_reading_payloads() -> Result<()> {
         let root = tempfile::tempdir()?;
         let prepared = prepare_leaf(&source(42), GuestAddress(0), root.path())?;

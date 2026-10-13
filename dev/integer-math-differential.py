@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from differential import state_dict as complete_state
 from differential import ROOT, State, executable, reference, states
 from evidence import write_evidence
 
@@ -203,14 +204,14 @@ def mathematical_reference(words, initial):
         value = (added - product if word & (1 << 15) else added + product) & mask
         if destination != 31:
             registers[destination] = value
-    return {'x': registers, 'sp': initial.sp, 'nzcv': initial.nzcv, 'reserved': initial.reserved}
+    return {**complete_state(initial), 'x': registers, 'sp': initial.sp, 'nzcv': initial.nzcv, 'reserved': initial.reserved}
 
 
 def native_state(code, initial):
     state = State.from_buffer_copy(initial)
     with executable(code) as address:
         ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)(ctypes.byref(state))
-    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+    return complete_state(state)
 
 
 def boundary_values(form):
@@ -392,7 +393,7 @@ def main():
               'operations': list(FORMS),
               'reference': 'Unicorn ARM64 2.1.4 and independent unbounded signed/unsigned integer arithmetic',
               'native': 'baseline x86-64 integer products, guarded division, leading-zero and byte-reversal code in isolated worker; SIGFPE and other worker failures fail the suite; no LZCNT requirement',
-              'tested_state': ['x0..x30', 'SP and reserved ABI field preservation',
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP and reserved ABI field preservation',
                                'all 16 incoming NZCV combinations',
                                'W32 upper-half clearing', 'signed/unsigned long source truncation',
                                'ZR sources/discarded destinations', 'all destination registers',
@@ -408,7 +409,7 @@ def main():
               'compiler_executable_sha256': executable_hash,
               'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
-              'limits': 'Integer register results, SP and NZCV only. Full PSTATE, system instructions, guest exceptions, memory, SIMD, PAC, runtime dispatch and OS boot are not covered.'}
+              'limits': 'Integer instruction results and complete GPR/SP/NZCV/reserved/V/FP state. Full PSTATE, system instructions, guest exceptions, memory, SIMD instructions, PAC, runtime dispatch and OS boot are not covered.'}
     write_evidence(ROOT / '.stela/integer-math-differential-report.json', report)
     print(json.dumps(report, indent=2))
 

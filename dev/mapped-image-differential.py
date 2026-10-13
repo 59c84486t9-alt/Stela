@@ -18,6 +18,7 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
 from unicorn import arm64_const as arm
 
+from differential import capture_arm, initialize_arm, state_dict as complete_state
 from differential import ROOT, ARM_REGISTERS, MASK, State, states
 from evidence import write_evidence
 
@@ -44,7 +45,7 @@ def digest(data):
 
 
 def snapshot(state):
-    return {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv, 'reserved': state.reserved}
+    return complete_state(state)
 
 
 def commands(data):
@@ -166,10 +167,7 @@ def original(data, info, initial):
         machine.mem_protect(segment['address'], segment['bytes'], segment['protection'])
     require(initial.sp == STACK_TOP, 'reference requires the owned research stack top')
     machine.mem_map(STACK_BASE, STACK_BYTES, 3)
-    for register, value in zip(ARM_REGISTERS, initial.x):
-        machine.reg_write(register, value)
-    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
-    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    initialize_arm(machine, initial)
     section = info['sections']['__text']
     trace = []
     def guard(machine, address, size, _):
@@ -180,10 +178,7 @@ def original(data, info, initial):
     machine.emu_start(entry, STOP, count=128)
     pc = machine.reg_read(arm.UC_ARM64_REG_PC)
     require(pc == STOP and len(trace) == 17, 'original fixture failed to execute real call/returns to stop address')
-    state = {'x': [machine.reg_read(register) for register in ARM_REGISTERS],
-             'sp': machine.reg_read(arm.UC_ARM64_REG_SP),
-             'nzcv': machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000,
-             'reserved': initial.reserved}
+    state = complete_state(capture_arm(machine, initial))
     data_segment = next(segment for segment in info['segments'] if segment['name'] == '__DATA')
     memory = bytes(machine.mem_read(data_segment['address'], data_segment['bytes']))
     frame = bytes(machine.mem_read(STACK_TOP - 16, 16))

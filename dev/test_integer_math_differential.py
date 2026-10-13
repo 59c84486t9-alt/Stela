@@ -1,5 +1,6 @@
 """Oracle checks independent of compiler builds and native execution."""
 import importlib.util
+from differential import state_dict as complete_state
 from pathlib import Path
 import unittest
 
@@ -49,8 +50,7 @@ class IntegerMathOracleTests(unittest.TestCase):
         words = [suite.encoding('SDIV64', 4, 1, 2),
                  suite.encoding('MSUB64', 1, 4, 2, 1),
                  suite.encoding('SDIV64', 31, 4, 31), suite.RET]
-        expected = {'x': list(state.x), 'sp': state.sp, 'nzcv': state.nzcv,
-                    'reserved': state.reserved}
+        expected = complete_state(state)
         expected['x'][4], expected['x'][1] = (-2) & suite.MASK, suite.MASK
         self.assertEqual(suite.mathematical_reference(words, state), expected)
 

@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from differential import state_dict as complete_state
 from differential import compiler_cli, ROOT, State, arithmetic, native, reference, states
 from evidence import write_evidence
 
@@ -91,7 +92,7 @@ def mathematical_reference(words, initial):
                 nzcv = (negative << 31) | (zero << 30) | (outgoing_carry << 29) | (overflow << 28)
         if destination != 31:
             registers[destination] = value
-    return {'x': registers, 'sp': initial.sp, 'nzcv': nzcv}
+    return {**complete_state(initial), 'x': registers, 'sp': initial.sp, 'nzcv': nzcv}
 
 
 def boundary_pairs(width):
@@ -191,14 +192,14 @@ def main():
               'operations': ['ADC', 'ADCS', 'SBC/NGC', 'SBCS/NGCS'],
               'reference': 'Unicorn ARM64 2.1.4 and independent unbounded signed/unsigned integer arithmetic',
               'native': 'direct x86-64 calls in isolated worker',
-              'tested_state': ['x0..x30', 'SP preservation', 'all 16 incoming NZCV combinations',
+              'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP preservation', 'all 16 incoming NZCV combinations',
                                'W32 upper-half clearing', 'ZR sources/discarded destinations',
                                'carry/borrow and signed overflow boundaries', 'carry dependency chains'],
               'corpus_sha256': corpus.hexdigest(), 'compiler_source_sha256': compiler,
               'compiler_executable_sha256': hashlib.sha256(cli.read_bytes()).hexdigest(),
               'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
-              'limits': 'Register arithmetic and NZCV only. Full PSTATE, system instructions, guest exceptions, memory, SIMD, PAC, runtime dispatch and OS boot are not covered.'}
+              'limits': 'Register arithmetic and complete GPR/SP/NZCV/reserved/V/FP state. Full PSTATE, system instructions, guest exceptions, memory, SIMD instructions, PAC, runtime dispatch and OS boot are not covered.'}
     write_evidence(ROOT / '.stela/carry-differential-report.json', report)
     print(json.dumps(report, indent=2))
 

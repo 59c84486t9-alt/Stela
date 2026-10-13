@@ -169,12 +169,12 @@ def main():
         result = bounded_cases(compiled)
     report = {"kind": "register_offset_arm_vs_native_x86", "passed": True, **result,
               "reference": "Unicorn ARM64 2.1.4", "native": "direct x86-64 SysV calls in isolated worker",
-              "tested_state": ["x0..x30", "SP", "NZCV", "all 65536 mapped RAM bytes"],
+              "tested_state": ["V0..V31, FPCR and FPSR preservation", "x0..x30", "SP", "NZCV", "all 65536 mapped RAM bytes"],
               "corpus_sha256": corpus.hexdigest(), "compiler_source_sha256": compiler,
               "compiler_executable_sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
               "harness_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "shared_runner_sha256": hashlib.sha256((ROOT / "dev/differential.py").read_bytes()).hexdigest(),
-              "limits": "Ordinary private RAM at identical guest/native addresses, aligned incoming SP, tags/PAC disabled. Faults tested separately. No MMIO, atomics, concurrency, SIMD or guest exception delivery."}
+              "limits": "Ordinary private RAM at identical guest/native addresses, aligned incoming SP, tags/PAC disabled. Faults tested separately. No MMIO, atomics, concurrency, SIMD instructions or guest exception delivery."}
     write_evidence(ROOT / ".stela/register-offset-differential-report.json", report)
     print(json.dumps(report, indent=2))
 

@@ -91,21 +91,40 @@ fn cpu(value: &Value) -> Result<ThreadState> {
     for (destination, source) in x.iter_mut().zip(xs) {
         *destination = number(source)?;
     }
-    Ok(ThreadState {
+    let mut state = ThreadState {
         pc: GuestAddress(number(&value["pc"])?),
         registers: GuestState {
             x,
             sp: number(&registers["sp"])?,
             nzcv: u32::try_from(number(&registers["nzcv"])?)?,
             reserved: u32::try_from(number(&registers["reserved"])?)?,
+            // This original integer-window reference predates SIMD/FP snapshots.
+            ..GuestState::default()
         },
-    })
+    };
+    if let Some(vectors) = registers.get("v") {
+        let vectors = vectors.as_array().context("reference SIMD registers")?;
+        ensure!(vectors.len() == 32, "reference SIMD register count");
+        for (destination, source) in state.registers.v.iter_mut().zip(vectors) {
+            let limbs = source.as_array().context("reference SIMD limbs")?;
+            ensure!(limbs.len() == 2, "reference SIMD limb count");
+            *destination = [number(&limbs[0])?, number(&limbs[1])?];
+        }
+    }
+    if let Some(fpcr) = registers.get("fpcr") {
+        state.registers.fpcr = u32::try_from(number(fpcr)?)?;
+    }
+    if let Some(fpsr) = registers.get("fpsr") {
+        state.registers.fpsr = u32::try_from(number(fpsr)?)?;
+    }
+    Ok(state)
 }
 
 fn cpu_json(state: &ThreadState) -> Value {
     json!({"pc":state.pc.0,"registers":{
         "x":state.registers.x,"sp":state.registers.sp,
-        "nzcv":state.registers.nzcv,"reserved":state.registers.reserved}})
+        "nzcv":state.registers.nzcv,"reserved":state.registers.reserved,
+        "v":state.registers.v,"fpcr":state.registers.fpcr,"fpsr":state.registers.fpsr}})
 }
 
 fn compare_cpu(actual: &ThreadState, expected: &Value) -> Result<()> {
@@ -118,7 +137,7 @@ fn compare_cpu(actual: &ThreadState, expected: &Value) -> Result<()> {
     );
     ensure!(
         actual.registers == expected.registers,
-        "CPU X0..X30/SP/NZCV/reserved mismatch"
+        "CPU X0..X30/SP/NZCV/reserved/V0..V31/FPCR/FPSR mismatch"
     );
     Ok(())
 }
@@ -132,9 +151,48 @@ fn initial_cpu() -> ThreadState {
             sp: 0x40400000,
             nzcv: 0,
             reserved: RESERVED,
+            v: std::array::from_fn(|index| {
+                [
+                    0x0123456789abcdefu64.rotate_left(index as u32),
+                    0xfedcba9876543210u64.rotate_right(index as u32),
+                ]
+            }),
+            fpcr: 0x03c00000,
+            fpsr: 0x0800001f,
         },
         pc: GuestAddress(ENTRY_START),
     }
+}
+
+#[test]
+fn reference_cpu_accepts_legacy_state_and_validates_supplied_vector_fp_fields() -> Result<()> {
+    let mut value = cpu_json(&initial_cpu());
+    for field in ["v", "fpcr", "fpsr"] {
+        value["registers"].as_object_mut().unwrap().remove(field);
+    }
+    let legacy = cpu(&value)?;
+    assert_eq!(legacy.registers.v, [[0; 2]; 32]);
+    assert_eq!((legacy.registers.fpcr, legacy.registers.fpsr), (0, 0));
+    let mut full = cpu_json(&legacy);
+    full["registers"]["v"][31][1] = json!(u64::MAX);
+    full["registers"]["fpcr"] = json!(u32::MAX);
+    full["registers"]["fpsr"] = json!(0x8000009fu32);
+    let parsed = cpu(&full)?;
+    assert_eq!(parsed.registers.v[31][1], u64::MAX);
+    assert_eq!(parsed.registers.fpcr, u32::MAX);
+    assert_eq!(parsed.registers.fpsr, 0x8000009f);
+    for change in 0..5 {
+        let mut invalid = full.clone();
+        match change {
+            0 => invalid["registers"]["v"] = json!([]),
+            1 => invalid["registers"]["v"][0] = json!([0]),
+            2 => invalid["registers"]["v"][0][0] = json!(-1),
+            3 => invalid["registers"]["fpcr"] = json!(u64::MAX),
+            _ => invalid["registers"]["fpsr"] = Value::Null,
+        }
+        assert!(cpu(&invalid).is_err());
+    }
+    Ok(())
 }
 
 fn saved_page(flags: u32, return_type: u32) -> Vec<u8> {
@@ -233,7 +291,8 @@ fn unchanged_kernel_formatter_windows_match_original_cpu_and_full_memory() -> Re
         root.join(reference_path)
     };
     ensure!(
-        std::fs::metadata(&reference_path)?.len() <= 64 * 1024 * 1024,
+        // Full V/FP snapshots increase the pinned 1,920-case JSON beyond64MiB.
+        std::fs::metadata(&reference_path)?.len() <= 128 * 1024 * 1024,
         "reference size limit"
     );
     let bytes = std::fs::read(&reference_path)?;

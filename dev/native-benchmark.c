@@ -9,11 +9,17 @@ typedef struct {
     uint64_t sp;
     uint32_t nzcv;
     uint32_t reserved;
+    uint64_t v[32][2];
+    uint32_t fpcr, fpsr;
 } GuestState;
 
-_Static_assert(sizeof(GuestState) == 264, "GuestState ABI size changed");
+_Static_assert(sizeof(GuestState) == 784, "GuestState ABI size changed");
 _Static_assert(offsetof(GuestState, sp) == 248, "GuestState SP offset changed");
 _Static_assert(offsetof(GuestState, nzcv) == 256, "GuestState NZCV offset changed");
+
+_Static_assert(offsetof(GuestState, v) == 264, "GuestState V offset changed");
+_Static_assert(offsetof(GuestState, fpcr) == 776, "GuestState FPCR offset changed");
+_Static_assert(offsetof(GuestState, fpsr) == 780, "GuestState FPSR offset changed");
 
 typedef void (*Leaf)(GuestState *);
 

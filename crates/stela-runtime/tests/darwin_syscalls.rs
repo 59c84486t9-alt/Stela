@@ -53,6 +53,14 @@ fn thread(flags: u32, address: u64) -> ThreadState {
         sp: 0x1234000056780000,
         nzcv: flags << 28,
         reserved: 0xa5c39e71,
+        v: std::array::from_fn(|index| {
+            [
+                0x0123456789abcdefu64.rotate_left(index as u32),
+                0xfedcba9876543210u64.rotate_right(index as u32),
+            ]
+        }),
+        fpcr: 0xa5c39e71 ^ flags,
+        fpsr: 0x5a3c618e ^ flags,
     };
     registers.x[0] = GUEST_PIPE;
     registers.x[1] = address;
@@ -399,15 +407,33 @@ fn adapter_matches_original_macos27_formatter_windows() -> Result<()> {
 
     fn parse_state(value: &Value) -> ThreadState {
         assert_eq!(value["registers"]["x"].as_array().unwrap().len(), 31);
-        ThreadState {
+        let mut state = ThreadState {
             pc: GuestAddress(value["pc"].as_u64().unwrap()),
             registers: GuestState {
                 x: std::array::from_fn(|index| value["registers"]["x"][index].as_u64().unwrap()),
                 sp: value["registers"]["sp"].as_u64().unwrap(),
                 nzcv: u32::try_from(value["registers"]["nzcv"].as_u64().unwrap()).unwrap(),
                 reserved: u32::try_from(value["registers"]["reserved"].as_u64().unwrap()).unwrap(),
+                // The historical integer-only reference omits SIMD/FP state.
+                ..GuestState::default()
             },
+        };
+        if let Some(vectors) = value["registers"].get("v") {
+            let vectors = vectors.as_array().unwrap();
+            assert_eq!(vectors.len(), 32);
+            for (destination, source) in state.registers.v.iter_mut().zip(vectors) {
+                let limbs = source.as_array().unwrap();
+                assert_eq!(limbs.len(), 2);
+                *destination = [limbs[0].as_u64().unwrap(), limbs[1].as_u64().unwrap()];
+            }
         }
+        if let Some(fpcr) = value["registers"].get("fpcr") {
+            state.registers.fpcr = u32::try_from(fpcr.as_u64().unwrap()).unwrap();
+        }
+        if let Some(fpsr) = value["registers"].get("fpsr") {
+            state.registers.fpsr = u32::try_from(fpsr.as_u64().unwrap()).unwrap();
+        }
+        state
     }
     let mut comparisons = 0;
     for case in reference["cases"].as_array().unwrap() {

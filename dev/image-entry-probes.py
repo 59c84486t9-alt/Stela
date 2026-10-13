@@ -6,6 +6,7 @@ Unicorn execution includes the real RET and is compared with native guest state.
 Apple dependencies, signatures, fixups and process setup remain unresolved.
 """
 import argparse
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -102,7 +103,9 @@ def check_image(cli, path, exit_status, work, reference):
     source_path.write_bytes(source)
     case = {'base': entry['guest_address'], 'source_bytes': len(source),
             'words': list(struct.unpack('<II', source))}
-    initial = State()
+    # This command uses GuestState::default(), whereas State() deliberately
+    # dirties SIMD/FP fields for the explicit-state preservation cases below.
+    initial = State.from_buffer_copy(bytes(ctypes.sizeof(State)))
     initial.x[30] = STOP
     machine = reference.machine_for({case['base']: case}, initial)
     expected, pc = reference.original_block(machine, case, initial.reserved)
@@ -163,7 +166,7 @@ def main():
               'compiler_source_sha256': rows[0]['cold_image_probe']['compiler_source_sha256'],
               'cli_sha256': cli_hash, 'source_sha256': hashes, 'inputs': rows,
               'full_state_comparisons': sum(row['full_state_comparisons'] for row in rows),
-              'tested_state': ['x0..x30', 'sp', 'nzcv', 'reserved', 'actual RET guest PC'],
+              'tested_state': ['x0..x30', 'sp', 'nzcv', 'reserved', 'V0..V31', 'FPCR', 'FPSR', 'actual RET guest PC'],
               'limits': 'Only original two-instruction MOV W0,#status; RET X30 entry blocks. No complete process loading, dyld, imports, signing, PAC ABI, syscalls or macOS boot. CLI times include process startup and are not native execution benchmarks.'}
     archive = write_evidence(arguments.output, report)
     print(json.dumps({'passed': True, 'inputs': len(rows), 'full_state_comparisons': report['full_state_comparisons'],

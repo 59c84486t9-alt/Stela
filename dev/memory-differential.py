@@ -182,12 +182,12 @@ def main():
         result = bounded_cases(compiled)
     report = {"kind": "direct_ram_arm_vs_native_x86", "passed": True, **result,
               "reference": "Unicorn ARM64 2.1.4", "native": "direct x86-64 SysV calls in isolated worker",
-              "tested_state": ["x0..x30", "SP", "NZCV", "all 65536 mapped RAM bytes"],
+              "tested_state": ["V0..V31, FPCR and FPSR preservation", "x0..x30", "SP", "NZCV", "all 65536 mapped RAM bytes"],
               "corpus_sha256": corpus.hexdigest(), "compiler_source_sha256": compiler,
               "compiler_executable_sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
               "harness_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "shared_runner_sha256": hashlib.sha256((ROOT / "dev/differential.py").read_bytes()).hexdigest(),
-              "limits": "Ordinary private RAM, identical guest/native addresses, aligned incoming SP, tags/PAC disabled. Fault tests are separate. No MMIO, atomics, concurrency, SIMD, guest exception delivery or OS boot."}
+              "limits": "Ordinary private RAM, identical guest/native addresses, aligned incoming SP, tags/PAC disabled. Fault tests are separate. No MMIO, atomics, concurrency, SIMD instructions, guest exception delivery or OS boot."}
     write_evidence(ROOT / ".stela/memory-differential-report.json", report)
     print(json.dumps(report, indent=2))
 

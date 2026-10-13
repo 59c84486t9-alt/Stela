@@ -29,6 +29,12 @@ struct Registers {
     sp: u64,
     nzcv: u32,
     reserved: u32,
+    #[serde(default)]
+    v: [[u64; 2]; 32],
+    #[serde(default)]
+    fpcr: u32,
+    #[serde(default)]
+    fpsr: u32,
 }
 impl Registers {
     fn guest(&self) -> GuestState {
@@ -37,6 +43,9 @@ impl Registers {
             sp: self.sp,
             nzcv: self.nzcv,
             reserved: self.reserved,
+            v: self.v,
+            fpcr: self.fpcr,
+            fpsr: self.fpsr,
         }
     }
     fn observed(state: &GuestState) -> Self {
@@ -45,6 +54,9 @@ impl Registers {
             sp: state.sp,
             nzcv: state.nzcv,
             reserved: state.reserved,
+            v: state.v,
+            fpcr: state.fpcr,
+            fpsr: state.fpsr,
         }
     }
 }
@@ -94,6 +106,7 @@ fn profile(code: &[u8], entry: u64, stop_pc: u64) -> Result<Vec<GuestAddress>> {
                 );
             }
             Operation::Bitfield(_)
+            | Operation::Simd(stela_compiler::aarch64::simd::Operand::MoveImmediate { .. })
             | Operation::ConditionalSelect(_)
             | Operation::IntegerMath(_)
             | Operation::AddSubRegister { .. }
@@ -282,6 +295,24 @@ pub fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_case_schema_preserves_simd_state_and_defaults_older_inputs() -> Result<()> {
+        let scalar = json!({"x":([0u64;31]),"sp":16,"nzcv":0,"reserved":42});
+        let mut registers: Registers = serde_json::from_value(scalar)?;
+        assert_eq!(registers.v, [[0; 2]; 32]);
+        assert_eq!((registers.fpcr, registers.fpsr), (0, 0));
+        registers.v[31] = [u64::MAX, 0xfff8000000000001];
+        registers.fpcr = 0x03c00000;
+        registers.fpsr = 0x0800009f;
+        let observed = Registers::observed(&registers.guest());
+        assert_eq!(
+            serde_json::to_value(observed)?,
+            serde_json::to_value(registers)?
+        );
+        Ok(())
+    }
+
     fn code(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
@@ -290,7 +321,7 @@ mod tests {
     fn profile_refuses_hidden_memory_platform_and_outward_transfers() {
         for word in [
             0xf9400020, 0x58000000, 0xa9000000, 0xd503237f, 0xd4001001, 0xd61f0000, 0x94000000,
-            0x14000100,
+            0x14000100, 0xfd42f100, 0x3cda83a0,
         ] {
             assert!(
                 profile(&code(&[word, 0xd65f03c0]), 0x1000, 0x2000).is_err(),
@@ -313,6 +344,10 @@ mod tests {
             2
         );
         assert!(profile(&code(&[0xd503201f]), 0x1000, 0x2000).is_err());
+        assert_eq!(
+            profile(&code(&[0x6f00e400, 0xd65f03c0]), 0x1000, 0x2000)?.len(),
+            2
+        );
         Ok(())
     }
 }

@@ -27,10 +27,80 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 0x100000
 MASK = (1 << 64) - 1
 ARM_REGISTERS = [getattr(arm, f"UC_ARM64_REG_X{index}") for index in range(31)]
+ARM_VECTORS = [getattr(arm, f"UC_ARM64_REG_Q{index}") for index in range(32)]
 
 
 class State(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_uint64 * 31), ("sp", ctypes.c_uint64), ("nzcv", ctypes.c_uint32), ("reserved", ctypes.c_uint32)]
+    _fields_ = [("x", ctypes.c_uint64 * 31), ("sp", ctypes.c_uint64), ("nzcv", ctypes.c_uint32), ("reserved", ctypes.c_uint32),
+                ("v", (ctypes.c_uint64 * 2) * 32), ("fpcr", ctypes.c_uint32), ("fpsr", ctypes.c_uint32)]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        seed_extended_state(self)
+
+
+def seed_extended_state(state, seed=None):
+    """Dirty appended fields without consuming any existing GPR random stream."""
+    seed = hashlib.sha256(bytes(state)[:264]).digest() if seed is None else seed
+    rng = random.Random(seed)
+    for vector in state.v:
+        vector[:] = [rng.getrandbits(64), rng.getrandbits(64)]
+    # Architectural fields implemented by Unicorn; avoid RES0 discrepancies.
+    state.fpcr = rng.getrandbits(32) & 0x07c00000
+    state.fpsr = rng.getrandbits(32) & 0x0800001f
+    return state
+
+
+def extended_state(state):
+    return {"v": [list(vector) for vector in state.v], "fpcr": state.fpcr, "fpsr": state.fpsr}
+
+
+def state_dict(state):
+    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv,
+            "reserved": state.reserved, **extended_state(state)}
+
+
+def initialize_extended_arm(machine, initial):
+    machine.reg_write_batch([(register, value[0] | (value[1] << 64))
+                             for register, value in zip(ARM_VECTORS, initial.v)] +
+                            [(arm.UC_ARM64_REG_FPCR, initial.fpcr), (arm.UC_ARM64_REG_FPSR, initial.fpsr)])
+
+
+def initialize_arm(machine, initial):
+    registers = ARM_REGISTERS + [arm.UC_ARM64_REG_SP, arm.UC_ARM64_REG_NZCV] + ARM_VECTORS + [arm.UC_ARM64_REG_FPCR, arm.UC_ARM64_REG_FPSR]
+    values = [*initial.x, initial.sp, initial.nzcv] + [value[0] | (value[1] << 64) for value in initial.v] + [initial.fpcr, initial.fpsr]
+    machine.reg_write_batch(list(zip(registers, values)))
+
+
+def capture_arm(machine, initial=None, reserved=None):
+    state = State.from_buffer_copy(initial) if initial is not None else State()
+    registers = ARM_REGISTERS + [arm.UC_ARM64_REG_SP, arm.UC_ARM64_REG_NZCV] + ARM_VECTORS + [arm.UC_ARM64_REG_FPCR, arm.UC_ARM64_REG_FPSR]
+    values = machine.reg_read_batch(registers)
+    state.x[:] = values[:31]
+    state.sp, state.nzcv = values[31], values[32] & 0xf0000000
+    for index, value in enumerate(values[33:65]):
+        state.v[index][:] = [value & MASK, value >> 64]
+    state.fpcr, state.fpsr = values[65:67]
+    if reserved is not None:
+        state.reserved = reserved
+    return state
+
+
+def parse_fault_record(data):
+    """C observer framing: header3Q, initialState, event3Q, finalState, RAM."""
+    header_bytes = event_bytes = struct.calcsize("<3Q")
+    state_bytes = ctypes.sizeof(State)
+    event_offset = header_bytes + state_bytes
+    final_offset = event_offset + event_bytes
+    ram_offset = final_offset + state_bytes
+    if len(data) < ram_offset:
+        raise AssertionError("Truncated native fault observer record")
+    return (struct.unpack_from("<3Q", data), State.from_buffer_copy(data[header_bytes:event_offset]),
+            struct.unpack_from("<3Q", data, event_offset),
+            State.from_buffer_copy(data[final_offset:ram_offset]), data[ram_offset:])
+
+
+assert ctypes.sizeof(State) == 784 and State.v.offset == 264 and State.fpcr.offset == 776 and State.fpsr.offset == 780
 
 
 def reference(code, initial, memory=None):
@@ -41,10 +111,7 @@ def reference(code, initial, memory=None):
         address, data = memory
         machine.mem_map(address, len(data))
         machine.mem_write(address, data)
-    for register, value in zip(ARM_REGISTERS, initial.x):
-        machine.reg_write(register, value)
-    machine.reg_write(arm.UC_ARM64_REG_SP, initial.sp)
-    machine.reg_write(arm.UC_ARM64_REG_NZCV, initial.nzcv)
+    initialize_arm(machine, initial)
     returned = False
     def boundary(machine, address, size, _):
         nonlocal returned
@@ -56,9 +123,7 @@ def reference(code, initial, memory=None):
     machine.emu_start(BASE, BASE + len(code), count=10000)
     if not returned:
         raise AssertionError("ARM reference did not return within its instruction budget")
-    result = {"x": [machine.reg_read(r) for r in ARM_REGISTERS],
-            "sp": machine.reg_read(arm.UC_ARM64_REG_SP),
-            "nzcv": machine.reg_read(arm.UC_ARM64_REG_NZCV) & 0xf0000000}
+    result = state_dict(capture_arm(machine, initial))
     if memory is not None:
         result["memory"] = bytes(machine.mem_read(address, len(data)))
     return result
@@ -88,7 +153,7 @@ def native(code, initial):
     state = State.from_buffer_copy(initial)
     with executable(code) as address:
         ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)(ctypes.byref(state))
-    return {"x": list(state.x), "sp": state.sp, "nzcv": state.nzcv}
+    return state_dict(state)
 
 
 def native_worker(pipe, code, initial_states):
@@ -197,6 +262,7 @@ def states(all_flags=False):
             state.x[index] = value if index in (0,7) else randomizer.getrandbits(64)
         state.sp = value
         state.nzcv = randomizer.randrange(16) << 28
+        seed_extended_state(state)
         result.append(state)
     if all_flags:
         result = [State.from_buffer_copy(result[index % len(result)]) for index in range(16)]
@@ -220,8 +286,8 @@ def main():
     corpus = hashlib.sha256()
     compiler_source = None
     report = {"kind": "arm64_leaf_differential", "source_oracle": "Unicorn ARM64 2.1.4",
-              "target": "native x86-64 SysV", "tested_state": ["x0..x30", "sp", "nzcv"],
-              "limits": "Integer/register/internal-branch suite only. Guest memory operations, faults, external calls, SIMD, PAC and OS ABI are not exercised here; memory and fault suites are separate."}
+              "target": "native x86-64 SysV", "tested_state": ["x0..x30", "sp", "nzcv", "reserved", "v0..v31", "fpcr", "fpsr"],
+              "limits": "Integer/register/internal-branch suite only. Guest memory operations, faults, external calls, SIMD instructions, PAC and OS ABI are not exercised here; memory and fault suites are separate."}
     with tempfile.TemporaryDirectory(prefix="stela-diff-") as temporary:
         directory = Path(temporary)
         for index, words in enumerate(programs()):
