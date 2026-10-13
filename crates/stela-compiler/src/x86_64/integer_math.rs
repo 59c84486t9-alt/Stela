@@ -1,9 +1,42 @@
-//! Baseline x86-64 integer products/quotients; guest NZCV stays unchanged.
+//! Baseline x86-64 integer math; guest NZCV stays unchanged.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::integer_math::{Kind, Operand};
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     load(code, operand.left);
+    match operand.kind {
+        Kind::LeadingZeros { width } => {
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x0f, 0xbd, 0xc0]); // bsr (r/e)ax,(r/e)ax
+            let bits = if width == Width::X64 { 64u32 } else { 32 };
+            code.push(0xb9); // mov ecx,2*width-1: preserves BSR ZF
+            code.extend((2 * bits - 1).to_le_bytes());
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            // BSR's zero-input destination is undefined: replace it before use.
+            code.extend([0x0f, 0x44, 0xc1]); // cmovz (r/e)ax,(r/e)cx
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            // Nonzero: (width-1)-MSB. Zero: (2*width-1) XOR (width-1)=width.
+            code.extend([0x83, 0xf0, (bits - 1) as u8]);
+            store(code, operand.destination);
+            return;
+        }
+        Kind::ReverseBytes { halfwords } => {
+            code.extend([0x0f, 0xc8]); // bswap eax, always clears upper X half
+            if halfwords {
+                // Full reversal plus halfword rotation swaps each byte pair.
+                code.extend([0xc1, 0xc8, 16]); // ror eax,16
+            }
+            store(code, operand.destination);
+            return;
+        }
+        _ => {}
+    }
     right_operand(code, operand.right, Width::X64, Shift::Lsl, 0);
     if let Kind::Divide { signed, width } = operand.kind {
         divide(code, signed, width);
@@ -27,7 +60,9 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             Width::X64
         }
         Kind::Low { width } => width,
-        Kind::Divide { .. } => unreachable!("division emitted above"),
+        Kind::Divide { .. } | Kind::LeadingZeros { .. } | Kind::ReverseBytes { .. } => {
+            unreachable!("division and unary operations emitted above")
+        }
     };
     if width == Width::X64 {
         code.push(0x48);

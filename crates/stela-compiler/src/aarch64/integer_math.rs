@@ -1,11 +1,13 @@
-//! Apple A64 scalar integer product/division encodings; register 31 is ZR.
+//! Apple A64 scalar integer math encodings; register 31 is ZR.
 //!
 //! Semantics and fixed bits follow the pinned Arm 2026-06 MADD/MSUB,
-//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH and SDIV/UDIV instruction XML.
+//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH, SDIV/UDIV, CLZ and REV instruction XML.
 use super::{Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    LeadingZeros { width: Width },
+    ReverseBytes { halfwords: bool },
     Divide { signed: bool, width: Width },
     Low { width: Width },
     Long { signed: bool },
@@ -27,6 +29,23 @@ pub struct Operand {
 /// MUL/MNEG and long aliases are represented by an ordinary ZR accumulator.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    let unary = match word & 0xfffffc00 {
+        0x5ac01000 => Some(Kind::LeadingZeros { width: Width::W32 }),
+        0xdac01000 => Some(Kind::LeadingZeros { width: Width::X64 }),
+        0x5ac00800 => Some(Kind::ReverseBytes { halfwords: false }),
+        0x5ac00400 => Some(Kind::ReverseBytes { halfwords: true }),
+        _ => None,
+    };
+    if let Some(kind) = unary {
+        return Some(Ok(Operand {
+            kind,
+            subtract: false,
+            destination: register(word & 31, false),
+            left: register((word >> 5) & 31, false),
+            right: Register::Zero,
+            accumulator: Register::Zero,
+        }));
+    }
     if matches!(word & 0x7fe0fc00, 0x1ac00800 | 0x1ac00c00) {
         return Some(Ok(Operand {
             kind: Kind::Divide {
@@ -78,6 +97,37 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unary_forms_use_exact_fixed_bits_and_zero_register_roles() {
+        let forms = [
+            (0x5ac01000, Kind::LeadingZeros { width: Width::W32 }),
+            (0xdac01000, Kind::LeadingZeros { width: Width::X64 }),
+            (0x5ac00800, Kind::ReverseBytes { halfwords: false }),
+            (0x5ac00400, Kind::ReverseBytes { halfwords: true }),
+        ];
+        for (base, kind) in forms {
+            for destination in 0..32 {
+                for source in 0..32 {
+                    let operand = decode(base | (source << 5) | destination).unwrap().unwrap();
+                    assert_eq!(operand.kind, kind);
+                    assert_eq!(operand.destination, register(destination, false));
+                    assert_eq!(operand.left, register(source, false));
+                    assert_eq!(operand.right, Register::Zero);
+                    assert_eq!(operand.accumulator, Register::Zero);
+                }
+            }
+            for bit in 10..32 {
+                if let Some(Ok(neighbor)) = decode(base ^ (1 << bit)) {
+                    assert_ne!(neighbor.kind, kind, "{base:08x} bit {bit}");
+                }
+            }
+        }
+        // X64 reversal encodings and CLS are outside these four admitted forms.
+        for word in [0xdac00800, 0xdac00400, 0xdac00c00, 0x5ac01400, 0xdac01400] {
+            assert!(decode(word).is_none(), "{word:08x}");
+        }
+    }
 
     #[test]
     fn division_fixed_bits_width_and_zero_roles_are_exact() {

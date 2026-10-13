@@ -28,12 +28,17 @@ MULTIPLY_FORMS = {
 }
 DIVIDE_FORMS = {'SDIV32': 0x1ac00c00, 'SDIV64': 0x9ac00c00,
                 'UDIV32': 0x1ac00800, 'UDIV64': 0x9ac00800}
-FORMS = {**MULTIPLY_FORMS, **DIVIDE_FORMS}
+UNARY_FORMS = {'CLZ32': 0x5ac01000, 'CLZ64': 0xdac01000,
+               'REV32': 0x5ac00800, 'REV16_32': 0x5ac00400}
+FORMS = {**MULTIPLY_FORMS, **DIVIDE_FORMS, **UNARY_FORMS}
 MNEMONICS = {'madd', 'msub', 'mul', 'mneg', 'smaddl', 'smsubl', 'smull', 'smnegl',
-              'umaddl', 'umsubl', 'umull', 'umnegl', 'smulh', 'umulh', 'sdiv', 'udiv', 'ret'}
+              'umaddl', 'umsubl', 'umull', 'umnegl', 'smulh', 'umulh', 'sdiv', 'udiv',
+              'clz', 'rev', 'rev16', 'ret'}
 
 
-def encoding(form, destination, left, right, accumulator=31):
+def encoding(form, destination, left, right=0, accumulator=31):
+    if form in UNARY_FORMS:
+        return FORMS[form] | (left << 5) | destination
     return (FORMS[form] | (right << 16) | (0 if form in DIVIDE_FORMS else accumulator << 10)
             | (left << 5) | destination)
 
@@ -96,6 +101,26 @@ def cases():
                                           (0, 1, 31), (31, 31, 31)):
             result.append({'form': form, 'kind': 'alias_boundaries',
                            'words': [encoding(form, destination, left, right), RET]})
+    assert len(result) == 768, 'Preserve every original multiply/divide program'
+    for form in UNARY_FORMS:
+        # All 1,024 Rd/Rn encodings, grouped by destination to avoid 4,096 CLI
+        # launches. Sequential alias effects are evaluated by both oracles.
+        for destination in range(32):
+            result.append({'form': form, 'kind': 'all_register_pairs',
+                           'words': [encoding(form, destination, source)
+                                     for source in range(32)] + [RET]})
+            result.append({'form': form, 'kind': 'in_place',
+                           'words': [encoding(form, destination, destination), RET]})
+        for destination, source in ((0, 1), (1, 1), (31, 1), (0, 31), (31, 31), (30, 30)):
+            result.append({'form': form, 'kind': 'unary_boundaries',
+                           'words': [encoding(form, destination, source), RET]})
+        result.append({'form': form, 'kind': 'unary_dependency_chain',
+                       'words': [encoding(form, 0, 1), encoding(form, 4, 0),
+                                 encoding(form, 2, 2), encoding(form, 0, 4),
+                                 encoding(form, 31, 0), encoding(form, 0, 31), RET]})
+    result.append({'form': 'CLZ64', 'kind': 'mixed_unary_chain',
+                   'words': [encoding('REV16_32', 0, 1), encoding('CLZ64', 4, 0),
+                             encoding('REV32', 2, 0), encoding('CLZ32', 0, 2), RET]})
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     for case in result:
         for word in case['words']:
@@ -127,6 +152,20 @@ def quotient(numerator, denominator, bits, is_signed):
     return value & mask
 
 
+def unary_reference(form, value):
+    bits = 64 if form == 'CLZ64' else 32
+    value &= (1 << bits) - 1
+    if form.startswith('CLZ'):
+        return bits - value.bit_length()
+    # Independent byte-array transformations, not the emitter's BSWAP/ROR path.
+    data = value.to_bytes(4, 'little')
+    if form == 'REV32':
+        return int.from_bytes(data[::-1], 'little')
+    if form == 'REV16_32':
+        return int.from_bytes(data[0:2][::-1] + data[2:4][::-1], 'little')
+    raise AssertionError('Unexpected unary form')
+
+
 def mathematical_reference(words, initial):
     registers = list(initial.x)
     for word in words[:-1]:
@@ -135,6 +174,12 @@ def mathematical_reference(words, initial):
         operands = [registers[r] if r != 31 else 0 for r in (left, right, accumulator)]
         first, second, added = operands
         bits = 64 if word >> 31 else 32
+        unary = next((form for form, base in UNARY_FORMS.items()
+                      if word & 0xfffffc00 == base), None)
+        if unary is not None:
+            if destination != 31:
+                registers[destination] = unary_reference(unary, first)
+            continue
         if word & 0x7fe0f800 == 0x1ac00800:
             value = quotient(first, second, bits, bool(word & (1 << 10)))
             if destination != 31:
@@ -171,6 +216,16 @@ def native_state(code, initial):
 def boundary_values(form):
     bits = 32 if form.endswith('32') or form.endswith('L') else 64
     sign, mask = 1 << (bits - 1), (1 << bits) - 1
+    if form in UNARY_FORMS:
+        if form.startswith('CLZ'):
+            values = [0] + [1 << bit for bit in range(bits)]
+            values += [(1 << bit) - 1 for bit in range(1, bits + 1)]
+        else:
+            values = [0, 1, mask, 0x01234567, 0x89abcdef, 0xaabbccdd,
+                      0x00112233, 0xff00ff00, 0x00ff00ff, 0x80000000,
+                      0x00008000, 0x7fffffff, 0x0000ffff, 0xffff0000,
+                      0xaaaaaaaa, 0x55555555]
+        return ((value, 0, 0) for value in dict.fromkeys(values))
     values = (0, 1, 2, sign - 1, sign, mask, 0xaaaaaaaaaaaaaaaa & mask,
               0x5555555555555555 & mask)
     if form in DIVIDE_FORMS:
@@ -181,6 +236,8 @@ def boundary_values(form):
 
 
 def case_boundaries(case):
+    if case['kind'] == 'unary_boundaries':
+        return boundary_values(case['form'])
     if case['kind'] in ('boundaries', 'remainder_combo'):
         return boundary_values(case['form'])
     if case['kind'] == 'alias_boundaries':
@@ -195,6 +252,11 @@ def case_boundaries(case):
 
 def initialize_boundary(case, state, boundary):
     poison = 0xdeadc0de00000000 if case['form'].endswith(('32', 'L')) else 0
+    if case['kind'] == 'unary_boundaries':
+        source = (case['words'][0] >> 5) & 31
+        if source != 31:
+            state.x[source] = boundary[0] | poison
+        return
     if case['kind'] != 'alias_boundaries':
         state.x[1], state.x[2], state.x[3] = (boundary[0] | poison,
                                               boundary[1] | poison, boundary[2])
@@ -210,8 +272,10 @@ def initialize_boundary(case, state, boundary):
 def execute_cases(compiled):
     comparisons = 0
     counts = {'multiply': {'programs': 0, 'comparisons': 0},
-              'divide': {'programs': 0, 'comparisons': 0}}
+              'divide': {'programs': 0, 'comparisons': 0},
+              'unary': {'programs': 0, 'comparisons': 0}}
     group_corpora = {name: hashlib.sha256() for name in counts}
+    legacy_corpus = hashlib.sha256()
     incoming = states(all_flags=True)
     corpus = hashlib.sha256()
     rng = random.Random(0x534f52455454414d)
@@ -225,7 +289,8 @@ def execute_cases(compiled):
                                                 rng.getrandbits(32))
         incoming.append(state)
     for case in compiled:
-        group_name = 'divide' if case['form'] in DIVIDE_FORMS else 'multiply'
+        group_name = ('unary' if case['form'] in UNARY_FORMS else
+                      'divide' if case['form'] in DIVIDE_FORMS else 'multiply')
         group = counts[group_name]
         group['programs'] += 1
         code = struct.pack('<' + 'I' * len(case['words']), *case['words'])
@@ -241,6 +306,9 @@ def execute_cases(compiled):
                 corpus.update(bytes(state))
                 group_corpora[group_name].update(code)
                 group_corpora[group_name].update(bytes(state))
+                if group_name != 'unary':
+                    legacy_corpus.update(code)
+                    legacy_corpus.update(bytes(state))
                 expected_math = mathematical_reference(case['words'], state)
                 expected_arm = {**reference(code, state), 'reserved': state.reserved}
                 actual = native_state(case['native'], state)
@@ -252,10 +320,12 @@ def execute_cases(compiled):
                 comparisons += 1
                 group['comparisons'] += 1
     assert counts['multiply'] == {'programs': 544, 'comparisons': 51904}
+    assert counts['divide'] == {'programs': 224, 'comparisons': 28928}
     for name, group in counts.items():
         group['state_corpus_sha256'] = group_corpora[name].hexdigest()
     return {'programs': len(compiled), 'three_way_register_state_comparisons': comparisons,
-            'groups': counts, 'state_corpus_sha256': corpus.hexdigest()}
+            'groups': counts, 'state_corpus_sha256': corpus.hexdigest(),
+            'legacy_multiply_divide_state_corpus_sha256': legacy_corpus.hexdigest()}
 
 
 def worker(pipe, compiled):
@@ -321,7 +391,7 @@ def main():
     report = {'kind': 'integer_math_arm_vs_native_x86', 'passed': True, **result,
               'operations': list(FORMS),
               'reference': 'Unicorn ARM64 2.1.4 and independent unbounded signed/unsigned integer arithmetic',
-              'native': 'baseline x86-64 integer products and guarded division in isolated worker; SIGFPE and other worker failures fail the suite',
+              'native': 'baseline x86-64 integer products, guarded division, leading-zero and byte-reversal code in isolated worker; SIGFPE and other worker failures fail the suite; no LZCNT requirement',
               'tested_state': ['x0..x30', 'SP and reserved ABI field preservation',
                                'all 16 incoming NZCV combinations',
                                'W32 upper-half clearing', 'signed/unsigned long source truncation',
@@ -330,7 +400,10 @@ def main():
                                'high 64 product bits', 'ignored high-product Ra encodings',
                                'SDIV/UDIV 32/64, truncation toward zero, zero divisors',
                                'signed MIN/-1 produces MIN without host SIGFPE',
-                               'division/remainder combinations and mixed-signedness chains'],
+                               'division/remainder combinations and mixed-signedness chains',
+                               'CLZ32/64 all leading counts including zero, REV32/REV16_32 byte patterns',
+                               'all 1024 Rd/Rn unary encodings per form, in-place/discard/ZR operands',
+                               'unary and mixed-width dependency chains with dirty W upper halves'],
               'corpus_sha256': corpus.hexdigest(), 'compiler_source_sha256': compiler,
               'compiler_executable_sha256': executable_hash,
               'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

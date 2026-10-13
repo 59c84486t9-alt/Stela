@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v6",
+  "registry_version": "apple-silicon-reviewed-forms-v7",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -1461,6 +1461,84 @@
           "reason": "UnresolvedDirectTarget"
         }
       ]
+    },
+    {
+      "id": "CLZ_32_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac01000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CLZ"
+      },
+      "source_file": "clz_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clz_int.xml",
+      "source_sha256": "ac5a139cfb625117cc880f4c46740da7217b0980f675bd0bde7b4ff45ad2efb6",
+      "mnemonic": "CLZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ac01020",
+          "expected_mnemonics": [
+            "clz"
+          ]
+        }
+      ],
+      "review": "Selected scalar canonical form reviewed against exact June 2026 official XML and decoder/emitter. Integer-math differential evidence compares independent leading-count/byte-array mathematics, original ARM and native x86, including all register pairs and boundary values. Aliases and vector/other-width forms excluded; smoke checks emission only.",
+      "scope": "Count leading zeros over the selected W32/X64 source width, returning the width for zero. All Rd/Rn operands, in-place/discard/ZR behavior, W writes zero-extend, and NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "CLZ_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac01000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CLZ"
+      },
+      "source_file": "clz_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clz_int.xml",
+      "source_sha256": "ac5a139cfb625117cc880f4c46740da7217b0980f675bd0bde7b4ff45ad2efb6",
+      "mnemonic": "CLZ",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac01020",
+          "expected_mnemonics": [
+            "clz"
+          ]
+        }
+      ],
+      "review": "Selected scalar canonical form reviewed against exact June 2026 official XML and decoder/emitter. Integer-math differential evidence compares independent leading-count/byte-array mathematics, original ARM and native x86, including all register pairs and boundary values. Aliases and vector/other-width forms excluded; smoke checks emission only.",
+      "scope": "Count leading zeros over the selected W32/X64 source width, returning the width for zero. All Rd/Rn operands, in-place/discard/ZR behavior, W writes zero-extend, and NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
     },
     {
       "id": "CSEL_32_condsel",
@@ -5000,6 +5078,84 @@
           "reason": "unsupported ARM64 semantics"
         }
       ]
+    },
+    {
+      "id": "REV16_32_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac00400",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "REV16"
+      },
+      "source_file": "rev16_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rev16_int.xml",
+      "source_sha256": "51fb9196d28589ef791d6a4a9690ba6607335ab27beefa40c4308ec0bdfbb10b",
+      "mnemonic": "REV16",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ac00420",
+          "expected_mnemonics": [
+            "rev16"
+          ]
+        }
+      ],
+      "review": "Selected scalar canonical form reviewed against exact June 2026 official XML and decoder/emitter. Integer-math differential evidence compares independent leading-count/byte-array mathematics, original ARM and native x86, including all register pairs and boundary values. Aliases and vector/other-width forms excluded; smoke checks emission only.",
+      "scope": "Reverse bytes independently within both 16-bit halfwords of Wn. All Rd/Rn operands, in-place/discard/ZR behavior, W writes zero-extend, and NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
+    },
+    {
+      "id": "REV_32_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac00800",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "REV"
+      },
+      "source_file": "rev.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rev.xml",
+      "source_sha256": "77a1f97adc86403a7c5c966cb2f0174b7c0932bd114280d70f16b7d576ab83a8",
+      "mnemonic": "REV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ac00820",
+          "expected_mnemonics": [
+            "rev"
+          ]
+        }
+      ],
+      "review": "Selected scalar canonical form reviewed against exact June 2026 official XML and decoder/emitter. Integer-math differential evidence compares independent leading-count/byte-array mathematics, original ARM and native x86, including all register pairs and boundary values. Aliases and vector/other-width forms excluded; smoke checks emission only.",
+      "scope": "Reverse all four bytes of Wn. All Rd/Rn operands, in-place/discard/ZR behavior, W writes zero-extend, and NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."
     },
     {
       "id": "SBCS_32_addsub_carry",
