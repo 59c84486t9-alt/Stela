@@ -218,6 +218,80 @@ class PauthGuards(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     suite.audit_clock_probe(changed, oracle, {}, None, {}, 'compiler', True)
 
+    def test_generic_domains_preserve_data_tags_strip_and_key_specific_poison(self):
+        for key in suite.DOMAIN_KEYS:
+            data = key[0] == 'd'
+            for pointer in (0, suite.STOP, suite.LOW, 0xffffffffffffffff, 0x8000000000001400):
+                if not suite.domain_invalid_extension(pointer, key):
+                    signed = suite.domain_sign(pointer, 0x2000, key)
+                    self.assertEqual(suite.domain_authenticate(signed, 0x2000, key), (pointer, True))
+                    self.assertEqual(suite.domain_strip(signed, data), pointer)
+                    if data:
+                        self.assertEqual(signed & suite.HIGH8, pointer & suite.HIGH8)
+            signed = suite.domain_sign(suite.STOP, 0x2000, key)
+            poisoned, valid = suite.domain_authenticate(signed ^ (1 << 47), 0x2000, key)
+            self.assertFalse(valid)
+            self.assertEqual((poisoned >> (53 if data else 61)) & 3, 1 if key[1] == 'a' else 2)
+
+    def test_generic_grid_covers33_forms_all_flags_all_variable_destinations_aliases(self):
+        cases = list(suite.generic_cases())
+        self.assertEqual(len(cases), 2944)
+        self.assertEqual(len(suite.basic_forms()), 33)
+        for form in suite.basic_forms():
+            selected = [case for case in cases if case['name'] == form['name']]
+            self.assertEqual({c['flag'] for c in selected}, set(range(16)))
+            if form['variable']:
+                self.assertEqual({c['destination'] for c in selected}, set(range(32)))
+            if form['variable'] and isinstance(form['modifier'], int):
+                self.assertEqual({c['destination'] for c in selected if c['role'] == 'aliased_modifier'}, set(range(32)))
+
+    def test_data_noncanonical_classifier_declines_any_additional_corruption(self):
+        initial = suite.initial_state(0, 0x2000, 15)
+        initial.x[0] = 1 << 47
+        expected = suite.State.from_buffer_copy(initial)
+        expected.x[0] = suite.domain_sign(initial.x[0], 0x2000, 'da')
+        observed = suite.State.from_buffer_copy(expected)
+        observed.x[0] ^= 1 << 54
+        self.assertEqual(suite.classify_domain_original(expected, observed, 4, 4, 'sign', 'da', 0, initial.x[0]),
+                         'invalid_extension_legacy_unicorn_observation')
+        changed = suite.State.from_buffer_copy(observed)
+        changed.v[31][1] ^= 1
+        with self.assertRaises(AssertionError):
+            suite.classify_domain_original(expected, changed, 4, 4, 'sign', 'da', 0, initial.x[0])
+        with self.assertRaises(AssertionError):
+            suite.classify_domain_original(expected, observed, 4, 8, 'sign', 'da', 0, initial.x[0])
+
+    def test_signer_null_and_blended_modifier_have_exact_register_and_flag_effects(self):
+        initial = suite.initial_state(0, 0x2000, 15)
+        initial.x[0], initial.x[1], initial.x[2] = suite.METADATA_BASE, 0, 0x123456789abc
+        expected = suite.signer_math(initial, 0xffff, 'da', True)
+        preserved = suite.State.from_buffer_copy(initial); preserved.x[0] = 0
+        self.assertEqual(bytes(expected), bytes(preserved))
+        initial.x[1] = suite.STOP
+        expected = suite.signer_math(initial, 0xabcd, 'da', True)
+        self.assertEqual(expected.x[16], 0xabcd123456789abc)
+        self.assertEqual(expected.x[2], expected.x[16])
+        self.assertEqual(expected.x[0], suite.domain_sign(suite.STOP, expected.x[16], 'da'))
+        self.assertEqual(expected.nzcv, 0x60000000)
+        self.assertEqual(bytes(expected)[264:], bytes(initial)[264:])
+
+    def test_signer_receipt_rejects_missing_memory_hash_read_or_fullstate(self):
+        state = suite.initial_state(0, 0x2000, 15)
+        source, memory = b'original', bytes(4096)
+        receipt = [{'address': suite.METADATA_BASE, 'bytes': 4096, 'sha256': suite.digest(memory)}]
+        report = {'state': state_dict(state), 'pc': suite.STOP, 'outcome': {'reason': {'kind': 'stop_address'}},
+                  'abi': suite.ABI, 'complete_binary_verified': False, 'software_pauth_profile': suite.FULL_PROFILE,
+                  'source_sha256': suite.digest(source), 'memory': {'memory_before': receipt, 'memory_after': receipt,
+                  'memory_reads': [{'address': suite.METADATA_BASE, 'bytes': 4096, 'hex': memory.hex()}]}}
+        suite.validate_signer_native(report, state, source, memory, 0)
+        for field in ('memory_before', 'memory_after', 'memory_reads'):
+            changed = copy.deepcopy(report); changed['memory'][field] = []
+            with self.assertRaises(AssertionError):
+                suite.validate_signer_native(changed, state, source, memory, 0)
+        changed = copy.deepcopy(report); changed['state']['fpsr'] ^= 1
+        with self.assertRaises(AssertionError):
+            suite.validate_signer_native(changed, state, source, memory, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

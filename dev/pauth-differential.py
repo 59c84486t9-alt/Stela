@@ -138,7 +138,63 @@ def authenticate_ib(pointer, modifier, key=KEY):
     return (original if valid else poisoned), valid
 
 
-def arm_machine(key=KEY, enabled=True):
+
+DOMAIN_KEYS = {'ia': (0x0123456789abcdef, 0xfedcba9876543210), 'ib': KEY,
+               'da': (0x0f1e2d3c4b5a6978, 0x8877665544332211),
+               'db': (0xcafebabedeadbeef, 0x1020304050607080)}
+FULL_PROFILE = 'stela-classic-arm64e-qarma5-va47-itbi0-dtbi1-all-keys-v1'
+DATA_PAC_MASK = ((1 << 55) - 1) ^ LOW
+HIGH8 = 0xff << 56
+
+
+def domain_strip(pointer, data):
+    extension = MASK if pointer & (1 << 55) else 0
+    mask = ((1 << 56) - 1) ^ LOW if data else MASK ^ LOW
+    return (pointer & ~mask) | (extension & mask)
+
+
+def domain_sign(pointer, modifier, key, keys=DOMAIN_KEYS):
+    data = key[0] == 'd'
+    top = 55 if data else 63
+    extension = MASK if pointer & (1 << top) else 0
+    extmask = ((1 << (top + 1)) - 1) ^ LOW
+    canonical = (pointer & ~extmask) | (extension & extmask)
+    signature = qarma5(canonical, modifier, *keys[key])
+    if pointer & extmask not in (0, extmask):
+        signature ^= 1 << (54 if data else 62)
+    pacmask = DATA_PAC_MASK if data else PAC_MASK
+    # Bit55 chooses the address range, even when it was not a valid extension.
+    return (pointer & LOW) | (pointer & HIGH8 if data else 0) | (extension & (1 << 55)) | (signature & pacmask)
+
+
+def domain_authenticate(pointer, modifier, key, keys=DOMAIN_KEYS):
+    data = key[0] == 'd'
+    original_pointer = domain_strip(pointer, data)
+    pacmask = DATA_PAC_MASK if data else PAC_MASK
+    valid = ((qarma5(original_pointer, modifier, *keys[key]) ^ pointer) & pacmask) == 0
+    shift = 53 if data else 61
+    error = 1 if key[1] == 'a' else 2
+    poison = (original_pointer & ~(3 << shift)) | (error << shift)
+    return (original_pointer if valid else poison), valid
+
+
+def domain_invalid_extension(pointer, key):
+    top = 55 if key[0] == 'd' else 63
+    mask = ((1 << (top + 1)) - 1) ^ LOW
+    return pointer & mask not in (0, mask)
+
+
+def classify_domain_original(expected, observed, pc, original_pc, operation, key, destination, pointer):
+    assert pc == original_pc, (hex(pc), hex(original_pc))
+    if bytes(expected) == bytes(observed):
+        return 'original_math_native_equal'
+    assert operation == 'sign' and destination != 31 and domain_invalid_extension(pointer, key)
+    corrected = State.from_buffer_copy(observed)
+    corrected.x[destination] ^= (1 << 54) if key[0] == 'd' else ((1 << 62) | (1 << 63))
+    assert bytes(corrected) == bytes(expected), 'unclassified original PAuth state mismatch'
+    return 'invalid_extension_legacy_unicorn_observation'
+
+def arm_machine(key=KEY, enabled=True, keys=None):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
     machine.mem_map(BASE, 4096)
@@ -152,6 +208,11 @@ def arm_machine(key=KEY, enabled=True):
     for half, value in enumerate(key):
         machine.cpr_write(3, 0, 2, 1, 2 + half, value)
         assert machine.cpr_read(3, 0, 2, 1, 2 + half) == value
+    if keys is not None:
+        for domain, (crm, op2) in zip(('ia', 'ib', 'da', 'db'), ((1, 0), (1, 2), (2, 0), (2, 2))):
+            for half, value in enumerate(keys[domain]):
+                machine.cpr_write(3, 0, 2, crm, op2 + half, value)
+                assert machine.cpr_read(3, 0, 2, crm, op2 + half) == value
     # Explicit EL0t, no PAuth2/FPAC model, masks do not affect pointer operations.
     machine.reg_write(arm.UC_ARM64_REG_PSTATE, 0x3c0)
     isar = machine.cpr_read(3, 0, 0, 6, 1)
@@ -689,9 +750,372 @@ def raw_clock_cohort(cli, folder, key_path, state_path):
     return rows, manifests
 
 
+def basic_forms():
+    forms = []
+    for auth in (False, True):
+        for zero in (False, True):
+            for index, key in enumerate(DOMAIN_KEYS):
+                name = ('aut' if auth else 'pac') + key + ('z' if zero else '')
+                word = 0xdac10000 | (int(auth) << 12) | (int(zero) << 13) | (index << 10) | ((31 if zero else 1) << 5)
+                forms.append({'name': name, 'word': word, 'operation': 'authenticate' if auth else 'sign',
+                              'key': key, 'destination': 0, 'modifier': 'zero' if zero else 1, 'variable': True})
+    for word, name, operation, key, destination, modifier in [
+        (0xd503211f, 'pacia1716', 'sign', 'ia', 17, 16), (0xd503215f, 'pacib1716', 'sign', 'ib', 17, 16),
+        (0xd503219f, 'autia1716', 'authenticate', 'ia', 17, 16), (0xd50321df, 'autib1716', 'authenticate', 'ib', 17, 16),
+        (0xd503233f, 'paciasp', 'sign', 'ia', 30, 'sp'), (0xd503237f, 'pacibsp', 'sign', 'ib', 30, 'sp'),
+        (0xd50323bf, 'autiasp', 'authenticate', 'ia', 30, 'sp'), (0xd50323ff, 'autibsp', 'authenticate', 'ib', 30, 'sp'),
+        (0xd503231f, 'paciaz', 'sign', 'ia', 30, 'zero'), (0xd503235f, 'pacibz', 'sign', 'ib', 30, 'zero'),
+        (0xd503239f, 'autiaz', 'authenticate', 'ia', 30, 'zero'), (0xd50323df, 'autibz', 'authenticate', 'ib', 30, 'zero'),
+        (0xdac143e0, 'xpaci', 'strip', 'ia', 0, 'zero'), (0xdac147e0, 'xpacd', 'strip', 'da', 0, 'zero'),
+        (0xd50320ff, 'xpaclri', 'strip', 'ia', 30, 'zero'),
+        (0xd65f0bff, 'retaa', 'return', 'ia', 30, 'sp'), (0xd65f0fff, 'retab', 'return', 'ib', 30, 'sp')]:
+        forms.append({'name': name, 'word': word, 'operation': operation, 'key': key,
+                      'destination': destination, 'modifier': modifier, 'variable': name in ('xpaci', 'xpacd')})
+    assert len(forms) == 33 and len({f['word'] for f in forms}) == 33
+    return forms
+
+
+def generic_cases():
+    for form in basic_forms():
+        for variant in range(4):
+            for flag in range(16):
+                yield dict(form, variant=variant, flag=flag, role='canonical_form')
+        if form['variable']:
+            for destination in range(32):
+                changed = dict(form, destination=destination, word=(form['word'] & ~31) | destination)
+                yield dict(changed, variant=1, flag=destination % 16, role='all_destinations')
+                if isinstance(form['modifier'], int):
+                    changed['modifier'] = destination if destination < 31 else 'sp'
+                    changed['word'] = (changed['word'] & ~(31 << 5)) | (destination << 5)
+                    yield dict(changed, variant=1, flag=destination % 16, role='aliased_modifier')
+
+
+def generic_input(case, seed):
+    state = initial_state(STOP, 0x2000, seed)
+    state.nzcv = case['flag'] << 28
+    destination, modifier, operation, key = (case[n] for n in ('destination', 'modifier', 'operation', 'key'))
+    if isinstance(modifier, int):
+        state.x[modifier] = 0x2000
+    raw = [0, STOP, 0x8000000000001400 if key[0] == 'd' else 0xffff800000001400, 1 << 47][case['variant']]
+    actual_modifier = 0 if modifier == 'zero' else state.sp if modifier == 'sp' else state.x[modifier]
+    if operation in ('authenticate', 'return'):
+        raw = domain_sign(STOP if operation == 'return' else (0x8000000000001400 if key[0] == 'd' else STOP), actual_modifier, key)
+        if case['variant'] == 1:
+            raw ^= 1 << 47
+        elif case['variant'] == 2:
+            raw ^= 1 << 56  # Wrong tag for data, PAC bit for code; collisions remain explicit.
+        elif case['variant'] == 3:
+            raw = domain_sign(STOP, actual_modifier, list(DOMAIN_KEYS)[(list(DOMAIN_KEYS).index(key) + 1) % 4])
+    if destination != 31:
+        state.x[destination] = raw
+    return state
+
+
+def generic_math(case, initial):
+    state = State.from_buffer_copy(initial)
+    destination, modifier, operation, key = (case[n] for n in ('destination', 'modifier', 'operation', 'key'))
+    pointer = 0 if destination == 31 else initial.x[destination]
+    modifier = 0 if modifier == 'zero' else initial.sp if modifier == 'sp' else initial.x[modifier]
+    authenticated = None
+    pc = BASE + 4
+    if operation == 'sign':
+        value = domain_sign(pointer, modifier, key)
+    elif operation in ('authenticate', 'return'):
+        value, authenticated = domain_authenticate(pointer, modifier, key)
+    else:
+        value = domain_strip(pointer, key[0] == 'd')
+    if operation == 'return':
+        pc = value
+    elif destination != 31:
+        state.x[destination] = value
+    return state, pc, authenticated, pointer
+
+
+def original_generic(case, initial):
+    machine = arm_machine(keys=DOMAIN_KEYS)
+    machine.mem_write(BASE, struct.pack('<I', case['word']))
+    initialize_arm(machine, initial)
+    visited = []
+    machine.hook_add(UC_HOOK_CODE, lambda _, pc, size, unused: visited.append([pc, size]))
+    error = None
+    try:
+        machine.emu_start(BASE, BASE + 4, count=1)
+    except UcError as exc:
+        error = {'code': exc.errno, 'message': str(exc)}
+    assert visited == [[BASE, 4]]
+    return capture_arm(machine, initial), machine.reg_read(arm.UC_ARM64_REG_PC), error
+
+
+def generic_descriptor(case):
+    operation, key, destination, modifier = (case[n] for n in ('operation', 'key', 'destination', 'modifier'))
+    if case['name'] in WORDS:
+        value = OPERATIONS[case['name']]
+    elif operation == 'return':
+        value = 'return_ia_sp'
+    elif operation == 'strip':
+        value = {'strip': {'data': key[0] == 'd', 'destination': destination}}
+    else:
+        mod = 'stack_pointer' if modifier == 'sp' else 'zero' if modifier == 'zero' else {'register': modifier}
+        value = {operation: {'key': key, 'destination': destination, 'modifier': mod}}
+    return {'operation': value, 'instruction_pc': BASE, 'next_pc': BASE + 4}
+
+
+def validate_generic_native(report, case, initial, expected, pc, authenticated, checksum):
+    assert report['kind'] == 'native_block_run' and report['abi'] == ABI
+    assert report['software_pauth_profile'] == FULL_PROFILE and not report['complete_binary_verified']
+    assert report['source_sha256'] == checksum and report['state'] == state_dict(expected) and report['pc'] == pc
+    outcome = report['outcome']
+    descriptor = generic_descriptor(case)
+    assert outcome['blocks_executed'] == 1 and outcome['last_exit'] == [BASE, 6]
+    assert outcome['pointer_authentication_events'] == [{'instruction': descriptor, 'next_pc': pc, 'authenticated': authenticated}]
+    if case['operation'] == 'return' and authenticated is False:
+        assert outcome['reason'] == {'kind': 'pointer_authentication_poisoned_return', 'instruction': descriptor, 'poisoned_target': pc}
+    else:
+        assert outcome['reason']['kind'] == 'stop_address'
+    assert bytes(initial)[248:] == bytes(expected)[248:]
+
+
+def generic_cohort(cli, folder, state_path, keys_path):
+    records, seen = [], set()
+    cache = folder / 'generic-cache'
+    for index, case in enumerate(generic_cases()):
+        initial = generic_input(case, 0x100000 + index)
+        expected, pc, authenticated, pointer = generic_math(case, initial)
+        observed, original_pc, error = original_generic(case, initial)
+        classification = classify_domain_original(expected, observed, pc, original_pc, case['operation'], case['key'], case['destination'], pointer)
+        assert error is None or (case['operation'] == 'return' and authenticated is False and error['code'] in (8, 21))
+        source = struct.pack('<I', case['word'])
+        source_path = folder / ('generic-' + hex(case['word']) + '.arm64')
+        source_path.write_bytes(source)
+        state_path.write_text(json.dumps(state_dict(initial)))
+        report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path), '--state', str(state_path),
+            '--guest-base', hex(BASE), '--stop-pc', hex(pc), '--block-budget', '1', '--software-pauth-keys', str(keys_path),
+            '--cache-dir', str(cache)], timeout=15))
+        validate_generic_native(report, case, initial, expected, pc, authenticated, digest(source))
+        cold = case['word'] not in seen
+        assert report['outcome']['compiled_blocks'] == int(cold)
+        assert report['outcome']['disk_cache_hits'] == int(not cold)
+        seen.add(case['word'])
+        records.append({'case': case, 'initial': state_dict(initial), 'classification': classification,
+                        'original': state_dict(observed), 'original_pc': original_pc, 'original_error': error,
+                        'independent_math': state_dict(expected), 'native': report})
+        if (index + 1) % 512 == 0:
+            print(f'{index + 1} generic full-key PAuth cases', flush=True)
+    negatives = []
+    ib_path = folder / 'only-ib.json'
+    ib_path.write_text(json.dumps({'low': KEY[0], 'high': KEY[1]}))
+    for form in basic_forms():
+        source_path = folder / ('negative-' + form['name'] + '.arm64')
+        source_path.write_bytes(struct.pack('<I', form['word']))
+        initial = generic_input(dict(form, variant=0, flag=15), 0x300000)
+        state_path.write_text(json.dumps(state_dict(initial)))
+        command = [str(cli), 'run-blocks', str(source_path), '--state', str(state_path), '--guest-base', hex(BASE),
+                   '--block-budget', '1', '--cache-dir', str(cache)]
+        ordinary = json.loads(subprocess.check_output(command, timeout=15))
+        assert ordinary['outcome']['reason']['kind'] == 'unsupported' and ordinary['outcome']['blocks_executed'] == 0
+        assert ordinary['state'] == state_dict(initial) and ordinary['pc'] == BASE
+        assert ordinary['outcome']['disk_cache_hits'] == 0
+        negatives.append({'form': form['name'], 'ordinary': ordinary})
+        if form['key'] != 'ib' and form['operation'] != 'strip':
+            missing = json.loads(subprocess.check_output([*command, '--software-pauth-ib-key', str(ib_path)], timeout=15))
+            assert missing['outcome']['reason'] == {'kind': 'pointer_authentication_key_unavailable',
+                'instruction': generic_descriptor(form), 'key': form['key']}
+            assert missing['state'] == state_dict(initial) and missing['pc'] == BASE
+            assert not missing['outcome'].get('pointer_authentication_events')
+            negatives[-1]['missing_key'] = missing
+    artifacts = []
+    for path in sorted(cache.rglob('manifest.json')):
+        raw = path.read_bytes(); manifest = json.loads(raw); native = path.with_name('native.bin').read_bytes()
+        assert manifest['identity']['abi'] == ABI and manifest['identity']['guest_base'] == BASE
+        assert manifest['source_map'] == [[BASE, 0]] and not manifest['verified']
+        assert manifest['native_sha256'] == digest(native) and manifest['native_bytes'] == len(native)
+        assert json.loads(path.with_name('manifest.sha256.json').read_bytes()) == digest(raw)
+        for words in DOMAIN_KEYS.values():
+            assert all(struct.pack('<Q', word) not in native for word in words)
+        artifacts.append({'manifest': manifest, 'manifest_sha256': digest(raw)})
+    assert len(artifacts) == len(seen)
+    return {'negative_profile_checks': negatives, 'cache_receipts': artifacts, 'cases': records, 'canonical_forms': 33, 'native_math_state_comparisons': len(records),
+            'original_equal': sum(r['classification'] == 'original_math_native_equal' for r in records),
+            'invalid_extension_observations': sum(r['classification'] != 'original_math_native_equal' for r in records),
+            'cold_compiles': len(seen), 'disk_hits': len(records) - len(seen)}
+
+
+SIGNER_BEGIN, SIGNER_END = 0x898c0, 0x89920
+METADATA_BASE = 0x90000000000
+
+
+def signer_math(initial, diversity, key, address_diversity):
+    state = State.from_buffer_copy(initial)
+    if initial.x[1] == 0:
+        state.x[0] = 0
+        return state
+    blended = (initial.x[2] & ((1 << 48) - 1)) | (diversity << 48)
+    modifier = blended if address_diversity else diversity
+    state.x[2], state.x[8], state.x[9], state.x[16] = blended, list(DOMAIN_KEYS).index(key), diversity, modifier
+    state.x[0] = state.x[17] = domain_sign(initial.x[1], modifier, key)
+    state.nzcv = [0x80000000, 0x60000000, 0x60000000, 0x20000000][list(DOMAIN_KEYS).index(key)]
+    return state
+
+
+def original_signer(source, initial, memory):
+    machine = arm_machine(keys=DOMAIN_KEYS)
+    machine.mem_write(BASE, source)
+    machine.mem_map(METADATA_BASE, 4096)
+    machine.mem_write(METADATA_BASE, memory)
+    machine.mem_protect(METADATA_BASE, 4096, unicorn.UC_PROT_READ)
+    initialize_arm(machine, initial)
+    visited = []
+    machine.hook_add(UC_HOOK_CODE, lambda _, pc, size, unused: visited.append(pc))
+    machine.emu_start(BASE, STOP, count=32)
+    assert machine.reg_read(arm.UC_ARM64_REG_PC) == STOP and visited[-1] in (BASE + 0x38, BASE + 0x5c)
+    assert bytes(machine.mem_read(METADATA_BASE, 4096)) == memory
+    return capture_arm(machine, initial), visited
+
+
+
+def validate_signer_native(report, expected, source, memory, pointer):
+    assert report['state'] == state_dict(expected) and report['pc'] == STOP and report['outcome']['reason']['kind'] == 'stop_address'
+    assert report['software_pauth_profile'] == FULL_PROFILE and report['source_sha256'] == digest(source)
+    assert report['abi'] == ABI and not report['complete_binary_verified']
+    proof = report['memory']; receipt = [{'address': METADATA_BASE, 'bytes': 4096, 'sha256': digest(memory)}]
+    assert proof['memory_before'] == receipt and proof['memory_after'] == receipt
+    assert proof['memory_reads'] == [{'address': METADATA_BASE, 'bytes': 4096, 'hex': memory.hex()}]
+    assert len(report['outcome'].get('pointer_authentication_events', [])) == int(pointer != 0)
+
+def signer_cohort(cli, folder, state_path, keys_path, image):
+    source = image[SIGNER_BEGIN:SIGNER_END]
+    assert len(source) == 96
+    source_path, memory_path = folder / 'original-sign-pointer.arm64', folder / 'memory.json'
+    source_path.write_bytes(source)
+    records = []
+    for key in DOMAIN_KEYS:
+        for diversity in (0, 1, 0x8000, 0xffff):
+            for address_diversity in (False, True):
+                for pointer in (0, STOP, LOW, 0xffff800000001400, 0x8000000000001400, 1 << 47):
+                    initial = initial_state(STOP, 0x2000, 0x200000 + len(records))
+                    initial.x[0], initial.x[1], initial.x[2], initial.x[30] = METADATA_BASE + 4092, pointer, 0x1000001400, STOP
+                    memory = bytearray(b'\xa5' * 4096)
+                    struct.pack_into('<I', memory, 4092, diversity | (list(DOMAIN_KEYS).index(key) << 25) | (int(address_diversity) << 27))
+                    expected = signer_math(initial, diversity, key, address_diversity)
+                    observed, visited = original_signer(source, initial, bytes(memory))
+                    classification = 'original_math_native_equal' if bytes(expected) == bytes(observed) else 'invalid_extension_legacy_unicorn_observation'
+                    if classification != 'original_math_native_equal':
+                        assert pointer != 0 and domain_invalid_extension(pointer, key)
+                        # Signer's MOV X0,X17 duplicates the exact legacy difference.
+                        corrected = State.from_buffer_copy(observed)
+                        delta = (1 << 54) if key[0] == 'd' else ((1 << 62) | (1 << 63))
+                        corrected.x[0] ^= delta; corrected.x[17] ^= delta
+                        assert bytes(corrected) == bytes(expected)
+                    state_path.write_text(json.dumps(state_dict(initial)))
+                    memory_path.write_text(json.dumps({'regions': [{'guest_address': METADATA_BASE, 'virtual_bytes': 4096,
+                        'initial_bytes': list(memory), 'readable': True, 'writable': False}]}))
+                    report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path), '--state', str(state_path),
+                        '--guest-base', hex(BASE), '--stop-pc', hex(STOP), '--block-budget', '16', '--software-pauth-keys', str(keys_path),
+                        '--memory', str(memory_path), '--read-memory', f'{hex(METADATA_BASE)}:4096', '--cache-dir', str(folder / 'signer-cache')], timeout=15))
+                    validate_signer_native(report, expected, source, memory, pointer)
+                    records.append({'key': key, 'diversity': diversity, 'address_diversity': address_diversity, 'pointer': pointer,
+                        'classification': classification, 'initial': state_dict(initial), 'original': state_dict(observed),
+                        'original_instruction_pcs': visited, 'independent_math': state_dict(expected), 'native': report})
+    return {'original_slice_offset': SIGNER_BEGIN, 'original_bytes': len(source), 'source_sha256': digest(source),
+            'native_math_full_state_ram_comparisons': len(records), 'cases': records,
+            'limits': ['Unchanged complete original signPointer executes, not the entire chained-fixup loop. Null input returns without reading metadata or executing PAC.']}
+
+
+def original_fixup_slots(image, load_base):
+    segments, payload = [], None
+    cursor = 32
+    for _ in range(struct.unpack_from('<I', image, 16)[0]):
+        command, size = struct.unpack_from('<II', image, cursor)
+        assert size >= 8 and cursor + size <= len(image)
+        if command == 0x19:
+            name, vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<16s4Q', image, cursor + 8)
+            segments.append((name.rstrip(b'\0').decode(), vmaddr, vmsize, fileoff, filesize))
+        elif command == 0x80000034:
+            offset, extent = struct.unpack_from('<II', image, cursor + 8)
+            payload = image[offset:offset + extent]
+            assert len(payload) == extent
+        cursor += size
+    assert payload is not None
+    version, starts, imports, symbols, count, import_format, symbol_format = struct.unpack_from('<7I', payload)
+    assert (version, count, symbol_format) == (0, 0, 0)
+    segcount = struct.unpack_from('<I', payload, starts)[0]
+    assert segcount == len(segments)
+    records, seen = [], set()
+    for segment_index in range(segcount):
+        delta = struct.unpack_from('<I', payload, starts + 4 + 4 * segment_index)[0]
+        if not delta:
+            continue
+        segment = starts + delta
+        size, page_bytes, pointer_format, segment_offset, max_valid, page_count = struct.unpack_from('<IHHQIH', payload, segment)
+        assert pointer_format == 12 and size >= 22 + page_count * 2 and segment + size <= len(payload)
+        name, vmaddr, vmsize, fileoff, filesize = segments[segment_index]
+        assert vmaddr == segment_offset
+        for page in range(page_count):
+            offset = struct.unpack_from('<H', payload, segment + 22 + 2 * page)[0]
+            if offset == 0xffff:
+                continue
+            assert offset < page_bytes and not offset & 0x8000
+            while True:
+                within = page * page_bytes + offset
+                position, slot = fileoff + within, load_base + segment_offset + within
+                assert within + 8 <= filesize and offset + 8 <= page_bytes and slot not in seen
+                seen.add(slot)
+                raw = struct.unpack_from('<Q', image, position)[0]
+                assert not raw & (1 << 62)
+                record = {'segment_index': segment_index, 'file_offset': position, 'guest_address': slot, 'raw': raw, 'pointer_format': pointer_format}
+                if raw >> 63:
+                    authentication = {'key': list(DOMAIN_KEYS)[(raw >> 49) & 3], 'diversity': (raw >> 32) & 0xffff,
+                                      'address_diversity': bool((raw >> 48) & 1)}
+                    record.update(target=load_base + (raw & 0xffffffff), authentication=authentication)
+                else:
+                    assert (raw >> 43) & 0xff == 0
+                    record['value'] = load_base + (raw & ((1 << 43) - 1))
+                records.append(record)
+                advance = (raw >> 51) & 0x7ff
+                if not advance:
+                    break
+                offset += advance * 8
+    assert len(records) == 2568 and sum('authentication' in r for r in records) == 1324
+    return records
+
+
+def fixup_plan_cohort(cli, folder, keys_path, image, dyld_path):
+    records = []
+    source = image[SIGNER_BEGIN:SIGNER_END]
+    for load_base in (0x40000000000, 0x40000004000):
+        slots = original_fixup_slots(image, load_base)
+        report = json.loads(subprocess.check_output([str(cli), 'plan-fixups', str(dyld_path), '--image-base', hex(load_base),
+            '--software-pauth-keys', str(keys_path)], timeout=30))
+        decoded, signed = report['decoded_fixups'], report['fixups']
+        plain = [r for r in slots if 'authentication' not in r]
+        authenticated = [r for r in slots if 'authentication' in r]
+        assert decoded['rebases'] == plain and decoded['authenticated_rebases'] == authenticated
+        assert not decoded['binds'] and not decoded.get('authenticated_binds') and not decoded['imports']
+        assert signed['rebases'] == plain and signed['pauth_profile'] == FULL_PROFILE and signed['address_space'] == 1
+        expected_signed, original_equal = [], 0
+        for fixup in authenticated:
+            auth = fixup['authentication']; diversity = auth['diversity']; address_diversity = auth['address_diversity']; key = auth['key']
+            modifier = ((fixup['guest_address'] & ((1 << 48) - 1)) | (diversity << 48)) if address_diversity else diversity
+            value = domain_sign(fixup['target'], modifier, key)
+            initial = initial_state(STOP, 0x2000, fixup['file_offset'])
+            initial.x[0], initial.x[1], initial.x[2], initial.x[30] = METADATA_BASE, fixup['target'], fixup['guest_address'], STOP
+            memory = bytearray(4096)
+            struct.pack_into('<I', memory, 0, diversity | (list(DOMAIN_KEYS).index(key) << 25) | (int(address_diversity) << 27))
+            observed, visited = original_signer(source, initial, bytes(memory))
+            assert bytes(observed) == bytes(signer_math(initial, diversity, key, address_diversity)) and observed.x[0] == value
+            original_equal += 1
+            expected_signed.append({'fixup': fixup, 'modifier': modifier, 'value': value})
+        assert signed['authenticated_rebases'] == expected_signed
+        records.append({'load_base': load_base, 'original_raw_slots': slots, 'signed_expected': expected_signed,
+                        'original_signer_equal': original_equal, 'native_plan': report})
+    return {'placements': records, 'raw_slots_checked': 5136, 'original_signer_checks': 2648,
+            'limits': ['Raw original descriptors and unchanged signPointer verify plans; no memory patching, binds, complete original fixup-loop or process claim.']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--generic-pauth', action='store_true', help='also verify all33 basic PAC forms, original dyld signer and authenticated fixup plans')
     parser.add_argument('--executable', type=Path, action='append', default=[])
     parser.add_argument('--bootstrap-clock', action='store_true', help='also verify the complete original mach_continuous_time startup call')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/pauth-differential-report.json')
@@ -706,6 +1130,8 @@ def main():
                ROOT / 'dev/dyld-entry-differential.py', ROOT / 'src/dyld_entry.rs',
                ROOT / 'crates/stela-runtime/src/process.rs', ROOT / 'crates/stela-runtime/src/clock.rs',
                ROOT / 'crates/stela-runtime/src/memory.rs']
+    if args.generic_pauth:
+        sources += [ROOT / 'src/macho/chained_fixups.rs', ROOT / 'src/macho/load_plan.rs']
     pins = {str(path.relative_to(ROOT)): digest(path.read_bytes()) for path in sources}
     cli_hash = digest(cli.read_bytes())
     records = []
@@ -713,6 +1139,7 @@ def main():
     clock_integrated = []
     clock_manifests = []
     clock_register_cases, clock_register_manifests = [], []
+    generic, signer, fixups = None, None, None
     seen = set()
     equal = divergent = poisoned_returns = failed_auth = 0
     with tempfile.TemporaryDirectory(prefix='stela-pauth-') as temporary:
@@ -765,6 +1192,18 @@ def main():
             assert report['software_pauth_profile'] is None and 'pointer_authentication_events' not in report['outcome']
             ordinary.append(report)
         manifests = cache_receipts(cache, source_hashes)
+        if args.generic_pauth:
+            keys_path = folder / 'keys.json'
+            keys_path.write_text(json.dumps({key: {'low': values[0], 'high': values[1]} for key, values in DOMAIN_KEYS.items()}))
+            generic = generic_cohort(cli, folder, state_path, keys_path)
+            dyld_suite = importlib.import_module('dyld-entry-differential')
+            container = dyld_suite.DEFAULT_DYLD.read_bytes()
+            assert digest(container) == dyld_suite.CONTAINER_SHA256
+            offset, image = dyld_suite.classic_slice(container)
+            assert offset == dyld_suite.SLICE_OFFSET and digest(image) == dyld_suite.SLICE_SHA256
+            signer = signer_cohort(cli, folder, state_path, keys_path, image)
+            fixups = fixup_plan_cohort(cli, folder, keys_path, image, dyld_suite.DEFAULT_DYLD)
+            assert digest(dyld_suite.DEFAULT_DYLD.read_bytes()) == dyld_suite.CONTAINER_SHA256
         if args.executable:
             dyld_suite = importlib.import_module('dyld-entry-differential')
             container = dyld_suite.DEFAULT_DYLD.read_bytes()
@@ -834,6 +1273,7 @@ def main():
               'oracle': {'unicorn_version': unicorn.__version__, 'cpu_model': 'max', 'tcr_el1': TCR, 'current_el': 0,
                          'instruction_tbi': False, 'data_tbi': True, 'virtual_address_bits': 47, 'pauth2': False, 'fpac': False},
               'public_fixed_test_keys': True, 'cache_receipts': manifests, 'cases': records,
+              'generic_pauth': generic, 'original_sign_pointer': signer, 'authenticated_fixup_plan': fixups,
               'integrated_original_dyld_pac_probes': integrated,
               'integrated_original_dyld_clock_probes': clock_integrated, 'clock_cache_receipts': clock_manifests,
               'original_clock_replay_full_state_ram_comparisons': len(clock_integrated),
@@ -844,7 +1284,7 @@ def main():
                          'Native executes original scalar prefix then explicit PAC runtime boundary; cryptography is a software helper, not inline native PAC.',
                          'Authentication failures poison pointers; RETAB typed stop records pending instruction-fetch exception delivery.',
                          'Noncanonical signing: June2026 ASL corrupts bit62, older Unicorn2.1.4 corrupts bit63;64 exact classified observations are not counted as three-way equality.',
-                         'Generic IA/DA/DB/PACGA/XPAC remain oracle-only, outside the three production instruction forms.',
+                         'Optional generic cohort covers33 basic IA/IB/DA/DB PAC/AUT/XPAC/RET forms; PACGA, authenticated branches/calls and system controls remain unsupported. Data signing invalid-extension differences classify exact bit54 versus older Unicorn bit55 insertion behavior, not equality.',
                          'MRS Rt31 discardedvalue is unobservable; the unchangedinstruction executes and fullstate preservation is checked, while native event replays a separatelyrecorded postinstruction counter sample. Other31Rt replay actualMRSdestination results.',
                          'Optional clock bootstrap executes44 originalinstructions, twoPACsigns+RETAB, actualISB/CNTVCT, allnine stores and restoredframe. Counterreplay provesopaque input effects; original62500000Hz and nativevirtual1GHz rates are not equated. Nativehost samples are separatelybounded by publicmach_continuous_time.',
                          'PAC-only vectors do not access guest RAM; complete clock probes compare every stack byte and all readable image/clock views. Full784B state is checked throughout; no full OS process, Apple hardware or performance claim.']}
