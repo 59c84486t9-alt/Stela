@@ -108,6 +108,7 @@ fn profile(code: &[u8], entry: u64, stop_pc: u64) -> Result<Vec<GuestAddress>> {
             Operation::Bitfield(_)
             | Operation::Simd(stela_compiler::aarch64::simd::Operand::MoveImmediate { .. })
             | Operation::ConditionalSelect(_)
+            | Operation::Flags(_)
             | Operation::IntegerMath(_)
             | Operation::AddSubRegister { .. }
             | Operation::AddSubCarry { .. }

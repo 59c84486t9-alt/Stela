@@ -12,6 +12,7 @@ mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
 mod crc;
+mod flags;
 mod integer_math;
 pub mod isa;
 mod pc_relative;
@@ -284,6 +285,7 @@ fn emit_instruction(
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
         Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
         Operation::Crc(operand) => crc::emit(code, &operand, target),
+        Operation::Flags(operand) => flags::emit(code, &operand),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
         Operation::MemoryPair {
             transfer,

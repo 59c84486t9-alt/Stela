@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v24",
+  "registry_version": "apple-silicon-reviewed-forms-v25",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -371,6 +371,28 @@
         "crc_reserved.reserved_forms": 8,
         "crc_reserved.original_undefined_full_state_pc_checks": 128,
         "crc_reserved.native_explicit_declines": 16
+      }
+    },
+    "scalar_flags": {
+      "harness": "dev/arithmetic-differential.py",
+      "report": ".stela/flags-differential-report.json",
+      "kind": "flagm_flagm2_arm_math_native_x86",
+      "comparison_field": "three_way_complete_state_comparisons",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_positive_counts": [
+        "native_math_complete_state_comparisons",
+        "native_math_only_complete_state_comparisons",
+        "unicorn_crm_decline_complete_state_pc_observations"
+      ],
+      "required_measurements": {
+        "programs": 1180,
+        "three_way_complete_state_comparisons": 76560,
+        "native_math_only_complete_state_comparisons": 720,
+        "shared_block_dispatch.original_math_native_state_pc_comparisons": 112,
+        "shared_block_dispatch.cold_compiles": 7,
+        "shared_block_dispatch.disk_cache_hits": 105
       }
     }
   },
@@ -23429,6 +23451,264 @@
       ],
       "review": "All eight canonical scalar CRC32/CRC32C forms reviewed against the pinned Arm 2026-06 XML and Intel SDM CRC32. Independent reflected-polynomial long division, original ARM and native full-state comparisons cover baseline tables and checked SSE4.2 Castagnoli, register roles/aliases, all incoming NZCV, dirty upper bits, every input/accumulator bit and all byte-table entries. Original RET/native block dispatch and reserved width/size declines are checked. Actual emitted code/data ranges and candidate performance are recorded by the consolidated harness.",
       "scope": "Uncomplemented IEEE/Castagnoli remainder over low 8/16/32/64-bit data and W accumulator, zero-extended W destination. Every register-31 role is ZR; sources are read before destination writes. Guest GPR/SP/NZCV/reserved/V/FP preservation and no guest memory access. Baseline table requires readable native code; checked x86 CRC32 is Castagnoli only. FEAT_CRC32 guest profile assumed; full PSTATE/DIT, feature-disabled guest exception delivery, application/OS compatibility and PCLMUL reduction remain outside scope."
+    },
+    {
+      "id": "AXFLAG_M_pstate",
+      "mnemonic": "AXFLAG",
+      "category": "base_integer_system",
+      "source_file": "axflag.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd500405f",
+      "features": [
+        {
+          "feature": "FEAT_FlagM2",
+          "name": "v8Ap5"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "system",
+        "isa": "A64",
+        "mnemonic": "AXFLAG"
+      },
+      "source_sha256": "4b98affa181080cace405ea50a99df36b9e8d08128ae37855420746db1432642",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/axflag.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd500405f",
+          "expected_mnemonics": [
+            "axflag"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "CFINV_M_pstate",
+      "mnemonic": "CFINV",
+      "category": "base_integer_system",
+      "source_file": "cfinv.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd500401f",
+      "features": [
+        {
+          "feature": "FEAT_FlagM",
+          "name": "v8Ap4"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "system",
+        "isa": "A64",
+        "mnemonic": "CFINV"
+      },
+      "source_sha256": "299705b476c48f0e8a98bc1f5ca4734f35cd43eb4e53206130c7df9f95cd5946",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cfinv.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd500401f",
+          "expected_mnemonics": [
+            "cfinv"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "RMIF_only_rmif",
+      "mnemonic": "RMIF",
+      "category": "base_integer_system",
+      "source_file": "rmif.xml",
+      "encoding_mask": "0xffe07c10",
+      "encoding_value": "0xba000400",
+      "features": [
+        {
+          "feature": "FEAT_FlagM",
+          "name": "v8Ap4"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "RMIF"
+      },
+      "source_sha256": "70e2314bab3bf874b1a427733f353cd0e3a0e005c4ed08a2a8aa96cf71b056dc",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rmif.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xba01842f",
+          "expected_mnemonics": [
+            "rmif"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "SETF16_only_setf",
+      "mnemonic": "SETF16",
+      "category": "base_integer_system",
+      "source_file": "setf.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0x3a00480d",
+      "features": [
+        {
+          "feature": "FEAT_FlagM",
+          "name": "v8Ap4"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SETF16"
+      },
+      "source_sha256": "694c388554de1a6b48ee1bdc19cc52fd84b5bd90cf90ccf565c50ee6998e0dc2",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/setf.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3a00482d",
+          "expected_mnemonics": [
+            "setf16"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "SETF8_only_setf",
+      "mnemonic": "SETF8",
+      "category": "base_integer_system",
+      "source_file": "setf.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0x3a00080d",
+      "features": [
+        {
+          "feature": "FEAT_FlagM",
+          "name": "v8Ap4"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "SETF8"
+      },
+      "source_sha256": "694c388554de1a6b48ee1bdc19cc52fd84b5bd90cf90ccf565c50ee6998e0dc2",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/setf.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3a00082d",
+          "expected_mnemonics": [
+            "setf8"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "XAFLAG_M_pstate",
+      "mnemonic": "XAFLAG",
+      "category": "base_integer_system",
+      "source_file": "xaflag.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd500403f",
+      "features": [
+        {
+          "feature": "FEAT_FlagM2",
+          "name": "v8Ap5"
+        }
+      ],
+      "status": "implemented",
+      "docvars": {
+        "instr-class": "system",
+        "isa": "A64",
+        "mnemonic": "XAFLAG"
+      },
+      "source_sha256": "2d958ae45b5970c0d3c25545d18a2ba29438d79814d0e0b7569b492ecfbbd357",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/xaflag.xml",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "scalar_flags"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/flags.rs",
+        "crates/stela-compiler/src/x86_64/flags.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd500403f",
+          "expected_mnemonics": [
+            "xaflag"
+          ]
+        }
+      ],
+      "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
+      "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
     }
   ],
   "compiler_fingerprint_sources": [
@@ -23444,6 +23724,8 @@
     "crates/stela-compiler/src/x86_64/conditional_select.rs",
     "crates/stela-compiler/src/aarch64/crc.rs",
     "crates/stela-compiler/src/x86_64/crc.rs",
+    "crates/stela-compiler/src/aarch64/flags.rs",
+    "crates/stela-compiler/src/x86_64/flags.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
     "crates/stela-compiler/src/x86_64/integer_math.rs",
     "crates/stela-compiler/src/aarch64/pc_relative.rs",

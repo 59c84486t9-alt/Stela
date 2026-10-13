@@ -124,6 +124,102 @@ class ArithmeticOracleTests(unittest.TestCase):
                                       if (case['width'], case['subtract'], case['flags']) == (width, subtract, flags)},
                                      {(option, shift) for option in range(8) for shift in range(5)})
 
+class FlagOracleTests(unittest.TestCase):
+    def test_corpus_exhausts_immediates_crm_and_source_registers(self):
+        cases = arithmetic.flag_cases()
+        self.assertEqual(len(cases), 1180)
+        rmif = [case['words'][0] for case in cases if case['kind'] == 'immediates']
+        self.assertEqual({((word >> arithmetic.RMIF_ROTATE_SHIFT) & 63, word & 15) for word in rmif},
+                         {(rotation, mask) for rotation in range(64) for mask in range(16)})
+        half_rotation = next(case for case in cases if case['kind'] == 'immediates'
+                             and (case['words'][0] >> arithmetic.RMIF_ROTATE_SHIFT) & 63 == 32
+                             and case['words'][0] & 15 == 15)
+        self.assertTrue(any((value & 15) != ((value >> 32) & 15)
+                            for value in arithmetic.flag_values(half_rotation)))
+        for form in ('CFINV', 'AXFLAG', 'XAFLAG'):
+            words = [case['words'][0] for case in cases if case['form'] == form and case['kind'] == 'ignored_crm']
+            self.assertEqual({(word >> arithmetic.IGNORED_CRM_SHIFT) & 15 for word in words}, set(range(16)))
+        for form in ('RMIF', 'SETF8', 'SETF16'):
+            self.assertEqual({case['source'] for case in cases if case['form'] == form
+                              and case['kind'] == 'source_registers'}, set(range(32)))
+        for form in arithmetic.FLAG_FORMS:
+            self.assertEqual({case['kind'] for case in cases if case['form'] == form
+                              and case['kind'].endswith('_chain')}, {'carry_chain', 'conditional_chain'})
+
+    def test_flag_boolean_truth_tables_and_ignored_crm_match_original(self):
+        from differential import states
+        from unicorn import arm64_const as arm
+        for form in ('CFINV', 'AXFLAG', 'XAFLAG'):
+            for crm in range(16):
+                words = [arithmetic.flag_encoding(form, crm=crm), arithmetic.RET]
+                original = arithmetic.reusable_reference(struct.pack('<2I', *words), arm.UC_CPU_ARM64_MAX,
+                                                          oracle_declines=crm != 0)
+                for initial in states(all_flags=True):
+                    initial.reserved = 0x5a17c0de
+                    expected = arithmetic.flag_reference(words, initial)
+                    self.assertEqual(original(initial), expected if crm == 0 else None)
+                    expected['nzcv'] = initial.nzcv
+                    self.assertEqual(expected, complete_state(initial))
+
+    def test_rmif_wrap_mask_and_zero_source_match_original(self):
+        from differential import states
+        from unicorn import arm64_const as arm
+        for rotation in (0, 1, 31, 32, 61, 62, 63):
+            for mask in (0, 1, 2, 4, 8, 15):
+                words = [arithmetic.flag_encoding('RMIF', rotation=rotation, mask=mask), arithmetic.RET]
+                original = arithmetic.reusable_reference(struct.pack('<2I', *words), arm.UC_CPU_ARM64_MAX)
+                case = {'form': 'RMIF', 'source': 1, 'words': words}
+                for value in arithmetic.flag_values(case):
+                    for initial in states(all_flags=True):
+                        initial.x[1] = value
+                        expected = arithmetic.flag_reference(words, initial)
+                        self.assertEqual(original(initial), expected)
+                        unchanged = (~mask & 15) << 28
+                        self.assertEqual(expected['nzcv'] & unchanged, initial.nzcv & unchanged)
+        initial = State()
+        initial.nzcv, initial.x[1], initial.sp = 0xf0000000, arithmetic.MASK, arithmetic.MASK
+        words = [arithmetic.flag_encoding('RMIF', source=31), arithmetic.RET]
+        expected = complete_state(initial)
+        expected['nzcv'] = 0
+        self.assertEqual(arithmetic.flag_reference(words, initial), expected)
+        original = arithmetic.reusable_reference(struct.pack('<2I', *words), arm.UC_CPU_ARM64_MAX)
+        self.assertEqual(original(initial), expected)
+
+    def test_setf_boundaries_dirty_upper_bits_and_carry_preservation(self):
+        from differential import states
+        from unicorn import arm64_const as arm
+        for form in ('SETF8', 'SETF16'):
+            for source in (1, 31):
+                words = [arithmetic.flag_encoding(form, source), arithmetic.RET]
+                original = arithmetic.reusable_reference(struct.pack('<2I', *words), arm.UC_CPU_ARM64_MAX)
+                for value in arithmetic.flag_values({'form': form, 'source': source}):
+                    for initial in states(all_flags=True):
+                        initial.x[1], initial.sp = value, arithmetic.MASK
+                        expected = arithmetic.flag_reference(words, initial)
+                        self.assertEqual(original(initial), expected)
+                        self.assertEqual(expected['nzcv'] & arithmetic.CARRY_FLAG, initial.nzcv & arithmetic.CARRY_FLAG)
+                        if source == 31:
+                            self.assertEqual(expected['nzcv'], (initial.nzcv & arithmetic.CARRY_FLAG) | 0x40000000)
+        initial = State()
+        initial.x[1] = 0xdeadc0de00000100
+        self.assertEqual(arithmetic.flag_reference([arithmetic.flag_encoding('SETF8'), arithmetic.RET], initial)['nzcv'],
+                         0x50000000)
+
+    def test_flag_dependency_chains_use_fresh_guest_flags_after_host_clobbers(self):
+        from differential import states
+        from unicorn import arm64_const as arm
+        for case in arithmetic.flag_cases():
+            if not case['kind'].endswith('_chain'):
+                continue
+            words = case['words']
+            original = arithmetic.reusable_reference(struct.pack('<' + 'I' * len(words), *words), arm.UC_CPU_ARM64_MAX)
+            for value in arithmetic.flag_values(case):
+                for initial in states(all_flags=True):
+                    if value is not None:
+                        initial.x[case['source']] = value
+                    self.assertEqual(original(initial), arithmetic.flag_reference(words, initial))
+
+
 class IntegerMathOracleTests(unittest.TestCase):
     def test_crc_known_vectors_polynomial_difference_and_uncomplemented_updates(self):
         import zlib

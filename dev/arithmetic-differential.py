@@ -8,10 +8,11 @@ import multiprocessing
 from pathlib import Path
 import struct
 import subprocess
+import tarfile
 import tempfile
 import time
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from capstone import Cs, CS_ARCH_ARM64, CS_ARCH_X86, CS_MODE_ARM, CS_MODE_64
 from differential import state_dict as complete_state
 from differential import ROOT, State, arithmetic, executable, initialize_arm, capture_arm, states
 from evidence import write_evidence
@@ -20,6 +21,28 @@ RET = 0xd65f03c0
 MASK = (1 << 64) - 1
 LEGACY_CARRY_CORPUS = '5cea082d8e1f903412a26c0fc364f6508686c0f7488880531215721f92de74ab'
 STATE_CORPUS = '5a6a330a0a666d818f34bf90be5ef8bbe09f40e9322d0a46b3b9913b61574dae'
+FLAG_FORMS = {'CFINV': 0xd500401f, 'RMIF': 0xba000400, 'SETF8': 0x3a00080d,
+              'SETF16': 0x3a00480d, 'AXFLAG': 0xd500405f, 'XAFLAG': 0xd500403f}
+FLAG_SYSTEM_MASK = 0xfffff0ff
+RMIF_MASK = 0xffe07c10
+SETF_MASK = 0xfffffc1f
+SOURCE_REGISTER_SHIFT = 5
+RMIF_ROTATE_SHIFT = 15
+IGNORED_CRM_SHIFT = 8
+NZCV_SHIFT = 28
+CARRY_FLAG = 1 << 29
+ZERO_REGISTER = 31
+REGISTER_COUNT = 32
+FLAG_NIBBLE_MASK = 15
+ROTATE_MASK = 63
+HOST_RET = 0xc3
+FLAG_SEMANTIC_ARCHIVE = ROOT / '.stela/isa/ISA_A64_xml_A_profile-2026-06.tar.gz'
+FLAG_SEMANTIC_ARCHIVE_SHA256 = '63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354'
+BASELINE_FLAG_MNEMONICS = frozenset({
+    'adc', 'add', 'and', 'bt', 'btr', 'bts', 'cmova', 'cmovae', 'cmovb', 'cmovbe', 'cmove',
+    'cmovg', 'cmovge', 'cmovl', 'cmovle', 'cmovne', 'cmp', 'je', 'jmp', 'jne', 'lea', 'mov',
+    'movabs', 'movzx', 'neg', 'nop', 'not', 'or', 'pop', 'pushfq', 'ret', 'rol', 'ror', 'sar',
+    'sete', 'setne', 'shl', 'shr', 'sub', 'test', 'xor'})
 
 
 def encoding(width, subtract, flags, destination, left, right):
@@ -217,14 +240,17 @@ def boundary_pairs(width):
             (0xaaaaaaaaaaaaaaaa & mask, 0x5555555555555555 & mask)]
 
 
-def reusable_reference(code):
+def reusable_reference(code, cpu_model=None, oracle_declines=False):
     """One unchanged straight-line program, fully reset before each observation."""
     from differential import BASE
-    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
+    from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_ERR_EXCEPTION
+    from unicorn import arm64_const as arm
     words = struct.unpack('<' + 'I' * (len(code) // 4), code)
     if words[-1] != RET or RET in words[:-1] or len(code) > 4096:
         raise ValueError('Reusable arithmetic oracle requires one final RET')
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    if cpu_model is not None:
+        machine.ctl_set_cpu_model(cpu_model)
     machine.mem_map(BASE, 4096)
     machine.mem_write(BASE, code)
     returned = False
@@ -241,7 +267,16 @@ def reusable_reference(code):
         nonlocal returned
         returned = False
         initialize_arm(machine, initial)
-        machine.emu_start(BASE, BASE + len(code), count=10000)
+        try:
+            machine.emu_start(BASE, BASE + len(code), count=10000)
+        except UcError as error:
+            if (not oracle_declines or error.errno != UC_ERR_EXCEPTION
+                    or machine.reg_read(arm.UC_ARM64_REG_PC) != BASE
+                    or complete_state(capture_arm(machine, initial)) != complete_state(initial)):
+                raise
+            return None
+        if oracle_declines:
+            raise AssertionError('Original oracle unexpectedly accepted a classified unavailable encoding')
         if not returned:
             raise AssertionError('Arithmetic reference did not reach its RET')
         return complete_state(capture_arm(machine, initial))
@@ -446,9 +481,335 @@ def run_scalar_control(cli):
     write_evidence(ROOT / '.stela/scalar-control-differential-report.json', report)
     print(json.dumps(report, indent=2))
 
+
+def flag_encoding(form, source=1, rotation=0, mask=FLAG_NIBBLE_MASK, crm=0):
+    if form == 'RMIF':
+        if not 0 <= rotation <= ROTATE_MASK or not 0 <= mask <= FLAG_NIBBLE_MASK:
+            raise ValueError('RMIF rotation/mask outside architectural fields')
+        return FLAG_FORMS[form] | (rotation << RMIF_ROTATE_SHIFT) | (source << SOURCE_REGISTER_SHIFT) | mask
+    if form in ('SETF8', 'SETF16'):
+        return FLAG_FORMS[form] | (source << SOURCE_REGISTER_SHIFT)
+    if not 0 <= crm <= FLAG_NIBBLE_MASK:
+        raise ValueError('Ignored CRm field outside four bits')
+    return FLAG_FORMS[form] | (crm << IGNORED_CRM_SHIFT)
+
+
+def flag_cases():
+    """Exhaust immediates; bound source-pattern coverage instead of multiplying it."""
+    result = []
+    for form in ('CFINV', 'AXFLAG', 'XAFLAG'):
+        for crm in range(16):
+            result.append({'family': 'flags', 'form': form, 'kind': 'ignored_crm', 'source': None,
+                           'oracle_declines': crm != 0, 'words': [flag_encoding(form, crm=crm), RET]})
+    for rotation in range(64):
+        for mask in range(16):
+            result.append({'family': 'flags', 'form': 'RMIF', 'kind': 'immediates', 'source': 1,
+                           'words': [flag_encoding('RMIF', rotation=rotation, mask=mask), RET]})
+    for form in ('RMIF', 'SETF8', 'SETF16'):
+        for source in range(REGISTER_COUNT):
+            result.append({'family': 'flags', 'form': form, 'kind': 'source_registers', 'source': source,
+                           'words': [flag_encoding(form, source, rotation=(source * 7) & ROTATE_MASK), RET]})
+    for form in FLAG_FORMS:
+        first = flag_encoding(form, rotation=63, mask=0b1010)
+        # ADD dirties host flags without changing guest NZCV. ADC consumes the
+        # resulting guest C; CCMP additionally checks a predicate of fresh C/Z.
+        consumers = ([arithmetic(0, 0, 1, 28, 28, 1), encoding(1, 0, 0, 0, 31, 31)],
+                     [0xfa42802f, encoding(1, 0, 0, 0, 31, 31)])
+        for index, words in enumerate(consumers):
+            result.append({'family': 'flags', 'form': form, 'kind': 'carry_chain' if index == 0 else 'conditional_chain',
+                           'source': 1, 'words': [first, *words, RET]})
+    return result
+
+
+def flag_values(case):
+    if case['source'] is None:
+        return (None,)
+    if case['form'] == 'RMIF':
+        rotation = (case['words'][0] >> RMIF_ROTATE_SHIFT) & ROTATE_MASK
+        # Rotation places the chosen nibble at bit zero, including wrap at 63.
+        values = (0, MASK, 0x0123456789abcdea, 0xfedcba9876543215)
+        return tuple(((value << rotation) | (value >> (64 - rotation))) & MASK for value in values)
+    if case['form'] in ('SETF8', 'SETF16'):
+        bits = 8 if case['form'] == 'SETF8' else 16
+        sign = 1 << (bits - 1)
+        poison = 0xdeadc0de00000000
+        # Bit `bits` participates in V, even though the low-width result is zero.
+        return tuple(poison | value for value in (0, 1, sign - 1, sign, sign + 1,
+                                                  (1 << bits) - 1, 1 << bits, (1 << bits) | sign))
+    return (None,)
+
+
+def flag_reference(words, initial):
+    """Independent Arm XML model; no translated-byte or host-flag dependence."""
+    state = State.from_buffer_copy(initial)
+    for word in words[:-1]:
+        nibble = state.nzcv >> NZCV_SHIFT
+        zero, carry, overflow = (bool(nibble & bit) for bit in (4, 2, 1))
+        system = word & FLAG_SYSTEM_MASK
+        if system == FLAG_FORMS['CFINV']:
+            state.nzcv ^= CARRY_FLAG
+        elif system == FLAG_FORMS['AXFLAG']:
+            state.nzcv = ((int(zero or overflow) << 2) | (int(carry and not overflow) << 1)) << NZCV_SHIFT
+        elif system == FLAG_FORMS['XAFLAG']:
+            state.nzcv = ((int(not carry and not zero) << 3) | (int(zero and carry) << 2)
+                          | (int(carry or zero) << 1) | int(not carry and zero)) << NZCV_SHIFT
+        elif word & RMIF_MASK == FLAG_FORMS['RMIF']:
+            source = (word >> SOURCE_REGISTER_SHIFT) & ZERO_REGISTER
+            value = state.x[source] if source != ZERO_REGISTER else 0
+            rotation = (word >> RMIF_ROTATE_SHIFT) & ROTATE_MASK
+            selected = (((value << 64) | value) >> rotation) & FLAG_NIBBLE_MASK
+            mask = word & FLAG_NIBBLE_MASK
+            state.nzcv = ((nibble & ~mask) | (selected & mask)) << NZCV_SHIFT
+        elif word & SETF_MASK in (FLAG_FORMS['SETF8'], FLAG_FORMS['SETF16']):
+            source = (word >> SOURCE_REGISTER_SHIFT) & ZERO_REGISTER
+            value = state.x[source] if source != ZERO_REGISTER else 0
+            bits = 16 if word & SETF_MASK == FLAG_FORMS['SETF16'] else 8
+            negative = (value >> (bits - 1)) & 1
+            overflow = ((value >> bits) & 1) ^ negative
+            zero = (value & ((1 << bits) - 1)) == 0
+            state.nzcv = (state.nzcv & CARRY_FLAG) | (negative << 31) | (int(zero) << 30) | (overflow << 28)
+        elif word & 0x7f800000 == 0x11000000:
+            # Only the explicit nonflag ADD #1 consumer fixture is permitted.
+            if word != arithmetic(0, 0, 1, 28, 28, 1):
+                raise AssertionError(f'Unexpected flag-chain arithmetic {word:#x}')
+            state.x[28] = (state.x[28] + 1) & MASK
+        else:
+            expected = scalar_control_reference([word, RET], state)
+            state.x[:], state.nzcv = expected['x'], expected['nzcv']
+    return complete_state(state)
+
+
+def execute_flags(compiled):
+    from unicorn import arm64_const as arm
+    corpus, comparisons, declines = hashlib.sha256(), 0, 0
+    groups = {form: {'programs': 0, 'three_way_comparisons': 0, 'native_math_only_comparisons': 0}
+              for form in FLAG_FORMS}
+    templates = states(all_flags=True)
+    for case in compiled:
+        groups[case['form']]['programs'] += 1
+        source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+        oracle_declines = case.get('oracle_declines', False)
+        original = reusable_reference(source, arm.UC_CPU_ARM64_MAX, oracle_declines)
+        with executable(case['native']) as address:
+            function = ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)
+            for value in flag_values(case):
+                for template in templates:
+                    initial = State.from_buffer_copy(template)
+                    if value is not None and case['source'] != ZERO_REGISTER:
+                        initial.x[case['source']] = value
+                    initial.reserved = 0x5a17c0de
+                    expected, observed = flag_reference(case['words'], initial), original(initial)
+                    actual = State.from_buffer_copy(initial)
+                    function(ctypes.byref(actual))
+                    if expected != complete_state(actual) or (not oracle_declines and expected != observed):
+                        raise AssertionError(json.dumps({'case': {k: v for k, v in case.items() if k != 'native'},
+                            'initial': complete_state(initial), 'math': expected, 'arm': observed,
+                            'native': complete_state(actual)}))
+                    corpus.update(source); corpus.update(bytes(initial))
+                    comparisons += 1
+                    declines += int(oracle_declines)
+                    groups[case['form']]['native_math_only_comparisons' if oracle_declines else 'three_way_comparisons'] += 1
+    return {'programs': len(compiled), 'three_way_complete_state_comparisons': comparisons - declines,
+            'native_math_complete_state_comparisons': comparisons, 'native_math_only_complete_state_comparisons': declines,
+            'unicorn_crm_decline_complete_state_pc_observations': declines,
+            'groups': groups, 'state_corpus_sha256': corpus.hexdigest()}
+
+
+def flag_binary_accounting(compiled, native):
+    decoded = list(Cs(CS_ARCH_X86, CS_MODE_64).disasm(native, 0))
+    if sum(instruction.size for instruction in decoded) != len(native):
+        raise AssertionError('Flag native disassembly does not cover every byte')
+    if any(instruction.mnemonic not in BASELINE_FLAG_MNEMONICS for instruction in decoded):
+        raise AssertionError('Flag baseline binary contains an unreviewed or optional host instruction')
+    boundaries = {instruction.address: index for index, instruction in enumerate(decoded)}
+    boundaries[len(native)] = len(decoded)
+    shapes, offset, bodies, body_bytes = {}, 0, 0, 0
+    for case in compiled:
+        code = case['native']
+        if code[-1] != HOST_RET:
+            raise AssertionError('Flag mini-function lacks exact host RET')
+        if offset not in boundaries or offset + len(code) not in boundaries:
+            raise AssertionError('Flag mini-function boundary splits a native instruction')
+        local = decoded[boundaries[offset]:boundaries[offset + len(code)]]
+        if sum(instruction.size for instruction in local) != len(code) or local[-1].mnemonic != 'ret':
+            raise AssertionError('Flag source map splits a native instruction')
+        bodies += len(local) - 1; body_bytes += len(code) - 1
+        if len(case['words']) == 2:
+            shape = shapes.setdefault(case['form'], {'programs': 0, 'body_bytes_min': len(code) - 1,
+                'body_bytes_max': 0, 'body_instructions_min': len(local) - 1, 'body_instructions_max': 0})
+            shape['programs'] += 1
+            for field, value in (('body_bytes', len(code) - 1), ('body_instructions', len(local) - 1)):
+                shape[field + '_min'] = min(shape[field + '_min'], value)
+                shape[field + '_max'] = max(shape[field + '_max'], value)
+        for boundary in case['native_offsets']:
+            if offset + boundary not in boundaries:
+                raise AssertionError('Flag source-map boundary is inside a host instruction')
+        offset += len(code)
+    if offset != len(native) or bodies + len(compiled) != len(decoded):
+        raise AssertionError('Flag body/RET accounting does not partition emitted bytes')
+    return {'native_sha256': hashlib.sha256(native).hexdigest(), 'static_native_bytes_including_ret': len(native),
+        'static_native_instructions_including_ret': len(decoded), 'harness_ret_bytes': len(compiled),
+        'harness_ret_instructions': len(compiled), 'static_body_native_bytes': body_bytes,
+        'static_body_native_instructions': bodies, 'single_operation_forms': shapes,
+        'opcode_histogram': {mnemonic: sum(i.mnemonic == mnemonic for i in decoded)
+                             for mnemonic in sorted({i.mnemonic for i in decoded})},
+        'limits': 'Actual emitted baseline bytes, completely decoded and partitioned by source maps. '
+                  'Each leaf has one one-byte harness RET, excluded from body counts. Static counts are not timings.'}
+
+
+def retain_flag_binary_evidence(source, output, accounting):
+    files = {'source.bin': source, 'native.bin': (output / 'native.bin').read_bytes(),
+             'manifest.json': (output / 'manifest.json').read_bytes(),
+             'accounting.json': (json.dumps(accounting, sort_keys=True, indent=2) + '\n').encode()}
+    key = hashlib.sha256(b''.join(files.values()) + Path(__file__).read_bytes()).hexdigest()
+    directory = ROOT / '.stela/native-evidence/flags' / key
+    directory.mkdir(parents=True, exist_ok=True)
+    receipts = {}
+    for name, data in files.items():
+        path = directory / name
+        if path.exists() and path.read_bytes() != data:
+            raise AssertionError(f'Immutable flag native evidence changed: {path}')
+        if not path.exists():
+            path.write_bytes(data)
+        receipts[name] = {'path': str(path.relative_to(ROOT)), 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
+    return receipts
+
+
+def flag_blocks(cli, directory):
+    """Small shared-dispatch check: every form, every incoming flag, actual ARM RET."""
+    from differential import BASE
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+    from unicorn import arm64_const as arm
+    stop = BASE + 0x800
+    source, state_path = directory / 'flags-block.arm64', directory / 'flags-state.json'
+    comparisons = cold = disk = 0
+    corpus = hashlib.sha256()
+    probes = [(form, 0b1010) for form in FLAG_FORMS] + [('RMIF', 0)]
+    zero_map_receipt = None
+    for form, mask in probes:
+        words = [flag_encoding(form, rotation=63, mask=mask),
+                 arithmetic(0, 0, 1, 28, 28, 1), encoding(1, 0, 0, 0, 31, 31), RET]
+        code = struct.pack('<' + 'I' * len(words), *words)
+        source.write_bytes(code)
+        if form == 'RMIF' and mask == 0:
+            output = directory / 'rmif-zero-block'
+            manifest = json.loads(subprocess.check_output([str(cli), 'compile-block', str(source),
+                '--guest-base', hex(BASE), '--output-dir', str(output), '--cpu-target', 'baseline'], timeout=15))
+            native = (output / 'native.bin').read_bytes()
+            offsets = [row[1] for row in manifest['source_map']]
+            boundaries = {instruction.address for instruction in Cs(CS_ARCH_X86, CS_MODE_64).disasm(native, 0)}
+            if (manifest['source_sha256'] != hashlib.sha256(code).hexdigest()
+                    or manifest['native_sha256'] != hashlib.sha256(native).hexdigest()
+                    or [row[0] for row in manifest['source_map']] != list(range(BASE, BASE + len(code), 4))
+                    or any(a >= b for a, b in zip(offsets, offsets[1:]))
+                    or any(offset not in boundaries for offset in offsets)):
+                raise AssertionError('RMIF mask-zero block lacks distinct, aligned source-map intervals')
+            zero_map_receipt = {'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
+                                'rmif_body_bytes': offsets[1] - offsets[0], 'source_map': manifest['source_map']}
+            zero_map_receipt['retained_native_evidence'] = retain_flag_binary_evidence(code, output, zero_map_receipt)
+        machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+        machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+        machine.mem_map(BASE, 4096); machine.mem_write(BASE, code)
+        for flag, template in enumerate(states(all_flags=True)):
+            initial = State.from_buffer_copy(template)
+            initial.x[1] = (0, MASK, 0xdeadc0de00000100, 0xdeadc0de00018000)[flag % 4]
+            initial.x[30], initial.reserved = stop, 0x5a17c0de
+            expected = flag_reference(words, initial)
+            initialize_arm(machine, initial)
+            machine.emu_start(BASE, stop, count=len(words) + 1)
+            if machine.reg_read(arm.UC_ARM64_REG_PC) != stop or complete_state(capture_arm(machine, initial)) != expected:
+                raise AssertionError('Original FlagM block/RET differs from mathematical state/PC')
+            state_path.write_text(json.dumps(complete_state(initial)))
+            result = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source), '--state', str(state_path),
+                '--guest-base', hex(BASE), '--stop-pc', hex(stop), '--block-budget', '1', '--cpu-target', 'baseline',
+                '--cache-dir', str(directory / 'flags-cache')], timeout=15))
+            outcome = result['outcome']
+            if (result['state'] != expected or result['pc'] != stop
+                    or result['source_sha256'] != hashlib.sha256(code).hexdigest()
+                    or result['abi'] != 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
+                    or result['complete_binary_verified'] is not False
+                    or outcome['reason'] != {'kind': 'stop_address'} or outcome['blocks_executed'] != 1
+                    or outcome['compiled_blocks'] != int(flag == 0) or outcome['disk_cache_hits'] != int(flag != 0)):
+                raise AssertionError('Native FlagM block/RET state, provenance or cache accounting mismatch')
+            corpus.update(code); corpus.update(bytes(initial))
+            corpus.update(json.dumps(result, sort_keys=True, separators=(',', ':')).encode())
+            comparisons += 1; cold += outcome['compiled_blocks']; disk += outcome['disk_cache_hits']
+    return {'original_math_native_state_pc_comparisons': comparisons, 'cold_compiles': cold,
+            'disk_cache_hits': disk, 'result_corpus_sha256': corpus.hexdigest(),
+            'rmif_mask_zero_source_map': zero_map_receipt}
+
+
+def flag_semantic_sources():
+    digest = hashlib.sha256(FLAG_SEMANTIC_ARCHIVE.read_bytes()).hexdigest()
+    if digest != FLAG_SEMANTIC_ARCHIVE_SHA256:
+        raise AssertionError('Flag semantic archive differs from the pinned Arm release')
+    with tarfile.open(FLAG_SEMANTIC_ARCHIVE) as archive:
+        sources = {name + '.xml': hashlib.sha256(archive.extractfile(
+            f'ISA_A64_xml_A_profile-2026-06/{name}.xml').read()).hexdigest()
+            for name in ('cfinv', 'rmif', 'setf', 'axflag', 'xaflag')}
+    return {'archive': str(FLAG_SEMANTIC_ARCHIVE.relative_to(ROOT)), 'archive_sha256': digest,
+            'xml_sha256': sources}
+
+
+def run_flags(cli):
+    from differential import BASE
+    compiled, entries, words = flag_cases(), [], []
+    executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
+    started = time.monotonic()
+    for case in compiled:
+        entries.append(len(words)); words.extend(case['words'])
+    source = struct.pack('<' + 'I' * len(words), *words)
+    with tempfile.TemporaryDirectory(prefix='stela-flags-') as temporary:
+        directory = Path(temporary)
+        path, output = directory / 'flags.arm64', directory / 'native'
+        path.write_bytes(source)
+        manifest = json.loads(subprocess.check_output([str(cli), 'compile-leaf', str(path), '--guest-base', hex(BASE),
+            '--output-dir', str(output), '--cpu-target', 'baseline'], timeout=60))
+        native = (output / 'native.bin').read_bytes()
+        mapping = manifest['source_map']
+        if (manifest['target_cpu'] != 'x86_64-baseline' or manifest['verified'] is not False
+                or manifest['source_sha256'] != hashlib.sha256(source).hexdigest()
+                or manifest['native_sha256'] != hashlib.sha256(native).hexdigest()
+                or manifest['guest_instructions'] != len(words)
+                or [row[0] for row in mapping] != list(range(BASE, BASE + len(source), 4))):
+            raise AssertionError('Flag manifest does not bind baseline source/native bytes and every guest word')
+        offsets = [row[1] for row in mapping] + [len(native)]
+        if offsets[0] != 0 or any(a >= b for a, b in zip(offsets, offsets[1:])):
+            raise AssertionError('Flag source-map intervals must remain nonempty, including RMIF mask zero')
+        for case, entry in zip(compiled, entries):
+            start, end = offsets[entry], offsets[entry + len(case['words'])]
+            case['native'] = native[start:end]
+            case['native_offsets'] = [offset - start for offset in offsets[entry:entry + len(case['words'])]]
+        accounting = flag_binary_accounting(compiled, native)
+        retained = retain_flag_binary_evidence(source, output, accounting)
+        result = bounded_cases(compiled)
+        blocks = flag_blocks(cli, directory)
+    if hashlib.sha256(cli.read_bytes()).hexdigest() != executable_hash:
+        raise AssertionError('Compiler executable changed during flag verification')
+    report = {'kind': 'flagm_flagm2_arm_math_native_x86', 'passed': True, **result,
+        'target_cpu': 'x86_64-baseline', 'forms': list(FLAG_FORMS), 'shared_block_dispatch': blocks,
+        'native_binary_accounting': accounting, 'compiler_source_sha256': manifest['compiler_source_sha256'],
+        'retained_native_evidence': retained,
+        'compiler_executable_sha256': executable_hash, 'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
+        'corpus_sha256': hashlib.sha256(source).hexdigest(), 'verification_wall_seconds': time.monotonic() - started,
+        'semantic_sources': flag_semantic_sources(),
+        'reference': 'Unicorn ARM64 MAX and independent Arm 2026-06 XML Boolean/integer semantics.',
+        'limits': 'All 784 GuestState bytes compared; flag-only instructions do not access guest memory. '
+                  'Leaf oracle stops before its final RET; shared-dispatch checks execute original RET. '
+                  'Default Unicorn CPU lacks FlagM/FlagM2; MAX is explicitly selected. '
+                  'Unicorn MAX rejects all 45 nonzero-CRm system encodings despite Arm XML ignored fields; '
+                  'these have native/math-only credit and separate complete-state/PC rejection observations. '
+                  'No disabled-feature exceptions, full PSTATE/DIT, hardware or application performance claim.'}
+    write_evidence(ROOT / '.stela/flags-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
 def worker(pipe, compiled):
     try:
-        pipe.send(execute_scalar_control(compiled) if compiled[0].get('family') == 'scalar_control' else execute_cases(compiled))
+        family = compiled[0].get('family')
+        execute = {'scalar_control': execute_scalar_control, 'flags': execute_flags}.get(family, execute_cases)
+        pipe.send(execute(compiled))
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -564,12 +925,15 @@ def reject_reserved_extended(cli, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['scalar-control'], help='Run only the current scalar implementation cohort')
+    parser.add_argument('--focus', choices=['scalar-control', 'flags'], help='Run only the selected implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
-    if arguments.focus:
+    if arguments.focus == 'flags':
+        run_flags(cli)
+        return
+    if arguments.focus == 'scalar-control':
         run_scalar_control(cli)
         return
     executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
