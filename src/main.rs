@@ -5,6 +5,7 @@ use std::{fs::File, path::PathBuf};
 mod apple;
 mod containers;
 mod corpus_progress;
+mod dyld_entry;
 mod image;
 mod linked_benchmark;
 mod macho;
@@ -152,6 +153,31 @@ enum Command {
         #[arg(long, value_parser = ["arm64", "arm64e"])]
         architecture: Option<String>,
     },
+    /// Plan a classic Apple dynamic linker's original UNIXTHREAD entry.
+    PlanDynamicLinker {
+        input: PathBuf,
+        #[arg(long, value_parser = ["arm64", "arm64e"])]
+        architecture: Option<String>,
+    },
+    /// Probe only dyld's reviewed five-instruction startup prefix with owned arguments.
+    ProbeDyldEntry {
+        input: PathBuf,
+        #[arg(long)]
+        executable: PathBuf,
+        /// Byte-array argv, environment and extra apple entries; no host environment inheritance.
+        #[arg(long)]
+        arguments: Option<PathBuf>,
+        #[arg(long, default_value = "0x40000000000", value_parser = parse_address)]
+        dyld_slide: u64,
+        #[arg(long, default_value = "0x60000000000", value_parser = parse_address)]
+        image_base: u64,
+        #[arg(long, default_value = "0x80000000000", value_parser = parse_address)]
+        stack_base: u64,
+        #[arg(long, default_value_t = 65536)]
+        stack_bytes: u64,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+    },
     /// Inspect kernel collection images using collection-relative offsets.
     FilesetManifest {
         input: PathBuf,
@@ -221,6 +247,9 @@ enum Command {
         input: PathBuf,
         #[arg(long)]
         architecture: Option<String>,
+        /// Require MH_DYLINKER and seed its typed LC_UNIXTHREAD PC instead of LC_MAIN.
+        #[arg(long, conflicts_with = "guest_base")]
+        dynamic_linker: bool,
         /// Treat input as raw code registered at this address instead of a Mach-O.
         #[arg(long, value_parser = parse_address)]
         guest_base: Option<u64>,
@@ -981,6 +1010,50 @@ fn run() -> Result<()> {
                 }))?
             );
         }
+        Command::PlanDynamicLinker {
+            input,
+            architecture,
+        } => {
+            let data = std::fs::read(&input)?;
+            let (offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
+            let plan = macho::load_plan::plan_dynamic_linker(bytes)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind":"macho_dynamic_linker_load_plan", "container_sha256":stela_core::sha256(&data),
+                    "slice_offset":offset, "plan":plan, "native_executed":false,
+                    "complete_binary_verified":false
+                }))?
+            );
+        }
+        Command::ProbeDyldEntry {
+            input,
+            executable,
+            arguments,
+            dyld_slide,
+            image_base,
+            stack_base,
+            stack_bytes,
+            cache_dir,
+        } => {
+            let arguments = arguments
+                .map(|path| -> Result<_> { Ok(serde_json::from_slice(&std::fs::read(path)?)?) })
+                .transpose()?
+                .unwrap_or_default();
+            let report = dyld_entry::probe(
+                &input,
+                &executable,
+                &arguments,
+                dyld_entry::Options {
+                    dyld_slide,
+                    image_base,
+                    stack_base,
+                    stack_bytes,
+                    cache_dir,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::FilesetManifest { input, output } => {
             ensure!(
                 !output.exists(),
@@ -1151,6 +1224,7 @@ fn run() -> Result<()> {
         Command::DiscoverCode {
             input,
             architecture,
+            dynamic_linker,
             guest_base,
             entry,
             function_starts,
@@ -1179,7 +1253,7 @@ fn run() -> Result<()> {
             let provenance;
             if let Some(base) = guest_base {
                 ensure!(
-                    architecture.is_none() && !function_starts,
+                    architecture.is_none() && !function_starts && !dynamic_linker,
                     "raw discovery has no Mach-O architecture or function-start metadata"
                 );
                 let generation = runtime.register_code(GuestAddress(base), data.clone())?;
@@ -1194,7 +1268,16 @@ fn run() -> Result<()> {
                     serde_json::json!({"format":"raw","source_sha256":stela_core::sha256(&data)});
             } else {
                 let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
-                let image = macho::block_image::BlockImage::from_slice(bytes)?;
+                let image = if dynamic_linker {
+                    macho::block_image::BlockImage::from_dynamic_linker_slice(bytes)?
+                } else {
+                    macho::block_image::BlockImage::from_slice(bytes)?
+                };
+                let thread_entry = if dynamic_linker {
+                    Some(macho::load_plan::plan_dynamic_linker(bytes)?.thread)
+                } else {
+                    None
+                };
                 let sources = image.discovery_sources(bytes, function_starts)?;
                 roots.extend(sources.roots);
                 for region in sources.regions {
@@ -1209,7 +1292,8 @@ fn run() -> Result<()> {
                 }
                 provenance = serde_json::json!({"format":"macho","slice_offset":slice_offset,
                     "plan":image.plan(),"data_in_code":sources.data_in_code,
-                    "function_start_count":sources.function_start_count});
+                    "function_start_count":sources.function_start_count,
+                    "thread_entry":thread_entry});
             }
             let mut seen = std::collections::BTreeSet::new();
             roots.retain(|root| seen.insert(*root));

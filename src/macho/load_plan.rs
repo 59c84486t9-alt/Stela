@@ -117,6 +117,36 @@ pub struct LoadPlan {
     pub execution_supported: bool,
     pub unresolved_requirements: Vec<String>,
 }
+
+/// Original ARM_THREAD_STATE64 descriptor, not a complete guest PSTATE/context.
+/// PC is a preferred virtual address; the process loader must relocate it and
+/// replace the serialized SP with its separately validated KernelArgs stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Arm64UnixThread {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub cpsr: u32,
+    pub pad: u32,
+    pub flavor: u32,
+    pub count: u32,
+    pub raw_command_sha256: String,
+    pub raw_command_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DynamicLinkerPlan {
+    /// `entry` remains absent: LC_UNIXTHREAD is not an LC_MAIN C-call entry.
+    pub image: LoadPlan,
+    pub thread: Arm64UnixThread,
+    pub install_name: String,
+}
+
+struct PlannedImage {
+    image: LoadPlan,
+    thread: Option<Arm64UnixThread>,
+    install_name: Option<String>,
+}
 impl LoadPlan {
     pub fn executable_entry(&self) -> Result<&EntryPoint> {
         self.entry
@@ -176,15 +206,59 @@ fn payload(data: &[u8], command: u32, role: &str, offset: u32, bytes: u32) -> Re
 /// image first; all returned offsets are relative to the selected thin slice.
 /// Success proves only structural planning, never process execution readiness.
 pub fn plan(data: &[u8]) -> Result<LoadPlan> {
-    plan_kind(data, macho::MH_EXECUTE)
+    Ok(plan_kind(data, macho::MH_EXECUTE)?.image)
 }
 
 /// Plan a dylib without inventing an executable entry or running initializers.
 pub fn plan_library(data: &[u8]) -> Result<LoadPlan> {
-    plan_kind(data, macho::MH_DYLIB)
+    Ok(plan_kind(data, macho::MH_DYLIB)?.image)
 }
 
-fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
+/// Plan a thin classic arm64/arm64e dynamic linker with one reviewed kernel
+/// thread-entry descriptor. This does not map, rebase or execute dyld.
+pub fn plan_dynamic_linker(data: &[u8]) -> Result<DynamicLinkerPlan> {
+    let planned = plan_kind(data, macho::MH_DYLINKER)?;
+    Ok(DynamicLinkerPlan {
+        image: planned.image,
+        thread: planned
+            .thread
+            .ok_or_else(|| invalid("MH_DYLINKER requires LC_UNIXTHREAD"))?,
+        install_name: planned
+            .install_name
+            .ok_or_else(|| invalid("MH_DYLINKER requires LC_ID_DYLINKER"))?,
+    })
+}
+
+fn unix_thread(raw: &[u8]) -> Result<Arm64UnixThread> {
+    // XNU ARM_THREAD_STATE64=6 has 68 uint32 words (272 bytes). Reject extra
+    // flavors/trailing bytes rather than interpreting arbitrary thread state.
+    if raw.len() != 288 {
+        return Err(invalid("LC_UNIXTHREAD requires exactly 288 bytes"));
+    }
+    let word = |offset| u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
+    let flavor = word(8);
+    let count = word(12);
+    if flavor != 6 || count != 68 {
+        return Err(invalid(
+            "LC_UNIXTHREAD requires ARM_THREAD_STATE64 flavor 6/count 68",
+        ));
+    }
+    let state = &raw[16..];
+    let register = |offset| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+    Ok(Arm64UnixThread {
+        x: std::array::from_fn(|index| register(index * 8)),
+        sp: register(248),
+        pc: register(256),
+        cpsr: word(280),
+        pad: word(284),
+        flavor,
+        count,
+        raw_command_sha256: sha256(raw),
+        raw_command_hex: hex::encode(raw),
+    })
+}
+
+fn plan_kind(data: &[u8], expected_type: u32) -> Result<PlannedImage> {
     if data.get(..4) != Some(&[0xcf, 0xfa, 0xed, 0xfe]) {
         return Err(PlanError::UnsupportedFormat);
     }
@@ -214,6 +288,8 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
     let mut payloads = vec![];
     let mut deferred_commands = vec![];
     let mut entry = None;
+    let mut thread = None;
+    let mut install_name = None;
     let mut consumed = 0u64;
     let mut singleton_commands = BTreeSet::new();
     while let Some(command) = commands.next()? {
@@ -325,6 +401,9 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
                 });
             }
             LoadCommandVariant::EntryPoint(main) => {
+                if expected_type == macho::MH_DYLINKER {
+                    return Err(invalid("MH_DYLINKER cannot declare LC_MAIN"));
+                }
                 if expected_type != macho::MH_EXECUTE {
                     return Err(invalid("MH_DYLIB cannot declare LC_MAIN"));
                 }
@@ -333,7 +412,18 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
                 }
                 entry = Some((main.entryoff.get(endian), main.stacksize.get(endian)));
             }
-            LoadCommandVariant::Thread(_, _) => return Err(PlanError::UnsupportedEntryConvention),
+            LoadCommandVariant::Thread(_, _) => {
+                if expected_type != macho::MH_DYLINKER {
+                    return Err(PlanError::UnsupportedEntryConvention);
+                }
+                if id != macho::LC_UNIXTHREAD {
+                    return Err(invalid("MH_DYLINKER requires LC_UNIXTHREAD, not LC_THREAD"));
+                }
+                if thread.is_some() {
+                    return Err(invalid("duplicate LC_UNIXTHREAD"));
+                }
+                thread = Some(unix_thread(command.raw_data())?);
+            }
             LoadCommandVariant::IdDylib(dylib) => {
                 if expected_type != macho::MH_DYLIB {
                     return Err(invalid("MH_EXECUTE cannot declare LC_ID_DYLIB"));
@@ -357,6 +447,9 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
                 compatibility_version: dylib.dylib.compatibility_version.get(endian),
             }),
             LoadCommandVariant::LoadDylinker(linker) => {
+                if expected_type == macho::MH_DYLINKER {
+                    return Err(invalid("MH_DYLINKER cannot declare LC_LOAD_DYLINKER"));
+                }
                 if expected_type != macho::MH_EXECUTE {
                     return Err(invalid("MH_DYLIB cannot declare LC_LOAD_DYLINKER"));
                 }
@@ -364,6 +457,16 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
                     return Err(invalid("duplicate LC_LOAD_DYLINKER"));
                 }
                 dylinker = Some(command_string(command, linker.name, 12)?);
+            }
+            LoadCommandVariant::IdDylinker(linker) if expected_type == macho::MH_DYLINKER => {
+                if install_name.is_some() || command.cmdsize() > 4112 {
+                    return Err(invalid("duplicate or oversized LC_ID_DYLINKER"));
+                }
+                let name = command_string(command, linker.name, 12)?;
+                if name.len() > 4096 {
+                    return Err(invalid("LC_ID_DYLINKER name exceeds 4096 bytes"));
+                }
+                install_name = Some(name);
             }
             LoadCommandVariant::Rpath(path) => rpaths.push(command_string(command, path.path, 12)?),
             LoadCommandVariant::LinkeditData(info) => {
@@ -485,9 +588,40 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
             guest_address,
             stack_size,
         })
-    } else {
+    } else if expected_type == macho::MH_DYLIB {
         if dylib_identity.is_none() {
             return Err(invalid("MH_DYLIB requires LC_ID_DYLIB"));
+        }
+        None
+    } else {
+        let descriptor = thread
+            .as_ref()
+            .ok_or_else(|| invalid("MH_DYLINKER requires LC_UNIXTHREAD"))?;
+        if install_name.is_none() {
+            return Err(invalid("MH_DYLINKER requires LC_ID_DYLINKER"));
+        }
+        if !descriptor.pc.is_multiple_of(4) {
+            return Err(invalid("LC_UNIXTHREAD PC is not instruction aligned"));
+        }
+        let required = macho::VM_PROT_READ | macho::VM_PROT_EXECUTE;
+        let mappings = segments
+            .iter()
+            .filter(|s| {
+                s.initial_protection & required == required
+                    && descriptor.pc >= s.guest.address
+                    && descriptor.pc - s.guest.address < s.file.bytes
+            })
+            .collect::<Vec<_>>();
+        if mappings.len() != 1 {
+            return Err(invalid(
+                "LC_UNIXTHREAD PC does not identify exactly one file-backed readable executable address",
+            ));
+        }
+        let mapping = mappings[0];
+        if mapping.file.bytes - (descriptor.pc - mapping.guest.address) < 4 {
+            return Err(invalid(
+                "LC_UNIXTHREAD PC has no complete file-backed instruction",
+            ));
         }
         None
     };
@@ -536,30 +670,34 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<LoadPlan> {
         unresolved_requirements
             .push("arm64e pointer-authentication ABI and CPU-subtype capability policy".into());
     }
-    Ok(LoadPlan {
-        schema_version: 2,
-        file_type: expected_type,
-        dylib_identity,
-        slice_sha256: sha256(data),
-        slice_bytes: data.len() as u64,
-        cpu_type,
-        cpu_subtype,
-        architecture: if cpu_subtype & !macho::CPU_SUBTYPE_MASK == 2 {
-            "arm64e"
-        } else {
-            "arm64"
-        }
-        .into(),
-        header_flags: header.flags(endian),
-        segments,
-        entry,
-        dependencies,
-        dylinker,
-        rpaths,
-        payloads,
-        deferred_commands,
-        execution_supported: false,
-        unresolved_requirements,
+    Ok(PlannedImage {
+        thread,
+        install_name,
+        image: LoadPlan {
+            schema_version: 2,
+            file_type: expected_type,
+            dylib_identity,
+            slice_sha256: sha256(data),
+            slice_bytes: data.len() as u64,
+            cpu_type,
+            cpu_subtype,
+            architecture: if cpu_subtype & !macho::CPU_SUBTYPE_MASK == 2 {
+                "arm64e"
+            } else {
+                "arm64"
+            }
+            .into(),
+            header_flags: header.flags(endian),
+            segments,
+            entry,
+            dependencies,
+            dylinker,
+            rpaths,
+            payloads,
+            deferred_commands,
+            execution_supported: false,
+            unresolved_requirements,
+        },
     })
 }
 
@@ -642,6 +780,238 @@ mod tests {
             segment(b"__DATA", BASE + 0x2000, 0x1000, 0x1100, 0x100, 3),
             main_command(0x1004),
         ]
+    }
+    fn unix_thread_command(pc: u64) -> Vec<u8> {
+        let mut command = vec![0; 288];
+        u32_put(&mut command, 0, macho::LC_UNIXTHREAD);
+        u32_put(&mut command, 4, 288);
+        u32_put(&mut command, 8, 6);
+        u32_put(&mut command, 12, 68);
+        for index in 0..31 {
+            u64_put(
+                &mut command,
+                16 + index * 8,
+                0xfedc_ba98_7654_3210u64.rotate_left(index as u32),
+            );
+        }
+        u64_put(&mut command, 264, u64::MAX - 7);
+        u64_put(&mut command, 272, pc);
+        u32_put(&mut command, 280, 0xf123_4567);
+        u32_put(&mut command, 284, 0x89ab_cdef);
+        command
+    }
+    fn dynamic_linker_commands() -> Vec<Vec<u8>> {
+        vec![
+            segment(b"__TEXT", 0, 0x2000, 0, 0x1100, 5),
+            segment(b"__DATA", 0x2000, 0x1000, 0x1100, 0x100, 3),
+            unix_thread_command(0x1004),
+            string_command(macho::LC_ID_DYLINKER, 12, b"/usr/lib/dyld"),
+        ]
+    }
+    fn dynamic_linker_image(commands: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut data = image(commands);
+        u32_put(&mut data, 12, macho::MH_DYLINKER);
+        data
+    }
+
+    #[test]
+    fn dynamic_linker_preserves_raw_thread_state_with_zero_based_text_and_no_main_entry() {
+        let items = dynamic_linker_commands();
+        let raw = items[2].clone();
+        let input = dynamic_linker_image(items);
+        let result = plan_dynamic_linker(&input).unwrap();
+        assert_eq!(result.image.file_type, macho::MH_DYLINKER);
+        assert_eq!(result.image.architecture, "arm64e");
+        assert_eq!(result.image.segments[0].guest.address, 0);
+        assert_eq!(result.install_name, "/usr/lib/dyld");
+        assert_eq!(result.image.slice_sha256, sha256(&input));
+        assert!(result.image.entry.is_none());
+        assert!(result.image.dylinker.is_none());
+        assert!(result.image.dylib_identity.is_none());
+        assert!(!result.image.execution_supported);
+        for index in 0..31 {
+            assert_eq!(
+                result.thread.x[index],
+                0xfedc_ba98_7654_3210u64.rotate_left(index as u32)
+            );
+        }
+        assert_eq!(result.thread.sp, u64::MAX - 7);
+        assert_eq!(result.thread.pc, 0x1004);
+        assert_eq!(result.thread.cpsr, 0xf123_4567);
+        assert_eq!(result.thread.pad, 0x89ab_cdef);
+        assert_eq!((result.thread.flavor, result.thread.count), (6, 68));
+        assert_eq!(result.thread.raw_command_sha256, sha256(&raw));
+        assert_eq!(hex::decode(&result.thread.raw_command_hex).unwrap(), raw);
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["image"]["entry"], serde_json::Value::Null);
+        assert_eq!(json["thread"]["pc"], 0x1004);
+        assert_eq!(json["thread"]["x"].as_array().unwrap().len(), 31);
+        assert!(matches!(
+            plan(&input),
+            Err(PlanError::UnsupportedFileType(7))
+        ));
+        assert!(matches!(
+            plan_library(&input),
+            Err(PlanError::UnsupportedFileType(7))
+        ));
+    }
+
+    #[test]
+    fn dynamic_linker_accepts_only_reviewed_cpu_profiles_and_file_type() {
+        for subtype in [0, 2, 0x8000_0002] {
+            let mut input = dynamic_linker_image(dynamic_linker_commands());
+            u32_put(&mut input, 8, subtype);
+            assert_eq!(
+                plan_dynamic_linker(&input).unwrap().image.cpu_subtype,
+                subtype
+            );
+        }
+        for subtype in [1, 12, 0x8000_000c] {
+            let mut input = dynamic_linker_image(dynamic_linker_commands());
+            u32_put(&mut input, 8, subtype);
+            assert!(matches!(
+                plan_dynamic_linker(&input),
+                Err(PlanError::UnsupportedCpu { .. })
+            ));
+        }
+        let mut input = dynamic_linker_image(dynamic_linker_commands());
+        u32_put(&mut input, 4, macho::CPU_TYPE_X86_64);
+        assert!(matches!(
+            plan_dynamic_linker(&input),
+            Err(PlanError::UnsupportedCpu { .. })
+        ));
+        assert!(matches!(
+            plan_dynamic_linker(&image(commands())),
+            Err(PlanError::UnsupportedFileType(2))
+        ));
+    }
+
+    #[test]
+    fn dynamic_linker_declines_missing_duplicate_mixed_and_non_unix_entries() {
+        for remove in [2, 3] {
+            let mut items = dynamic_linker_commands();
+            items.remove(remove);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        for command in [
+            unix_thread_command(0x1004),
+            main_command(0x1004),
+            string_command(macho::LC_ID_DYLINKER, 12, b"/usr/lib/dyld"),
+            string_command(macho::LC_LOAD_DYLINKER, 12, b"/usr/lib/dyld"),
+            string_command(macho::LC_ID_DYLIB, 24, b"libwrong.dylib"),
+        ] {
+            let mut items = dynamic_linker_commands();
+            items.push(command.clone());
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+            let mut items = dynamic_linker_commands();
+            items.insert(0, command);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        let mut items = dynamic_linker_commands();
+        u32_put(&mut items[2], 0, macho::LC_THREAD);
+        assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        // Existing execute/library modes keep declining every thread entry.
+        for kind in [macho::MH_EXECUTE, macho::MH_DYLIB] {
+            let mut items = commands();
+            items[3] = unix_thread_command(BASE + 0x1004);
+            let mut input = image(items);
+            u32_put(&mut input, 12, kind);
+            let result = if kind == macho::MH_EXECUTE {
+                plan(&input)
+            } else {
+                plan_library(&input)
+            };
+            assert_eq!(result.unwrap_err(), PlanError::UnsupportedEntryConvention);
+        }
+    }
+
+    #[test]
+    fn dynamic_linker_rejects_unknown_counts_trailing_flavors_and_truncations() {
+        for (offset, value) in [
+            (8, 0),
+            (8, 1),
+            (8, 7),
+            (12, 0),
+            (12, 67),
+            (12, 69),
+            (12, u32::MAX),
+        ] {
+            let mut items = dynamic_linker_commands();
+            u32_put(&mut items[2], offset, value);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        for size in [8, 16, 280, 296, 576] {
+            let mut items = dynamic_linker_commands();
+            items[2].resize(size, 0);
+            u32_put(&mut items[2], 4, size as u32);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        let input = dynamic_linker_image(dynamic_linker_commands());
+        for length in [0, 4, 31, 100, 32 + 72 + 72 + 287] {
+            assert!(plan_dynamic_linker(&input[..length]).is_err());
+        }
+    }
+
+    #[test]
+    fn dynamic_linker_entry_requires_complete_readable_executable_file_bytes() {
+        for pc in [0x1005, 0x1100, 0x2000, u64::MAX - 3] {
+            let mut items = dynamic_linker_commands();
+            items[2] = unix_thread_command(pc);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        let mut items = dynamic_linker_commands();
+        items[2] = unix_thread_command(0x10fc);
+        assert!(plan_dynamic_linker(&dynamic_linker_image(items.clone())).is_ok());
+        // The final aligned address has only three original instruction bytes.
+        u64_put(&mut items[0], 48, 0x10ff);
+        assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        for protection in [0, 1, 3, 4] {
+            let mut items = dynamic_linker_commands();
+            u32_put(&mut items[0], 56, protection);
+            u32_put(&mut items[0], 60, protection);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        // Serialized PC is a VM address, not a file offset or image-relative LC_MAIN.
+        let mut items = dynamic_linker_commands();
+        items.push(segment(b"__CODE", 0x4000, 0x1000, 0x1200, 0x100, 5));
+        items[2] = unix_thread_command(0x4004);
+        let mut input = dynamic_linker_image(items);
+        input.resize(0x1300, 0);
+        assert_eq!(plan_dynamic_linker(&input).unwrap().thread.pc, 0x4004);
+    }
+
+    #[test]
+    fn dynamic_linker_install_name_is_bounded_terminated_utf8_and_outside_fixed_fields() {
+        for name in [b"".as_slice(), b"\xff".as_slice()] {
+            let mut items = dynamic_linker_commands();
+            items[3] = string_command(macho::LC_ID_DYLINKER, 12, name);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        for offset in [0, 8, 32, u32::MAX] {
+            let mut items = dynamic_linker_commands();
+            u32_put(&mut items[3], 8, offset);
+            assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        }
+        let mut items = dynamic_linker_commands();
+        items[3][12..].fill(b'x');
+        assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
+        let mut items = dynamic_linker_commands();
+        items[3] = string_command(macho::LC_ID_DYLINKER, 12, &vec![b'x'; 4097]);
+        let mut input = image(vec![]);
+        input.resize(0x3000, 0);
+        // Oversized identity must decline even when the image itself contains it.
+        u64_put(&mut items[0], 32, 0x3000);
+        u64_put(&mut items[0], 48, 0x3000);
+        items.remove(1);
+        u32_put(&mut input, 12, macho::MH_DYLINKER);
+        u32_put(&mut input, 16, items.len() as u32);
+        u32_put(&mut input, 20, items.iter().map(|x| x.len() as u32).sum());
+        let mut at = 32;
+        for command in items {
+            input[at..at + command.len()].copy_from_slice(&command);
+            at += command.len();
+        }
+        assert!(plan_dynamic_linker(&input).is_err());
     }
     #[test]
     fn plans_unslid_arm64e_mapping_zero_fill_and_image_relative_entry() {

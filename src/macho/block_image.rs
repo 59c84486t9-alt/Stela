@@ -53,6 +53,7 @@ pub struct DiscoverySources {
 #[derive(Debug)]
 pub struct BlockImage {
     plan: LoadPlan,
+    entry_address: u64,
     regions: Vec<ExecutableRegion>,
 }
 impl BlockImage {
@@ -61,6 +62,16 @@ impl BlockImage {
     /// import substitution, instruction patch or executable zero-fill is applied.
     pub fn from_slice(data: &[u8]) -> Result<Self, PlanError> {
         let plan = load_plan::plan(data)?;
+        let entry_address = plan.executable_entry()?.guest_address;
+        Self::snapshot(data, plan, entry_address)
+    }
+    /// Explicit dynamic-linker mode retains its UNIXTHREAD entry separately;
+    /// the underlying image never acquires a fabricated LC_MAIN entry.
+    pub fn from_dynamic_linker_slice(data: &[u8]) -> Result<Self, PlanError> {
+        let linker = load_plan::plan_dynamic_linker(data)?;
+        Self::snapshot(data, linker.image, linker.thread.pc)
+    }
+    fn snapshot(data: &[u8], plan: LoadPlan, entry_address: u64) -> Result<Self, PlanError> {
         let mut regions = Vec::new();
         for segment in &plan.segments {
             if segment.initial_protection & macho::VM_PROT_EXECUTE == 0 || segment.file.bytes == 0 {
@@ -89,7 +100,11 @@ impl BlockImage {
                 bytes: bytes.into(),
             });
         }
-        Ok(Self { plan, regions })
+        Ok(Self {
+            plan,
+            entry_address,
+            regions,
+        })
     }
     /// Seed only declared executable entry/function starts and remove declared
     /// embedded data from fetch snapshots. Metadata does not certify every byte
@@ -245,12 +260,7 @@ impl BlockImage {
                 snapshot_piece(source, at, source_end, &mut regions)?;
             }
         }
-        let entry = self
-            .plan
-            .entry
-            .as_ref()
-            .context("discovery requires LC_MAIN entry")?
-            .guest_address;
+        let entry = self.entry_address;
         let function_start_count = starts.as_ref().map_or(0, Vec::len);
         let mut roots = BTreeSet::from([entry]);
         if include_function_starts {
@@ -388,6 +398,52 @@ mod tests {
         put32(&mut input, 0x210, 0xd65f03c0);
         put32(&mut input, 0x220, 0xd65f03c0);
         input
+    }
+    #[test]
+    fn dynamic_linker_discovery_requires_explicit_mode_and_keeps_unixthread_entry_typed() {
+        let mut thread = vec![0; 288];
+        put32(&mut thread, 0, macho::LC_UNIXTHREAD);
+        put32(&mut thread, 4, 288);
+        put32(&mut thread, 8, 6);
+        put32(&mut thread, 12, 68);
+        put64(&mut thread, 272, BASE + 0x280);
+        let mut identity = vec![0; 32];
+        put32(&mut identity, 0, macho::LC_ID_DYLINKER);
+        put32(&mut identity, 4, 32);
+        put32(&mut identity, 8, 12);
+        identity[12..25].copy_from_slice(b"/usr/lib/dyld");
+        let commands = [segment(b"__TEXT", BASE, 0, 0x400, 5), thread, identity];
+        let mut input = vec![0; 0x400];
+        for (index, value) in [
+            0xfeedfacf,
+            macho::CPU_TYPE_ARM64,
+            2,
+            macho::MH_DYLINKER,
+            3,
+            commands.iter().map(|c| c.len() as u32).sum(),
+            0,
+            0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put32(&mut input, index * 4, value);
+        }
+        let mut at = 32;
+        for command in commands {
+            input[at..at + command.len()].copy_from_slice(&command);
+            at += command.len();
+        }
+        put32(&mut input, 0x280, 0xd65f03c0);
+        assert!(BlockImage::from_slice(&input).is_err());
+        let image = BlockImage::from_dynamic_linker_slice(&input).unwrap();
+        assert!(image.plan.entry.is_none());
+        assert!(image.plan.executable_entry().is_err());
+        let sources = image.discovery_sources(&input, false).unwrap();
+        assert_eq!(sources.roots, [BASE + 0x280]);
+        assert_eq!(sources.regions[0].bytes(), input);
+        input[0x280] ^= 1;
+        assert!(image.discovery_sources(&input, false).is_err());
     }
     #[test]
     fn discovery_seeds_only_declared_roots_and_splits_data_without_changing_original_bytes() {
