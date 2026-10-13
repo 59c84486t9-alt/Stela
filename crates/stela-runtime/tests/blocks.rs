@@ -53,6 +53,10 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
         0x5e207a30, // SQABS B16,B17: active MIN sets QC, clears upper bits
         0x6e320e52, // UQADD V18.16B,V18.16B,V18.16B: zero sum retains QC
         0x6ea12a93, // SQXTUN2 V19.4S,V20.2D: signed wide bounds, preserve low half
+        0x4eb7c2d5, // SMULL2 V21.2D,V22.4S,V23.4S
+        0x4eb612b5, // SADDW2 V21.2D,V21.2D,V22.4S: full wide left alias
+        0x6eb772d8, // UABDL2 V24.2D,V22.4S,V23.4S
+        0x4eb79ed9, // MUL V25.4S,V22.4S,V23.4S
         RET,
     ]);
     let mut initial = state(BASE, 19);
@@ -74,6 +78,8 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     initial.registers.v[17] = [0x80, u64::MAX];
     initial.registers.v[19] = [0x0123456789abcdef, u64::MAX];
     initial.registers.v[20] = [u64::MAX, 0x100000000];
+    initial.registers.v[22] = [0x00000003fffffffe, 0x80000000ffffffff];
+    initial.registers.v[23] = [0xfffffffd00000005, 0xffffffff00000002];
     let mut expected = initial.registers.clone();
     let shifted = source.map(|byte| byte.wrapping_shl(3));
     expected.v[0] = limbs(shifted);
@@ -93,6 +99,9 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     expected.v[16] = [0x7f, 0];
     expected.v[19] = [0x0123456789abcdef, 0xffffffff00000000];
     expected.fpsr |= FPSR_QC;
+    expected.v[21] = [u64::MAX - 2, 0];
+    expected.v[24] = [0xfffffffd, 0x7fffffff];
+    expected.v[25] = [0xfffffff7fffffff6, 0x80000000fffffffe];
     let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
     targets.dedup();
     for target in targets {

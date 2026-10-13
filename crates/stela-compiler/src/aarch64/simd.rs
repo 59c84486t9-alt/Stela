@@ -2,6 +2,7 @@
 //! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
+pub mod products;
 pub mod rearrange;
 pub mod reductions;
 pub mod saturating;
@@ -37,6 +38,7 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Product(products::Operand),
     Saturate(saturating::Operand),
     Reduce(reductions::Operand),
     Shift(shifts::Operand),
@@ -89,6 +91,9 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = products::decode(word) {
+        return Some(decoded.map(Operand::Product));
+    }
     if let Some(decoded) = saturating::decode(word) {
         return Some(decoded.map(Operand::Saturate));
     }

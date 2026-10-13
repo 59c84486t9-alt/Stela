@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v18",
+  "registry_version": "apple-silicon-reviewed-forms-v19",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -229,6 +229,22 @@
         "programs": 805,
         "three_way_register_state_comparisons": 11270,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 11270
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_products": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-products-differential-report.json",
+      "kind": "simd_products_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 1050,
+        "three_way_register_state_comparisons": 14700,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 14700
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -17779,6 +17795,931 @@
           ]
         }
       ]
+    },
+    {
+      "id": "MLA_asimdsame_only",
+      "instruction_id": "MLA_advsimd_vec",
+      "mnemonic": "MLA",
+      "category": "fp_simd",
+      "source_file": "mla_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e209400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c13ecbf5a64b0beaba00da49e95602e987b0cdfb9fffab7ffa23c2246bd37e17",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e229420",
+          "expected_mnemonics": [
+            "mla"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MLS_asimdsame_only",
+      "instruction_id": "MLS_advsimd_vec",
+      "mnemonic": "MLS",
+      "category": "fp_simd",
+      "source_file": "mls_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e209400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "da0980b028405cc88d03ba40853b4656a72e5fd2ce75bf84d9ca13fc86031491",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e229420",
+          "expected_mnemonics": [
+            "mls"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MUL_asimdsame_only",
+      "instruction_id": "MUL_advsimd_vec",
+      "mnemonic": "MUL",
+      "category": "fp_simd",
+      "source_file": "mul_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e209c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4c6293a4dc611bde2b1fbae1bf6b69c46399541e99d4e02e3696d6c971befb16",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e229c20",
+          "expected_mnemonics": [
+            "mul"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SABAL_asimddiff_L",
+      "instruction_id": "SABAL_advsimd",
+      "mnemonic": "SABAL",
+      "category": "fp_simd",
+      "source_file": "sabal_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e205000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "92302d9eba8a79efea76b8e175f52b88352561b344dc76d035f5ed5b5437d9ac",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e225020",
+          "expected_mnemonics": [
+            "sabal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SABA_asimdsame_only",
+      "instruction_id": "SABA_advsimd",
+      "mnemonic": "SABA",
+      "category": "fp_simd",
+      "source_file": "saba_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e207c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8adc2fb5e8852cf3fe805b3a12d263d34ba62a96ed2034d3a3aab61e86964cc1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e227c20",
+          "expected_mnemonics": [
+            "saba"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SABDL_asimddiff_L",
+      "instruction_id": "SABDL_advsimd",
+      "mnemonic": "SABDL",
+      "category": "fp_simd",
+      "source_file": "sabdl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e207000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "120b1ef24a03a8c11d013ae94590529fd57db4c30ffc4c59ffdeb4e35baea0cb",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e227020",
+          "expected_mnemonics": [
+            "sabdl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SABD_asimdsame_only",
+      "instruction_id": "SABD_advsimd",
+      "mnemonic": "SABD",
+      "category": "fp_simd",
+      "source_file": "sabd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e207400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "212c0875b42f2f88a335c95e475b5da1a7b65f6e632f56a413581eb25fa689ff",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e227420",
+          "expected_mnemonics": [
+            "sabd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SADDL_asimddiff_L",
+      "instruction_id": "SADDL_advsimd",
+      "mnemonic": "SADDL",
+      "category": "fp_simd",
+      "source_file": "saddl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e200000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "33f1987f76131dbf0bb0bee694bca368e0e8f32d9de8f806da809717b0f2f682",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e220020",
+          "expected_mnemonics": [
+            "saddl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SADDW_asimddiff_W",
+      "instruction_id": "SADDW_advsimd",
+      "mnemonic": "SADDW",
+      "category": "fp_simd",
+      "source_file": "saddw_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e201000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "bdf1f4ce0ecde2bb4eab726116b5d14c3a11791af9da013119faa6cdf1bb110e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e221020",
+          "expected_mnemonics": [
+            "saddw"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMLAL_asimddiff_L",
+      "instruction_id": "SMLAL_advsimd_vec",
+      "mnemonic": "SMLAL",
+      "category": "fp_simd",
+      "source_file": "smlal_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e208000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "d33fdfe58dfc3fcfc759ac33e1a45a37b33a575aab60f41243488b7c7f77ed1a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e228020",
+          "expected_mnemonics": [
+            "smlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMLSL_asimddiff_L",
+      "instruction_id": "SMLSL_advsimd_vec",
+      "mnemonic": "SMLSL",
+      "category": "fp_simd",
+      "source_file": "smlsl_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20a000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9dfcff95254d0aa430dc81e7b3ce5e65a19bbe7dc351f3f38836410db73f434f",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22a020",
+          "expected_mnemonics": [
+            "smlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMULL_asimddiff_L",
+      "instruction_id": "SMULL_advsimd_vec",
+      "mnemonic": "SMULL",
+      "category": "fp_simd",
+      "source_file": "smull_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20c000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "7345f8578e82e8d47f72a6f2e20378f7635d7beb43ebdb615c8a8528d3aae3a1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22c020",
+          "expected_mnemonics": [
+            "smull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSUBL_asimddiff_L",
+      "instruction_id": "SSUBL_advsimd",
+      "mnemonic": "SSUBL",
+      "category": "fp_simd",
+      "source_file": "ssubl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e202000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "2f4e8e958cce0da570a6cd9e72489ff8fb2454242115f08cdeb0244a33af914b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e222020",
+          "expected_mnemonics": [
+            "ssubl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSUBW_asimddiff_W",
+      "instruction_id": "SSUBW_advsimd",
+      "mnemonic": "SSUBW",
+      "category": "fp_simd",
+      "source_file": "ssubw_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e203000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "73b1cca3338c0428ec39f8bfcc3e4b28a3d8ce12d7fc01d10bd939d119f41be9",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e223020",
+          "expected_mnemonics": [
+            "ssubw"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UABAL_asimddiff_L",
+      "instruction_id": "UABAL_advsimd",
+      "mnemonic": "UABAL",
+      "category": "fp_simd",
+      "source_file": "uabal_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e205000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "6a66c92b43f5bbcd7e1d9e888ae4d8aef56388b8acd61826a26d093447a86acc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e225020",
+          "expected_mnemonics": [
+            "uabal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UABA_asimdsame_only",
+      "instruction_id": "UABA_advsimd",
+      "mnemonic": "UABA",
+      "category": "fp_simd",
+      "source_file": "uaba_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e207c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9d2eec1b1b2e4dd069dd6eb33ca331a2cabe667d14cc13ce8501ffdb53e47a95",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e227c20",
+          "expected_mnemonics": [
+            "uaba"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UABDL_asimddiff_L",
+      "instruction_id": "UABDL_advsimd",
+      "mnemonic": "UABDL",
+      "category": "fp_simd",
+      "source_file": "uabdl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e207000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "892b0d57a494377adc841acab4a001b8835c6161c5bb5037485c9a32b626bc6f",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e227020",
+          "expected_mnemonics": [
+            "uabdl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UABD_asimdsame_only",
+      "instruction_id": "UABD_advsimd",
+      "mnemonic": "UABD",
+      "category": "fp_simd",
+      "source_file": "uabd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e207400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a5746920bd5615d0b123feede39e7634d8fc54cac04f8cb6223f25343f85f180",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e227420",
+          "expected_mnemonics": [
+            "uabd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UADDL_asimddiff_L",
+      "instruction_id": "UADDL_advsimd",
+      "mnemonic": "UADDL",
+      "category": "fp_simd",
+      "source_file": "uaddl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e200000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "35b1dc2c74a8f5d5bb27a338501d1a32bc6695c36e8e3285541cb0797a52885e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e220020",
+          "expected_mnemonics": [
+            "uaddl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UADDW_asimddiff_W",
+      "instruction_id": "UADDW_advsimd",
+      "mnemonic": "UADDW",
+      "category": "fp_simd",
+      "source_file": "uaddw_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e201000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "1f37d5ce0ec6b011bf62ae904cc65604450917076ef46f58cc00078a50d88c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e221020",
+          "expected_mnemonics": [
+            "uaddw"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMLAL_asimddiff_L",
+      "instruction_id": "UMLAL_advsimd_vec",
+      "mnemonic": "UMLAL",
+      "category": "fp_simd",
+      "source_file": "umlal_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e208000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "7744fc7be24bd09d4e27ca26333df4cea95640bd65d60d8e8d092ce5458b829d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e228020",
+          "expected_mnemonics": [
+            "umlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMLSL_asimddiff_L",
+      "instruction_id": "UMLSL_advsimd_vec",
+      "mnemonic": "UMLSL",
+      "category": "fp_simd",
+      "source_file": "umlsl_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e20a000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "2edfca27f407d7d345657d5878c37e57e0695fb7e799328d51394ded00760b13",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22a020",
+          "expected_mnemonics": [
+            "umlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMULL_asimddiff_L",
+      "instruction_id": "UMULL_advsimd_vec",
+      "mnemonic": "UMULL",
+      "category": "fp_simd",
+      "source_file": "umull_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e20c000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9f241acd6b7d8ea828951eb2a9f3eb098d09a2369d6b2414c04f0c6825a5d273",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22c020",
+          "expected_mnemonics": [
+            "umull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USUBL_asimddiff_L",
+      "instruction_id": "USUBL_advsimd",
+      "mnemonic": "USUBL",
+      "category": "fp_simd",
+      "source_file": "usubl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e202000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "80a8e8a91712a9951d2bffa8017d92533a7a0ffe8a9c4c04d2e0ed7b4b21eff7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e222020",
+          "expected_mnemonics": [
+            "usubl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USUBW_asimddiff_W",
+      "instruction_id": "USUBW_advsimd",
+      "mnemonic": "USUBW",
+      "category": "fp_simd",
+      "source_file": "usubw_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e203000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "040e7ff7cebafec52ffadf923be7b5923c5d4c08d8eaacda3d1ce929829ab8d2",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated 8/16/32-bit lanes and vector widths; normal Q=0 upper clearing and long/wide source-half selection. Full signed/unsigned doubled-width products, modular add/sub accumulation, widening ADD/SUB with full-width left operands for W forms, and mathematical signed/unsigned absolute differences before truncation. V31 and source/destination overlaps, including old accumulator values. Guest NZCV/FPCR/FPSR and RAM unchanged. Polynomial, high/saturating and indexed-element variants are separate forms; no disabled-feature traps, SME streaming or application execution claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 encodings/decode/operations. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 comparisons cover all arrangements, extrema, half selection, aliases and chains. Independent host disassembly confirms PMULLD/PMULDQ and qword compare selection only in supported feature tiers.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e223020",
+          "expected_mnemonics": [
+            "usubw"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -17808,6 +18749,8 @@
     "crates/stela-compiler/src/x86_64/simd/reductions.rs",
     "crates/stela-compiler/src/aarch64/simd/saturating.rs",
     "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+    "crates/stela-compiler/src/aarch64/simd/products.rs",
+    "crates/stela-compiler/src/x86_64/simd/products.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

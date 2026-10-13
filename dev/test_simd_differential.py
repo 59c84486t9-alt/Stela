@@ -12,6 +12,21 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_product_oracle_keeps_full_signed_products_and_pretruncation_differences(self):
+        initial=State()
+        initial.v[1][:]=[0,0x80000000ffffffff]
+        initial.v[2][:]=[0,0xffffffff00000002]
+        base={'d':0,'n':1,'m':2,'lane':4,'output_lane':8,'bytes':16,'upper':True,
+              'signed':True,'wide_left':False,'operation':'product','accumulate':None}
+        self.assertEqual(suite.product_mathematical([base],initial)['v'][0],[suite.MASK-1,0x80000000])
+        self.assertEqual(suite.product_mathematical([{**base,'signed':False}],initial)['v'][0],
+                         [0x1fffffffe,0x7fffffff80000000])
+        initial.v[1][:]=[0x8080808080808080]*2
+        initial.v[2][:]=[0x7f7f7f7f7f7f7f7f]*2
+        observed=suite.product_mathematical([{**base,'lane':1,'output_lane':1,'upper':False,'operation':'difference'}],initial)
+        self.assertEqual(observed['v'][0],[suite.MASK,suite.MASK])
+        self.assertEqual(observed['fpsr'],initial.fpsr)
+
     def test_saturation_oracle_handles_mixed_65_bit_sums_and_sticky_qc(self):
         initial=State()
         initial.fpsr=0x1f
@@ -48,7 +63,8 @@ class SimdDifferentialTests(unittest.TestCase):
         registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
         for group,generator,count in [('simd_integer',suite.integer_programs,38),
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
-                ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22)]:
+                ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22),
+                ('simd_products',suite.product_programs,25)]:
             forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
             operations=[o for p in generator() for o in p['operations']]
             self.assertEqual(len(forms),count,group)

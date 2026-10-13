@@ -237,7 +237,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -388,7 +388,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts','reductions','saturating') else execute_batches(batches, pipe)})
+        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts','reductions','saturating','products') else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -903,6 +903,58 @@ def saturating_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors],'fpsr':fpsr}
 
 
+def product_programs():
+    bases={'mul':0x0e209c00,'mla':0x0e209400,'mls':0x2e209400,
+        'smull':0x0e20c000,'umull':0x2e20c000,'smlal':0x0e208000,'umlal':0x2e208000,'smlsl':0x0e20a000,'umlsl':0x2e20a000,
+        'saddl':0x0e200000,'uaddl':0x2e200000,'ssubl':0x0e202000,'usubl':0x2e202000,
+        'saddw':0x0e201000,'uaddw':0x2e201000,'ssubw':0x0e203000,'usubw':0x2e203000,
+        'sabd':0x0e207400,'uabd':0x2e207400,'saba':0x0e207c00,'uaba':0x2e207c00,
+        'sabdl':0x0e207000,'uabdl':0x2e207000,'sabal':0x0e205000,'uabal':0x2e205000}
+    programs=[]
+    for name,base in bases.items():
+        widen=name not in ('mul','mla','mls','sabd','uabd','saba','uaba')
+        product=name in ('mul','mla','mls','smull','umull','smlal','umlal','smlsl','umlsl')
+        difference=name in ('sabd','uabd','saba','uaba','sabdl','uabdl','sabal','uabal')
+        accumulation='add' if name in ('mla','smlal','umlal','saba','uaba','sabal','uabal') else 'sub' if name in ('mls','smlsl','umlsl') else None
+        for q in (0,1):
+            for size in range(3):
+                lane=1<<size
+                config={'name':name,'base':base|(q<<30)|(size<<22),'lane':lane,'output_lane':lane*2 if widen else lane,
+                    'bytes':16 if widen else 8<<q,'upper':widen and q==1,'signed':name.startswith('s'),
+                    'wide_left':name.endswith('w'),'operation':'product' if product else 'difference' if difference else 'sub' if 'sub' in name else 'add',
+                    'accumulate':accumulation}
+                def operation(d,n,m): return {**config,'kind':'product','d':d,'n':n,'m':m,'word':config['base']|(m<<16)|(n<<5)|d}
+                for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31),(0,31,31),(31,29,31)):
+                    programs.append({'operations':[operation(d,n,m)]})
+                programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def product_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v]
+    for op in operations:
+        d,n,m,lane,out_lane,width=(op[k] for k in ('d','n','m','lane','output_lane','bytes'))
+        left,right,old=vectors[n],vectors[m],vectors[d]
+        in_bits,out_bits=lane*8,out_lane*8
+        left_bits=out_bits if op['wide_left'] else in_bits
+        if op['upper']:
+            if not op['wide_left']: left>>=64
+            right>>=64
+        result=0
+        for index in range(width//out_lane):
+            a=left>>(index*left_bits)&((1<<left_bits)-1);b=right>>(index*in_bits)&((1<<in_bits)-1)
+            if op['signed']:
+                if a&(1<<(left_bits-1)): a-=1<<left_bits
+                if b&(1<<(in_bits-1)): b-=1<<in_bits
+            value=a*b if op['operation']=='product' else abs(a-b) if op['operation']=='difference' else a-b if op['operation']=='sub' else a+b
+            previous=old>>(index*out_bits)&((1<<out_bits)-1)
+            if op['accumulate']=='add': value=previous+value
+            elif op['accumulate']=='sub': value=previous-value
+            result|=(value&((1<<out_bits)-1))<<(index*out_bits)
+        vectors[d]=result
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
+
+
 def integer_mathematical(operations,initial):
     vectors=[lo|(hi<<64) for lo,hi in initial.v]
     for op in operations:
@@ -946,7 +998,8 @@ def execute_register_batches(batches):
                 bit_bytes=reduction and operations[0]['name'] in ('cnt','rbit')
                 leading=reduction and operations[0]['name'] in ('clz','cls')
                 saturation=batch.get('cohort')=='saturating'
-                patterns=7 if saturation else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
+                products=batch.get('cohort')=='products'
+                patterns=7 if saturation or products else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
                 for flags in (0,15):
                     for pattern in range(patterns):
                         initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
@@ -995,12 +1048,23 @@ def execute_register_batches(batches):
                                         values[byte:byte+lane]=(1<<(bits-1)).to_bytes(lane,'little')
                                     initial.v[register][:]=struct.unpack('<2Q',values)
                             initial.fpsr=(initial.fpsr&~(1<<27))|((1<<27) if flags else 0)
+                        if products:
+                            if pattern<5:
+                                values=(0,1,(1<<bits)-1,1<<(bits-1),(1<<(bits-1))-1,(1<<bits)-2,(1<<(bits-1))+1)
+                                for register in range(32):
+                                    value=sum(values[(pattern+register+i)%len(values)]<<(i*bits) for i in range(128//bits))
+                                    initial.v[register][:]=[value&MASK,value>>64]
+                            elif pattern==5:
+                                for register in range(32):
+                                    low=sum(((register+i+1)&((1<<bits)-1))<<(i*bits) for i in range(64//bits))
+                                    high=sum((((1<<bits)-1-register-i)&((1<<bits)-1))<<(i*bits) for i in range(64//bits))
+                                    initial.v[register][:]=[low,high]
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
                         assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
                         original=state_dict(capture_arm(machine,initial))
-                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical,'reductions':reduction_mathematical,'saturating':saturating_mathematical}[batch['cohort']](operations,initial)
+                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical,'reductions':reduction_mathematical,'saturating':saturating_mathematical,'products':product_mathematical}[batch['cohort']](operations,initial)
                         actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
                         if mathematical!=original or original!=actual:
                             raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
@@ -1011,7 +1075,7 @@ def execute_register_batches(batches):
 
 
 def run_register_cohort(cli, focus):
-    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs,'reductions':reduction_programs,'saturating':saturating_programs}[focus]();started=time.monotonic()
+    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs,'reductions':reduction_programs,'saturating':saturating_programs,'products':product_programs}[focus]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
     info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
     selections=[('baseline','x86_64-baseline')]
@@ -1040,6 +1104,9 @@ def run_register_cohort(cli, focus):
                 if '+ssse3' in target_id: expected.update(('pabsb','pabsw','pabsd'))
                 if '+sse4.1' in target_id: expected.add('packusdw')
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            elif focus=='products':
+                if '+sse4.1' in target_id: expected.update(('pmulld','pmuldq'))
+                if '+sse4.2' in target_id: expected.add('pcmpgtq')
             assert set(used)==expected,(target_id,used,expected)
             profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used,
                 'packed_shifts_used':sorted({o['mnemonic'] for o in info['simd_immediate_shifts']} & mnemonics.keys())}
@@ -1060,7 +1127,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['integer','rearrange','shifts','reductions','saturating'], help='Only the focused SIMD register implementation cohort')
+    parser.add_argument('--focus', choices=['integer','rearrange','shifts','reductions','saturating','products'], help='Only the focused SIMD register implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
