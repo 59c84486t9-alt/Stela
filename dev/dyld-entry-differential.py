@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Pinned original dyld entry prefix versus native shared BlockRuntime.
+"""Original dyld entry, data protection and self-rebase versus shared BlockRuntime.
 
-The complete original file-backed __TEXT is registered unchanged. Only the
-reviewed five-instruction prefix executes; the next PACIBSP must decline.
-This tests neither dyld initialization nor process launch or PAC behavior.
+Default mode retains the five-instruction entry/PAC-decline fixture. Explicit
+cohorts cover the original lockdown callback or complete self-rebase path.
+All register the unchanged original text; none establishes a complete process.
 """
 import argparse
 import ctypes
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import struct
@@ -473,11 +474,106 @@ def data_vm_cohort(cli, directory, view, image):
             'limits':'Unchanged original callback/thunk/syscall wrapper execute through genuine SVC, with modeled reviewed kernel result and Unicorn protection change. Native invokes owned host mprotect. No original privileged kernel, ProcessConfig, full self-rebase, TLS/error wrapper or complete process claim.'}
 
 
+
+SELF_REBASE_BEGIN, SELF_REBASE_END = 0x30524, 0x30568
+
+
+def self_rebase_cohort(cli, directory, view, image):
+    """Execute the unchanged startup rebase path, including its full fixup loop."""
+    spec = importlib.util.spec_from_file_location('self_rebase_pauth', ROOT / 'dev/pauth-differential.py')
+    pac = importlib.util.module_from_spec(spec); spec.loader.exec_module(pac)
+    source, state_path, memory_path = directory/'rebase-text.bin', directory/'rebase-state.json', directory/'rebase-memory.json'
+    source.write_bytes(view['text'])
+    keys_path = directory/'rebase-keys.json'
+    keys_path.write_text(json.dumps({key: {'low': v[0], 'high': v[1]} for key,v in pac.DOMAIN_KEYS.items()}))
+    source_paths = ('dev/dyld-entry-differential.py','dev/pauth-differential.py','dev/differential.py','src/main.rs',
+                    'crates/stela-runtime/src/blocks.rs','crates/stela-runtime/src/memory.rs','crates/stela-runtime/src/pauth.rs')
+    source_hashes = {path:digest((ROOT/path).read_bytes()) for path in source_paths}
+    cli_hash, rows, compiler = digest(cli.read_bytes()), [], None
+    for base in (0x40000000000, 0x40000004000):
+        regions = original_segment_regions(image, base)
+        stack, stack_bytes = 0x90000000000, 65536
+        regions.append({'name':'stack','address':stack,'virtual_bytes':stack_bytes,
+                        'initial_protection':3,'data':bytes(stack_bytes)})
+        for flags in (0, 15):
+            initial = State.from_buffer_copy(states(all_flags=True)[flags])
+            initial.nzcv, initial.sp = flags << 28, stack + stack_bytes - 0x680
+            initial.x[19], initial.x[26] = 1234, 0
+            machine = pac.arm_machine(keys=pac.DOMAIN_KEYS)
+            memory = []
+            for index, region in enumerate(regions):
+                address, data = region['address'], region['data']
+                machine.mem_map(address, len(data)); machine.mem_write(address, data)
+                machine.mem_protect(address, len(data), region['initial_protection'])
+                path = directory/f'rebase-region-{index}.bin'; path.write_bytes(data)
+                memory.append({'guest_address':address,'virtual_bytes':len(data),
+                    'initial_file':{'path':path.name,'bytes':len(data),'sha256':digest(data)},
+                    'readable':True,'writable':bool(region['initial_protection'] & 2)})
+            initialize_arm(machine, initial)
+            visited = []
+            machine.hook_add(UC_HOOK_CODE, lambda _,pc,size,unused: visited.append(pc))
+            machine.emu_start(base + SELF_REBASE_BEGIN, base + SELF_REBASE_END, count=2000000)
+            require(machine.reg_read(arm.UC_ARM64_REG_PC) == base + SELF_REBASE_END,
+                    'original self-rebase did not reach the original continuation')
+            expected = capture_arm(machine, initial)
+            after = {r['address']:bytes(machine.mem_read(r['address'],r['virtual_bytes'])) for r in regions}
+            slots, slot_digest = pac.original_fixup_slots(image, base), hashlib.sha256()
+            for slot in slots:
+                if 'authentication' in slot:
+                    auth = slot['authentication']
+                    modifier = (slot['guest_address'] & ((1 << 48) - 1)) if auth['address_diversity'] else 0
+                    modifier |= auth['diversity'] << 48
+                    value = pac.domain_sign(slot['target'], modifier, auth['key'])
+                else: value = slot['value']
+                region = regions[slot['segment_index']]
+                actual = struct.unpack_from('<Q',after[region['address']],slot['guest_address']-region['address'])[0]
+                require(actual == value and actual != slot['raw'], 'original fixup differs from independent slot/signing model')
+                slot_digest.update(struct.pack('<QQQ',slot['guest_address'],slot['raw'],value))
+            before_hashes = [{'address':r['address'],'bytes':r['virtual_bytes'],'sha256':digest(r['data'])} for r in regions]
+            after_hashes = [{'address':r['address'],'bytes':r['virtual_bytes'],'sha256':digest(after[r['address']])} for r in regions]
+            state_path.write_text(json.dumps(state_dict(initial))); memory_path.write_text(json.dumps({'regions':memory}))
+            native = json.loads(subprocess.check_output([str(cli),'run-blocks',str(source),'--guest-base',hex(base),
+                '--entry',hex(base+SELF_REBASE_BEGIN),'--stop-pc',hex(base+SELF_REBASE_END),'--block-budget','100000',
+                '--state',str(state_path),'--memory',str(memory_path),'--software-pauth-keys',str(keys_path),
+                '--cache-dir',str(directory/'rebase-cache')],timeout=60))
+            require(native['source_sha256'] == digest(view['text']) and native['abi'] == pac.ABI
+                    and native['software_pauth_profile'] == pac.FULL_PROFILE
+                    and native['complete_binary_verified'] is False, 'native rebase source/ABI/scope differs')
+            require(native['pc'] == base + SELF_REBASE_END and native['outcome']['reason'] == {'kind':'stop_address'}
+                    and native['state'] == state_dict(expected), 'native self-rebase state/continuation differs')
+            require(native['memory']['memory_before'] == before_hashes and native['memory']['memory_after'] == after_hashes,
+                    'native self-rebase full mapped RAM differs')
+            events = native['outcome']['pointer_authentication_events']
+            require(events and all(event['authenticated'] is not False for event in events), 'self-rebase authentication failed')
+            require(compiler in (None, native['compiler_source_sha256']), 'rebase compiler changed')
+            compiler = native['compiler_source_sha256']
+            counts = {k:v for k,v in native['outcome'].items() if k != 'pointer_authentication_events'}
+            require(counts['compiled_blocks'] > 0 if flags == 0 else counts['compiled_blocks'] == 0,
+                    'self-rebase cold/disk cache reuse differs')
+            rows.append({'base':base,'incoming_nzcv':initial.nzcv,'initial_state':state_dict(initial),
+                'final_state':state_dict(expected),'original_instruction_count':len(visited),
+                'original_unique_instructions':len(set(visited)), 'native_dispatch':counts,
+                'pointer_authentication_events':len(events),'memory_before':before_hashes,'memory_after':after_hashes,
+                'independent_fixup_slots':len(slots),'authenticated_slots':sum('authentication' in slot for slot in slots),
+                'slot_raw_and_result_sha256':slot_digest.hexdigest()})
+            print(f'self-rebase {base:#x}, NZCV {flags:x}: {len(visited):,} original instructions; all 2,568 fixups/state/RAM match',flush=True)
+    require(digest(cli.read_bytes()) == cli_hash and all(digest((ROOT/path).read_bytes()) == value
+            for path,value in source_hashes.items()), 'CLI or sources changed during self-rebase cohort')
+    return {'kind':'original_dyld_self_rebase_arm_vs_shared_native','passed':True,
+        'container_sha256':CONTAINER_SHA256,'slice_sha256':SLICE_SHA256,'original_text_sha256':digest(view['text']),
+        'entry_offset':SELF_REBASE_BEGIN,'continuation_offset':SELF_REBASE_END,
+        'compiler_source_sha256':compiler,'compiler_executable_sha256':cli_hash,
+        'full_state_and_all_mapped_ram_comparisons':len(rows),'independent_fixup_slot_comparisons':sum(r['independent_fixup_slots'] for r in rows),
+        'abi':pac.ABI,'software_pauth_profile':pac.FULL_PROFILE,'shared_sources_sha256':source_hashes,
+        'cases':rows,
+        'limits':'Unchanged complete self-rebase startup path entered at original basic block with explicit live inputs, original raw mappings and software PAuth1 keys. All chained writes execute in original code. This does not execute earlier time/kdebug startup, following libc/Mach/TLS initialization, full ProcessConfig, application launch, Apple hardware PAC or macOS boot.'}
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dyld', type=Path, default=DEFAULT_DYLD)
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/dyld-entry-differential-report.json')
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--self-rebase', action='store_true', help='run only the focused original full self-rebase cohort')
     parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
     args = parser.parse_args()
@@ -492,6 +588,13 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
+    if args.self_rebase:
+        with tempfile.TemporaryDirectory(prefix='stela-self-rebase-') as temporary:
+            report = self_rebase_cohort(cli,Path(temporary),view,image)
+        output = ROOT / '.stela/dyld-self-rebase-differential-report.json'
+        snapshot = write_evidence(output,report)
+        print(json.dumps({'passed':True,'report':str(output),'snapshot':str(snapshot)}))
+        return
     sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'src/dyld_entry.rs', ROOT / 'crates/stela-runtime/src/process.rs',
                ROOT / 'src/macho/mapped_image.rs', ROOT / 'crates/stela-runtime/src/memory.rs', ROOT / 'crates/stela-runtime/src/darwin.rs',
                ROOT / 'crates/stela-runtime/src/blocks.rs', ROOT / 'src/main.rs']
