@@ -58,6 +58,8 @@
     "crates/stela-compiler/src/x86_64/simd/saturating.rs",
     "crates/stela-compiler/src/aarch64/simd/products.rs",
     "crates/stela-compiler/src/x86_64/simd/products.rs",
+    "crates/stela-compiler/src/aarch64/simd/halving.rs",
+    "crates/stela-compiler/src/x86_64/simd/halving.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],

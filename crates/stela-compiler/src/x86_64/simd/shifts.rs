@@ -50,7 +50,7 @@ pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount:
         packed(code, Host::And, xmm, 5);
     }
 }
-fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
+pub(super) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
     if !signed {
         logical_shift(code, xmm, lane_bytes, amount, false);
         return;
@@ -76,7 +76,13 @@ fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: 
         _ => unreachable!("reviewed lane width"),
     }
 }
-fn rounded_right(code: &mut Vec<u8>, lane_bytes: u8, amount: u8, signed: bool, round: bool) {
+pub(super) fn rounded_right(
+    code: &mut Vec<u8>,
+    lane_bytes: u8,
+    amount: u8,
+    signed: bool,
+    round: bool,
+) {
     if round {
         packed(code, Host::MoveAligned, 1, 0);
         logical_shift(code, 1, lane_bytes, amount - 1, false);
@@ -97,6 +103,9 @@ fn narrow(
     destination: u8,
 ) {
     rounded_right(code, lane_bytes * 2, amount, false, round);
+    pack_truncated(code, lane_bytes, upper, destination);
+}
+pub(super) fn pack_truncated(code: &mut Vec<u8>, lane_bytes: u8, upper: bool, destination: u8) {
     match lane_bytes {
         1 => {
             lane_mask(code, 2, 2, 0xff);

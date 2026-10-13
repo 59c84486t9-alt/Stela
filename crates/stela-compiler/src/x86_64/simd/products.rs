@@ -21,7 +21,7 @@ fn arithmetic(lane: u8, subtract: bool) -> Host {
 }
 /// Extend the selected 64-bit input half into doubled-width lanes. XMM3 is the
 /// extension mask; extending one operand never changes the other in XMM0/1.
-fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed: bool) {
+pub(super) fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed: bool) {
     if upper {
         Shift::RightBytes.emit(code, xmm, 8);
     }

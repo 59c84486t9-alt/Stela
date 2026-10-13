@@ -57,6 +57,12 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
         0x4eb612b5, // SADDW2 V21.2D,V21.2D,V22.4S: full wide left alias
         0x6eb772d8, // UABDL2 V24.2D,V22.4S,V23.4S
         0x4eb79ed9, // MUL V25.4S,V22.4S,V23.4S
+        0x6e3716da, // URHADD V26.16B,V22.16B,V23.16B
+        0x6e202b5b, // UADDLP V27.8H,V26.16B
+        0x4ea02adc, // SADDLP V28.2D,V22.4S
+        0x6eb842bd, // RADDHN2 V29.4S,V21.2D,V24.2D
+        0x0e212b7e, // XTN V30.8B,V27.8H
+        0x6e213b5f, // SHLL2 V31.8H,V26.16B,#8
         RET,
     ]);
     let mut initial = state(BASE, 19);
@@ -80,6 +86,7 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     initial.registers.v[20] = [u64::MAX, 0x100000000];
     initial.registers.v[22] = [0x00000003fffffffe, 0x80000000ffffffff];
     initial.registers.v[23] = [0xfffffffd00000005, 0xffffffff00000002];
+    initial.registers.v[29] = [0x0123456789abcdef, u64::MAX];
     let mut expected = initial.registers.clone();
     let shifted = source.map(|byte| byte.wrapping_shl(3));
     expected.v[0] = limbs(shifted);
@@ -102,6 +109,23 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     expected.v[21] = [u64::MAX - 2, 0];
     expected.v[24] = [0xfffffffd, 0x7fffffff];
     expected.v[25] = [0xfffffff7fffffff6, 0x80000000fffffffe];
+    let input_bytes = |v: [u64; 2]| (u128::from(v[0]) | (u128::from(v[1]) << 64)).to_le_bytes();
+    let a = input_bytes(initial.registers.v[22]);
+    let b = input_bytes(initial.registers.v[23]);
+    let averaged: [u8; 16] =
+        std::array::from_fn(|i| ((u16::from(a[i]) + u16::from(b[i]) + 1) >> 1) as u8);
+    let pairs: [u16; 8] =
+        std::array::from_fn(|i| u16::from(averaged[i * 2]) + u16::from(averaged[i * 2 + 1]));
+    expected.v[26] = limbs(averaged);
+    expected.v[27] = limbs(std::array::from_fn(|i| pairs[i / 2].to_le_bytes()[i % 2]));
+    expected.v[28] = [1, 0xffffffff7fffffff];
+    expected.v[29] = [0x0123456789abcdef, 1];
+    expected.v[30] = limbs(std::array::from_fn(
+        |i| if i < 8 { pairs[i] as u8 } else { 0 },
+    ));
+    expected.v[31] = limbs(std::array::from_fn(|i| {
+        if i % 2 == 0 { 0 } else { averaged[8 + i / 2] }
+    }));
     let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
     targets.dedup();
     for target in targets {

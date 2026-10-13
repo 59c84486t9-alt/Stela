@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v19",
+  "registry_version": "apple-silicon-reviewed-forms-v20",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -245,6 +245,22 @@
         "programs": 1050,
         "three_way_register_state_comparisons": 14700,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 14700
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_halving": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-halving-differential-report.json",
+      "kind": "simd_halving_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 672,
+        "three_way_register_state_comparisons": 12096,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 12096
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -18720,6 +18736,598 @@
           ]
         }
       ]
+    },
+    {
+      "id": "ADDHN_asimddiff_N",
+      "instruction_id": "ADDHN_advsimd",
+      "mnemonic": "ADDHN",
+      "category": "fp_simd",
+      "source_file": "addhn_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e204000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f1ff0f9fa0e7f43829142f7c09d5a883cdd4da672addd5f7dd94b8c7f44ad260",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e224020",
+          "expected_mnemonics": [
+            "addhn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "RADDHN_asimddiff_N",
+      "instruction_id": "RADDHN_advsimd",
+      "mnemonic": "RADDHN",
+      "category": "fp_simd",
+      "source_file": "raddhn_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e204000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "536a0a2786ca13315d8c46fbf3800f77dff6c4e3371940b57c02d29f43f0aee9",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e224020",
+          "expected_mnemonics": [
+            "raddhn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "RSUBHN_asimddiff_N",
+      "instruction_id": "RSUBHN_advsimd",
+      "mnemonic": "RSUBHN",
+      "category": "fp_simd",
+      "source_file": "rsubhn_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e206000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b95d60b3b2e532b1805e1d282f3001b9feed64f2bb43a543a702bc01a34b41e7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e226020",
+          "expected_mnemonics": [
+            "rsubhn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SADALP_asimdmisc_P",
+      "instruction_id": "SADALP_advsimd",
+      "mnemonic": "SADALP",
+      "category": "fp_simd",
+      "source_file": "sadalp_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e206800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f8176c64258e41c7e95899482cb72a2f106a5983edef8aea2c5856d922d82d00",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e206820",
+          "expected_mnemonics": [
+            "sadalp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SADDLP_asimdmisc_P",
+      "instruction_id": "SADDLP_advsimd",
+      "mnemonic": "SADDLP",
+      "category": "fp_simd",
+      "source_file": "saddlp_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e202800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "be942c0a46ab9818507ee42d924a970fd03191e0e1832540a3651ce7cbc84f12",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e202820",
+          "expected_mnemonics": [
+            "saddlp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHADD_asimdsame_only",
+      "instruction_id": "SHADD_advsimd",
+      "mnemonic": "SHADD",
+      "category": "fp_simd",
+      "source_file": "shadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e200400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "2aa6e7a230339f5d4f27c9138adf80d99badb09b3c19b73812155525d0a66424",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e220420",
+          "expected_mnemonics": [
+            "shadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHLL_asimdmisc_S",
+      "instruction_id": "SHLL_advsimd",
+      "mnemonic": "SHLL",
+      "category": "fp_simd",
+      "source_file": "shll_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e213800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f22d824ca799cadf15648f07b655671acbaf0f4857ece423f4e5e1dbde173a74",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e213820",
+          "expected_mnemonics": [
+            "shll"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHSUB_asimdsame_only",
+      "instruction_id": "SHSUB_advsimd",
+      "mnemonic": "SHSUB",
+      "category": "fp_simd",
+      "source_file": "shsub_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e202400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8614325898506759fa862e9946534e21945455d2670ee1b3462b6915ebcca33d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e222420",
+          "expected_mnemonics": [
+            "shsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRHADD_asimdsame_only",
+      "instruction_id": "SRHADD_advsimd",
+      "mnemonic": "SRHADD",
+      "category": "fp_simd",
+      "source_file": "srhadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e201400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e5dd2ad81b29dbe205cff98d0879088397a2a12e43269adf319903841aae018d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e221420",
+          "expected_mnemonics": [
+            "srhadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SUBHN_asimddiff_N",
+      "instruction_id": "SUBHN_advsimd",
+      "mnemonic": "SUBHN",
+      "category": "fp_simd",
+      "source_file": "subhn_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e206000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e49240e94300310c8e293c1b2263b5e702fff2f2a38217bd026c77c6e819c9a2",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e226020",
+          "expected_mnemonics": [
+            "subhn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UADALP_asimdmisc_P",
+      "instruction_id": "UADALP_advsimd",
+      "mnemonic": "UADALP",
+      "category": "fp_simd",
+      "source_file": "uadalp_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e206800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9ed50a514f8054ce8a276f4e7233e639546e4196d848e7bf27274d93147780fb",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e206820",
+          "expected_mnemonics": [
+            "uadalp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UADDLP_asimdmisc_P",
+      "instruction_id": "UADDLP_advsimd",
+      "mnemonic": "UADDLP",
+      "category": "fp_simd",
+      "source_file": "uaddlp_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e202800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f325439d1ab8ec819dc01c99f24dd4893229556849b8ab6eabee489d9f993e84",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e202820",
+          "expected_mnemonics": [
+            "uaddlp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UHADD_asimdsame_only",
+      "instruction_id": "UHADD_advsimd",
+      "mnemonic": "UHADD",
+      "category": "fp_simd",
+      "source_file": "uhadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e200400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "bab7b6de648f2b7060ca26d6e304a973641dfd2daf1d23b034c3feec9b244bed",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e220420",
+          "expected_mnemonics": [
+            "uhadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UHSUB_asimdsame_only",
+      "instruction_id": "UHSUB_advsimd",
+      "mnemonic": "UHSUB",
+      "category": "fp_simd",
+      "source_file": "uhsub_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e202400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8dd5edc758d0b7c5b1ba9d329b18b9c36063a62d9add3a6a78d0d80d8fab7fcb",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e222420",
+          "expected_mnemonics": [
+            "uhsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URHADD_asimdsame_only",
+      "instruction_id": "URHADD_advsimd",
+      "mnemonic": "URHADD",
+      "category": "fp_simd",
+      "source_file": "urhadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e201400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3ff37f0948a7e7132c9e62fce43ef9c642fcaf87a4d868516111a6b22f95b358",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e221420",
+          "expected_mnemonics": [
+            "urhadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "XTN_asimdmisc_N",
+      "instruction_id": "XTN_advsimd",
+      "mnemonic": "XTN",
+      "category": "fp_simd",
+      "source_file": "xtn_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e212800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "ad607374c1cf1ecbed2304eed3baaf1942f122f6bc8f1744e694d636b299c0a7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated 8/16/32-bit lane, width and Q half variant; ordinary V31 and all source/old-destination aliases. Signed/unsigned halving uses mathematical carry/borrow and round bias before truncation. High-half narrowing and XTN preserve low halves for 2 forms and clear upper halves for lower forms. Pairwise widening extends before summation/optional modular accumulation; SHLL shifts selected input halves by full original lane width. NZCV/FPCR/FPSR and RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 fixed encodings/decode/operation facts. Focused original ARM, independent arbitrary-precision lane math and baseline/native x86 complete-state comparisons cover all arrangements, overflow/borrow/rounding limits, adjacent pairs, source-half distinctions, aliases and chains. Optional host selection independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/simd/halving.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_halving"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e212820",
+          "expected_mnemonics": [
+            "xtn"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -18751,6 +19359,8 @@
     "crates/stela-compiler/src/x86_64/simd/saturating.rs",
     "crates/stela-compiler/src/aarch64/simd/products.rs",
     "crates/stela-compiler/src/x86_64/simd/products.rs",
+    "crates/stela-compiler/src/aarch64/simd/halving.rs",
+    "crates/stela-compiler/src/x86_64/simd/halving.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

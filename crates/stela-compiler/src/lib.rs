@@ -37,6 +37,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/simd/saturating.rs"),
     include_str!("aarch64/simd/products.rs"),
     include_str!("x86_64/simd/products.rs"),
+    include_str!("aarch64/simd/halving.rs"),
+    include_str!("x86_64/simd/halving.rs"),
     include_str!("../Cargo.toml"),
     include_str!("../../../Cargo.lock"),
 );

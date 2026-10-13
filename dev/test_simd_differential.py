@@ -12,6 +12,21 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_halving_oracle_keeps_overflow_borrow_and_narrow_round_carry(self):
+        initial=State()
+        initial.v[1][:]=[suite.MASK]*2
+        initial.v[2][:]=[suite.MASK]*2
+        base={'d':0,'n':1,'m':2,'lane':1,'output_lane':1,'bytes':16,'upper':False,
+              'signed':False,'operation':'half','subtract':False,'round':False,'accumulate':False}
+        self.assertEqual(suite.halving_mathematical([base],initial)['v'][0],[suite.MASK]*2)
+        initial.v[1][:]=[0,0]
+        self.assertEqual(suite.halving_mathematical([{**base,'subtract':True}],initial)['v'][0],[0x8080808080808080]*2)
+        initial.v[1][:]=[suite.MASK]*2
+        initial.v[0][:]=[0x0123456789abcdef,suite.MASK]
+        observed=suite.halving_mathematical([{**base,'operation':'high','lane':2,'bytes':8,'upper':True,'round':True}],initial)
+        self.assertEqual(observed['v'][0],[0x0123456789abcdef,0])
+        self.assertEqual(observed['fpsr'],initial.fpsr)
+
     def test_product_oracle_keeps_full_signed_products_and_pretruncation_differences(self):
         initial=State()
         initial.v[1][:]=[0,0x80000000ffffffff]
@@ -64,7 +79,7 @@ class SimdDifferentialTests(unittest.TestCase):
         for group,generator,count in [('simd_integer',suite.integer_programs,38),
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
                 ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22),
-                ('simd_products',suite.product_programs,25)]:
+                ('simd_products',suite.product_programs,25),('simd_halving',suite.halving_programs,16)]:
             forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
             operations=[o for p in generator() for o in p['operations']]
             self.assertEqual(len(forms),count,group)
