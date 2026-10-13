@@ -582,7 +582,7 @@ mod tests {
         for word in [
             0xa8400400, // LDNP x0,x1,[x0] is non-temporal, not LDP
             0xa8000400, // STNP
-            0x6d400400, // SIMD LDP d0,d1,[x0]
+            0x6d400000, // SIMD LDP d0,d0,[x0] has duplicate V destinations
             0xe9400400, // unallocated integer pair opcode
             0x69000400, // STGP allocation-tag store must not become plain STP
             0xa9400000, // LDP with identical destinations
@@ -597,6 +597,10 @@ mod tests {
         assert!(Decoder.lift(GuestAddress(0), 0xa9400400).is_ok()); // offset LDP can overwrite base
         assert!(Decoder.lift(GuestAddress(0), 0xa9000000).is_ok()); // STP same source twice is defined
         assert!(Decoder.lift(GuestAddress(0), 0xa9bf7fff).is_ok()); // STP xzr,xzr,[sp,#-16]!
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0xad0183e0).unwrap().operation,
+            Operation::Simd(simd::Operand::MemoryPair { load: false, .. })
+        )); // original Xcode STP q0,q0,[sp,#48]
     }
 
     #[test]

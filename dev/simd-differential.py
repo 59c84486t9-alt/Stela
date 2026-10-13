@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Original ARM, independent byte math and native x86 SIMD data movement.
 
-Only reviewed B/H/S/D/Q immediate transfers and MOVI D/2D byte masks are tested.
+Reviewed single B/H/S/D/Q transfers, MOVI D/2D and paired S/D/Q transfers are tested.
 Single-operation leaf mini-functions expose each result in a fresh complete
 state; mixed chains additionally compare final state and RAM. Representative
 block cases execute the original RET and native block exit ABI.
@@ -37,6 +37,8 @@ LEAF_ABI = 'x86_64-sysv-guest-state-v3-direct-ram'
 BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 WIDTHS = (1, 2, 4, 8, 16)
 MODES = ('unsigned', 'unscaled', 'pre', 'post')
+PAIR_WIDTHS = (4, 8, 16)
+PAIR_MODES = ('offset', 'pre', 'post')
 
 
 class BlockExit(ctypes.Structure):
@@ -62,6 +64,21 @@ def memory_encoding(width, loading, rt, rn, offset, mode):
     return (size << 30) | 0x3c000000 | (opcode << 22) | ((offset & 511) << 12) | (indexing << 10) | (rn << 5) | rt
 
 
+def pair_encoding(width, loading, rt, rt2, rn, offset, mode):
+    if width not in PAIR_WIDTHS or any(not 0 <= register < 32 for register in (rt, rt2, rn)):
+        raise ValueError('invalid SIMD pair width/register')
+    if mode not in PAIR_MODES or offset % width or not -64 <= offset // width <= 63:
+        raise ValueError('SIMD pair offset outside signed7 scaled range')
+    opcode = {4: 0, 8: 1, 16: 2}[width]
+    index = {'post': 1, 'offset': 2, 'pre': 3}[mode]
+    return (opcode << 30) | 0x2c000000 | (index << 23) | (int(loading) << 22) | (((offset // width) & 127) << 15) | (rt2 << 10) | (rn << 5) | rt
+
+
+def pair_op(width, loading, rt, rt2, rn, offset, mode):
+    return {'kind': 'pair', 'width': width, 'loading': loading, 'rt': rt, 'rt2': rt2, 'rn': rn,
+            'offset': offset, 'mode': mode, 'word': pair_encoding(width, loading, rt, rt2, rn, offset, mode)}
+
+
 def movi_encoding(two_lanes, mask, rt):
     if not 0 <= mask < 256 or not 0 <= rt < 32:
         raise ValueError('invalid MOVI mask/register')
@@ -82,6 +99,8 @@ def movi_op(two_lanes, mask, rt):
 def canonical_form(operation):
     if operation['kind'] == 'movi':
         return 'MOVI_2D' if operation['two_lanes'] else 'MOVI_D'
+    if operation['kind'] == 'pair':
+        return f"{'LDP' if operation['loading'] else 'STP'}_{operation['width']}_{operation['mode']}"
     return f"{'LDR' if operation['loading'] else 'STR'}_{operation['width']}_{operation['mode']}"
 
 
@@ -125,6 +144,36 @@ def programs():
     return result, blocks
 
 
+def pair_programs():
+    result, blocks = [], []
+    roles = ((0, 1, 0), (31, 0, 31), (0, 31, 31), (31, 30, 0),
+             (7, 7, 7), (0, 0, 0), (31, 31, 31), (0, 7, 7))
+    for width in PAIR_WIDTHS:
+        for loading in (False, True):
+            for mode in PAIR_MODES:
+                for scaled in (-64, -1, 0, 1, 63):
+                    for rt, rt2, rn in roles:
+                        if loading and rt == rt2:
+                            continue
+                        result.append({'kind': 'pair_boundaries', 'operations': [pair_op(width, loading, rt, rt2, rn, scaled * width, mode)], 'flags': 16})
+                for register in range(32):
+                    for position in (0, 1):
+                        rt, rt2 = (register, (register + 11) % 32) if position == 0 else ((register + 11) % 32, register)
+                        result.append({'kind': 'pair_all_vector_positions', 'operations': [pair_op(width, loading, rt, rt2, (register + 1) % 32, 0, mode)], 'flags': 1})
+                    result.append({'kind': 'pair_all_bases', 'operations': [pair_op(width, loading, register, (register + 1) % 32, register, 2 * width, mode)], 'flags': 1})
+                    if not loading:
+                        result.append({'kind': 'pair_duplicate_stores', 'operations': [pair_op(width, False, register, register, register, 0, mode)], 'flags': 1})
+                blocks.append({'kind': 'pair_block', 'operations': [pair_op(width, loading, 0, 31, 0, 16, mode)], 'flags': 16})
+        frame = max(16, 2 * width)
+        result.append({'kind': 'pair_stack_chain', 'operations': [movi_op(True, 0xa5, 0), movi_op(True, 0x5a, 31),
+            pair_op(width, False, 0, 31, 31, -frame, 'pre'), memory_op(1, True, 0, 31, 0, 'unsigned'),
+            pair_op(width, True, 0, 31, 31, frame, 'post')], 'flags': 16})
+        result.append({'kind': 'pair_mixed_chain', 'operations': [pair_op(width, False, 0, 31, 0, 0, 'offset'),
+            memory_op(16, True, 7, 0, 0, 'unsigned'), pair_op(16, False, 7, 7, 0, 64, 'offset'),
+            pair_op(width, True, 0, 31, 0, 0, 'offset')], 'flags': 16})
+    return result, blocks
+
+
 def mathematical(operations, initial, memory, ram_address):
     state = State.from_buffer_copy(initial)
     ram = bytearray(memory)
@@ -141,14 +190,20 @@ def mathematical(operations, initial, memory, ram_address):
             raise ValueError('oracle received misaligned incoming SP')
         effective = (base + (0 if mode == 'post' else offset)) & MASK
         position = effective - ram_address
-        if not 0 <= position <= len(ram) - width:
+        registers = [rt, operation['rt2']] if operation['kind'] == 'pair' else [rt]
+        if operation['loading'] and len(registers) == 2 and registers[0] == registers[1]:
+            raise ValueError('constrained-unpredictable duplicate SIMD pair load')
+        if not 0 <= position <= len(ram) - width * len(registers):
             raise ValueError('oracle memory access outside owned RAM')
         if operation['loading']:
-            value = int.from_bytes(ram[position:position + width], 'little')
-            state.v[rt][:] = [value & MASK, value >> 64]
+            values = [int.from_bytes(ram[position + slot * width:position + (slot + 1) * width], 'little')
+                      for slot in range(len(registers))]
+            for register, value in zip(registers, values):
+                state.v[register][:] = [value & MASK, value >> 64]
         else:
-            value = state.v[rt][0] | (state.v[rt][1] << 64)
-            ram[position:position + width] = value.to_bytes(16, 'little')[:width]
+            values = [state.v[register][0] | (state.v[register][1] << 64) for register in registers]
+            for slot, value in enumerate(values):
+                ram[position + slot * width:position + (slot + 1) * width] = value.to_bytes(16, 'little')[:width]
         if mode in ('pre', 'post'):
             if rn == 31:
                 state.sp = (base + offset) & MASK
@@ -180,7 +235,7 @@ def compile_batch(cli, directory, functions, index, block=False):
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'movi', 'ret'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -206,7 +261,7 @@ def initial_case(function, index, flags, ram_address, original_ram, templates):
     initial.x[30] = STOP
     seed_extended_state(initial, (index << 8) | flags)
     ram = bytearray(original_ram)
-    memories = [operation for operation in function['operations'] if operation['kind'] == 'memory']
+    memories = [operation for operation in function['operations'] if operation['kind'] in ('memory', 'pair')]
     if len(memories) == 1:
         operation = memories[0]
         rn, offset, mode, width = (operation[k] for k in ('rn', 'offset', 'mode', 'width'))
@@ -222,7 +277,10 @@ def initial_case(function, index, flags, ram_address, original_ram, templates):
         effective = base + (0 if mode == 'post' else offset)
         position = effective - ram_address
         value = (0, (1 << 128) - 1, 0x80000000000000018000000000000001, 0x0123456789abcdeffedcba9876543210)[flags % 4]
-        ram[position:position + width] = value.to_bytes(16, 'little')[:width]
+        for slot in range(2 if operation['kind'] == 'pair' else 1):
+            # Distinct neighboring values prove both pair positions and order.
+            element = value if slot == 0 else value ^ 0xfedcba98765432100123456789abcdef
+            ram[position + slot * width:position + (slot + 1) * width] = element.to_bytes(16, 'little')[:width]
     elif memories:
         initial.x[0] = ram_address + 0x600
         initial.sp = ram_address + 0x1000
@@ -230,17 +288,20 @@ def initial_case(function, index, flags, ram_address, original_ram, templates):
 
 
 def execute_batches(batches, pipe):
-    counts = Counter()
+    cohort_counts = {'single': Counter(), 'pair': Counter()}
+    corpus_by_cohort = {'single': hashlib.sha256(), 'pair': hashlib.sha256()}
+    pair_forms, pair_registers, pair_bases, duplicate_stores = set(), {}, {}, {}
     observed_forms, masks, vectors, bases = set(), {False: set(), True: set()}, set(), set()
     movi_destinations = {False: set(), True: set()}
     templates = states(all_flags=True)
     original_ram = random.Random(0x51d5c0de).randbytes(RAM_BYTES)
-    state_corpus = hashlib.sha256()
     with mmap.mmap(-1, RAM_BYTES, prot=mmap.PROT_READ | mmap.PROT_WRITE) as ram:
         marker = ctypes.c_char.from_buffer(ram)
         address = ctypes.addressof(marker)
         del marker
         for batch_index, batch in enumerate(batches):
+            cohort = batch['cohort']
+            counts = cohort_counts[cohort]
             machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
             machine.mem_map(BASE, ((len(batch['source']) + 4095) // 4096) * 4096)
             machine.mem_write(BASE, batch['source'])
@@ -277,26 +338,49 @@ def execute_batches(batches, pipe):
                             if (returned.next_pc, returned.kind) != (expected.x[30], 4):
                                 raise AssertionError('Native SIMD block did not return actual RET tuple')
                             counts['native_block_exit_checks'] += 1
-                        state_corpus.update(bytes(initial))
+                        corpus_by_cohort[cohort].update(bytes(initial))
                         counts[function['kind']] += 1
                         for operation in function['operations']:
-                            observed_forms.add(canonical_form(operation))
-                            vectors.add(operation['rt'])
-                            if operation['kind'] == 'movi':
-                                masks[operation['two_lanes']].add(operation['mask'])
-                                movi_destinations[operation['two_lanes']].add(operation['rt'])
-                            else:
-                                bases.add(operation['rn'])
-            pipe.send({'progress': batch_index + 1, 'batches': len(batches), 'comparisons': sum(v for k, v in counts.items() if k != 'native_block_exit_checks')})
+                            form = canonical_form(operation)
+                            if cohort == 'pair' and operation['kind'] == 'pair':
+                                pair_forms.add(form)
+                                positions = pair_registers.setdefault(form, [set(), set()])
+                                positions[0].add(operation['rt'])
+                                positions[1].add(operation['rt2'])
+                                pair_bases.setdefault(form, set()).add(operation['rn'])
+                                if not operation['loading'] and operation['rt'] == operation['rt2']:
+                                    duplicate_stores.setdefault(form, set()).add(operation['rt'])
+                            elif cohort == 'single':
+                                observed_forms.add(form)
+                                vectors.add(operation['rt'])
+                                if operation['kind'] == 'movi':
+                                    masks[operation['two_lanes']].add(operation['mask'])
+                                    movi_destinations[operation['two_lanes']].add(operation['rt'])
+                                else:
+                                    bases.add(operation['rn'])
+            pipe.send({'progress': batch_index + 1, 'batches': len(batches), 'comparisons': sum(v for counter in cohort_counts.values() for k, v in counter.items() if k != 'native_block_exit_checks')})
     if len(observed_forms) != 42 or any(values != set(range(256)) for values in masks.values()) or any(values != set(range(32)) for values in movi_destinations.values()) or vectors != set(range(32)) or bases != set(range(32)):
         raise AssertionError('Not all canonical forms/masks/register roles were observed')
-    total = sum(v for k, v in counts.items() if k != 'native_block_exit_checks')
+    if (len(pair_forms) != 18 or any(position != set(range(32)) for positions in pair_registers.values() for position in positions)
+            or any(values != set(range(32)) for values in pair_bases.values()) or len(duplicate_stores) != 9
+            or any(values != set(range(32)) for values in duplicate_stores.values())):
+        raise AssertionError('Not every pair form/register position/base/duplicate-store role was observed')
+    single, pair = cohort_counts['single'], cohort_counts['pair']
+    total = sum(v for k, v in single.items() if k != 'native_block_exit_checks')
+    pair_total = sum(v for k, v in pair.items() if k != 'native_block_exit_checks')
     return {'three_way_register_state_comparisons': total, 'state_memory_comparisons': total,
-            'native_block_exit_checks': counts.pop('native_block_exit_checks'), 'comparisons_by_kind': dict(counts),
-            'canonical_forms_observed': sorted(observed_forms), 'movi_masks_observed_per_width': {str(k): len(v) for k, v in masks.items()},
+            'native_block_exit_checks': single.pop('native_block_exit_checks'), 'comparisons_by_kind': dict(single),
+            'pair_three_way_register_state_comparisons': pair_total, 'pair_state_memory_comparisons': pair_total,
+            'pair_native_block_exit_checks': pair.pop('native_block_exit_checks'), 'pair_comparisons_by_kind': dict(pair),
+            'total_three_way_register_state_comparisons': total + pair_total,
+            'canonical_forms_observed': sorted(observed_forms), 'pair_canonical_forms_observed': sorted(pair_forms),
+            'movi_masks_observed_per_width': {str(k): len(v) for k, v in masks.items()},
             'movi_destinations_observed_per_width': {str(k): sorted(v) for k, v in movi_destinations.items()},
             'vector_registers_observed': sorted(vectors), 'base_registers_observed': sorted(bases),
-            'state_corpus_sha256': state_corpus.hexdigest()}
+            'pair_vector_positions_by_form': {form: [sorted(v) for v in positions] for form, positions in sorted(pair_registers.items())},
+            'pair_base_registers_by_form': {form: sorted(v) for form, v in sorted(pair_bases.items())},
+            'duplicate_store_registers_by_form': {form: sorted(v) for form, v in sorted(duplicate_stores.items())},
+            'state_corpus_sha256': corpus_by_cohort['single'].hexdigest(), 'pair_state_corpus_sha256': corpus_by_cohort['pair'].hexdigest()}
 
 
 def worker(pipe, batches):
@@ -353,6 +437,80 @@ def fault_cases():
     return cases
 
 
+def pair_fault_cases():
+    cases = []
+    for width in PAIR_WIDTHS:
+        for loading in (False, True):
+            for mode in PAIR_MODES:
+                for rn in (0, 31):
+                    cases.append({'pair': True, 'width': width, 'loading': loading, 'rt': 0, 'rt2': 31,
+                                  'rn': rn, 'mode': mode, 'offset': -16 if mode != 'post' else 16, 'protection': 'guard'})
+                    # S/D post-indexed second-element boundary cannot have an
+                    # aligned incoming SP; pre/offset can compensate by -width.
+                    if rn != 31 or width == 16 or mode != 'post':
+                        cases.append({'pair': True, 'width': width, 'loading': loading, 'rt': 0, 'rt2': 31,
+                                      'rn': rn, 'mode': mode, 'offset': -width if mode != 'post' else 16, 'protection': 'pair_second'})
+                    if rn == 31:
+                        cases.append({'pair': True, 'width': width, 'loading': loading, 'rt': 0, 'rt2': 31,
+                                      'rn': rn, 'mode': mode, 'offset': -16 if mode == 'pre' else 0, 'protection': 'sp_alignment'})
+                if not loading:
+                    cases.append({'pair': True, 'width': width, 'loading': False, 'rt': 0, 'rt2': 31, 'rn': 0,
+                                  'mode': mode, 'offset': -16 if mode != 'post' else 16, 'protection': 'readonly'})
+                    for rt, rt2 in ((0, 31), (0, 0), (31, 31)):
+                        cases.append({'pair': True, 'width': width, 'loading': False, 'rt': rt, 'rt2': rt2, 'rn': 0,
+                                      'mode': mode, 'offset': -width if mode != 'post' else 16, 'protection': 'pair_readonly'})
+    return cases
+
+
+def declined_pair_encodings():
+    result = []
+    for width in PAIR_WIDTHS:
+        for mode in PAIR_MODES:
+            for register in (0, 7, 31):
+                result.append({'reason': 'constrained_duplicate_load', 'word': pair_encoding(width, True, register, register, 0, 0, mode)})
+    for mode in PAIR_MODES:
+        result.append({'reason': 'reserved_opc', 'word': (pair_encoding(16, True, 0, 1, 0, 0, mode) & ~(3 << 30)) | (3 << 30)})
+    for width in PAIR_WIDTHS:
+        result.append({'reason': 'non_temporal_pair_outside_profile', 'word': pair_encoding(width, True, 0, 1, 0, 0, 'offset') & ~(3 << 23)})
+    return result
+
+
+def verify_declined_pairs(cli, directory):
+    results = []
+    for index, case in enumerate(declined_pair_encodings()):
+        path, output = directory / f'declined-{index}.arm64', directory / f'declined-{index}.native'
+        path.write_bytes(struct.pack('<2I', case['word'], RET))
+        completed = subprocess.run([str(cli), 'compile-leaf', str(path), '--guest-base', hex(BASE), '--output-dir', str(output)], capture_output=True, text=True, timeout=30)
+        if completed.returncode == 0 or (output / 'native.bin').exists():
+            raise AssertionError(f'Unsupported SIMD pair was emitted: {case}')
+        results.append({**case, 'source_sha256': digest(path.read_bytes()), 'error': completed.stderr.strip()})
+    return {'declined_pair_inputs_before_execution': len(results), 'declined_pair_results': results}
+
+
+def validate_pair_fault_state(case, initial, native, original, first_element):
+    """Keep staged native policy separate from exact Unicorn observations."""
+    staged = State.from_buffer_copy(initial)
+    staged.x[7] = 99
+    if bytes(native) != bytes(staged):
+        raise AssertionError('Failed pair committed a V destination, base or other state')
+    if case['protection'] == 'sp_alignment':
+        if original is not None:
+            raise AssertionError('SP alignment policy must not claim original execution')
+        return 'sp_policy_only'
+    if original is None:
+        raise AssertionError('Pair memory fault is missing original observation')
+    expected_original = State.from_buffer_copy(staged)
+    second_load = case['loading'] and case['protection'] == 'pair_second'
+    if second_load:
+        if len(first_element) != case['width']:
+            raise AssertionError('First-load observation has incorrect byte extent')
+        value = int.from_bytes(first_element, 'little')
+        expected_original.v[case['rt']][:] = [value & MASK, value >> 64]
+    if bytes(original) != bytes(expected_original):
+        raise AssertionError('Original pair fault differs beyond its exact observed first-load effect')
+    return 'unicorn_second_load_divergence' if second_load else 'original_native_full_state_equal'
+
+
 def verify_faults(cli, directory, compiler):
     spec = importlib.util.spec_from_file_location('simd_original_faults', ROOT / 'dev/memory-faults.py')
     faults = importlib.util.module_from_spec(spec)
@@ -360,9 +518,13 @@ def verify_faults(cli, directory, compiler):
     observer = directory / 'simd-fault-observer'
     source_path = ROOT / 'dev/native-memory-faults.c'
     subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', str(source_path), '-o', str(observer)], check=True)
-    observations = []
-    for index, case in enumerate(fault_cases()):
-        operation = memory_op(case['width'], case['loading'], 31, case['rn'], case['offset'], case['mode'])
+    observations = {'single': [], 'pair': []}
+    partial_stores = 0
+    pair_classifications = Counter()
+    for index, case in enumerate(fault_cases() + pair_fault_cases()):
+        paired = case.get('pair', False)
+        operation = (pair_op(case['width'], case['loading'], case['rt'], case['rt2'], case['rn'], case['offset'], case['mode'])
+                     if paired else memory_op(case['width'], case['loading'], 31, case['rn'], case['offset'], case['mode']))
         source = struct.pack('<3I', move(2, 1, 7, 99), operation['word'], RET)
         path, output = directory / f'fault-{index}.arm64', directory / f'fault-{index}.native'
         path.write_bytes(source)
@@ -371,10 +533,14 @@ def verify_faults(cli, directory, compiler):
         validate_manifest(manifest, source, native, False)
         if manifest['compiler_source_sha256'] != compiler:
             raise AssertionError('Fault compiler identity changed')
-        pre_offset = case['offset'] if case['mode'] in ('unscaled', 'pre') else 0
-        data = subprocess.check_output([str(observer), str(output / 'native.bin'), case['protection'], str(case['rn']), str(pre_offset)], timeout=10)
+        pre_offset = case['offset'] if case['mode'] in ('unscaled', 'offset', 'pre') else 0
+        arguments = [str(observer), str(output / 'native.bin'), case['protection'], str(case['rn']), str(pre_offset)]
+        if case['protection'] in ('pair_second', 'pair_readonly'):
+            arguments.append(str(case['width']))
+        data = subprocess.check_output(arguments, timeout=10)
         (code_address, ram_address, page_size), initial, (number, native_pc, fault_address), actual, ram = parse_fault_record(data)
-        if len(ram) != page_size or not number:
+        observed_bytes = page_size * (2 if case['protection'] == 'pair_readonly' else 1)
+        if len(ram) != observed_bytes or not number:
             raise AssertionError('SIMD fault observer did not report bounded fault RAM')
         native_offset = native_pc - code_address
         mapped = [guest for guest, offset in manifest['source_map'] if offset <= native_offset]
@@ -383,26 +549,55 @@ def verify_faults(cli, directory, compiler):
         if case['protection'] == 'sp_alignment':
             expected = State.from_buffer_copy(initial)
             expected.x[7] = 99
-            expected_ram, original_faults = b'\xa5' * page_size, None
+            expected_ram, original_faults = b'\xa5' * observed_bytes, None
             if number != signal.SIGILL:
                 raise AssertionError('SIMD incoming SP check did not precede access')
         else:
             if number not in (signal.SIGSEGV, signal.SIGBUS):
                 raise AssertionError('SIMD memory fault has unexpected host signal')
-            expected, expected_ram, original_faults = faults.arm_fault(source, initial, ram_address, page_size, case['protection'] == 'readonly')
+            expected, expected_ram, original_faults = faults.arm_fault(source, initial, ram_address, page_size, case['protection'] == 'readonly', second_readonly=case['protection'] == 'pair_readonly')
             if any(item['pc'] != BASE + 4 for item in original_faults):
                 raise AssertionError('Original SIMD fault PC differs')
             base = initial.sp if case['rn'] == 31 else initial.x[case['rn']]
             effective = base + (0 if case['mode'] == 'post' else case['offset'])
-            wanted_address = ram_address + page_size if case['protection'] == 'crossing' else effective
+            wanted_address = ram_address + page_size if case['protection'] in ('crossing', 'pair_second', 'pair_readonly') else effective
             if fault_address != wanted_address:
                 raise AssertionError('SIMD host fault address differs')
-        if bytes(actual) != bytes(expected) or ram != expected_ram:
+        if ram != expected_ram or (not paired and bytes(actual) != bytes(expected)):
             raise AssertionError(f'SIMD fault changed V/GPR/base state or RAM: {case}')
-        observations.append({**case, 'passed': True, 'source_sha256': digest(source), 'native_sha256': digest(native),
+        classification = None
+        if paired:
+            classification = validate_pair_fault_state(case, initial, actual, expected if original_faults is not None else None, b'\xa5' * case['width'])
+            pair_classifications[classification] += 1
+            expect_partial = not case['loading'] and case['protection'] in ('pair_second', 'pair_readonly')
+            changed = ram != b'\xa5' * observed_bytes
+            if changed != expect_partial:
+                raise AssertionError('Pair fault has unexpected first-element visibility')
+            if expect_partial:
+                first = (initial.v[case['rt']][0] | initial.v[case['rt']][1] << 64).to_bytes(16, 'little')[:case['width']]
+                if ram[page_size - case['width']:page_size] != first:
+                    raise AssertionError('Second-element fault did not retain exact first store')
+                partial_stores += 1
+        observations['pair' if paired else 'single'].append({**case, **({'native_fault_policy_verified': True} if paired else {'passed': True}),
+                             'source_sha256': digest(source), 'native_sha256': digest(native),
                              'guest_fault_pc': BASE + 4, 'native_fault_offset': native_offset,
-                             'native_signal': number, 'original_faults': original_faults})
-    return {'fault_boundary_comparisons': len(observations), 'fault_results': observations,
+                             'native_signal': number, 'original_faults': original_faults,
+                             **({'fault_state_classification': classification,
+                                 'original_native_full_state_equal': bytes(actual) == bytes(expected) if original_faults is not None else None,
+                                 'initial_state_hex': bytes(initial).hex(),
+                                 'native_state_hex': bytes(actual).hex(),
+                                 'original_state_hex': bytes(expected).hex() if original_faults is not None else None,
+                                 'native_ram_sha256': digest(ram), 'original_ram_sha256': digest(expected_ram) if original_faults is not None else None}
+                                if paired else {})})
+    if pair_classifications != Counter({'original_native_full_state_equal': 88, 'unicorn_second_load_divergence': 16, 'sp_policy_only': 18}):
+        raise AssertionError(f'Unexpected pair fault observation classes: {pair_classifications}')
+    return {'fault_boundary_comparisons': len(observations['single']), 'fault_results': observations['single'],
+            'pair_fault_boundary_comparisons': len(observations['pair']), 'pair_fault_results': observations['pair'],
+            'pair_partial_first_store_comparisons': partial_stores,
+            'pair_native_staged_fault_policy_comparisons': len(observations['pair']),
+            'pair_original_native_fault_full_state_equal_comparisons': pair_classifications['original_native_full_state_equal'],
+            'pair_unicorn_second_load_fault_divergences': pair_classifications['unicorn_second_load_divergence'],
+            'pair_sp_alignment_policy_only_comparisons': pair_classifications['sp_policy_only'],
             'fault_observer_source_sha256': digest(source_path.read_bytes()), 'fault_observer_executable_sha256': digest(observer.read_bytes()),
             'shared_fault_oracle_sha256': digest((ROOT / 'dev/memory-faults.py').read_bytes())}
 
@@ -418,32 +613,44 @@ def main():
     source_paths = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'dev/memory-faults.py', ROOT / 'dev/native-memory-faults.c']
     identities = {str(path): digest(path.read_bytes()) for path in source_paths}
     leaf, blocks = programs()
+    pair_leaf, pair_blocks = pair_programs()
     batches, compiler = [], None
+    destination = ROOT / '.stela/simd-differential-report.json'
+    previous_evidence = digest(destination.read_bytes()) if destination.exists() else None
     with tempfile.TemporaryDirectory(prefix='stela-simd-') as temporary:
         directory = Path(temporary)
-        for index, functions in enumerate([leaf[i:i + 512] for i in range(0, len(leaf), 512)] + [[case] for case in blocks]):
-            block = index >= (len(leaf) + 511) // 512
+        jobs = []
+        for cohort, functions, representative in [('single', leaf, blocks), ('pair', pair_leaf, pair_blocks)]:
+            jobs.extend((cohort, functions[i:i + 512], False) for i in range(0, len(functions), 512))
+            jobs.extend((cohort, [case], True) for case in representative)
+        for index, (cohort, functions, block) in enumerate(jobs):
             batch = compile_batch(cli, directory, functions, index, block)
+            batch['cohort'] = cohort
+            batch['receipt']['cohort'] = cohort
             if compiler is not None and compiler != batch['compiler']:
                 raise AssertionError('Compiler changed during SIMD suite')
             compiler = batch['compiler']
             batches.append(batch)
         result = bounded_cases(batches)
         result.update(verify_faults(cli, directory, compiler))
+        result.update(verify_declined_pairs(cli, directory))
     if digest(cli.read_bytes()) != cli_hash or any(digest(path.read_bytes()) != identities[str(path)] for path in source_paths):
         raise AssertionError('SIMD compiler executable or shared sources changed during evidence collection')
     report = {'kind': 'simd_arm_vs_native_x86', 'passed': True, **result,
               'leaf_mini_functions': len(leaf), 'block_programs': len(blocks),
+              'pair_leaf_mini_functions': len(pair_leaf), 'pair_block_programs': len(pair_blocks),
+              'previous_evidence_sha256': previous_evidence,
+              'cohort_source_sha256': {cohort: digest(b''.join(batch['source'] for batch in batches if batch['cohort'] == cohort)) for cohort in ('single', 'pair')},
               'compilation_batches': [batch['receipt'] for batch in batches],
               'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
               'harness_source_sha256': identities[str(Path(__file__))], 'shared_runner_sha256': identities[str(ROOT / 'dev/differential.py')],
               'shared_sources_sha256': {str(path.relative_to(ROOT)): identities[str(path)] for path in source_paths[1:]},
               'guest_state_bytes': ctypes.sizeof(State), 'leaf_abi': LEAF_ABI, 'block_abi': BLOCK_ABI,
               'tested_state': ['x0..x30', 'SP', 'NZCV', 'reserved metadata', 'V0..V31 full128', 'FPCR', 'FPSR', 'all private RAM bytes'],
-              'limits': 'Only42 reviewed data-movement forms, not SIMD arithmetic/FP arithmetic/PAC/MMIO/atomics/concurrency/process loading. Native execution is isolated and bounded. Leaf RET is harness-owned; representative block cases execute originalRET and check native return tuple. IncomingSPalignment faults follow declared enabled policy; Unicorn does not enforce that check. Qstores have no128-bit atomicity/rollback claim; fault tests use wholly inaccessible/readonly stores and crosspageQloads. No guest syndrome/exception delivery or full binary verification.'}
+              'limits': 'Separate42single/MOVI and18paired data-movement forms, not SIMD arithmetic/FP arithmetic/PAC/MMIO/atomics/concurrency/process loading. Native execution is isolated and bounded. Leaf RET is harness-owned; representative block cases execute originalRET and check native return tuple. IncomingSPalignment faults follow declared enabled policy; Unicorn does not enforce that check. Pair loads stage both destinations under the declared native fault policy:122 native-policy checks,88 original/native full-state equal observations,16 explicitly retained Unicorn second-load divergences,18 SP-policy-only checks. Arm ASL reads whole Mem before vector assignments; Unicorn/current QEMU vector paths perform sequential loads. These observations establish neither an emulator defect nor Apple hardware/guest-fault conformance. Second-store faults preserve the completed first element under this private-RAM profile. Qstores have no128-bit atomicity/rollback claim; fault tests use wholly inaccessible/readonly stores and crosspageQloads. No guest syndrome/exception delivery or full binary verification.'}
     destination = ROOT / '.stela/simd-differential-report.json'
     snapshot = write_evidence(destination, report)
-    print(json.dumps({key: value for key, value in report.items() if key not in ('fault_results', 'compilation_batches')}, indent=2))
+    print(json.dumps({key: value for key, value in report.items() if key not in ('fault_results', 'pair_fault_results', 'declined_pair_results', 'compilation_batches')}, indent=2))
 
 
 if __name__ == '__main__':

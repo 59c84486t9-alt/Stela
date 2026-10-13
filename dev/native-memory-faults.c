@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[2], "pair_second") || !strcmp(argv[2], "pair_readonly")) {
         if (argc != 6) return 13;
         int distance = atoi(argv[5]);
-        if (distance != 4 && distance != 8) return 14;
+        if (distance != 4 && distance != 8 && distance != 16) return 14;
         target -= (unsigned)distance;
         if (!strcmp(argv[2], "pair_readonly")) {
             if (mprotect(ram + page_size, page_size, PROT_READ | PROT_WRITE)) return 15;

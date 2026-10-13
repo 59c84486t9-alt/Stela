@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v8",
+  "registry_version": "apple-silicon-reviewed-forms-v9",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -110,6 +110,23 @@
         "state_memory_comparisons",
         "native_block_exit_checks",
         "fault_boundary_comparisons"
+      ]
+    },
+    "simd_pairs": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-differential-report.json",
+      "kind": "simd_arm_vs_native_x86",
+      "comparison_field": "pair_three_way_register_state_comparisons",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/memory-faults.py",
+        "dev/native-memory-faults.c"
+      ],
+      "required_positive_counts": [
+        "pair_native_block_exit_checks",
+        "pair_native_staged_fault_policy_comparisons",
+        "pair_original_native_fault_full_state_equal_comparisons",
+        "pair_unicorn_second_load_fault_divergences"
       ]
     }
   },
@@ -9665,6 +9682,1050 @@
           "word": "0xbc0003ff",
           "expected_mnemonics": [
             "stur"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-doublewords",
+        "atomic-ops": "LDP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6d400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_D_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x6d4007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x6d407fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-doublewords",
+        "atomic-ops": "LDP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6cc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_D_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x6cc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x6cc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-doublewords",
+        "atomic-ops": "LDP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6dc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_D_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x6dc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x6dc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-quadwords",
+        "atomic-ops": "LDP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xad400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_Q_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0xad4007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xad407fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-quadwords",
+        "atomic-ops": "LDP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xacc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_Q_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0xacc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xacc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-quadwords",
+        "atomic-ops": "LDP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xadc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_Q_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0xadc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xadc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-words",
+        "atomic-ops": "LDP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2d400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_S_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x2d4007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2d407fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-words",
+        "atomic-ops": "LDP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2cc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_S_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x2cc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2cc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-words",
+        "atomic-ops": "LDP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2dc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "LDP_S_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "LDP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "LDP",
+      "name": "LDP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
+      "source_file": "ldp_fpsimd.xml",
+      "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
+      "status": "partial",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "smoke_samples": [
+        {
+          "word": "0x2dc007e0",
+          "expected_mnemonics": [
+            "ldp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2dc07fff",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-doublewords",
+        "atomic-ops": "STP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6d000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_D_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x6d0007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-doublewords",
+        "atomic-ops": "STP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6c800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_D_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x6c8007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 01",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-doublewords",
+        "atomic-ops": "STP-pair-doublewords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-doublewords"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6d800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_D_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "64-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x6d8007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-quadwords",
+        "atomic-ops": "STP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xad000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_Q_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0xad0007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-quadwords",
+        "atomic-ops": "STP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xac800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_Q_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0xac8007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 10",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-quadwords",
+        "atomic-ops": "STP-pair-quadwords",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-quadwords"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xad800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_Q_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "128-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0xad8007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "signed-scaled-offset",
+        "address-form-reg-type": "signed-scaled-offset-pair-words",
+        "atomic-ops": "STP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_signed_offset",
+      "encoding_class_name": "Signed offset",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2d000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_S_ldstpair_off",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x2d0007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "post-indexed",
+        "address-form-reg-type": "post-indexed-pair-words",
+        "atomic-ops": "STP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_post_index",
+      "encoding_class_name": "Post-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2c800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_S_ldstpair_post",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x2c8007e0",
+          "expected_mnemonics": [
+            "stp"
+          ]
+        }
+      ]
+    },
+    {
+      "alias": false,
+      "bitdiffs": "opc == 00",
+      "category": "fp_simd",
+      "docvars": {
+        "address-form": "pre-indexed",
+        "address-form-reg-type": "pre-indexed-pair-words",
+        "atomic-ops": "STP-pair-words",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STP",
+        "offset-type": "off7s_s",
+        "reg-type": "pair-words"
+      },
+      "encoding_class_id": "iclass_pre_index",
+      "encoding_class_name": "Pre-index",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2d800000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "id": "STP_S_ldstpair_pre",
+      "instruction_class": "fpsimd",
+      "instruction_id": "STP_fpsimd",
+      "label": "32-bit",
+      "mnemonic": "STP",
+      "name": "STP (SIMD&FP)",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stp_fpsimd.xml",
+      "source_file": "stp_fpsimd.xml",
+      "source_sha256": "1eb7c01200751411da566dbda50877eec438e7a1f7db1f9800db4ee2cfef86e1",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "simd_pairs"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
+      "smoke_samples": [
+        {
+          "word": "0x2d8007e0",
+          "expected_mnemonics": [
+            "stp"
           ]
         }
       ]
