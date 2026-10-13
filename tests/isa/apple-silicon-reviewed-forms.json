@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v10",
+  "registry_version": "apple-silicon-reviewed-forms-v11",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -48,9 +48,14 @@
       "kind": "arm64_leaf_differential"
     },
     "carry": {
-      "harness": "dev/carry-differential.py",
-      "report": ".stela/carry-differential-report.json",
-      "kind": "add_sub_carry_arm_vs_native_x86"
+      "harness": "dev/arithmetic-differential.py",
+      "report": ".stela/arithmetic-differential-report.json",
+      "kind": "add_sub_arithmetic_arm_vs_native_x86",
+      "comparison_field": "carry_three_way_register_state_comparisons",
+      "required_measurements": {
+        "groups.carry.programs": 368,
+        "groups.carry.comparisons": 28928
+      }
     },
     "logical_immediate": {
       "harness": "dev/logical-immediate-differential.py",
@@ -132,6 +137,20 @@
         "pair_original_native_fault_full_state_equal_comparisons",
         "pair_unicorn_second_load_fault_divergences"
       ]
+    },
+    "extended_arithmetic": {
+      "harness": "dev/arithmetic-differential.py",
+      "report": ".stela/arithmetic-differential-report.json",
+      "kind": "add_sub_arithmetic_arm_vs_native_x86",
+      "comparison_field": "extended_three_way_register_state_comparisons",
+      "required_measurements": {
+        "groups.extended.programs": 3848,
+        "groups.extended.comparisons": 749568,
+        "extended_block_dispatch.original_arm_math_native_state_pc_comparisons": 5120,
+        "extended_block_dispatch.cold_compiles": 320,
+        "extended_block_dispatch.disk_cache_hits": 4800,
+        "reserved_shift_original_undefined_native_declines": 192
+      }
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -11006,6 +11025,1422 @@
       ],
       "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
       "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "ADDS_32S_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0x2b200000",
+      "source_file": "adds_addsub_ext.xml",
+      "mnemonic": "ADDS",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/adds_addsub_ext.xml",
+      "source_sha256": "e8b16b4dc2ca9c49e4ec7bf09bb51e1d2248de60e497cd08858b6e274441e655",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2b220020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b222420",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b224820",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b226c20",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b229020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b22a020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b22c420",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b22e820",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0x2b3f03ff",
+          "expected_mnemonics": [
+            "cmn"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2b221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x2b22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "ADDS_64S_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0xab200000",
+      "source_file": "adds_addsub_ext.xml",
+      "mnemonic": "ADDS",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/adds_addsub_ext.xml",
+      "source_sha256": "e8b16b4dc2ca9c49e4ec7bf09bb51e1d2248de60e497cd08858b6e274441e655",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xab220020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab222420",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab224820",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab226c20",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab229020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab22a020",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab22c420",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab22e820",
+          "expected_mnemonics": [
+            "adds"
+          ]
+        },
+        {
+          "word": "0xab3f03ff",
+          "expected_mnemonics": [
+            "cmn"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xab221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xab22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "ADD_32_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0x0b200000",
+      "source_file": "add_addsub_ext.xml",
+      "mnemonic": "ADD",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/add_addsub_ext.xml",
+      "source_sha256": "4ecb50f360f799a78f06a8bc94ab94f25b9c9ea60239d13a39abe3cf379c3742",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0b220020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b222420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b224820",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b226c20",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b229020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b22a020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b22c420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b22e820",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x0b3f03ff",
+          "expected_mnemonics": [
+            "add"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0b221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x0b22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "ADD_64_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0x8b200000",
+      "source_file": "add_addsub_ext.xml",
+      "mnemonic": "ADD",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/add_addsub_ext.xml",
+      "source_sha256": "4ecb50f360f799a78f06a8bc94ab94f25b9c9ea60239d13a39abe3cf379c3742",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x8b220020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b222420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b224820",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b226c20",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b229020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b22a020",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b22c420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b22e820",
+          "expected_mnemonics": [
+            "add"
+          ]
+        },
+        {
+          "word": "0x8b3f03ff",
+          "expected_mnemonics": [
+            "add"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x8b221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x8b22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "SUBS_32S_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0x6b200000",
+      "source_file": "subs_addsub_ext.xml",
+      "mnemonic": "SUBS",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subs_addsub_ext.xml",
+      "source_sha256": "de3a144c78b594e0371e0424be7f8db0bf5b185c693215a20bf04e995f906df2",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6b220020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b222420",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b224820",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b226c20",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b229020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b22a020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b22c420",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b22e820",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0x6b3f03ff",
+          "expected_mnemonics": [
+            "cmp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x6b221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x6b22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "SUBS_64S_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0xeb200000",
+      "source_file": "subs_addsub_ext.xml",
+      "mnemonic": "SUBS",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subs_addsub_ext.xml",
+      "source_sha256": "de3a144c78b594e0371e0424be7f8db0bf5b185c693215a20bf04e995f906df2",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xeb220020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb222420",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb224820",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb226c20",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb229020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb22a020",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb22c420",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb22e820",
+          "expected_mnemonics": [
+            "subs"
+          ]
+        },
+        {
+          "word": "0xeb3f03ff",
+          "expected_mnemonics": [
+            "cmp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xeb221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xeb22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "SUB_32_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0x4b200000",
+      "source_file": "sub_addsub_ext.xml",
+      "mnemonic": "SUB",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sub_addsub_ext.xml",
+      "source_sha256": "2eb7d101cd7cfaac79cc5b373f6a61627fb48f8678b04c87c28ce9021c753bd8",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4b220020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b222420",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b224820",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b226c20",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b229020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b22a020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b22c420",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b22e820",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0x4b3f03ff",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4b221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0x4b22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
+    },
+    {
+      "id": "SUB_64_addsub_ext",
+      "category": "base_integer_system",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0xcb200000",
+      "source_file": "sub_addsub_ext.xml",
+      "mnemonic": "SUB",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sub_addsub_ext.xml",
+      "source_sha256": "2eb7d101cd7cfaac79cc5b373f6a61627fb48f8678b04c87c28ce9021c753bd8",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "extended_arithmetic"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xcb220020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb222420",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb224820",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb226c20",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb229020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb22a020",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb22c420",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb22e820",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        },
+        {
+          "word": "0xcb3f03ff",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xcb221420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb221820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb221c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb223420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb223820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb223c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb225420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb225820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb225c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb227420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb227820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb227c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb229420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb229820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb229c20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22b420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22b820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22bc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22d420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22d820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22dc20",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22f420",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22f820",
+          "reason": "unsupported"
+        },
+        {
+          "word": "0xcb22fc20",
+          "reason": "unsupported"
+        }
+      ],
+      "review": "Pinned Arm AddWithCarry/ExtendReg semantics and complete decoder class; original ARM, independent signed/unsigned arithmetic and direct native state comparisons for all extensions/shifts. Shared dispatch executes unchanged RET; reserved shifts decline.",
+      "scope": "All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."
     }
   ],
   "compiler_fingerprint_sources": [

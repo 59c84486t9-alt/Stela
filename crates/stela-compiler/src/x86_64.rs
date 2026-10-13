@@ -2,8 +2,8 @@
 use crate::{
     Backend, GuestAddress, NativeBlock, UnsupportedReason,
     aarch64::{
-        AddressMode, Instruction, Logical, MemoryTransfer, Operation, Register, Shift, WideMove,
-        Width,
+        AddressMode, Instruction, Logical, MemoryTransfer, Operation, Register, RegisterExtend,
+        Shift, WideMove, Width,
     },
 };
 
@@ -383,6 +383,41 @@ fn emit_instruction(
             if width == Width::X64 {
                 code.push(0x48);
             }
+            code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
+            store(code, destination);
+            if flags {
+                nzcv(code, subtract);
+            }
+        }
+        Operation::AddSubExtended {
+            width,
+            subtract,
+            flags,
+            destination,
+            left,
+            right,
+            extend,
+            amount,
+        } => {
+            // Read both operands before a possibly overlapping destination/SP write.
+            load(code, left);
+            right_operand(code, right, Width::X64, Shift::Lsl, 0);
+            match extend {
+                RegisterExtend::Uxtb => code.extend([0x0f, 0xb6, 0xc9]), // movzx ecx,cl
+                RegisterExtend::Uxth => code.extend([0x0f, 0xb7, 0xc9]), // movzx ecx,cx
+                RegisterExtend::Uxtw => code.extend([0x89, 0xc9]),       // mov ecx,ecx
+                RegisterExtend::Sxtb => code.extend([0x48, 0x0f, 0xbe, 0xc9]),
+                RegisterExtend::Sxth => code.extend([0x48, 0x0f, 0xbf, 0xc9]),
+                RegisterExtend::Sxtw => code.extend([0x48, 0x63, 0xc9]),
+                RegisterExtend::Uxtx | RegisterExtend::Sxtx => {}
+            }
+            if amount != 0 {
+                code.extend([0x48, 0xc1, 0xe1, amount]);
+            }
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            // W32 arithmetic truncates both operands and zero-extends even WSP.
             code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
             store(code, destination);
             if flags {

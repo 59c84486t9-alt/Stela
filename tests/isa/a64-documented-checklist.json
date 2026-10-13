@@ -2138,15 +2138,15 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 284,
+    "implemented": 292,
     "partial": 13,
-    "unsupported": 4035,
+    "unsupported": 4027,
     "total": 4332,
-    "implementation_percentage": 6.555863342566943,
+    "implementation_percentage": 6.740535549399815,
     "categories": {
       "base_integer_system": {
-        "unsupported": 717,
-        "implemented": 233,
+        "unsupported": 709,
+        "implemented": 241,
         "partial": 4
       },
       "fp_simd": {
@@ -2162,67 +2162,71 @@
       }
     }
   },
-  "compiler_source_sha256": "3581ef2cc28ec921fca5e7b1b1b78d2865bc9f00db7874a0aa9890e8ae958a84",
+  "compiler_source_sha256": "b45f747fb6831dbea9873ef5e46d4af040758580e58aaf32578ddef4eba80474",
   "evidence_reports": [
     {
       "report": ".stela/bitfield-differential-report.json",
-      "report_sha256": "2b912aa89849cf8035357c3e3921872e7f0a0e773b22ae4a2d25eb9e1684051c"
+      "report_sha256": "f68bcd774b971dfe44090ef1643bbb257820529aa8deec8268f043333f7cbdd0"
     },
     {
-      "report": ".stela/carry-differential-report.json",
-      "report_sha256": "addfd0d85516165a9a8d7afb3179b8399b941319263d34500847b37573e15c36"
+      "report": ".stela/arithmetic-differential-report.json",
+      "report_sha256": "2adf34d137a7c0440a461da70f38a2c671e73699aab5965918aef2e2cfb6e268"
     },
     {
       "report": ".stela/conditional-select-differential-report.json",
-      "report_sha256": "c098152f98391ebd7c0b32e1d2396f02f98653c66d0e2c39c53285ac6cc0353a"
+      "report_sha256": "78405185b741e4088187cf1d8fc60627b9b89d04e0dc8217a3c03dbd121a1bd7"
+    },
+    {
+      "report": ".stela/arithmetic-differential-report.json",
+      "report_sha256": "2adf34d137a7c0440a461da70f38a2c671e73699aab5965918aef2e2cfb6e268"
     },
     {
       "report": ".stela/differential-report.json",
-      "report_sha256": "1e4a8f46fdc9282d2d5810f967b58dfe3fe216204262ef1553fc1c05dc32af87"
+      "report_sha256": "56cf07cd13ff5f91f5c70770d76cdfa665993cc921e644f64564bd8bf84934cb"
     },
     {
       "report": ".stela/integer-math-differential-report.json",
-      "report_sha256": "e2718993d3be6a87a4ebee173f976d04c0f2610524af68bc4dfb2320b8af08e2"
+      "report_sha256": "afd05fcfee7b9100998521c75f2424b9cee8ff7b09ffd5263572675e28e92ee0"
     },
     {
       "report": ".stela/pair-differential-report.json",
-      "report_sha256": "a92407853719fa5068618fcb6f847caf5d06f750061cd2ae5ab94b4cd21d6f90"
+      "report_sha256": "7e838374784fa406549a6aedcd2e4b338abc18740896a451c77c52b59d25c16d"
     },
     {
       "report": ".stela/logical-immediate-differential-report.json",
-      "report_sha256": "bbcbf68b4328b77f5eac1af3d821f1c97ee09adf2cbec218dae2ec80fe446c5c"
+      "report_sha256": "c775bed7b6f7edf0a30be5e8c4fa614a8c45938da47cfe04f8e887eb95ae4474"
     },
     {
       "report": ".stela/pc-relative-differential-report.json",
-      "report_sha256": "95f434c516570912944f183bbfdcf4ee81d3c03ee56c165b0f1e76211a0ddea3"
+      "report_sha256": "bf5c311d4675fc7b21215e1d89d77e0d56f8cc40817fea4fecf49666d0078a34"
     },
     {
       "report": ".stela/register-offset-differential-report.json",
-      "report_sha256": "15e83207547aecdb984d3232ecac42383ded4992daffa6af1773a3bfb23a0c7e"
+      "report_sha256": "f6db01c66fa210f9df2d5e0128ee3828f66a9d55d69910400ae5c110e1b6b8e4"
     },
     {
       "report": ".stela/memory-differential-report.json",
-      "report_sha256": "22eae2e02baf420038abf3ffc6d6a11166ec4c3d84f5fff270665d9a98bf401c"
+      "report_sha256": "518c05f724b1ce6194902ff8488cd9bfb65e5fe257e0c3734546963e8e23f39a"
     },
     {
       "report": ".stela/simd-differential-report.json",
-      "report_sha256": "398a1a345f626b845aaa6fc8005fcbeca72500109e8dbef6b69c82f3ab72ef80"
+      "report_sha256": "3f6cf8dc0ed8c1a53c08c053a1aae8f7cd8be4de9e7cfe14dfed745715231fad"
     },
     {
       "report": ".stela/simd-differential-report.json",
-      "report_sha256": "398a1a345f626b845aaa6fc8005fcbeca72500109e8dbef6b69c82f3ab72ef80"
+      "report_sha256": "3f6cf8dc0ed8c1a53c08c053a1aae8f7cd8be4de9e7cfe14dfed745715231fad"
     },
     {
       "report": ".stela/block-differential-report.json",
-      "report_sha256": "6583ec69ab9f928c61c33cfa65af735c6dc360b897a0602394d4c1b93eae8a5f"
+      "report_sha256": "70415d98b80558986f97e1307d24ea3a192437fb05118f0a20b2ece4c9d4080f"
     },
     {
       "report": ".stela/block-differential-report.json",
-      "report_sha256": "6583ec69ab9f928c61c33cfa65af735c6dc360b897a0602394d4c1b93eae8a5f"
+      "report_sha256": "70415d98b80558986f97e1307d24ea3a192437fb05118f0a20b2ece4c9d4080f"
     },
     {
       "report": ".stela/pauth-differential-report.json",
-      "report_sha256": "af91edaaedc6c7aec3d03e2054ee28fbdf4524ddbc6ae1ac7c99a701976133de"
+      "report_sha256": "52614bedc56c908335898b808f8fb2a1f1abf02c0a1a00129539125f2775ab4b"
     }
   ],
   "forms": [
@@ -2239,17 +2243,17 @@
     {"id":"ADDPT_64_addsub_pt","instruction_id":"ADDPT","mnemonic":"ADDPT","category":"base_integer_system","source_file":"addpt.xml","encoding_mask":"0xffe0e000","encoding_value":"0x9a002000","features":[{"feature":"FEAT_CPA","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"ADDP_asimdsame_only","instruction_id":"ADDP_advsimd_vec","mnemonic":"ADDP","category":"fp_simd","source_file":"addp_advsimd_vec.xml","encoding_mask":"0xbf20fc00","encoding_value":"0x0e20bc00","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
     {"id":"ADDP_asisdpair_only","instruction_id":"ADDP_advsimd_pair","mnemonic":"ADDP","category":"fp_simd","source_file":"addp_advsimd_pair.xml","encoding_mask":"0xfffffc00","encoding_value":"0x5ef1b800","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
-    {"id":"ADDS_32S_addsub_ext","instruction_id":"ADDS_addsub_ext","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x2b200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"ADDS_32S_addsub_ext","instruction_id":"ADDS_addsub_ext","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x2b200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"ADDS_32S_addsub_imm","instruction_id":"ADDS_addsub_imm","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x31000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADDS_32_addsub_shift","instruction_id":"ADDS_addsub_shift","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x2b000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
-    {"id":"ADDS_64S_addsub_ext","instruction_id":"ADDS_addsub_ext","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xab200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"ADDS_64S_addsub_ext","instruction_id":"ADDS_addsub_ext","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xab200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"ADDS_64S_addsub_imm","instruction_id":"ADDS_addsub_imm","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0xb1000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADDS_64_addsub_shift","instruction_id":"ADDS_addsub_shift","mnemonic":"ADDS","category":"base_integer_system","source_file":"adds_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0xab000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADDV_asimdall_only","instruction_id":"ADDV_advsimd","mnemonic":"ADDV","category":"fp_simd","source_file":"addv_advsimd.xml","encoding_mask":"0xbf3ffc00","encoding_value":"0x0e31b800","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
-    {"id":"ADD_32_addsub_ext","instruction_id":"ADD_addsub_ext","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x0b200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"ADD_32_addsub_ext","instruction_id":"ADD_addsub_ext","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x0b200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"ADD_32_addsub_imm","instruction_id":"ADD_addsub_imm","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x11000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADD_32_addsub_shift","instruction_id":"ADD_addsub_shift","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x0b000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
-    {"id":"ADD_64_addsub_ext","instruction_id":"ADD_addsub_ext","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x8b200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"ADD_64_addsub_ext","instruction_id":"ADD_addsub_ext","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x8b200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"ADD_64_addsub_imm","instruction_id":"ADD_addsub_imm","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x91000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADD_64_addsub_shift","instruction_id":"ADD_addsub_shift","mnemonic":"ADD","category":"base_integer_system","source_file":"add_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x8b000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"ADD_asimdsame_only","instruction_id":"ADD_advsimd","mnemonic":"ADD","category":"fp_simd","source_file":"add_advsimd.xml","encoding_mask":"0xbf20fc00","encoding_value":"0x0e208400","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
@@ -4210,16 +4214,16 @@
     {"id":"SUBPS_64S_dp_2src","instruction_id":"SUBPS","mnemonic":"SUBPS","category":"base_integer_system","source_file":"subps.xml","encoding_mask":"0xffe0fc00","encoding_value":"0xbac00000","features":[{"feature":"FEAT_MTE","name":"v8Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"SUBPT_64_addsub_pt","instruction_id":"SUBPT","mnemonic":"SUBPT","category":"base_integer_system","source_file":"subpt.xml","encoding_mask":"0xffe0e000","encoding_value":"0xda002000","features":[{"feature":"FEAT_CPA","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"SUBP_64S_dp_2src","instruction_id":"SUBP","mnemonic":"SUBP","category":"base_integer_system","source_file":"subp.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac00000","features":[{"feature":"FEAT_MTE","name":"v8Ap5"}],"status":"unsupported","profiles":[]},
-    {"id":"SUBS_32S_addsub_ext","instruction_id":"SUBS_addsub_ext","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x6b200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"SUBS_32S_addsub_ext","instruction_id":"SUBS_addsub_ext","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x6b200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"SUBS_32S_addsub_imm","instruction_id":"SUBS_addsub_imm","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x71000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"SUBS_32_addsub_shift","instruction_id":"SUBS_addsub_shift","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x6b000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
-    {"id":"SUBS_64S_addsub_ext","instruction_id":"SUBS_addsub_ext","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xeb200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"SUBS_64S_addsub_ext","instruction_id":"SUBS_addsub_ext","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xeb200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"SUBS_64S_addsub_imm","instruction_id":"SUBS_addsub_imm","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0xf1000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"SUBS_64_addsub_shift","instruction_id":"SUBS_addsub_shift","mnemonic":"SUBS","category":"base_integer_system","source_file":"subs_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0xeb000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
-    {"id":"SUB_32_addsub_ext","instruction_id":"SUB_addsub_ext","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x4b200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"SUB_32_addsub_ext","instruction_id":"SUB_addsub_ext","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0x4b200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"SUB_32_addsub_imm","instruction_id":"SUB_addsub_imm","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x51000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"SUB_32_addsub_shift","instruction_id":"SUB_addsub_shift","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x4b000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
-    {"id":"SUB_64_addsub_ext","instruction_id":"SUB_addsub_ext","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xcb200000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"SUB_64_addsub_ext","instruction_id":"SUB_addsub_ext","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_ext.xml","encoding_mask":"0xffe00000","encoding_value":"0xcb200000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All eight extension options and shifts 0..4 for this width/op/flags form; SP left and nonflag destination, ZR right and flag destination, operand aliases, W upper-zero and NZCV. Full PSTATE, exception delivery and process integration remain outside the declared profile."}]},
     {"id":"SUB_64_addsub_imm","instruction_id":"SUB_addsub_imm","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_imm.xml","encoding_mask":"0xff800000","encoding_value":"0xd1000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"SUB_64_addsub_shift","instruction_id":"SUB_addsub_shift","mnemonic":"SUB","category":"base_integer_system","source_file":"sub_addsub_shift.xml","encoding_mask":"0xff200000","encoding_value":"0xcb000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"SUB_asimdsame_only","instruction_id":"SUB_advsimd","mnemonic":"SUB","category":"fp_simd","source_file":"sub_advsimd.xml","encoding_mask":"0xbf20fc00","encoding_value":"0x2e208400","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},

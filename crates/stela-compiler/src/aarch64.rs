@@ -36,6 +36,18 @@ pub enum Shift {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterExtend {
+    Uxtb,
+    Uxth,
+    Uxtw,
+    Uxtx,
+    Sxtb,
+    Sxth,
+    Sxtw,
+    Sxtx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Logical {
     And,
     Or,
@@ -96,6 +108,16 @@ pub enum Operation {
         destination: Register,
         left: Register,
         right: Register,
+    },
+    AddSubExtended {
+        width: Width,
+        subtract: bool,
+        flags: bool,
+        destination: Register,
+        left: Register,
+        right: Register,
+        extend: RegisterExtend,
+        amount: u8,
     },
     LogicalRegister {
         width: Width,
@@ -369,6 +391,32 @@ impl Lifter for Decoder {
                 left: register((word >> 5) & 31, false),
                 right: register((word >> 16) & 31, false),
             }
+        } else if word & 0x1fe00000 == 0x0b200000 {
+            let amount = ((word >> 10) & 7) as u8;
+            if amount > 4 {
+                return Err(unsupported());
+            }
+            let flags = word & (1 << 29) != 0;
+            let extend = match (word >> 13) & 7 {
+                0 => RegisterExtend::Uxtb,
+                1 => RegisterExtend::Uxth,
+                2 => RegisterExtend::Uxtw,
+                3 => RegisterExtend::Uxtx,
+                4 => RegisterExtend::Sxtb,
+                5 => RegisterExtend::Sxth,
+                6 => RegisterExtend::Sxtw,
+                _ => RegisterExtend::Sxtx,
+            };
+            Operation::AddSubExtended {
+                width,
+                subtract: word & (1 << 30) != 0,
+                flags,
+                destination: register(word & 31, !flags),
+                left: register((word >> 5) & 31, true),
+                right: register((word >> 16) & 31, false),
+                extend,
+                amount,
+            }
         } else if word & 0x1f200000 == 0x0b000000 {
             if shift == Shift::Ror || (width == Width::W32 && amount >= 32) {
                 return Err(unsupported());
@@ -462,6 +510,57 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extended_arithmetic_validates_options_shifts_and_sp_zero_roles() {
+        let extensions = [
+            RegisterExtend::Uxtb,
+            RegisterExtend::Uxth,
+            RegisterExtend::Uxtw,
+            RegisterExtend::Uxtx,
+            RegisterExtend::Sxtb,
+            RegisterExtend::Sxth,
+            RegisterExtend::Sxtw,
+            RegisterExtend::Sxtx,
+        ];
+        for width in [Width::W32, Width::X64] {
+            for subtract in [false, true] {
+                for flags in [false, true] {
+                    for (option, extend) in extensions.into_iter().enumerate() {
+                        for amount in 0..8 {
+                            let word = (u32::from(width == Width::X64) << 31)
+                                | (u32::from(subtract) << 30)
+                                | (u32::from(flags) << 29)
+                                | 0x0b3f03ff
+                                | ((option as u32) << 13)
+                                | (amount << 10);
+                            let decoded = Decoder.lift(GuestAddress(0), word);
+                            if amount > 4 {
+                                assert!(decoded.is_err());
+                                continue;
+                            }
+                            assert_eq!(
+                                decoded.unwrap().operation,
+                                Operation::AddSubExtended {
+                                    width,
+                                    subtract,
+                                    flags,
+                                    destination: if flags { Register::Zero } else { Register::Sp },
+                                    left: Register::Sp,
+                                    right: Register::Zero,
+                                    extend,
+                                    amount: amount as u8,
+                                }
+                            );
+                            for reserved in [1 << 22, 1 << 23] {
+                                assert!(Decoder.lift(GuestAddress(0), word | reserved).is_err());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn carry_operands_use_zero_and_require_the_exact_instruction_encoding() {
         for width in [Width::W32, Width::X64] {
