@@ -177,12 +177,25 @@ mod tests {
 
     #[test]
     fn pac_helper_exit_has_no_guest_writes_or_embedded_service_address() {
-        use crate::block::{PointerAuthentication, PointerAuthenticationOperation};
-        for operation in [
-            PointerAuthenticationOperation::SignIbSp,
-            PointerAuthenticationOperation::AuthenticateIbSp,
-            PointerAuthenticationOperation::ReturnIbSp,
-        ] {
+        use crate::block::{PointerAuthentication, decode_pointer_authentication};
+        let fixed_words = [
+            0xd503211f, 0xd503215f, 0xd503219f, 0xd50321df, 0xd503231f, 0xd503233f, 0xd503235f,
+            0xd503237f, 0xd503239f, 0xd50323bf, 0xd50323df, 0xd50323ff, 0xd50320ff, 0xd65f0bff,
+            0xd65f0fff, 0xdac143f1, 0xdac147f1,
+        ];
+        let integer_words = (0..8).flat_map(|op| {
+            [
+                0xdac10000 | (op << 10) | (16 << 5) | 17,
+                0xdac123e0 | (op << 10) | 17,
+            ]
+        });
+        let words: Vec<_> = fixed_words.into_iter().chain(integer_words).collect();
+        assert_eq!(words.len(), 33);
+        for word in words {
+            let operation = decode_pointer_authentication(GuestAddress(0x1000), word)
+                .unwrap()
+                .unwrap()
+                .operation;
             let pc = GuestAddress(0x123456789000);
             let request = PointerAuthentication {
                 operation,

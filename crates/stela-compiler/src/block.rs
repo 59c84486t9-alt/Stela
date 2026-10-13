@@ -130,12 +130,65 @@ pub fn decode_clock_instruction(
     }))
 }
 
+/// Separate compiler-side key selector; never contains process key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PointerAuthenticationKey {
+    Ia,
+    Ib,
+    Da,
+    Db,
+}
+
+/// Register31 is SP only in the two-operand modifier field. The distinct Z
+/// encoding denotes zero, while destination31 always denotes the discard XZR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerAuthenticationModifier {
+    Register(u8),
+    StackPointer,
+    Zero,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PointerAuthenticationOperation {
+    // Preserve the original descriptor representation for existing consumers.
     SignIbSp,
     AuthenticateIbSp,
     ReturnIbSp,
+    Sign {
+        key: PointerAuthenticationKey,
+        destination: u8,
+        modifier: PointerAuthenticationModifier,
+    },
+    Authenticate {
+        key: PointerAuthenticationKey,
+        destination: u8,
+        modifier: PointerAuthenticationModifier,
+    },
+    Strip {
+        data: bool,
+        destination: u8,
+    },
+    ReturnIaSp,
+}
+
+impl PointerAuthenticationOperation {
+    pub const fn is_return(self) -> bool {
+        matches!(self, Self::ReturnIbSp | Self::ReturnIaSp)
+    }
+
+    pub const fn required_key(self) -> Option<PointerAuthenticationKey> {
+        match self {
+            Self::SignIbSp | Self::AuthenticateIbSp | Self::ReturnIbSp => {
+                Some(PointerAuthenticationKey::Ib)
+            }
+            Self::ReturnIaSp => Some(PointerAuthenticationKey::Ia),
+            Self::Sign { key, .. } | Self::Authenticate { key, .. } => Some(key),
+            Self::Strip { .. } => None,
+        }
+    }
 }
 
 /// A helper request at an unchanged original instruction. The native block
@@ -147,13 +200,17 @@ pub struct PointerAuthentication {
     pub next_pc: GuestAddress,
 }
 
-/// June 2026 Arm PACIBSP/AUTIBSP HINT-space and RETAB fixed encodings.
-/// Other keys/modifiers, PAuth_LR, authenticated calls and XPAC remain unsupported.
+/// June2026 basic PAC/AUT integer and HINT forms, XPAC and RETAA/RETAB.
+/// The explicit software profile disables PAuth_LR/PACM, FPAC and GCS. Other
+/// authenticated branches/calls, PACGA and system controls remain unsupported.
 /// Runtime consumers revalidate this descriptor against immutable source bytes.
 pub fn decode_pointer_authentication(
     pc: GuestAddress,
     word: u32,
 ) -> Result<Option<PointerAuthentication>, CompileError> {
+    use PointerAuthenticationKey::{Da, Db, Ia, Ib};
+    use PointerAuthenticationModifier::{Register, StackPointer, Zero};
+    use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
     if !pc.0.is_multiple_of(4) {
         return Err(CompileError(
             "PAC instruction PC must be aligned to 4 bytes".into(),
@@ -163,6 +220,99 @@ pub fn decode_pointer_authentication(
         0xd503237f => PointerAuthenticationOperation::SignIbSp,
         0xd50323ff => PointerAuthenticationOperation::AuthenticateIbSp,
         0xd65f0fff => PointerAuthenticationOperation::ReturnIbSp,
+        0xd65f0bff => PointerAuthenticationOperation::ReturnIaSp,
+        0xd503211f => Sign {
+            key: Ia,
+            destination: 17,
+            modifier: Register(16),
+        },
+        0xd503215f => Sign {
+            key: Ib,
+            destination: 17,
+            modifier: Register(16),
+        },
+        0xd503219f => Authenticate {
+            key: Ia,
+            destination: 17,
+            modifier: Register(16),
+        },
+        0xd50321df => Authenticate {
+            key: Ib,
+            destination: 17,
+            modifier: Register(16),
+        },
+        0xd503233f => Sign {
+            key: Ia,
+            destination: 30,
+            modifier: StackPointer,
+        },
+        0xd50323bf => Authenticate {
+            key: Ia,
+            destination: 30,
+            modifier: StackPointer,
+        },
+        0xd503231f => Sign {
+            key: Ia,
+            destination: 30,
+            modifier: Zero,
+        },
+        0xd503235f => Sign {
+            key: Ib,
+            destination: 30,
+            modifier: Zero,
+        },
+        0xd503239f => Authenticate {
+            key: Ia,
+            destination: 30,
+            modifier: Zero,
+        },
+        0xd50323df => Authenticate {
+            key: Ib,
+            destination: 30,
+            modifier: Zero,
+        },
+        0xd50320ff => Strip {
+            data: false,
+            destination: 30,
+        },
+        _ if word & 0xffffc000 == 0xdac10000 => {
+            let rn = ((word >> 5) & 31) as u8;
+            let modifier = if word & (1 << 13) != 0 {
+                // The Z forms fix Rn=11111. Do not admit unallocated neighbors.
+                if rn != 31 {
+                    return Ok(None);
+                }
+                Zero
+            } else if rn == 31 {
+                StackPointer
+            } else {
+                Register(rn)
+            };
+            let key = match (word >> 10) & 3 {
+                0 => Ia,
+                1 => Ib,
+                2 => Da,
+                _ => Db,
+            };
+            let destination = (word & 31) as u8;
+            if word & (1 << 12) == 0 {
+                Sign {
+                    key,
+                    destination,
+                    modifier,
+                }
+            } else {
+                Authenticate {
+                    key,
+                    destination,
+                    modifier,
+                }
+            }
+        }
+        _ if word & 0xfffffbe0 == 0xdac143e0 => Strip {
+            data: word & (1 << 10) != 0,
+            destination: (word & 31) as u8,
+        },
         _ => return Ok(None),
     };
     Ok(Some(PointerAuthentication {
@@ -394,19 +544,14 @@ pub fn analyze_with_profile(
         Some(Terminator::Trap(value)) => trap = Some(*value),
         Some(Terminator::PointerAuthentication(value)) => {
             pointer_authentication = Some(*value);
-            match value.operation {
-                PointerAuthenticationOperation::SignIbSp
-                | PointerAuthenticationOperation::AuthenticateIbSp => {
-                    add(SuccessorKind::Fallthrough, value.next_pc);
-                }
-                PointerAuthenticationOperation::ReturnIbSp => {
-                    // The source is signed LR. Only an enabled runtime service
-                    // may authenticate it; this is never a raw ordinary RET.
-                    dynamic_edge = Some(DynamicEdge {
-                        kind: DynamicEdgeKind::Return,
-                        register: 30,
-                    });
-                }
+            if value.operation.is_return() {
+                // Signed LR is only a candidate: the service authenticates it.
+                dynamic_edge = Some(DynamicEdge {
+                    kind: DynamicEdgeKind::Return,
+                    register: 30,
+                });
+            } else {
+                add(SuccessorKind::Fallthrough, value.next_pc);
             }
         }
         Some(Terminator::Clock(value)) => {
@@ -858,18 +1003,245 @@ mod tests {
             for bit in 0..32 {
                 let changed = word ^ (1 << bit);
                 if !encodings.iter().any(|(word, _)| *word == changed) {
-                    assert_eq!(decode_pointer_authentication(pc, changed).unwrap(), None);
+                    assert_ne!(
+                        decode_pointer_authentication(pc, changed)
+                            .unwrap()
+                            .map(|request| request.operation),
+                        Some(operation)
+                    );
                 }
             }
             assert!(decode_pointer_authentication(GuestAddress(pc.0 + 1), word).is_err());
             assert!(decode_pointer_authentication(GuestAddress(u64::MAX - 3), word).is_err());
         }
-        // Different keys, zero modifiers and authenticated register branches
-        // must not be mistaken for this three-instruction software boundary.
-        for word in [
-            0xd503233f, 0xd50323bf, 0xd503235f, 0xd50323df, 0xd65f0bff, 0xd71f0800, 0xd73f0800,
-        ] {
+        // Authenticated register branches/calls, PACGA and reserved words remain out
+        // of this basic instruction boundary.
+        for word in [0xd71f0800, 0xd73f0800, 0x9ac03000, 0xdac12000, 0xdac15000] {
             assert_eq!(decode_pointer_authentication(pc, word).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn basic_pac_integer_fields_distinguish_sp_zero_and_discard() {
+        use PointerAuthenticationKey::{Da, Db, Ia, Ib};
+        use PointerAuthenticationModifier::{Register, StackPointer, Zero};
+        let pc = GuestAddress(0x1000);
+        for authenticate in [false, true] {
+            for (key_index, key) in [Ia, Ib, Da, Db].into_iter().enumerate() {
+                for rn in 0..32u32 {
+                    for rd in 0..32u32 {
+                        let opcode =
+                            0xdac10000 | ((authenticate as u32) << 12) | ((key_index as u32) << 10);
+                        let expected = |modifier| {
+                            if authenticate {
+                                PointerAuthenticationOperation::Authenticate {
+                                    key,
+                                    destination: rd as u8,
+                                    modifier,
+                                }
+                            } else {
+                                PointerAuthenticationOperation::Sign {
+                                    key,
+                                    destination: rd as u8,
+                                    modifier,
+                                }
+                            }
+                        };
+                        let word = opcode | (rn << 5) | rd;
+                        let request = decode_pointer_authentication(pc, word).unwrap().unwrap();
+                        assert_eq!(
+                            request.operation,
+                            expected(if rn == 31 {
+                                StackPointer
+                            } else {
+                                Register(rn as u8)
+                            })
+                        );
+                        assert_eq!(request.operation.required_key(), Some(key));
+                        assert!(compile(&bytes(&[word]), pc).is_err());
+                        let zero_word = word | (1 << 13);
+                        let zero = decode_pointer_authentication(pc, zero_word).unwrap();
+                        assert_eq!(
+                            zero.map(|request| request.operation),
+                            (rn == 31).then(|| expected(Zero))
+                        );
+                    }
+                }
+            }
+        }
+        // Actual original dyld signer data-key operands are X17 and X16.
+        for (word, key) in [(0xdac10a11, Da), (0xdac10e11, Db)] {
+            assert_eq!(
+                decode_pointer_authentication(pc, word)
+                    .unwrap()
+                    .unwrap()
+                    .operation,
+                PointerAuthenticationOperation::Sign {
+                    key,
+                    destination: 17,
+                    modifier: Register(16)
+                }
+            );
+        }
+        for word in [
+            0x5ac10000, 0xfac10000, 0xdac00000, 0xdac18000, 0xdac12000, 0xdac15000, 0x9ac03000,
+            0xd71f0800, 0xd73f0800,
+        ] {
+            assert!(decode_pointer_authentication(pc, word).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn basic_pac_fixed_hints_strip_and_return_have_exact_operands() {
+        use PointerAuthenticationKey::{Ia, Ib};
+        use PointerAuthenticationModifier::{Register, StackPointer, Zero};
+        use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
+        let pc = GuestAddress(0x4000);
+        let fixed = [
+            (
+                0xd503211f,
+                Sign {
+                    key: Ia,
+                    destination: 17,
+                    modifier: Register(16),
+                },
+            ),
+            (
+                0xd503215f,
+                Sign {
+                    key: Ib,
+                    destination: 17,
+                    modifier: Register(16),
+                },
+            ),
+            (
+                0xd503219f,
+                Authenticate {
+                    key: Ia,
+                    destination: 17,
+                    modifier: Register(16),
+                },
+            ),
+            (
+                0xd50321df,
+                Authenticate {
+                    key: Ib,
+                    destination: 17,
+                    modifier: Register(16),
+                },
+            ),
+            (
+                0xd503231f,
+                Sign {
+                    key: Ia,
+                    destination: 30,
+                    modifier: Zero,
+                },
+            ),
+            (
+                0xd503233f,
+                Sign {
+                    key: Ia,
+                    destination: 30,
+                    modifier: StackPointer,
+                },
+            ),
+            (
+                0xd503235f,
+                Sign {
+                    key: Ib,
+                    destination: 30,
+                    modifier: Zero,
+                },
+            ),
+            (0xd503237f, PointerAuthenticationOperation::SignIbSp),
+            (
+                0xd503239f,
+                Authenticate {
+                    key: Ia,
+                    destination: 30,
+                    modifier: Zero,
+                },
+            ),
+            (
+                0xd50323bf,
+                Authenticate {
+                    key: Ia,
+                    destination: 30,
+                    modifier: StackPointer,
+                },
+            ),
+            (
+                0xd50323df,
+                Authenticate {
+                    key: Ib,
+                    destination: 30,
+                    modifier: Zero,
+                },
+            ),
+            (0xd50323ff, PointerAuthenticationOperation::AuthenticateIbSp),
+            (
+                0xd50320ff,
+                Strip {
+                    data: false,
+                    destination: 30,
+                },
+            ),
+            (0xd65f0bff, PointerAuthenticationOperation::ReturnIaSp),
+            (0xd65f0fff, PointerAuthenticationOperation::ReturnIbSp),
+        ];
+        for (word, expected) in fixed {
+            assert_eq!(
+                decode_pointer_authentication(pc, word)
+                    .unwrap()
+                    .unwrap()
+                    .operation,
+                expected
+            );
+            for bit in 0..32 {
+                let changed = word ^ (1 << bit);
+                assert_eq!(
+                    decode_pointer_authentication(pc, changed)
+                        .unwrap()
+                        .is_some(),
+                    fixed.iter().any(|(fixed, _)| *fixed == changed)
+                );
+            }
+            for profile in [
+                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::AppleArm64eSoftwarePauthClockV1,
+            ] {
+                let analysis = analyze_with_profile(&bytes(&[word, 0]), pc, profile).unwrap();
+                assert_eq!(analysis.source_bytes, 4);
+                assert_eq!(analysis.dynamic_edge.is_some(), expected.is_return());
+                assert_eq!(analysis.static_successors.is_empty(), expected.is_return());
+            }
+            assert!(compile(&bytes(&[word]), pc).is_err());
+        }
+        for data in [false, true] {
+            for destination in 0..32u32 {
+                let word = 0xdac143e0 | ((data as u32) << 10) | destination;
+                let request = decode_pointer_authentication(pc, word).unwrap().unwrap();
+                assert_eq!(
+                    request.operation,
+                    Strip {
+                        data,
+                        destination: destination as u8
+                    }
+                );
+                assert_eq!(request.operation.required_key(), None);
+                for bit in 0..32 {
+                    if bit < 5 || bit == 10 {
+                        continue;
+                    }
+                    assert_ne!(
+                        decode_pointer_authentication(pc, word ^ (1 << bit))
+                            .unwrap()
+                            .map(|request| request.operation),
+                        Some(request.operation)
+                    );
+                }
+            }
         }
     }
 

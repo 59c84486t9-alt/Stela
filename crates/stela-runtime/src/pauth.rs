@@ -1,11 +1,12 @@
 //! Versioned software pointer authentication for classic Apple arm64e code.
 //!
 //! This is a coherent QARMA5/PAuth1 guest profile, not an Apple hardware key or
-//! signature equivalence claim. Instruction VA width is 47 with TBI disabled;
-//! both canonical extension regions and all 64-bit input patterns are modeled.
-//! Invalid-extension signing corrupts the PAC, and failed IB authentication
-//! returns architectural poison. No pointer is dereferenced here. Data keys,
-//! PAuth2/FPAC/PAuth_LR, system controls and actual exception delivery decline
+//! signature equivalence claim. VA width is 47; instruction TBI is disabled
+//! and data TBI enabled. Both extension regions and every u64 input are modeled.
+//! Invalid-extension signing corrupts the PAC; failed authentication returns
+//! classic A/B poison. Tagged data preserves its top byte, which participates in
+//! authentication. No pointer is dereferenced or normalized for a host access.
+//! PAuth2/FPAC/PAuth_LR, generic-key PACGA, system controls and exception delivery decline
 //! outside this module's profile. The caller owns process key lifetime and must
 //! bind this context to the executing address space before changing guest state.
 //!
@@ -19,20 +20,77 @@ use serde::Serialize;
 use std::fmt;
 
 pub const PROFILE_ID: &str = "stela-classic-arm64e-qarma5-va47-itbi0-ib-v1";
+pub const FULL_PROFILE_ID: &str = "stela-classic-arm64e-qarma5-va47-itbi0-dtbi1-all-keys-v1";
 const ADDRESS_MASK: u64 = (1 << 47) - 1;
 const REGION_BIT: u64 = 1 << 55;
 const PAC_MASK: u64 = !(ADDRESS_MASK | REGION_BIT);
+#[cfg(test)]
 const POISON_MASK: u64 = 3 << 61;
+#[cfg(test)]
 const IB_POISON: u64 = 2 << 61;
+const DATA_EXTENSION_MASK: u64 = 0x00ff_ffff_ffff_ffff & !ADDRESS_MASK;
+const DATA_PAC_MASK: u64 = DATA_EXTENSION_MASK & !REGION_BIT;
 
-/// Explicit process-owned IB key. No Debug/Serialize or implicit per-thread key.
-/// Limbs follow the architectural APIBKeyLo/APIBKeyHi order.
+/// Cryptographic key and address domain; XPAC uses only the address domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Key {
+    Ia,
+    Ib,
+    Da,
+    Db,
+}
+impl Key {
+    const fn index(self) -> usize {
+        match self {
+            Self::Ia => 0,
+            Self::Ib => 1,
+            Self::Da => 2,
+            Self::Db => 3,
+        }
+    }
+    pub const fn is_data(self) -> bool {
+        matches!(self, Self::Da | Self::Db)
+    }
+    const fn is_b(self) -> bool {
+        matches!(self, Self::Ib | Self::Db)
+    }
+    const fn extension_mask(self) -> u64 {
+        if self.is_data() {
+            DATA_EXTENSION_MASK
+        } else {
+            !ADDRESS_MASK
+        }
+    }
+    const fn pac_mask(self) -> u64 {
+        if self.is_data() {
+            DATA_PAC_MASK
+        } else {
+            PAC_MASK
+        }
+    }
+}
+
+/// Explicit process-owned keys, never Debug/Serialize. Limbs follow each
+/// architectural KeyLo/KeyHi register. A missing domain is not a zero key.
 pub struct Keys {
-    ib: [u64; 2],
+    words: [Option<[u64; 2]>; 4],
 }
 impl Keys {
     pub fn from_ib_words(low: u64, high: u64) -> Self {
-        Self { ib: [low, high] }
+        Self {
+            words: [None, Some([low, high]), None, None],
+        }
+    }
+    pub fn from_words(ia: [u64; 2], ib: [u64; 2], da: [u64; 2], db: [u64; 2]) -> Self {
+        Self {
+            words: [Some(ia), Some(ib), Some(da), Some(db)],
+        }
+    }
+    fn get(&self, key: Key) -> Result<&[u64; 2]> {
+        self.words[key.index()]
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pointer authentication key {key:?} is unavailable"))
     }
 }
 
@@ -44,7 +102,7 @@ impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Context")
             .field("address_space", &self.address_space)
-            .field("profile", &PROFILE_ID)
+            .field("profile", &self.profile_id())
             .finish_non_exhaustive()
     }
 }
@@ -66,47 +124,78 @@ impl Context {
         self.address_space
     }
     pub fn profile_id(&self) -> &'static str {
-        PROFILE_ID
-    }
-
-    /// Sign every u64 input using classic instruction InsertPAC semantics.
-    /// Null is genuinely signed. An already signed/noncanonical input is not
-    /// silently stripped into a successful signing operation: invalid extension
-    /// bits invert PAC bit62, ensuring its reconstructed pointer fails auth.
-    pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64> {
-        // Without instruction TBI, signing selects extension using input bit63.
-        let extension = if pointer >> 63 != 0 { !ADDRESS_MASK } else { 0 };
-        let original = (pointer & ADDRESS_MASK) | extension;
-        let mut pac = qarma5(original, modifier, &self.keys.ib);
-        let field = pointer >> 47;
-        if field != 0 && field != (u64::MAX >> 47) {
-            pac ^= 1 << 62;
+        if self.keys.words.iter().all(Option::is_some) {
+            FULL_PROFILE_ID
+        } else {
+            PROFILE_ID
         }
-        Ok((pointer & ADDRESS_MASK) | (extension & REGION_BIT) | (pac & PAC_MASK))
+    }
+    pub fn has_key(&self, key: Key) -> bool {
+        self.keys.words[key.index()].is_some()
     }
 
-    /// Authenticate every u64 input, restoring extension from encoded bit55.
-    /// A mismatch writes IB poison in bits62:61 (`10`), never XPAC success.
-    /// Callers implement AUT's destination write or RETAB's unchanged-LR branch
-    /// separately. This profile has no immediate FPAC exception on failure.
-    pub fn authenticate_ib(&self, pointer: u64, modifier: u64) -> Result<AuthResult> {
-        let extension = if pointer & REGION_BIT != 0 {
-            !ADDRESS_MASK
+    /// Classic InsertPAC with fixed VA47 instruction-TBI-off/data-TBI-on controls.
+    /// Data retains its tag in both QARMA input and output; it is not ignored by
+    /// authentication. Null is genuinely signed. Invalid extension corrupts
+    /// PAC bit62 (instruction) or54 (data), following June2026 Arm ASL, rather
+    /// than the older Unicorn invalid-extension behavior.
+    pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
+        let words = self.keys.get(key)?;
+        let extension_mask = key.extension_mask();
+        let top_bit = if key.is_data() { 55 } else { 63 };
+        let extension = if pointer & (1 << top_bit) != 0 {
+            extension_mask
         } else {
             0
         };
-        let original = (pointer & ADDRESS_MASK) | extension;
-        let pac = qarma5(original, modifier, &self.keys.ib);
-        let authenticated = (pac ^ pointer) & PAC_MASK == 0;
+        let original = (pointer & !extension_mask) | extension;
+        let mut pac = qarma5(original, modifier, words);
+        let field = pointer & extension_mask;
+        if field != 0 && field != extension_mask {
+            pac ^= 1 << (top_bit - 1);
+        }
+        Ok((pointer & !extension_mask) | (extension & REGION_BIT) | (pac & key.pac_mask()))
+    }
+
+    /// Classic Authenticate, restoring extension from encoded bit55. Failed A
+    /// authentication inserts poison01, B inserts10, in bits62:61 for code or
+    /// bits54:53 for data. No FPAC exception or successful-looking strip occurs.
+    pub fn authenticate(&self, key: Key, pointer: u64, modifier: u64) -> Result<AuthResult> {
+        let words = self.keys.get(key)?;
+        let original = strip_domain(key, pointer);
+        let pac = qarma5(original, modifier, words);
+        let authenticated = (pac ^ pointer) & key.pac_mask() == 0;
+        let shift = if key.is_data() { 53 } else { 61 };
+        let poison = if key.is_b() { 2 } else { 1 };
         Ok(AuthResult {
             pointer: if authenticated {
                 original
             } else {
-                (original & !POISON_MASK) | IB_POISON
+                (original & !(3 << shift)) | (poison << shift)
             },
             authenticated,
         })
     }
+
+    /// Architectural XPAC: keyless restoration, never an authentication check.
+    /// Ia/Ib select instruction layout, Da/Db tagged-data layout; this succeeds
+    /// even when that domain's cryptographic key was not provided.
+    pub fn strip(&self, key: Key, pointer: u64) -> Result<u64> {
+        Ok(strip_domain(key, pointer))
+    }
+
+    /// Backward-compatible IB/SP service with exactly the original profile math.
+    pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64> {
+        self.sign(Key::Ib, pointer, modifier)
+    }
+    pub fn authenticate_ib(&self, pointer: u64, modifier: u64) -> Result<AuthResult> {
+        self.authenticate(Key::Ib, pointer, modifier)
+    }
+}
+
+fn strip_domain(key: Key, pointer: u64) -> u64 {
+    let mask = key.extension_mask();
+    (pointer & !mask) | if pointer & REGION_BIT != 0 { mask } else { 0 }
 }
 
 const CELL_MASK: u64 = 0x1111_1111_1111_1111;
@@ -582,5 +671,241 @@ mod tests {
             format!("{context:?}"),
             format!("Context {{ address_space: 73, profile: {PROFILE_ID:?}, .. }}")
         );
+    }
+    fn all_keys() -> Keys {
+        let words = [0x1122334455667788, 0x99aabbccddeeff00];
+        Keys::from_words(words, words, words, words)
+    }
+
+    #[test]
+    fn generic_domains_match_original_canonical_sign_auth_and_xpac_vectors() -> Result<()> {
+        // Original enabled Unicorn2.1.4 MAX, QARMA5/VA47/iTBIoff/dTBIon.
+        // oracle-receipt.json SHA256:
+        // 2b0bb3e6c7c7cf9bb3958745ec00c2accda46e114cce9f19940895a18ac0b91e
+        let context = Context::new(73, all_keys());
+        let vectors = [
+            (
+                0x0000000000000000,
+                0x0000000000000000,
+                0xf90e800000000000,
+                0x000e800000000000,
+            ),
+            (
+                0x0000000000000000,
+                0x0000000000002000,
+                0xcd1f800000000000,
+                0x001f800000000000,
+            ),
+            (
+                0x0000000000000000,
+                0xffffffffffffffff,
+                0xf911000000000000,
+                0x0011000000000000,
+            ),
+            (
+                0x0000000000001400,
+                0x0000000000000000,
+                0x6709800000001400,
+                0x0009800000001400,
+            ),
+            (
+                0x0000000000001400,
+                0x0000000000002000,
+                0xce76000000001400,
+                0x0076000000001400,
+            ),
+            (
+                0x0000000000001400,
+                0xffffffffffffffff,
+                0xc405800000001400,
+                0x0005800000001400,
+            ),
+            (
+                0x00007fffffffffff,
+                0x0000000000000000,
+                0xfd717fffffffffff,
+                0x00717fffffffffff,
+            ),
+            (
+                0x00007fffffffffff,
+                0x0000000000002000,
+                0xdc587fffffffffff,
+                0x00587fffffffffff,
+            ),
+            (
+                0x00007fffffffffff,
+                0xffffffffffffffff,
+                0x7564ffffffffffff,
+                0x0064ffffffffffff,
+            ),
+            (
+                0xffff800000001400,
+                0x0000000000000000,
+                0x3cc4800000001400,
+                0xffc4800000001400,
+            ),
+            (
+                0xffff800000001400,
+                0x0000000000002000,
+                0xf8a9800000001400,
+                0xffa9800000001400,
+            ),
+            (
+                0xffff800000001400,
+                0xffffffffffffffff,
+                0xb598800000001400,
+                0xff98800000001400,
+            ),
+        ];
+        for (pointer, modifier, instruction, data) in vectors {
+            for key in [Key::Ia, Key::Ib, Key::Da, Key::Db] {
+                let signed = if key.is_data() { data } else { instruction };
+                assert_eq!(context.sign(key, pointer, modifier)?, signed);
+                assert_eq!(
+                    context.authenticate(key, signed, modifier)?,
+                    AuthResult {
+                        pointer,
+                        authenticated: true,
+                    }
+                );
+                assert_eq!(context.strip(key, signed)?, pointer);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tagged_data_matches_original_and_retains_tag_on_auth_and_strip() -> Result<()> {
+        let context = Context::new(73, all_keys());
+        let vectors = [
+            (0x8000000000001400, 0x0000000000000000, 0x805d800000001400),
+            (0x8000000000001400, 0x0000000000002000, 0x8026800000001400),
+            (0x8000000000001400, 0xffffffffffffffff, 0x807a800000001400),
+            (0x7aff800000001400, 0x0000000000000000, 0x7abe000000001400),
+            (0x7aff800000001400, 0x0000000000002000, 0x7acb000000001400),
+            (0x7aff800000001400, 0xffffffffffffffff, 0x7ad1000000001400),
+        ];
+        for (pointer, modifier, signed) in vectors {
+            for key in [Key::Da, Key::Db] {
+                assert_eq!(context.sign(key, pointer, modifier)?, signed);
+                assert_eq!(signed >> 56, pointer >> 56);
+                assert_eq!(
+                    context.authenticate(key, signed, modifier)?,
+                    AuthResult {
+                        pointer,
+                        authenticated: true,
+                    }
+                );
+                assert_eq!(context.strip(key, signed)?, pointer);
+                for bit in 47..55 {
+                    let failed = context.authenticate(key, signed ^ (1 << bit), modifier)?;
+                    assert!(!failed.authenticated);
+                    assert_eq!(failed.pointer >> 56, pointer >> 56);
+                    assert_eq!(failed.pointer & REGION_BIT, pointer & REGION_BIT);
+                    let poison = if key == Key::Db { 2u64 } else { 1 };
+                    assert_eq!(failed.pointer, (pointer & !(3 << 53)) | (poison << 53));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_domains_poison_every_corrupted_pac_bit_and_key_selection_is_explicit() -> Result<()> {
+        let context = Context::new(73, all_keys());
+        for key in [Key::Ia, Key::Ib, Key::Da, Key::Db] {
+            let signed = context.sign(key, 0x1400, 0x2000)?;
+            let shift = if key.is_data() { 53 } else { 61 };
+            let poison = if key.is_b() { 2u64 } else { 1 };
+            for bit in 0..64 {
+                if key.pac_mask() & (1 << bit) != 0 {
+                    assert_eq!(
+                        context.authenticate(key, signed ^ (1 << bit), 0x2000)?,
+                        AuthResult {
+                            pointer: 0x1400 | (poison << shift),
+                            authenticated: false,
+                        }
+                    );
+                }
+            }
+        }
+        // Distinct domain keys use the same independently verified QARMA
+        // primitive; no artificial IA/IB/DA/DB domain tag is added to the MAC.
+        let context = Context::new(
+            73,
+            Keys::from_words(
+                [0, 0],
+                [u64::MAX, u64::MAX],
+                [1, 2],
+                [0x1122334455667788, 0x99aabbccddeeff00],
+            ),
+        );
+        for (key, expected) in [
+            (Key::Ia, 0xff3a000000001400),
+            (Key::Ib, 0x6419000000001400),
+            (Key::Da, 0x0071800000001400),
+            (Key::Db, 0x0076000000001400),
+        ] {
+            assert_eq!(context.sign(key, 0x1400, 0x2000)?, expected);
+            assert!(context.authenticate(key, expected, 0x2000)?.authenticated);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn data_invalid_extension_corruption_follows_june_asl_not_old_emulator() -> Result<()> {
+        let context = Context::new(73, all_keys());
+        for key in [Key::Da, Key::Db] {
+            for tag in [0u64, 0x80, 0x7a, 0xff] {
+                for bit in 47..56 {
+                    for pointer in [
+                        (tag << 56) | (1 << bit) | 0x1400,
+                        (tag << 56) | (DATA_EXTENSION_MASK & !(1 << bit)) | 0x1400,
+                    ] {
+                        let canonical = strip_domain(key, pointer);
+                        let signed = context.sign(key, pointer, 0x2000)?;
+                        assert_eq!(signed, context.sign(key, canonical, 0x2000)? ^ (1 << 54));
+                        let failed = context.authenticate(key, signed, 0x2000)?;
+                        assert!(!failed.authenticated);
+                        let poison = if key.is_b() { 2u64 } else { 1 };
+                        assert_eq!(failed.pointer, (canonical & !(3 << 53)) | (poison << 53));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_keys_decline_sign_and_auth_but_xpac_is_keyless() -> Result<()> {
+        let ib = Context::new(
+            73,
+            Keys::from_ib_words(0x1122334455667788, 0x99aabbccddeeff00),
+        );
+        assert_eq!(ib.profile_id(), PROFILE_ID);
+        assert!(ib.has_key(Key::Ib));
+        for key in [Key::Ia, Key::Da, Key::Db] {
+            assert!(!ib.has_key(key));
+            assert!(ib.sign(key, 0x1400, 0x2000).is_err());
+            assert!(ib.authenticate(key, 0x1400, 0x2000).is_err());
+            assert_eq!(ib.strip(key, 0x1400)?, 0x1400);
+        }
+        assert_eq!(ib.sign_ib(0x1400, 0x2000)?, 0xce76000000001400);
+        let full = Context::new(73, all_keys());
+        assert_eq!(full.profile_id(), FULL_PROFILE_ID);
+        assert_eq!(
+            format!("{full:?}"),
+            format!("Context {{ address_space: 73, profile: {FULL_PROFILE_ID:?}, .. }}")
+        );
+        for (key, name) in [
+            (Key::Ia, "ia"),
+            (Key::Ib, "ib"),
+            (Key::Da, "da"),
+            (Key::Db, "db"),
+        ] {
+            assert!(full.has_key(key));
+            assert_eq!(serde_json::to_value(key)?, serde_json::json!(name));
+        }
+        Ok(())
     }
 }
