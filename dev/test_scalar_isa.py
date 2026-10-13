@@ -1,9 +1,15 @@
 """Focused scalar ISA oracle checks; full differential sweeps are explicit milestones."""
 import hashlib
+import argparse
+import io
+import json
+import tarfile
+import tempfile
 import importlib.util
 from pathlib import Path
 import struct
 import unittest
+from unittest.mock import patch
 
 from differential import State, state_dict, state_dict as complete_state
 
@@ -18,6 +24,7 @@ def load_suite(filename, name):
 arithmetic = load_suite('arithmetic-differential.py', 'arithmetic_differential')
 math = load_suite('integer-math-differential.py', 'integer_math_differential')
 bitfield = load_suite('bitfield-differential.py', 'bitfield_differential')
+x86_mappings = load_suite('x86-mappings.py', 'x86_mappings')
 
 
 class ArithmeticOracleTests(unittest.TestCase):
@@ -324,6 +331,131 @@ class BitfieldOracleTests(unittest.TestCase):
         manifest['source_map'] = [[bitfield.BASE, 0]]
         with self.assertRaises(AssertionError):
             bitfield.validate_manifest(manifest, source, native, False)
+
+
+class X86MappingCatalogTests(unittest.TestCase):
+    """Source integrity/search checks, never instruction-semantic evidence."""
+
+    def test_operation_comparisons_and_sequence_warnings_are_preserved(self):
+        xml = b'''<intrinsics_list version="fixture"><intrinsic name="fixture" sequence="TRUE">
+          <return type="__m128i" etype="SI8"/><parameter type="__m128i" etype="SI8" varname="a"/>
+          <description>signed saturation</description><operation>a &lt; b AND c &gt; d</operation>
+          <instruction name="PADDSB" form="xmm, xmm"/><CPUID>SSE2</CPUID>
+        </intrinsic></intrinsics_list>'''
+        record, = x86_mappings.intrinsic_records(xml, {'url': 'fixture', 'sha256': 'source-hash'})
+        self.assertEqual(record['operation'], 'a < b AND c > d')
+        self.assertEqual(record['sequence'], 'TRUE')
+        self.assertEqual(record['parameters'][0]['etype'], 'SI8')
+        self.assertIsNone(record['flags'])
+
+    def test_xml_and_tar_inputs_have_explicit_safety_bounds(self):
+        for xml in (b'<!DOCTYPE x><intrinsics_list/>', b'<!ENTITY x "value"><intrinsics_list/>',
+                    '<!DOCTYPE x><intrinsics_list/>'.encode('utf-16')):
+            with self.assertRaisesRegex(ValueError, 'DTD/entity'):
+                x86_mappings.parse_intrinsics(xml)
+        with self.assertRaisesRegex(ValueError, 'not Intel Intrinsics'):
+            x86_mappings.parse_intrinsics(b'<unrelated/>')
+
+        def make_archive(names):
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode='w:gz') as tar:
+                for name in names:
+                    member = tarfile.TarInfo(name)
+                    member.size = 1
+                    tar.addfile(member, io.BytesIO(b'x'))
+            return archive.getvalue()
+
+        with self.assertRaisesRegex(ValueError, 'unsafe'):
+            list(x86_mappings.xed_files(make_archive(['xed/datafiles/../../outside.txt'])))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            list(x86_mappings.xed_files(make_archive(['xed/datafiles/test.txt'] * 2)))
+        oversized = tarfile.TarInfo('xed/ignored.bin')
+        oversized.size = 16 * 1024 * 1024 + 1
+        with self.assertRaisesRegex(ValueError, 'expanded member/total byte bounds'):
+            list(x86_mappings.xed_files(oversized.tobuf() + bytes(1024)))
+        self.assertEqual(list(x86_mappings.xed_files(make_archive(['xed/datafiles/test.txt']))),
+                         [('datafiles/test.txt', 'x')])
+
+    def test_xed_preserves_source_patterns_flags_and_explicit_isa_cpuid(self):
+        source = dict(revision='a' * 40, sha256='archive-hash')
+        cpuid = x86_mappings.cpuid_records([('datafiles/cpuid.xed.txt',
+            'XED_ISA_SET_SSE2: sse2.1.0.edx.26\n')], source)
+        text = '''INSTRUCTIONS()::
+{
+ICLASS: PADDSB
+EXTENSION: SSE2
+FLAGS: MUST [ zf-mod ]
+PATTERN: first
+OPERANDS: REG0:rw
+IFORM: FIRST
+PATTERN: second
+OPERANDS: REG0:rw MEM0:r
+}
+'''
+        record, = x86_mappings.xed_records(text, 'datafiles/fixture.txt', source, cpuid)
+        self.assertEqual(record['patterns'], [{'pattern': 'first', 'operands': 'REG0:rw', 'iform': 'FIRST'},
+                                               {'pattern': 'second', 'operands': 'REG0:rw MEM0:r'}])
+        self.assertEqual(record['flags'], ['MUST [ zf-mod ]'])
+        self.assertEqual(record['cpuid']['SSE2'][0]['raw'], 'sse2.1.0.edx.26')
+        self.assertIsNone(record['operation'])
+        self.assertEqual(record['reference']['locator'], 'datafiles/fixture.txt:2')
+        with self.assertRaisesRegex(ValueError, 'unclosed'):
+            list(x86_mappings.xed_records(text[:-2], 'fixture', source, cpuid))
+
+    def test_build_query_limits_and_mutation_checks_without_external_sources(self):
+        xml = b'''<intrinsics_list><intrinsic name="fixture"><return type="__m128i"/>
+          <description>signed saturation</description><operation>1234567890''' + b'x' * 8000 + b'''</operation>
+          <instruction name="PADDSB"/><CPUID>SSE2</CPUID></intrinsic></intrinsics_list>'''
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode='w:gz') as tar:
+            data = b'INSTRUCTIONS()::\n{\nICLASS: PADDSB\nEXTENSION: SSE2\nPATTERN: fixture\nOPERANDS: REG0:rw\n}\n'
+            member = tarfile.TarInfo('xed-fixture/datafiles/xed-isa.txt')
+            member.size = len(data)
+            tar.addfile(member, io.BytesIO(data))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = []
+            for kind, data in [('intrinsics', xml), ('xed', archive.getvalue())]:
+                sources.append(dict(kind=kind, url='fixture' if kind == 'intrinsics' else
+                    'https://codeload.github.com/intelxed/xed/tar.gz/' + 'a' * 40, revision='a' * 40,
+                    sha256=x86_mappings.digest(data), bytes=len(data),
+                    blob=x86_mappings.save_content(root, 'blobs', data, '.fixture')))
+            manifest = x86_mappings.canonical(dict(sources=sources))
+            current = dict(manifest=x86_mappings.save_content(root, 'manifests', manifest, '.json'),
+                           manifest_sha256=x86_mappings.digest(manifest))
+            x86_mappings.write_current(root, current)
+            built = x86_mappings.build(argparse.Namespace(root=root))
+            self.assertEqual(built['counts']['intrinsics'], 1)
+            self.assertEqual(built['counts']['xed_source_patterns'], 1)
+            with patch.object(x86_mappings.urllib.request, 'urlopen', side_effect=AssertionError('unexpected network access')):
+                reused = x86_mappings.fetch(argparse.Namespace(root=root, intrinsics_url='fixture',
+                    intrinsics_sha256=x86_mappings.digest(xml), xed_revision='a' * 40, refresh=False))
+                self.assertTrue(reused['reused'])
+            self.assertEqual(x86_mappings.read_current(root)['index'], built['index'])
+            args = argparse.Namespace(root=root, kind='all', mnemonic=['paddsb'], feature=['SSE2'],
+                                      words=['saturation'], limit=1, chars=4, patterns=1, budget=8000)
+            result = x86_mappings.query(args)
+            self.assertEqual((result['matches'], result['returned']), (1, 1))
+            self.assertEqual(result['results'][0]['operation'], '1234')
+            self.assertEqual(result['results'][0]['operation_truncated_chars'], 8006)
+            args.chars, args.budget = 12000, 2048
+            bounded = x86_mappings.query(args)
+            self.assertEqual((bounded['returned'], bounded['omitted_by_budget']), (0, 1))
+            self.assertLessEqual(len(json.dumps(bounded, ensure_ascii=False)) + 1, 2048)
+            args.words, args.mnemonic = [], ['does_not_exist']
+            self.assertEqual(x86_mappings.query(args)['matches'], 0)
+            x86_mappings.stats(argparse.Namespace(root=root, command='verify'))
+            source_path = root / sources[0]['blob']
+            source_path.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'source hash/size mismatch'):
+                x86_mappings.stats(argparse.Namespace(root=root, command='verify'))
+            source_path.write_bytes(xml)
+            current = x86_mappings.read_current(root)
+            (root / current['index']).write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'index SHA256 mismatch'):
+                x86_mappings.stats(argparse.Namespace(root=root, command='verify'))
+            with self.assertRaisesRegex(ValueError, 'escapes catalog root'):
+                x86_mappings.safe_artifact(root, '../outside')
 
 
 if __name__ == "__main__":
