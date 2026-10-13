@@ -234,9 +234,10 @@ pub fn probe(
     // No fixups are applied. Original dyld's self-rebase/cache handoff must be
     // reviewed before executing beyond the whitelisted startup instructions.
     let mut main_mapping =
-        mapped_image::prepare_segments(main_bytes, &main, options.image_base, &[])?;
-    let dyld_mapping = mapped_image::prepare_segments(dyld_bytes, &dyld.image, dyld_base, &[])?;
+        mapped_image::prepare_raw_segments(main_bytes, &main, options.image_base)?;
+    let dyld_mapping = mapped_image::prepare_raw_segments(dyld_bytes, &dyld.image, dyld_base)?;
     main_mapping.specs.extend(dyld_mapping.specs);
+    main_mapping.data_limits.extend(dyld_mapping.data_limits);
     let stack = mapped_image::add_stack(
         &mut main_mapping.specs,
         Some(mapped_image::StackSpec {
@@ -244,7 +245,8 @@ pub fn probe(
             bytes: options.stack_bytes,
         }),
     )?;
-    let mut memory = OwnedMemory::map(main_mapping.specs)?;
+    let mut memory =
+        OwnedMemory::map_with_data_limits(main_mapping.specs, main_mapping.data_limits)?;
     arguments.install(&mut memory)?;
     let before = memory.read_snapshot(arguments.payload_address, arguments.initial_bytes.len())?;
     ensure!(
@@ -408,6 +410,7 @@ pub fn probe(
     });
     let fields = serde_json::json!({
         "bootstrap_clock":options.bootstrap_clock,"clock":clock_report,"memory_effects":memory_effects,
+        "mapping_phase":"kernel_loaded_unfixed",
         "stack_before_hex":stack_before.as_ref().map(hex::encode),"stack_after_hex":stack_after.as_ref().map(hex::encode),
         "clock_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/clock.rs")),
     });

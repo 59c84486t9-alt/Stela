@@ -153,6 +153,9 @@ enum Command {
         /// Owned data mappings for trusted raw-code execution.
         #[arg(long)]
         memory: Option<PathBuf>,
+        /// Service reviewed Darwin data-only mprotect calls over owned mappings.
+        #[arg(long)]
+        data_vm_services: bool,
         #[arg(long, requires = "memory", value_parser = parse_memory_query)]
         read_memory: Vec<MemoryQuery>,
         /// Explicit finite replay for one reviewed virtual-counter read.
@@ -559,6 +562,8 @@ struct RawMemoryRegionInput {
     initial_bytes: Vec<u8>,
     readable: bool,
     writable: bool,
+    maximum_readable: Option<bool>,
+    maximum_writable: Option<bool>,
 }
 fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::OwnedMemory> {
     use std::io::Read;
@@ -578,20 +583,26 @@ fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::O
         input.regions.len() <= 1024,
         "raw memory region count exceeds 1024"
     );
-    stela_runtime::memory::OwnedMemory::map(
-        input
-            .regions
-            .into_iter()
-            .map(|r| stela_runtime::memory::MemoryRegionSpec {
+    let mut limits = Vec::new();
+    let mut specs = Vec::new();
+    for r in input.regions {
+        if r.maximum_readable.is_some() || r.maximum_writable.is_some() {
+            limits.push(stela_runtime::memory::DataProtectionLimit {
                 guest_address: r.guest_address,
-                virtual_bytes: r.virtual_bytes,
-                initial_bytes: r.initial_bytes,
-                readable: r.readable,
-                writable: r.writable,
-                executable: false,
-            })
-            .collect(),
-    )
+                readable: r.maximum_readable.unwrap_or(r.readable),
+                writable: r.maximum_writable.unwrap_or(r.writable),
+            });
+        }
+        specs.push(stela_runtime::memory::MemoryRegionSpec {
+            guest_address: r.guest_address,
+            virtual_bytes: r.virtual_bytes,
+            initial_bytes: r.initial_bytes,
+            readable: r.readable,
+            writable: r.writable,
+            executable: false,
+        });
+    }
+    stela_runtime::memory::OwnedMemory::map_with_data_limits(specs, limits)
 }
 fn memory_hashes(memory: &stela_runtime::memory::OwnedMemory) -> Result<Vec<serde_json::Value>> {
     memory.regions().iter().filter(|r| r.readable).map(|r| Ok(serde_json::json!({
@@ -1107,6 +1118,7 @@ fn run() -> Result<()> {
             software_pauth_ib_key,
             software_pauth_keys,
             memory: memory_path,
+            data_vm_services,
             read_memory,
             clock_snapshot: clock_snapshot_path,
         } => {
@@ -1146,7 +1158,7 @@ fn run() -> Result<()> {
                     .map(|path| pauth_context(path, 1))
                     .transpose()?
             };
-            let memory = raw_memory(memory_path.as_deref())?;
+            let mut memory = raw_memory(memory_path.as_deref())?;
             let memory_before = memory_hashes(&memory)?;
             let snapshot_total = read_memory.iter().try_fold(0usize, |total, q| {
                 total
@@ -1177,30 +1189,46 @@ fn run() -> Result<()> {
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
             // SAFETY: This explicit research command accepts trusted guest code
             // and caller-provided direct native RAM addresses under its documented ABI.
-            let outcome = unsafe {
-                if let Some(clock) = &mut clock {
-                    runtime.run_with_clock(
+            let (outcome, data_vm_events) = unsafe {
+                if data_vm_services {
+                    let result = stela_runtime::darwin::run_data_vm(
+                        &mut runtime,
                         &mut thread,
                         stop_pc.map(stela_compiler::GuestAddress),
                         block_budget,
-                        context
-                            .as_ref()
-                            .context("clock replay requires software PAC context")?,
-                        clock,
-                    )?
-                } else if let Some(context) = &context {
-                    runtime.run_with_pauth(
-                        &mut thread,
-                        stop_pc.map(stela_compiler::GuestAddress),
-                        block_budget,
-                        context,
-                    )?
+                        &mut memory,
+                        stela_runtime::darwin::ExecutionServices {
+                            pauth: context.as_ref(),
+                            clock: clock.as_mut(),
+                        },
+                    )?;
+                    (result.execution, result.services)
                 } else {
-                    runtime.run(
-                        &mut thread,
-                        stop_pc.map(stela_compiler::GuestAddress),
-                        block_budget,
-                    )?
+                    let outcome = if let Some(clock) = &mut clock {
+                        runtime.run_with_clock(
+                            &mut thread,
+                            stop_pc.map(stela_compiler::GuestAddress),
+                            block_budget,
+                            context
+                                .as_ref()
+                                .context("clock replay requires software PAC context")?,
+                            clock,
+                        )?
+                    } else if let Some(context) = &context {
+                        runtime.run_with_pauth(
+                            &mut thread,
+                            stop_pc.map(stela_compiler::GuestAddress),
+                            block_budget,
+                            context,
+                        )?
+                    } else {
+                        runtime.run(
+                            &mut thread,
+                            stop_pc.map(stela_compiler::GuestAddress),
+                            block_budget,
+                        )?
+                    };
+                    (outcome, Vec::new())
                 }
             };
             let memory_after = memory_hashes(&memory)?;
@@ -1214,6 +1242,7 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
                 "outcome":outcome,"abi":runtime.profile().abi(),"memory":memory_report,
+                "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock.as_ref().map(|clock| serde_json::json!({
                     "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
