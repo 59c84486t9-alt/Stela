@@ -11,6 +11,7 @@ pub struct Emitter;
 mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
+mod crc;
 mod integer_math;
 pub mod isa;
 mod pc_relative;
@@ -282,6 +283,7 @@ fn emit_instruction(
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
         Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
+        Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
         Operation::MemoryPair {
             transfer,

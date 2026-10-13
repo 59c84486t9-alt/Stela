@@ -181,3 +181,72 @@ impl SimdOpcode {
         code.push(0xc0 | (destination << 3) | source);
     }
 }
+
+/// SSE4.2 CRC32 computes Castagnoli, never the IEEE polynomial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrcOpcode {
+    Byte,
+    Halfword,
+    Word,
+    Doubleword,
+}
+impl CrcOpcode {
+    pub(crate) fn for_bytes(bytes: u8) -> Self {
+        match bytes {
+            1 => Self::Byte,
+            2 => Self::Halfword,
+            4 => Self::Word,
+            8 => Self::Doubleword,
+            _ => unreachable!("decoder validates CRC data size"),
+        }
+    }
+    /// Accumulator RAX, data RCX; every form zero-extends its 32-bit remainder.
+    pub(crate) fn emit(self, code: &mut Vec<u8>, target: TargetCpu) {
+        assert!(target.supports(TargetCpu::Sse42));
+        code.push(0xf2);
+        match self {
+            Self::Halfword => code.push(0x66),
+            Self::Doubleword => code.push(0x48),
+            _ => {}
+        }
+        code.extend([
+            0x0f,
+            0x38,
+            if self == Self::Byte { 0xf0 } else { 0xf1 },
+            0xc1,
+        ]);
+    }
+}
+
+/// Fixed caller-saved register recipe primitives for scalar CRC table lowering.
+/// RAX is the W accumulator, RCX is original data, RDX the table index,
+/// and R8 the immutable RIP-relative table base. GuestState remains in RDI.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CrcTableInstruction {
+    TruncateByteData,
+    TruncateHalfwordData,
+    TableBaseRip,
+    MergeWordData,
+    SelectHighDataWord,
+    IndexLowByte,
+    ShiftAccumulatorByte,
+    XorTableEntry,
+    JumpOverTable,
+    Discard,
+}
+impl CrcTableInstruction {
+    pub(crate) fn emit(self, code: &mut Vec<u8>) {
+        code.extend(match self {
+            Self::TruncateByteData => &[0x0f, 0xb6, 0xc9][..], // movzx ecx,cl
+            Self::TruncateHalfwordData => &[0x0f, 0xb7, 0xc9], // movzx ecx,cx
+            Self::TableBaseRip => &[0x4c, 0x8d, 0x05],         // lea r8,[rip+disp32]
+            Self::MergeWordData => &[0x31, 0xc8],              // xor eax,ecx
+            Self::SelectHighDataWord => &[0x48, 0xc1, 0xe9, 32], // shr rcx,32
+            Self::IndexLowByte => &[0x0f, 0xb6, 0xd0],         // movzx edx,al
+            Self::ShiftAccumulatorByte => &[0xc1, 0xe8, 8],    // shr eax,8
+            Self::XorTableEntry => &[0x41, 0x33, 0x04, 0x90],  // xor eax,[r8+rdx*4]
+            Self::JumpOverTable => &[0xe9],                    // jmp rel32
+            Self::Discard => &[0x90],                          // nop, nonempty source-map interval
+        });
+    }
+}

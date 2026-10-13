@@ -125,6 +125,56 @@ class ArithmeticOracleTests(unittest.TestCase):
                                      {(option, shift) for option in range(8) for shift in range(5)})
 
 class IntegerMathOracleTests(unittest.TestCase):
+    def test_crc_known_vectors_polynomial_difference_and_uncomplemented_updates(self):
+        import zlib
+        for castagnoli, expected in ((False, 0xcbf43926), (True, 0xe3069283)):
+            accumulator = 0xffffffff
+            for byte in b'123456789':
+                accumulator = math.crc_reference(accumulator, byte, 8, castagnoli)
+            self.assertEqual(accumulator ^ 0xffffffff, expected)
+        self.assertEqual(zlib.crc32(b'123456789'), 0xcbf43926)
+        for castagnoli in (False, True):
+            self.assertEqual(math.crc_reference(0, 0, 64, castagnoli), 0)
+            for bits in (8, 16, 32, 64):
+                self.assertEqual(math.crc_reference(0xdeadc0de12345678, math.MASK, bits, castagnoli),
+                                 math.crc_reference(0x12345678, (1 << bits) - 1, bits, castagnoli))
+                value, accumulator = 0x0123456789abcdef, 0x76543210
+                folded = accumulator
+                for byte in value.to_bytes(8, 'little')[:bits // 8]:
+                    folded = math.crc_reference(folded, byte, 8, castagnoli)
+                self.assertEqual(math.crc_reference(accumulator, value, bits, castagnoli), folded)
+
+    def test_crc_affine_power_matches_literal_repeated_updates(self):
+        state = State()
+        state.x[0], state.x[2] = 0xdeadc0de12345678, 0x0123456789abcdef
+        for form, word in math.CRC_FORMS.items():
+            for count in (1, 2, 3, 31, 128):
+                value = state.x[0]
+                for _ in range(count):
+                    value = math.crc_reference(value, state.x[2], math.crc_data_bits(word),
+                                               bool(word & math.CRC_CASTAGNOLI_BIT))
+                expected = complete_state(state)
+                expected['x'][0] = value
+                self.assertEqual(math.crc_repeated_state(form, True, state, count), expected)
+
+    def test_crc_corpus_all_forms_register_roles_aliases_and_dirty_upper_bits(self):
+        cases = math.crc_cases()
+        self.assertEqual(len(cases), 362)
+        for form in math.CRC_FORMS:
+            words = [c['words'][0] for c in cases if c['form'] == form and c['kind'] == 'all_registers']
+            for shift in (0, 5, 16):
+                self.assertEqual({(word >> shift) & 31 for word in words}, set(range(32)))
+            state = State()
+            state.x[1], state.x[2] = math.MASK, 0x0123456789abcdef
+            state.nzcv, state.reserved = 0xf0000000, 0x12345678
+            word = math.encoding(form, 2, 1, 2)
+            expected = complete_state(state)
+            bits = 8 << ((word >> 10) & 3)
+            expected['x'][2] = math.crc_reference(state.x[1], state.x[2], bits, bool(word & (1 << 12)))
+            self.assertEqual(math.mathematical_reference([word, math.RET], state), expected)
+            word = math.encoding(form, 31, 31, 31)
+            self.assertEqual(math.mathematical_reference([word, math.RET], state), complete_state(state))
+
     def test_signed_rounds_toward_zero_and_handles_architectural_extremes(self):
         for bits in (32, 64):
             mask, minimum = (1 << bits) - 1, 1 << (bits - 1)

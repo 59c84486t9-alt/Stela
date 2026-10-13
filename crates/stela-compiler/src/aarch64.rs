@@ -2,6 +2,7 @@
 use crate::{GuestAddress, Lifter, UnsupportedReason};
 pub mod bitfield;
 pub mod conditional_select;
+pub mod crc;
 pub mod integer_math;
 pub mod pc_relative;
 pub mod register_offset;
@@ -74,6 +75,7 @@ pub enum Operation {
     PcRelative(pc_relative::Operand),
     ConditionalSelect(conditional_select::Operand),
     ConditionalCompare(conditional_select::CompareOperand),
+    Crc(crc::Operand),
     IntegerMath(integer_math::Operand),
     MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
@@ -268,6 +270,8 @@ impl Lifter for Decoder {
             Operation::ConditionalSelect(decoded)
         } else if let Some(decoded) = conditional_select::decode_compare(word) {
             Operation::ConditionalCompare(decoded)
+        } else if let Some(decoded) = crc::decode(word) {
+            Operation::Crc(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::decode(word) {

@@ -18,6 +18,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/bitfield.rs"),
     include_str!("aarch64/conditional_select.rs"),
     include_str!("x86_64/conditional_select.rs"),
+    include_str!("aarch64/crc.rs"),
+    include_str!("x86_64/crc.rs"),
     include_str!("aarch64/integer_math.rs"),
     include_str!("x86_64/integer_math.rs"),
     include_str!("aarch64/pc_relative.rs"),

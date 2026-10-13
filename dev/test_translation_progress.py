@@ -367,11 +367,30 @@ class BlockProgressTests(unittest.TestCase):
                     progress.smoke_forms('cli', rows, rows, Path(temporary), mode=mode)
             self.assertEqual(probe.call_args.kwargs, expected_kwargs)
 
+    def test_crc_family_requires_its_own_two_profile_and_reserved_evidence(self):
+        root = Path(__file__).resolve().parents[1]
+        registry = json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text())
+        rows = progress.validate_registry(registry)
+        crc = [row for row in rows.values() if row['source_file'] in ('crc32.xml', 'crc32c.xml')]
+        self.assertEqual(len(crc), 8)
+        self.assertTrue(all(row['status'] == 'implemented' and row['evidence_groups'] == ['scalar_crc']
+                            for row in crc))
+        group = registry['evidence_groups']['scalar_crc']
+        self.assertEqual(group['comparison_field'], 'crc_three_way_register_state_comparisons')
+        required = group['required_measurements']
+        for profile in ('baseline', 'sse4.2'):
+            prefix = '/crc_profiles/sse4.2/' if profile == 'sse4.2' else 'crc_profiles.baseline.'
+            self.assertEqual(required[prefix + 'programs'], 362)
+            self.assertEqual(required[prefix + 'comparisons'], 136448)
+        self.assertEqual(required['crc_block_state_comparisons'], 256)
+        self.assertEqual(required['crc_reserved.reserved_forms'], 8)
+        self.assertEqual(required['crc_reserved.native_explicit_declines'], 16)
+
     def test_separate_profiles_do_not_inflate_instruction_count(self):
         root = Path(__file__).resolve().parents[1]
         leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
-        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 529)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 537)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 18)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
@@ -384,7 +403,7 @@ class BlockProgressTests(unittest.TestCase):
                           'traps': {'native_comparisons': 320,
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
-        self.assertIn('| Leaf-profile instruction forms implemented | 529 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 537 |', text)
         self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('| Block-profile forms partially implemented | 2 |', text)
@@ -432,6 +451,19 @@ class EvidenceTests(unittest.TestCase):
         reports, _ = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
         self.assertEqual(reports['carry']['native_comparisons'], 320)
         self.assertEqual(reports['carry']['trap_rust_runtime_execution_comparisons'], 320)
+
+    def test_exact_measurements_preserve_literal_dots_in_profile_names(self):
+        self.registry['evidence_groups']['carry']['required_measurements'] = {
+            'groups.carry.comparisons': 32, '/cpu_profiles/sse4.2/comparisons': 16}
+        self.report['groups'] = {'carry': {'comparisons': 32}}
+        self.report['cpu_profiles'] = {'sse4.2': {'comparisons': 16}}
+        self.write_report()
+        progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        for malformed in ({'sse4.2': {'comparisons': 0}}, {'sse4': {'2': {'comparisons': 16}}}):
+            self.report['cpu_profiles'] = malformed
+            self.write_report()
+            with self.assertRaisesRegex(ValueError, 'required measurement'):
+                progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
 
     def test_failed_arm_only_stale_and_unbound_reports_cannot_count(self):
         original = copy.deepcopy(self.report)

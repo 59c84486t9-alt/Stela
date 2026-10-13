@@ -263,7 +263,9 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
             results[name][key] = report[key]
         for key, expected in group.get('required_measurements', {}).items():
             value = report
-            for part in key.split('.'):
+            # Slash-separated paths preserve literal dots in CPU profile names.
+            parts = key[1:].split('/') if key.startswith('/') else key.split('.')
+            for part in parts:
                 value = value.get(part) if isinstance(value, dict) else None
             if type(value) is not int or value != expected:
                 raise ValueError(f'Differential evidence missing required measurement {key}')
