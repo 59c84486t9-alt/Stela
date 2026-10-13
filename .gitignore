@@ -8,3 +8,4 @@
 *.part.json
 __pycache__/
 .DS_Store
+/GOAL.md
