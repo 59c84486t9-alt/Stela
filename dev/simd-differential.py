@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import mmap
+import math
 import multiprocessing
 from pathlib import Path
 import random
@@ -237,7 +238,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -388,7 +389,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts','reductions','saturating','products','halving') else execute_batches(batches, pipe)})
+        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in REGISTER_COHORTS else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -1006,6 +1007,89 @@ def halving_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
+def immediate_programs():
+    programs=[]
+    for q in (0,1):
+        for op in (0,1):
+            for cmode in range(16):
+                if cmode==15 and op and not q: continue
+                for imm in range(256):
+                    d=imm%32
+                    word=0x0f000400|(q<<30)|(op<<29)|(cmode<<12)|((imm>>5)<<16)|((imm&31)<<5)|d
+                    operation={'kind':'constant','format':'modified','word':word,'d':d,'lane':1,'bytes':8<<q,
+                               'op':op,'cmode':cmode,'imm':imm,'half':False}
+                    programs.append({'operations':[operation]})
+        for imm in range(256):
+            d=imm%32
+            word=0x0f00fc00|(q<<30)|((imm>>5)<<16)|((imm&31)<<5)|d
+            programs.append({'operations':[{'kind':'constant','format':'modified','word':word,'d':d,'lane':2,'bytes':8<<q,
+                             'op':0,'cmode':15,'imm':imm,'half':True}]})
+    for lane,base in [(2,0x1ee01000),(4,0x1e201000),(8,0x1e601000)]:
+        for imm in range(256):
+            d=imm%32
+            programs.append({'operations':[{'kind':'constant','format':'scalar_float','word':base|(imm<<13)|d,
+                             'd':d,'lane':lane,'bytes':lane,'imm':imm}]})
+    moves=[(0x1ee04000,2,'vector',False,False),(0x1e204000,4,'vector',False,False),(0x1e604000,8,'vector',False,False),
+           (0x1ee60000,2,'from_vector',False,False),(0x9ee60000,2,'from_vector',False,True),
+           (0x1e260000,4,'from_vector',False,False),(0x9e660000,8,'from_vector',False,True),(0x9eae0000,8,'from_vector',True,True),
+           (0x1ee70000,2,'to_vector',False,False),(0x9ee70000,2,'to_vector',False,True),
+           (0x1e270000,4,'to_vector',False,False),(0x9e670000,8,'to_vector',False,True),(0x9eaf0000,8,'to_vector',True,True)]
+    for base,lane,direction,upper,x64 in moves:
+        def operation(d,n): return {'kind':'fp_move','word':base|(n<<5)|d,'d':d,'n':n,'lane':lane,'bytes':lane,
+                                    'direction':direction,'upper':upper,'x64':x64}
+        for d,n in [(0,1),(1,1),(31,0),(0,31),(31,31),(7,7)]: programs.append({'operations':[operation(d,n)]})
+        programs.append({'operations':[operation(d,(d+9)%32) for d in range(32)]})
+    return programs
+
+
+def immediate_float_bits(imm,lane):
+    # Independent exact numeric construction; compiler constructs IEEE fields.
+    exponent=(imm>>4)&7
+    exponent=exponent+1 if exponent<4 else exponent-7
+    value=math.ldexp(1+(imm&15)/16,exponent)
+    if imm&128: value=-value
+    return int.from_bytes(struct.pack({2:'<e',4:'<f',8:'<d'}[lane],value),'little')
+
+
+def immediate_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v];gprs=list(initial.x)
+    for op in operations:
+        d,lane=op['d'],op['lane']
+        if op['kind']=='fp_move':
+            n=op['n'];mask=(1<<(lane*8))-1
+            if op['direction']=='from_vector':
+                value=vectors[n]>>(64 if op['upper'] else 0)&mask
+                if d!=31: gprs[d]=value
+            else:
+                value=(0 if n==31 else gprs[n])&mask if op['direction']=='to_vector' else vectors[n]&mask
+                vectors[d]=(vectors[d]&MASK)|(value<<64) if op['upper'] else value
+            continue
+        imm,width=op['imm'],op['bytes']
+        action='move'
+        if op['format']=='scalar_float': value=immediate_float_bits(imm,lane)
+        else:
+            cmode=op['cmode'];inverse=op['op']
+            if op['half'] or cmode==15:
+                element_bytes=2 if op['half'] else 8 if inverse else 4
+                element=immediate_float_bits(imm,element_bytes)
+            elif cmode<8: element_bytes=4;element=imm<<((cmode//2)*8)
+            elif cmode<12: element_bytes=2;element=imm<<(((cmode-8)//2)*8)
+            elif cmode<14:
+                element_bytes=4;ones_bytes=1 if cmode==12 else 2
+                element=int.from_bytes(b'\xff'*ones_bytes+bytes([imm])+b'\0'*(3-ones_bytes),'little')
+            elif inverse:
+                element_bytes=8;element=int.from_bytes(bytes(255 if imm&(1<<i) else 0 for i in range(8)),'little')
+            else: element_bytes=1;element=imm
+            value=sum(element<<(i*element_bytes*8) for i in range(width//element_bytes))
+            if cmode<12 and cmode%2: action='bic' if inverse else 'orr'
+            elif inverse and cmode<14: value^=(1<<(width*8))-1
+        active_mask=(1<<(width*8))-1
+        if action=='orr': value|=vectors[d]
+        elif action=='bic': value=vectors[d]&~value
+        vectors[d]=value&active_mask
+    return {**state_dict(initial),'x':gprs,'v':[[v&MASK,v>>64] for v in vectors]}
+
+
 def integer_mathematical(operations,initial):
     vectors=[lo|(hi<<64) for lo,hi in initial.v]
     for op in operations:
@@ -1033,11 +1117,24 @@ def integer_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
+REGISTER_COHORTS={
+    'integer':(integer_programs,integer_mathematical),
+    'rearrange':(rearrange_programs,rearrange_mathematical),
+    'shifts':(shift_programs,shift_mathematical),
+    'reductions':(reduction_programs,reduction_mathematical),
+    'saturating':(saturating_programs,saturating_mathematical),
+    'products':(product_programs,product_mathematical),
+    'halving':(halving_programs,halving_mathematical),
+    'immediates':(immediate_programs,immediate_mathematical),
+}
+
+
 def execute_register_batches(batches):
     corpus,comparisons=hashlib.sha256(),0
     templates=states(all_flags=True)
     for batch in batches:
         machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
+        if batch['cohort']=='immediates': machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
         machine.mem_map(BASE,(len(batch['source'])+4095)&~4095);machine.mem_write(BASE,batch['source'])
         with executable(batch['native']) as address:
             for function,entry,offset in zip(batch['functions'],batch['entries'],batch['offsets']):
@@ -1051,7 +1148,8 @@ def execute_register_batches(batches):
                 saturation=batch.get('cohort')=='saturating'
                 products=batch.get('cohort')=='products'
                 halving=batch.get('cohort')=='halving'
-                patterns=9 if halving else 7 if saturation or products else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
+                immediates=batch.get('cohort')=='immediates'
+                patterns=(2 if operations[0]['kind']=='constant' else 8) if immediates else 9 if halving else 7 if saturation or products else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
                 for flags in (0,15):
                     for pattern in range(patterns):
                         initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
@@ -1123,12 +1221,25 @@ def execute_register_batches(batches):
                                     low=sum(((register+i+1)&((1<<bits)-1))<<(i*bits) for i in range(64//bits))
                                     high=sum((((1<<bits)-1-register-i)&((1<<bits)-1))<<(i*bits) for i in range(64//bits))
                                     initial.v[register][:]=[low,high]
+                        if immediates:
+                            if operations[0]['kind']=='constant':
+                                for vector in initial.v: vector[:]=[MASK if pattern==0 else 0]*2
+                            elif pattern<7:
+                                exponent_bits={2:5,4:8,8:11}[lane];fraction_bits=bits-exponent_bits-1
+                                infinity=((1<<exponent_bits)-1)<<fraction_bits
+                                values=(0,1<<(bits-1),infinity,infinity|(1<<(bits-1)),infinity|1,infinity|(1<<(fraction_bits-1))|3,1)
+                                value=values[pattern]
+                                for register in range(32):
+                                    payload=value if pattern not in (4,5) else value|(register&3)
+                                    full=sum(payload<<(i*bits) for i in range(128//bits))
+                                    initial.v[register][:]=[full&MASK,full>>64]
+                                    if register<31: initial.x[register]=(payload|((0xdeadbeefdeadbeef<<bits)&MASK))&MASK
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
                         assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
                         original=state_dict(capture_arm(machine,initial))
-                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical,'reductions':reduction_mathematical,'saturating':saturating_mathematical,'products':product_mathematical,'halving':halving_mathematical}[batch['cohort']](operations,initial)
+                        mathematical=REGISTER_COHORTS[batch['cohort']][1](operations,initial)
                         actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
                         if mathematical!=original or original!=actual:
                             raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
@@ -1139,11 +1250,11 @@ def execute_register_batches(batches):
 
 
 def run_register_cohort(cli, focus):
-    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs,'reductions':reduction_programs,'saturating':saturating_programs,'products':product_programs,'halving':halving_programs}[focus]();started=time.monotonic()
+    functions=REGISTER_COHORTS[focus][0]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
     info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
     selections=[('baseline','x86_64-baseline')]
-    if focus!='shifts' and info['detected_target']!='x86_64-baseline': selections.append(('native',info['detected_target']))
+    if focus not in ('shifts','immediates') and info['detected_target']!='x86_64-baseline': selections.append(('native',info['detected_target']))
     profiles={}
     with tempfile.TemporaryDirectory(prefix='stela-simd-integer-') as temporary:
         for index,(selection,target_id) in enumerate(selections):
@@ -1185,6 +1296,7 @@ def run_register_cohort(cli, focus):
         'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
         'harness_source_sha256':harness_hash,'shared_runner_sha256':digest((ROOT/'dev/differential.py').read_bytes()),
         'corpus_sha256':digest(batch['source']),'compilation':baseline['compilation'],'cpu_profiles':profiles,
+        'original_cpu_model':'MAX (FP16 enabled)' if focus=='immediates' else 'default',
         'total_profile_comparisons':sum(p['three_way_register_state_comparisons'] for p in profiles.values()),
         'verification_wall_seconds':time.monotonic()-started,
         'limits':f'Focused {focus} SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
@@ -1194,7 +1306,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['integer','rearrange','shifts','reductions','saturating','products','halving'], help='Only the focused SIMD register implementation cohort')
+    parser.add_argument('--focus', choices=list(REGISTER_COHORTS), help='Only the focused SIMD register implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)

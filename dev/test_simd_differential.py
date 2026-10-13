@@ -12,6 +12,18 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_immediate_oracle_uses_exact_numeric_float_bits_and_upper_lane_preservation(self):
+        for lane,one in [(2,0x3c00),(4,0x3f800000),(8,0x3ff0000000000000)]:
+            self.assertEqual(suite.immediate_float_bits(0x70,lane),one)
+        initial=State()
+        initial.x[0]=0x0123456789abcdef
+        initial.v[31][:]=[0xfedcba9876543210,suite.MASK]
+        operation={'kind':'fp_move','direction':'to_vector','d':31,'n':0,'lane':8,'upper':True}
+        observed=suite.immediate_mathematical([operation],initial)
+        self.assertEqual(observed['v'][31],[0xfedcba9876543210,0x0123456789abcdef])
+        operation.update(n=31)
+        self.assertEqual(suite.immediate_mathematical([operation],initial)['v'][31],[0xfedcba9876543210,0])
+
     def test_halving_oracle_keeps_overflow_borrow_and_narrow_round_carry(self):
         initial=State()
         initial.v[1][:]=[suite.MASK]*2
@@ -79,7 +91,8 @@ class SimdDifferentialTests(unittest.TestCase):
         for group,generator,count in [('simd_integer',suite.integer_programs,38),
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
                 ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22),
-                ('simd_products',suite.product_programs,25),('simd_halving',suite.halving_programs,16)]:
+                ('simd_products',suite.product_programs,25),('simd_halving',suite.halving_programs,16),
+                ('simd_immediates',suite.immediate_programs,30)]:
             forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
             operations=[o for p in generator() for o in p['operations']]
             self.assertEqual(len(forms),count,group)

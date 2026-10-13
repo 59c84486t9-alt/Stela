@@ -63,6 +63,12 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
         0x6eb842bd, // RADDHN2 V29.4S,V21.2D,V24.2D
         0x0e212b7e, // XTN V30.8B,V27.8H
         0x6e213b5f, // SHLL2 V31.8H,V26.16B,#8
+        0x1e2603d8, // FMOV W24,S30: raw low bits and W upper clearing
+        0x9eaf0311, // FMOV V17.D[1],X24: preserve low half
+        0x1ee04234, // FMOV H20,H17: raw scalar payload, clear upper bits
+        0x1eee1017, // FMOV H23,#1.0
+        0x6f00c656, // MVNI V22.4S,#0x12,MSL#8
+        0x2f00b5f6, // BIC V22.4H,#0x0f,LSL#8: Q=0 clears high half
         RET,
     ]);
     let mut initial = state(BASE, 19);
@@ -126,6 +132,11 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     expected.v[31] = limbs(std::array::from_fn(|i| {
         if i % 2 == 0 { 0 } else { averaged[8 + i / 2] }
     }));
+    expected.x[24] = 2;
+    expected.v[17] = [0x80, 2];
+    expected.v[20] = [0x80, 0];
+    expected.v[23] = [0x3c00, 0];
+    expected.v[22] = [0xf0ffe000f0ffe000, 0];
     let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
     targets.dedup();
     for target in targets {

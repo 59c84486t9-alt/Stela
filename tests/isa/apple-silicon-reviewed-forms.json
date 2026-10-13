@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v20",
+  "registry_version": "apple-silicon-reviewed-forms-v21",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -261,6 +261,22 @@
         "programs": 672,
         "three_way_register_state_comparisons": 12096,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 12096
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_immediates": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-immediates-differential-report.json",
+      "kind": "simd_immediates_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 17499,
+        "three_way_register_state_comparisons": 71088,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 71088
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -19328,6 +19344,1146 @@
           ]
         }
       ]
+    },
+    {
+      "id": "BIC_asimdimm_L_hl",
+      "instruction_id": "BIC_advsimd_imm",
+      "mnemonic": "BIC",
+      "category": "fp_simd",
+      "source_file": "bic_advsimd_imm.xml",
+      "encoding_mask": "0xbff8dc00",
+      "encoding_value": "0x2f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e25927da3a0a2660ded9bd36a95726d774370e18e3981dc52e58a947716d3104",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f009400",
+          "expected_mnemonics": [
+            "bic"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BIC_asimdimm_L_sl",
+      "instruction_id": "BIC_advsimd_imm",
+      "mnemonic": "BIC",
+      "category": "fp_simd",
+      "source_file": "bic_advsimd_imm.xml",
+      "encoding_mask": "0xbff89c00",
+      "encoding_value": "0x2f001400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e25927da3a0a2660ded9bd36a95726d774370e18e3981dc52e58a947716d3104",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f001400",
+          "expected_mnemonics": [
+            "bic"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_32H_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee60000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee60020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_32S_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e260000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e260020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_64D_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9e660000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9e660020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_64H_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9ee60000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ee60020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_64VX_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9eae0000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9eae0020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_D64_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9e670000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9e670020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_D_floatdp1",
+      "instruction_id": "FMOV_float",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e604000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "cf8ebc089e66a3027f39b04700eb5a9c443d5c9effd229d958f8e11029da89bc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e604020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_D_floatimm",
+      "instruction_id": "FMOV_float_imm",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_imm.xml",
+      "encoding_mask": "0xffe01fe0",
+      "encoding_value": "0x1e601000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3bec2850ef9c0a95b080d8d31c8c956a304a32fc477e4888b7a08e77644487b5",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e601000",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_H32_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee70000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee70020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_H64_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9ee70000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9ee70020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_H_floatdp1",
+      "instruction_id": "FMOV_float",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee04000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "cf8ebc089e66a3027f39b04700eb5a9c443d5c9effd229d958f8e11029da89bc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee04020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_H_floatimm",
+      "instruction_id": "FMOV_float_imm",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_imm.xml",
+      "encoding_mask": "0xffe01fe0",
+      "encoding_value": "0x1ee01000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3bec2850ef9c0a95b080d8d31c8c956a304a32fc477e4888b7a08e77644487b5",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee01000",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_S32_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e270000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e270020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_S_floatdp1",
+      "instruction_id": "FMOV_float",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e204000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "cf8ebc089e66a3027f39b04700eb5a9c443d5c9effd229d958f8e11029da89bc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e204020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_S_floatimm",
+      "instruction_id": "FMOV_float_imm",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_imm.xml",
+      "encoding_mask": "0xffe01fe0",
+      "encoding_value": "0x1e201000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3bec2850ef9c0a95b080d8d31c8c956a304a32fc477e4888b7a08e77644487b5",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e201000",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_V64I_float2int",
+      "instruction_id": "FMOV_float_gen",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_float_gen.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x9eaf0000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "82a49a2ec0a9096ad0cf06787c29642035e969f3fd43cd276f344c4d22917c63",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9eaf0020",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_asimdimm_D2_d",
+      "instruction_id": "FMOV_advsimd",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_advsimd.xml",
+      "encoding_mask": "0xfff8fc00",
+      "encoding_value": "0x6f00f400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c4d6fcb7cf0b1c4d2f387f4cbd18f6a71cd45d291888216115236593527f7e7b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6f00f400",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_asimdimm_H_h",
+      "instruction_id": "FMOV_advsimd",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_advsimd.xml",
+      "encoding_mask": "0xbff8fc00",
+      "encoding_value": "0x0f00fc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c4d6fcb7cf0b1c4d2f387f4cbd18f6a71cd45d291888216115236593527f7e7b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f00fc00",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FMOV_asimdimm_S_s",
+      "instruction_id": "FMOV_advsimd",
+      "mnemonic": "FMOV",
+      "category": "fp_simd",
+      "source_file": "fmov_advsimd.xml",
+      "encoding_mask": "0xbff8fc00",
+      "encoding_value": "0x0f00f400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c4d6fcb7cf0b1c4d2f387f4cbd18f6a71cd45d291888216115236593527f7e7b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f00f400",
+          "expected_mnemonics": [
+            "fmov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MOVI_asimdimm_L_hl",
+      "instruction_id": "MOVI_advsimd",
+      "mnemonic": "MOVI",
+      "category": "fp_simd",
+      "source_file": "movi_advsimd.xml",
+      "encoding_mask": "0xbff8dc00",
+      "encoding_value": "0x0f008400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f008400",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MOVI_asimdimm_L_sl",
+      "instruction_id": "MOVI_advsimd",
+      "mnemonic": "MOVI",
+      "category": "fp_simd",
+      "source_file": "movi_advsimd.xml",
+      "encoding_mask": "0xbff89c00",
+      "encoding_value": "0x0f000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f000400",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MOVI_asimdimm_M_sm",
+      "instruction_id": "MOVI_advsimd",
+      "mnemonic": "MOVI",
+      "category": "fp_simd",
+      "source_file": "movi_advsimd.xml",
+      "encoding_mask": "0xbff8ec00",
+      "encoding_value": "0x0f00c400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f00c400",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MOVI_asimdimm_N_b",
+      "instruction_id": "MOVI_advsimd",
+      "mnemonic": "MOVI",
+      "category": "fp_simd",
+      "source_file": "movi_advsimd.xml",
+      "encoding_mask": "0xbff8fc00",
+      "encoding_value": "0x0f00e400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f7df057c1ac38e9ab8cfbd7a18eb8b2f77a381bac572d773c1879e601d528534",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f00e400",
+          "expected_mnemonics": [
+            "movi"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MVNI_asimdimm_L_hl",
+      "instruction_id": "MVNI_advsimd",
+      "mnemonic": "MVNI",
+      "category": "fp_simd",
+      "source_file": "mvni_advsimd.xml",
+      "encoding_mask": "0xbff8dc00",
+      "encoding_value": "0x2f008400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aaa6837ab9f94bc849e8c1fee4c334fd4f2b32706a44710b94027b493862bf8c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f008400",
+          "expected_mnemonics": [
+            "mvni"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MVNI_asimdimm_L_sl",
+      "instruction_id": "MVNI_advsimd",
+      "mnemonic": "MVNI",
+      "category": "fp_simd",
+      "source_file": "mvni_advsimd.xml",
+      "encoding_mask": "0xbff89c00",
+      "encoding_value": "0x2f000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aaa6837ab9f94bc849e8c1fee4c334fd4f2b32706a44710b94027b493862bf8c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f000400",
+          "expected_mnemonics": [
+            "mvni"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MVNI_asimdimm_M_sm",
+      "instruction_id": "MVNI_advsimd",
+      "mnemonic": "MVNI",
+      "category": "fp_simd",
+      "source_file": "mvni_advsimd.xml",
+      "encoding_mask": "0xbff8ec00",
+      "encoding_value": "0x2f00c400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aaa6837ab9f94bc849e8c1fee4c334fd4f2b32706a44710b94027b493862bf8c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f00c400",
+          "expected_mnemonics": [
+            "mvni"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ORR_asimdimm_L_hl",
+      "instruction_id": "ORR_advsimd_imm",
+      "mnemonic": "ORR",
+      "category": "fp_simd",
+      "source_file": "orr_advsimd_imm.xml",
+      "encoding_mask": "0xbff8dc00",
+      "encoding_value": "0x0f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e0b30d5c2acd4a280e564e359aaba677a5692801242dd98061c4eb25e89ee279",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f009400",
+          "expected_mnemonics": [
+            "orr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ORR_asimdimm_L_sl",
+      "instruction_id": "ORR_advsimd_imm",
+      "mnemonic": "ORR",
+      "category": "fp_simd",
+      "source_file": "orr_advsimd_imm.xml",
+      "encoding_mask": "0xbff89c00",
+      "encoding_value": "0x0f001400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e0b30d5c2acd4a280e564e359aaba677a5692801242dd98061c4eb25e89ee279",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16. All allocated modified-immediate shifts/MSL forms and scalar/vector FMOV constants, with Q=0/scalar upper clearing. FMOV scalar and general/vector transfers preserve raw NaN/zero/denormal/infinity payloads, zero-extend W/X outputs, use GPR31 as ZR and V31 as data, preserve low halves for upper-D insertions, and support aliases. NZCV/FPCR/FPSR and guest RAM unchanged. Numerical conversion, FABS/FNEG mode semantics, disabled-feature traps, SME streaming and full applications are separate work.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and shared AdvSIMDExpandImm/VFPExpandImm/Vpart contracts reviewed. All 256 immediates per allocated arrangement plus raw-bit register transfers pass original ARM with FP16 enabled, independent numeric/byte math and native SSE2 complete-state checks. No host FP arithmetic or interpreter fallback.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+        "crates/stela-compiler/src/x86_64/simd/immediates.rs",
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_immediates"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f001400",
+          "expected_mnemonics": [
+            "orr"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -19361,6 +20517,8 @@
     "crates/stela-compiler/src/x86_64/simd/products.rs",
     "crates/stela-compiler/src/aarch64/simd/halving.rs",
     "crates/stela-compiler/src/x86_64/simd/halving.rs",
+    "crates/stela-compiler/src/aarch64/simd/immediates.rs",
+    "crates/stela-compiler/src/x86_64/simd/immediates.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

@@ -5,6 +5,7 @@ use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 mod halving;
+mod immediates;
 mod products;
 mod rearrange;
 mod reductions;
@@ -161,6 +162,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 }
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
+        Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),
         Operand::Saturate(ref operand) => saturating::emit(code, operand, target),

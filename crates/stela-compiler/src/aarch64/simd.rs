@@ -3,6 +3,7 @@
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
 pub mod halving;
+pub mod immediates;
 pub mod products;
 pub mod rearrange;
 pub mod reductions;
@@ -39,6 +40,7 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Immediate(immediates::Operand),
     Halving(halving::Operand),
     Product(products::Operand),
     Saturate(saturating::Operand),
@@ -93,6 +95,9 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = immediates::decode(word) {
+        return Some(decoded.map(Operand::Immediate));
+    }
     if let Some(decoded) = halving::decode(word) {
         return Some(decoded.map(Operand::Halving));
     }
