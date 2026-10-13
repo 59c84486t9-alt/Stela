@@ -118,6 +118,9 @@ enum Command {
         guest_base: u64,
         #[arg(long)]
         output_dir: PathBuf,
+        /// Emit explicit software PAuth helper boundaries; preparation needs no keys.
+        #[arg(long)]
+        software_pauth: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     RunBlocks {
@@ -134,6 +137,9 @@ enum Command {
         block_budget: usize,
         #[arg(long, default_value = ".stela/cache/blocks-v1")]
         cache_dir: PathBuf,
+        /// Opt into software IB/SP authentication with explicit {low,high} test keys.
+        #[arg(long)]
+        software_pauth_ib_key: Option<PathBuf>,
     },
     /// Probe trusted executable entry code; dyld/process setup remains unresolved.
     ProbeImageEntry {
@@ -177,6 +183,9 @@ enum Command {
         stack_bytes: u64,
         #[arg(long, default_value = ".stela/cache/blocks-v1")]
         cache_dir: PathBuf,
+        /// Also execute the original PACIBSP, then stop before its following instruction.
+        #[arg(long)]
+        software_pauth_ib_key: Option<PathBuf>,
     },
     /// Inspect kernel collection images using collection-relative offsets.
     FilesetManifest {
@@ -250,6 +259,9 @@ enum Command {
         /// Require MH_DYLINKER and seed its typed LC_UNIXTHREAD PC instead of LC_MAIN.
         #[arg(long, conflicts_with = "guest_base")]
         dynamic_linker: bool,
+        /// Prepare software PAuth helper boundaries without executing or supplying keys.
+        #[arg(long)]
+        software_pauth: bool,
         /// Treat input as raw code registered at this address instead of a Mach-O.
         #[arg(long, value_parser = parse_address)]
         guest_base: Option<u64>,
@@ -434,6 +446,39 @@ struct RegisterInput {
     fpcr: u32,
     #[serde(default)]
     fpsr: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauthKeyInput {
+    low: u64,
+    high: u64,
+}
+
+fn block_profile(software_pauth: bool) -> stela_compiler::block::BlockProfile {
+    if software_pauth {
+        stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
+    } else {
+        stela_compiler::block::BlockProfile::Ordinary
+    }
+}
+
+fn pauth_context(
+    path: &std::path::Path,
+    address_space: u64,
+) -> Result<stela_runtime::pauth::Context> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    File::open(path)?.take(4097).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 4096,
+        "software PAuth key input exceeds 4096 bytes"
+    );
+    let keys: PauthKeyInput = serde_json::from_slice(&bytes)?;
+    Ok(stela_runtime::pauth::Context::new(
+        address_space,
+        stela_runtime::pauth::Keys::from_ib_words(keys.low, keys.high),
+    ))
 }
 
 fn register_json(state: &stela_compiler::GuestState) -> serde_json::Value {
@@ -855,14 +900,17 @@ fn run() -> Result<()> {
             input,
             guest_base,
             output_dir,
+            software_pauth,
         } => {
             let source = std::fs::read(&input)?;
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-            let compiled = stela_compiler::block::compile(
+            let profile = block_profile(software_pauth);
+            let compiled = stela_compiler::block::compile_with_profile(
                 window,
                 stela_compiler::GuestAddress(guest_base),
+                profile,
             )?;
             ensure!(
                 !output_dir.exists(),
@@ -872,7 +920,7 @@ fn run() -> Result<()> {
             std::fs::write(output_dir.join("native.bin"), &compiled.native.x86_64_code)?;
             let manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot",
                 "source_bytes":compiled.source_bytes,"source_sha256":stela_core::sha256(&source[..compiled.source_bytes]),
-                "guest_base":guest_base,"abi":stela_compiler::block::BLOCK_ABI,
+                "guest_base":guest_base,"abi":profile.abi(),
                 "native_sha256":stela_core::sha256(&compiled.native.x86_64_code),
                 "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
@@ -888,6 +936,7 @@ fn run() -> Result<()> {
             state,
             block_budget,
             cache_dir,
+            software_pauth_ib_key,
         } => {
             use stela_runtime::blocks::{BlockRuntime, ThreadState};
             ensure!(
@@ -917,22 +966,38 @@ fn run() -> Result<()> {
             };
             let source = std::fs::read(input)?;
             let source_hash = stela_core::sha256(&source);
-            let mut runtime = BlockRuntime::new(1, cache_dir);
+            let context = software_pauth_ib_key
+                .as_deref()
+                .map(|path| pauth_context(path, 1))
+                .transpose()?;
+            let mut runtime =
+                BlockRuntime::new_with_profile(1, cache_dir, block_profile(context.is_some()));
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
             // SAFETY: This explicit research command accepts trusted guest code
             // and caller-provided direct native RAM addresses under its documented ABI.
             let outcome = unsafe {
-                runtime.run(
-                    &mut thread,
-                    stop_pc.map(stela_compiler::GuestAddress),
-                    block_budget,
-                )?
+                if let Some(context) = &context {
+                    runtime.run_with_pauth(
+                        &mut thread,
+                        stop_pc.map(stela_compiler::GuestAddress),
+                        block_budget,
+                        context,
+                    )?
+                } else {
+                    runtime.run(
+                        &mut thread,
+                        stop_pc.map(stela_compiler::GuestAddress),
+                        block_budget,
+                    )?
+                }
             };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
-                "outcome":outcome,"abi":stela_compiler::block::BLOCK_ABI,
+                "outcome":outcome,"abi":runtime.profile().abi(),
+                "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
+                "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "complete_binary_verified":false}))?
             );
@@ -1035,6 +1100,7 @@ fn run() -> Result<()> {
             stack_base,
             stack_bytes,
             cache_dir,
+            software_pauth_ib_key,
         } => {
             let arguments = arguments
                 .map(|path| -> Result<_> { Ok(serde_json::from_slice(&std::fs::read(path)?)?) })
@@ -1050,6 +1116,7 @@ fn run() -> Result<()> {
                     stack_base,
                     stack_bytes,
                     cache_dir,
+                    software_pauth_ib_key,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1225,6 +1292,7 @@ fn run() -> Result<()> {
             input,
             architecture,
             dynamic_linker,
+            software_pauth,
             guest_base,
             entry,
             function_starts,
@@ -1247,7 +1315,11 @@ fn run() -> Result<()> {
                 data.len() <= 256 * 1024 * 1024,
                 "code-discovery input exceeds 256 MiB"
             );
-            let mut runtime = BlockRuntime::new(0x534f_5245_414f_5401, cache_dir);
+            let mut runtime = BlockRuntime::new_with_profile(
+                0x534f_5245_414f_5401,
+                cache_dir,
+                block_profile(software_pauth),
+            );
             let mut regions = Vec::new();
             let mut roots = entry;
             let provenance;
@@ -1302,6 +1374,7 @@ fn run() -> Result<()> {
             let mut report = serde_json::json!({"schema_version":1,"kind":"apple_code_discovery_aot_preparation",
                 "input":input,"container_sha256":stela_core::sha256(&data),"provenance":provenance,
                 "executable_regions":regions,"discovery":discovery,
+                "abi":runtime.profile().abi(),
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "discovery_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/blocks.rs")),
                 "metadata_source_sha256":stela_core::sha256(include_bytes!("macho/block_image.rs")),

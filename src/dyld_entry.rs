@@ -1,6 +1,6 @@
 //! A bounded original-dyld startup probe, not an application launcher.
-//! Only the reviewed register-only prefix runs; original data/fixups and PAC
-//! remain untouched. Main/dyld segments and argument memory stay owned together.
+//! Only the reviewed register-only prefix and optionally its first software PAC
+//! operation run. Main/dyld segments and argument memory stay owned together.
 use crate::macho::{load_plan, mapped_image};
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{GuestAddress, GuestState};
@@ -17,6 +17,7 @@ pub struct Options {
     pub stack_base: u64,
     pub stack_bytes: u64,
     pub cache_dir: PathBuf,
+    pub software_pauth_ib_key: Option<PathBuf>,
 }
 
 fn instruction(data: &[u8], plan: &load_plan::LoadPlan, address: u64) -> Result<u32> {
@@ -115,9 +116,21 @@ pub fn probe(
         .pc
         .checked_add(options.dyld_slide)
         .context("dyld entry slide overflow")?;
-    let stop = target
+    let target_pc = target
         .checked_add(options.dyld_slide)
         .context("dyld target slide overflow")?;
+    let context = options
+        .software_pauth_ib_key
+        .as_deref()
+        .map(|path| crate::pauth_context(path, 0x534f524544594c44))
+        .transpose()?;
+    let stop = if context.is_some() {
+        target_pc
+            .checked_add(4)
+            .context("dyld PAC continuation overflow")?
+    } else {
+        target_pc
+    };
     let main_text = main
         .segments
         .iter()
@@ -160,7 +173,11 @@ pub fn probe(
         memory.read_snapshot(options.image_base, 32)? == main_bytes[..32],
         "mapped main header differs"
     );
-    let mut runtime = BlockRuntime::new(0x534f524544594c44, options.cache_dir);
+    let mut runtime = BlockRuntime::new_with_profile(
+        0x534f524544594c44,
+        options.cache_dir,
+        crate::block_profile(context.is_some()),
+    );
     for (address, bytes) in dyld_mapping.code {
         runtime.register_code(GuestAddress(address), bytes)?;
     }
@@ -174,26 +191,42 @@ pub fn probe(
         },
     };
     let initial = crate::register_json(&thread.registers);
-    // SAFETY: exact five-word whitelist above permits only register changes and
-    // one direct exit. Explicit stop prevents PAC or any target instruction from
-    // executing even if a later compiler adds support. Owned mappings remain live.
-    let outcome = unsafe { runtime.run(&mut thread, Some(GuestAddress(stop)), 2)? };
+    // SAFETY: exact whitelist permits only register changes/direct exit, plus
+    // the optional validated software PACIBSP helper. Explicit stop precedes
+    // every other target instruction. Owned mappings remain live throughout.
+    let outcome = unsafe {
+        if let Some(context) = &context {
+            runtime.run_with_pauth(&mut thread, Some(GuestAddress(stop)), 3, context)?
+        } else {
+            runtime.run(&mut thread, Some(GuestAddress(stop)), 2)?
+        }
+    };
     ensure!(
         outcome.reason == StopReason::StopAddress
-            && outcome.blocks_executed == 1
+            && outcome.blocks_executed == (if context.is_some() { 2 } else { 1 })
             && thread.pc.0 == stop,
-        "dyld startup did not stop after one reviewed block"
+        "dyld startup did not stop after the reviewed instructions"
     );
     let after = memory.read_snapshot(arguments.payload_address, arguments.initial_bytes.len())?;
     ensure!(
         before == after,
         "register-only startup changed argument memory"
     );
-    let target_analysis =
-        match stela_compiler::block::analyze(&0xd503237fu32.to_le_bytes(), GuestAddress(stop)) {
-            Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
-            Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
-        };
+    let target_analysis = match stela_compiler::block::analyze(
+        &0xd503237fu32.to_le_bytes(),
+        GuestAddress(target_pc),
+    ) {
+        Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
+        Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
+    };
+    let selected_profile_target_analysis = match stela_compiler::block::analyze_with_profile(
+        &0xd503237fu32.to_le_bytes(),
+        GuestAddress(target_pc),
+        runtime.profile(),
+    ) {
+        Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
+        Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
+    };
     Ok(serde_json::json!({
         "schema_version":1,"kind":"original_dyld_startup_prefix_probe",
         "dyld":{"path":dyld_path,"container_sha256":stela_core::sha256(&dyld_data),"slice_offset":dyld_offset,"plan":dyld,"slide":options.dyld_slide},
@@ -201,14 +234,18 @@ pub fn probe(
         "arguments":arguments,"process_arguments":args,"stack":stack,"mapped_regions":memory.regions(),
         "unreserved_guards":{"main":main_mapping.unreserved_guards,"dyld":dyld_mapping.unreserved_guards},
         "argument_payload_sha256":stela_core::sha256(&before),"argument_payload_after_sha256":stela_core::sha256(&after),
-        "entry_pc":entry,"stop_pc":stop,"original_prefix_words":words,
+        "entry_pc":entry,"stop_pc":stop,"target_pc":target_pc,"original_prefix_words":words,
+        "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
+        "pauth_instruction_executed":context.is_some(),"abi":runtime.profile().abi(),
+        "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
         "initial_state":initial,"state":crate::register_json(&thread.registers),"pc":thread.pc.0,
         "outcome":outcome,"target_instruction":"PACIBSP","target_analysis":target_analysis,
+        "target_analysis_profile":"ordinary","selected_profile_target_analysis":selected_profile_target_analysis,
         "fixups_applied":false,"native_executed":true,"complete_binary_verified":false,
         "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         "probe_source_sha256":stela_core::sha256(include_bytes!("dyld_entry.rs")),
         "process_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/process.rs")),
-        "unresolved_requirements":["PAC and authenticated fixups","dyld self-rebase and shared-cache handoff","initializers, TLS and guest process services","full original application execution"]
+        "unresolved_requirements":["remaining PAC operations and authenticated fixups","dyld self-rebase and shared-cache handoff","initializers, TLS and guest process services","full original application execution"]
     }))
 }
 
