@@ -14,6 +14,7 @@ import tempfile
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from evidence import write_evidence
 import a64_checklist
+import apple_isa
 
 ROOT = Path(__file__).resolve().parents[1]
 STATUSES = ('implemented', 'partial', 'unsupported')
@@ -291,6 +292,23 @@ def validate_current_compiler(registry, compiler, root=ROOT):
 
 
 def markdown(report):
+    if 'apple_codegen_candidates' in report:
+        row = report['apple_codegen_candidates']['summary']['union']
+        apple = report['apple_specific_extensions']
+        return ('| Measurement | Current evidence |\n| --- | --- |\n'
+                f"| Apple M1–M5 candidate forms implemented | **{row['implemented']:,} / {row['total']:,} ({row['implementation_percentage']:.2f}%)** |\n"
+                f"| Candidate forms partially implemented | {row['partial']:,} |\n"
+                f"| Candidate forms unimplemented | {row['unsupported']:,} |\n"
+                f"| Apple-specific extension groups | {apple['implemented']} implemented / {apple['tracked']} tracked; inventory open |\n"
+                f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n\n"
+                f"Pinned LLVM Apple CPU models mapped to Arm **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. "
+                'Canonical encoding forms count once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
+                'This candidate inventory includes streaming SVE through SME, without general non-streaming SVE. '
+                'Full hardware membership, M6 and Apple-private additions remain open; reviewed-profile instruction coverage does not establish complete CPU, application or macOS compatibility.\n\n'
+                '[Apple profile inventory](tests/isa/apple-codegen-profiles.json) · '
+                '[Arm reference checklist](tests/isa/a64-documented-checklist.json) · '
+                '[Apple extensions](tests/isa/apple-specific-extensions.json) · '
+                '[Scope and evidence](docs/development.md#apple-code-generation-candidate-inventory).\n')
     if 'documented_isa' in report:
         row = report['documented_isa']['summary']
         apple = report['apple_specific_extensions']
@@ -373,6 +391,7 @@ def main():
     parser.add_argument('--block-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-block-forms.json')
     parser.add_argument('--service-registry', type=Path, default=ROOT / 'tests/isa/a64-service-forms.json')
     parser.add_argument('--checklist', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
+    parser.add_argument('--apple-profiles', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
@@ -389,6 +408,8 @@ def main():
     service_rows = validate_registry(service_registry)
     catalog_data = args.checklist.read_bytes()
     catalog = json.loads(catalog_data)
+    apple_profiles_data = args.apple_profiles.read_bytes()
+    apple_profiles = json.loads(apple_profiles_data)
     apple = json.loads((ROOT / 'tests/isa/apple-specific-extensions.json').read_bytes())
     if apple.get('kind') != 'apple_specific_extension_ledger' or apple.get('inventory_complete') is not False:
         raise ValueError('Apple additions need a separate explicitly open inventory')
@@ -413,6 +434,7 @@ def main():
                                                       executable_hash=executable_hash)
     service_evidence, service_sources = validate_evidence(service_registry, service_rows, compiler, executable_hash=executable_hash)
     assessed, documented_summary = a64_checklist.assess(catalog, [registry, block_registry, service_registry])
+    apple_summary = apple_isa.assess(apple_profiles, assessed)
     assessed['compiler_source_sha256'] = compiler
     assessed['evidence_reports'] = [{k: row[k] for k in ('report', 'report_sha256')}
                                    for group in (evidence, block_evidence, service_evidence) for row in group.values()]
@@ -422,6 +444,7 @@ def main():
     if (sha256(args.cli) != executable_hash or args.registry.read_bytes() != registry_data
             or args.block_registry.read_bytes() != block_data
             or args.service_registry.read_bytes() != service_data or args.checklist.read_bytes() != catalog_data
+            or args.apple_profiles.read_bytes() != apple_profiles_data
             or validate_current_compiler(registry, compiler) != fingerprint_sources
             or validate_current_compiler(block_registry, compiler) != fingerprint_sources):
         raise ValueError('Compiler/registry changed during measurement')
@@ -436,6 +459,11 @@ def main():
               'profile': registry['profile'], 'summary': summarize(rows),
               'documented_isa': {'version': catalog['version'], 'facts_sha256': catalog['facts_sha256'],
                                 'summary': documented_summary},
+              'apple_codegen_candidates': {'version': apple_profiles['version'],
+                  'facts_sha256': apple_profiles['facts_sha256'],
+                  'inventory_sha256': hashlib.sha256(apple_profiles_data).hexdigest(),
+                  'harness_source_sha256': sha256(apple_isa.__file__), 'summary': apple_summary,
+                  'inventory_complete': False, 'hardware_membership_verified': False},
               'apple_specific_extensions': {'tracked': len(apple['extensions']),
                   'implemented': sum(r['status'] == 'implemented' for r in apple['extensions']),
                   'inventory_complete': False},
@@ -454,7 +482,7 @@ def main():
               'native_differential_evidence': evidence, 'compiler_smoke_probes': probes,
               'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
                                  for identity, row in rows.items()],
-              'limits': 'Documented ISA percentage uses the fixed complete June2026 A64 reference superset, deduplicated across explicit execution profiles. Partial forms earn no credit. Apple-specific additions and required Apple CPU/VM inventory remain separate and open. Differential tests establish evidence, not exhaustive correctness or complete application/macOS execution.'}
+              'limits': 'Headline instruction percentage uses pinned public LLVM Apple M1–M5 code-generation candidate forms mapped to the June2026 Arm reference, deduplicated across reviewed execution profiles. Full Arm reference coverage remains secondary. Partial forms earn no credit. These models do not prove complete Apple hardware/mode/operand availability; M6, Apple-private additions and full CPU/VM conformance remain open. Differential tests establish evidence, not exhaustive correctness or complete application/macOS execution.'}
     archive = write_evidence(args.output, report)
     if args.markdown_output:
         write_markdown(args.markdown_output, markdown(report))

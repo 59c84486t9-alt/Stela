@@ -91,6 +91,20 @@ class IsaProgressTests(unittest.TestCase):
         self.assertIn('0 implemented / 3 tracked; inventory open', text)
         self.assertIn('not macOS or application completion', text)
 
+    def test_readme_apple_candidates_replace_broader_arm_headline_without_claiming_hardware_completion(self):
+        report = {'summary': progress.summarize(progress.validate_registry(fixtures())),
+            'compiler_source_sha256': COMPILER,
+            'documented_isa': {'summary': {'implemented': 284, 'total': 4332}},
+            'apple_codegen_candidates': {'summary': {'union': {'implemented': 284, 'partial': 13,
+                'unsupported': 2822, 'total': 3119, 'implementation_percentage': 28400 / 3119}}},
+            'apple_specific_extensions': {'implemented': 0, 'tracked': 3}}
+        text = progress.markdown(report)
+        self.assertIn('284 / 3,119 (9.11%)', text)
+        self.assertIn('streaming SVE through SME', text)
+        self.assertIn('Full hardware membership, M6 and Apple-private additions remain open', text)
+        self.assertNotIn('4,332', text)
+        self.assertIn('reviewed execution profiles', text)
+
     def test_reviewed_counts_never_manufacture_completion_denominator(self):
         registry = fixtures()
         rows = progress.validate_registry(registry)
