@@ -153,16 +153,126 @@ struct ParsedBlock {
     source_bytes: usize,
 }
 
-fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, CompileError> {
+/// Semantic-analysis failure attached to the original failing instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockAnalysisError {
+    pub pc: GuestAddress,
+    pub detail: String,
+}
+impl std::fmt::Display for BlockAnalysisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} at {:#x}", self.detail, self.pc.0)
+    }
+}
+impl std::error::Error for BlockAnalysisError {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuccessorKind {
+    Direct,
+    ConditionalTarget,
+    ConditionalFallthrough,
+    CallTarget,
+    CallContinuation,
+    Fallthrough,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StaticSuccessor {
+    pub kind: SuccessorKind,
+    pub target: GuestAddress,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicEdgeKind {
+    Branch,
+    Call,
+    Return,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DynamicEdge {
+    pub kind: DynamicEdgeKind,
+    /// Architectural Xn source; index31 denotes Zero, never SP.
+    pub register: u8,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockAnalysis {
+    pub source_bytes: usize,
+    pub terminator_pc: Option<GuestAddress>,
+    pub static_successors: Vec<StaticSuccessor>,
+    pub dynamic_edge: Option<DynamicEdge>,
+    pub trap: Option<SynchronousTrap>,
+}
+/// Discover boundaries and edges from the exact parser used by both AOT and JIT.
+/// Static call continuations are candidates, not proof that the callee returns.
+/// Dynamic targets and trap resumption require external runtime evidence.
+pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, BlockAnalysisError> {
+    let parsed = parse(source, base)?;
+    let mut successors = Vec::new();
+    let mut dynamic_edge = None;
+    let mut trap = None;
+    let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
+    match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
+        None => add(SuccessorKind::Fallthrough, parsed.next_pc),
+        Some(Terminator::Branch(Operation::Branch { target })) => {
+            add(SuccessorKind::Direct, *target)
+        }
+        Some(Terminator::Branch(
+            Operation::BranchCondition { target, .. }
+            | Operation::BranchZero { target, .. }
+            | Operation::BranchBit { target, .. },
+        )) => {
+            add(SuccessorKind::ConditionalTarget, *target);
+            add(SuccessorKind::ConditionalFallthrough, parsed.next_pc);
+        }
+        Some(Terminator::DirectCall(target)) => {
+            add(SuccessorKind::CallTarget, *target);
+            add(SuccessorKind::CallContinuation, parsed.next_pc);
+        }
+        Some(Terminator::Register { source, kind }) => {
+            let edge = match kind {
+                ExitKind::Indirect => DynamicEdgeKind::Branch,
+                ExitKind::Call => DynamicEdgeKind::Call,
+                ExitKind::Return => DynamicEdgeKind::Return,
+                _ => unreachable!("private parser only constructs ordinary register transfers"),
+            };
+            let register = match source {
+                Register::X(index) => *index,
+                Register::Zero => 31,
+                Register::Sp => unreachable!("transfer source never SP"),
+            };
+            dynamic_edge = Some(DynamicEdge {
+                kind: edge,
+                register,
+            });
+            if *kind == ExitKind::Call {
+                add(SuccessorKind::CallContinuation, parsed.next_pc);
+            }
+        }
+        Some(Terminator::Trap(value)) => trap = Some(*value),
+        Some(Terminator::Branch(_)) => {
+            unreachable!("private parser only stores branch operations as terminators")
+        }
+    }
+    Ok(BlockAnalysis {
+        source_bytes: parsed.source_bytes,
+        terminator_pc: parsed.terminal.map(|(pc, _)| pc),
+        static_successors: successors,
+        dynamic_edge,
+        trap,
+    })
+}
+
+fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, BlockAnalysisError> {
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "block input and guest base must be nonempty/aligned to 4 bytes".into(),
-        ));
+        return Err(BlockAnalysisError {
+            pc: base,
+            detail: "block input and guest base must be nonempty/aligned to 4 bytes".into(),
+        });
     }
     if source.len() / 4 > MAX_BLOCK_INSTRUCTIONS {
-        return Err(CompileError(format!(
-            "block input exceeds {MAX_BLOCK_INSTRUCTIONS} instructions"
-        )));
+        return Err(BlockAnalysisError {
+            pc: base,
+            detail: format!("block input exceeds {MAX_BLOCK_INSTRUCTIONS} instructions"),
+        });
     }
     let mut instructions = vec![];
     let mut terminal = None;
@@ -170,19 +280,23 @@ fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, CompileError>
     let mut next_pc = base;
     for bytes in source.as_chunks::<4>().0 {
         let pc = next_pc;
-        next_pc = GuestAddress(
-            pc.0.checked_add(4)
-                .ok_or_else(|| CompileError("block guest address overflow".into()))?,
-        );
+        next_pc = GuestAddress(pc.0.checked_add(4).ok_or_else(|| BlockAnalysisError {
+            pc,
+            detail: "block guest address overflow".into(),
+        })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
-        if let Some(decoded) = decode_terminator(pc, word)? {
+        if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {
+            pc,
+            detail: error.0,
+        })? {
             terminal = Some((pc, decoded));
             break;
         }
-        let instruction = Decoder
-            .lift(pc, word)
-            .map_err(|error| CompileError(format!("unsupported ARM64 semantics: {error:?}")))?;
+        let instruction = Decoder.lift(pc, word).map_err(|error| BlockAnalysisError {
+            pc,
+            detail: format!("unsupported ARM64 semantics: {error:?}"),
+        })?;
         if matches!(
             instruction.operation,
             Operation::Branch { .. }
@@ -206,14 +320,16 @@ fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, CompileError>
 /// Validate and identify the consumed prefix without generating native code.
 /// Uses the same semantic lift and transfer boundaries as [`compile`].
 pub fn source_bytes(source: &[u8], base: GuestAddress) -> Result<usize, CompileError> {
-    Ok(parse(source, base)?.source_bytes)
+    Ok(parse(source, base)
+        .map_err(|error| CompileError(error.detail))?
+        .source_bytes)
 }
 
 /// Compile through the first control transfer/trap, or exit at the input boundary.
 /// Unknown semantics before that boundary are rejected. Bytes following a
 /// terminator are unconsumed and do not participate in the returned source map.
 pub fn compile(source: &[u8], base: GuestAddress) -> Result<CompiledBlock, CompileError> {
-    let parsed = parse(source, base)?;
+    let parsed = parse(source, base).map_err(|error| CompileError(error.detail))?;
     let native = crate::x86_64::block::emit(
         &parsed.instructions,
         parsed.terminal.as_ref(),
@@ -231,6 +347,131 @@ mod tests {
 
     fn bytes(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn analysis_shares_consumed_prefix_and_reports_static_and_dynamic_transfer_roles() {
+        let base = GuestAddress(0x1000);
+        for (word, kinds, targets, dynamic) in [
+            (0x14000002, vec![SuccessorKind::Direct], vec![0x1008], None),
+            (
+                0x54000040,
+                vec![
+                    SuccessorKind::ConditionalTarget,
+                    SuccessorKind::ConditionalFallthrough,
+                ],
+                vec![0x1008, 0x1004],
+                None,
+            ),
+            (
+                0xb4000040,
+                vec![
+                    SuccessorKind::ConditionalTarget,
+                    SuccessorKind::ConditionalFallthrough,
+                ],
+                vec![0x1008, 0x1004],
+                None,
+            ),
+            (
+                0x36000040,
+                vec![
+                    SuccessorKind::ConditionalTarget,
+                    SuccessorKind::ConditionalFallthrough,
+                ],
+                vec![0x1008, 0x1004],
+                None,
+            ),
+            (
+                0x94000002,
+                vec![SuccessorKind::CallTarget, SuccessorKind::CallContinuation],
+                vec![0x1008, 0x1004],
+                None,
+            ),
+            (
+                0xd61f0120,
+                vec![],
+                vec![],
+                Some((DynamicEdgeKind::Branch, 9)),
+            ),
+            (
+                0xd63f0120,
+                vec![SuccessorKind::CallContinuation],
+                vec![0x1004],
+                Some((DynamicEdgeKind::Call, 9)),
+            ),
+            (
+                0xd65f03c0,
+                vec![],
+                vec![],
+                Some((DynamicEdgeKind::Return, 30)),
+            ),
+            (
+                0xd61f03e0,
+                vec![],
+                vec![],
+                Some((DynamicEdgeKind::Branch, 31)),
+            ),
+        ] {
+            let source = bytes(&[word, 0]);
+            let analysis = analyze(&source, base).unwrap();
+            assert_eq!(analysis.source_bytes, source_bytes(&source, base).unwrap());
+            assert_eq!(
+                analysis.source_bytes,
+                compile(&source, base).unwrap().source_bytes
+            );
+            assert_eq!(analysis.source_bytes, 4);
+            assert_eq!(
+                analysis
+                    .static_successors
+                    .iter()
+                    .map(|edge| edge.kind)
+                    .collect::<Vec<_>>(),
+                kinds
+            );
+            assert_eq!(
+                analysis
+                    .static_successors
+                    .iter()
+                    .map(|edge| edge.target.0)
+                    .collect::<Vec<_>>(),
+                targets
+            );
+            assert_eq!(
+                analysis.dynamic_edge.map(|edge| (edge.kind, edge.register)),
+                dynamic
+            );
+        }
+        let linear = analyze(&bytes(&[0xd503201f; 256]), base).unwrap();
+        assert_eq!(
+            linear.static_successors[0],
+            StaticSuccessor {
+                kind: SuccessorKind::Fallthrough,
+                target: GuestAddress(0x1400)
+            }
+        );
+    }
+    #[test]
+    fn analysis_reports_exact_decline_pc_and_never_follows_trap_or_post_terminator_data() {
+        let base = GuestAddress(0x1000);
+        let source = bytes(&[0xd503201f, 0, 0xd65f03c0]);
+        let failure = analyze(&source, base).unwrap_err();
+        assert_eq!(failure.pc, GuestAddress(0x1004));
+        assert!(failure.detail.contains("unsupported"));
+        for word in [0xd4001001, 0xd43fffe0] {
+            let analysis = analyze(&bytes(&[0xd503201f, word, 0]), base).unwrap();
+            assert_eq!(analysis.source_bytes, 8);
+            assert!(analysis.static_successors.is_empty());
+            assert!(analysis.dynamic_edge.is_none());
+            assert!(analysis.trap.is_some());
+        }
+        assert!(analyze(&[], base).is_err());
+        assert!(analyze(&bytes(&[0xd503201f; 257]), base).is_err());
+        assert_eq!(
+            analyze(&bytes(&[0xd503201f]), GuestAddress(u64::MAX - 3))
+                .unwrap_err()
+                .pc,
+            GuestAddress(u64::MAX - 3)
+        );
     }
 
     #[test]

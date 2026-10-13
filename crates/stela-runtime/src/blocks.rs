@@ -6,10 +6,19 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
-    block::{BLOCK_ABI, BlockExit, ExitKind, MAX_BLOCK_INSTRUCTIONS, SynchronousTrap, decode_trap},
+    block::{
+        BLOCK_ABI, BlockAnalysis, BlockExit, DynamicEdge, ExitKind, MAX_BLOCK_INSTRUCTIONS,
+        SynchronousTrap, analyze, decode_trap,
+    },
 };
 use stela_core::sha256;
-use std::{collections::BTreeMap, io::Read, marker::PhantomData, path::PathBuf, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io::Read,
+    marker::PhantomData,
+    path::PathBuf,
+    rc::Rc,
+};
 
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -67,6 +76,57 @@ pub struct BlockRuntime {
     regions: BTreeMap<u64, CodeRegion>,
     loaded: BTreeMap<u64, LoadedBlock>,
     _serialized: PhantomData<Rc<()>>,
+}
+
+/// Persistent preparation artifact shared by ahead-of-time discovery and JIT.
+/// Preparing it performs no native mapping, invocation or guest memory access.
+#[derive(Debug, Serialize)]
+pub struct PreparedDiscoveryBlock {
+    pub entry: GuestAddress,
+    pub region_base: GuestAddress,
+    pub generation: u64,
+    pub analysis: BlockAnalysis,
+    pub prepared: Prepared,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiscoveryProblem {
+    UnmappedTarget,
+    UnalignedTarget,
+    TruncatedInstruction,
+    Unsupported {
+        failure_pc: GuestAddress,
+        detail: String,
+    },
+}
+#[derive(Debug, Serialize)]
+pub struct DiscoveryIssue {
+    pub entry: GuestAddress,
+    pub problem: DiscoveryProblem,
+}
+#[derive(Debug, Serialize)]
+pub struct DeferredDynamicEdge {
+    pub entry: GuestAddress,
+    pub instruction_pc: GuestAddress,
+    pub edge: DynamicEdge,
+}
+#[derive(Debug, Serialize)]
+pub struct DiscoveryReport {
+    pub address_space: u64,
+    pub roots: Vec<GuestAddress>,
+    pub budget: usize,
+    pub attempted_entries: usize,
+    pub blocks: Vec<PreparedDiscoveryBlock>,
+    pub issues: Vec<DiscoveryIssue>,
+    pub deferred_dynamic_edges: Vec<DeferredDynamicEdge>,
+    pub pending_entries: Vec<GuestAddress>,
+    pub compiled_blocks: usize,
+    pub disk_cache_hits: usize,
+    pub static_worklist_exhausted: bool,
+    pub dynamic_targets_unresolved: bool,
+    pub native_pages_loaded: bool,
+    pub native_executed: bool,
+    pub complete_code_discovered: bool,
 }
 
 impl BlockRuntime {
@@ -136,21 +196,22 @@ impl BlockRuntime {
             .map(|(&base, region)| (base, region))
     }
 
-    fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        let (base, region) = self.region(pc).context("instruction mapping disappeared")?;
-        if let Some(block) = self.loaded.get(&pc.0) {
-            ensure!(
-                block.region_base == base && block.generation == region.generation,
-                "stale native block generation"
-            );
-            outcome.memory_cache_hits += 1;
-            return Ok(());
-        }
+    /// Prepare one known entry into the persistent AOT/JIT cache, without RX
+    /// loading or execution. Source bytes/edges share the compiler's parser.
+    pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
+        ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        let (base, region) = self.region(pc).context("unmapped preparation entry")?;
+        ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
         let offset = usize::try_from(pc.0 - base)?;
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
+        let analysis = analyze(window, pc)?;
         let prepared = prepare_block(window, pc, &self.cache_root)?;
+        ensure!(
+            prepared.source_bytes == analysis.source_bytes,
+            "prepared block analysis extent mismatch"
+        );
         let manifest = &prepared.prepared.manifest;
         ensure!(
             manifest.identity.guest_base == pc.0
@@ -170,8 +231,134 @@ impl BlockRuntime {
             manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
             "invalid block native size"
         );
+        Ok(PreparedDiscoveryBlock {
+            entry: pc,
+            region_base: GuestAddress(base),
+            generation,
+            analysis,
+            prepared: prepared.prepared,
+        })
+    }
+
+    /// Follow known static successors only. A call continuation is a candidate,
+    /// not proof of a return; BR/BLR/RET targets remain explicitly unresolved.
+    /// Budget counts all attempted entries, including declines/missing regions.
+    /// No native instructions or guest data accesses execute during discovery.
+    pub fn discover(&mut self, roots: &[GuestAddress], budget: usize) -> Result<DiscoveryReport> {
+        ensure!(
+            !roots.is_empty() && roots.len() <= 1024,
+            "discovery requires 1..1024 roots"
+        );
+        ensure!(
+            budget <= 4096,
+            "discovery budget exceeds 4096 attempted entries"
+        );
+        let mut unique = BTreeSet::new();
+        for root in roots {
+            ensure!(
+                root.0.is_multiple_of(4) && unique.insert(root.0),
+                "discovery roots must be aligned and distinct"
+            );
+        }
+        let roots = unique.iter().copied().map(GuestAddress).collect::<Vec<_>>();
+        let mut queue = unique.iter().copied().collect::<VecDeque<_>>();
+        let mut blocks = Vec::new();
+        let mut issues = Vec::new();
+        let mut dynamic = Vec::new();
+        let mut attempted = 0;
+        let mut compiled = 0;
+        let mut hits = 0;
+        while attempted < budget {
+            let Some(raw) = queue.pop_front() else {
+                break;
+            };
+            attempted += 1;
+            let pc = GuestAddress(raw);
+            let problem = if !raw.is_multiple_of(4) {
+                Some(DiscoveryProblem::UnalignedTarget)
+            } else if let Some((base, region)) = self.region(pc) {
+                if region.end - raw < 4 {
+                    Some(DiscoveryProblem::TruncatedInstruction)
+                } else {
+                    let offset = usize::try_from(raw - base)?;
+                    let available =
+                        ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
+                    match analyze(&region.source[offset..offset + available], pc) {
+                        Ok(_) => None,
+                        Err(error) => Some(DiscoveryProblem::Unsupported {
+                            failure_pc: error.pc,
+                            detail: error.detail,
+                        }),
+                    }
+                }
+            } else {
+                Some(DiscoveryProblem::UnmappedTarget)
+            };
+            if let Some(problem) = problem {
+                issues.push(DiscoveryIssue { entry: pc, problem });
+                continue;
+            }
+            let block = self.prepare(pc)?;
+            if block.prepared.cache_hit {
+                hits += 1;
+            } else {
+                compiled += 1;
+            }
+            for successor in &block.analysis.static_successors {
+                if unique.insert(successor.target.0) {
+                    queue.push_back(successor.target.0);
+                }
+            }
+            if let Some(edge) = &block.analysis.dynamic_edge {
+                dynamic.push(DeferredDynamicEdge {
+                    entry: pc,
+                    instruction_pc: block
+                        .analysis
+                        .terminator_pc
+                        .context("dynamic edge lacks terminator")?,
+                    edge: edge.clone(),
+                });
+            }
+            blocks.push(block);
+        }
+        let static_worklist_exhausted = queue.is_empty() && issues.is_empty();
+        let dynamic_targets_unresolved = !dynamic.is_empty();
+        Ok(DiscoveryReport {
+            address_space: self.address_space,
+            roots,
+            budget,
+            attempted_entries: attempted,
+            blocks,
+            issues,
+            deferred_dynamic_edges: dynamic,
+            pending_entries: queue.into_iter().map(GuestAddress).collect(),
+            compiled_blocks: compiled,
+            disk_cache_hits: hits,
+            static_worklist_exhausted,
+            dynamic_targets_unresolved,
+            native_pages_loaded: false,
+            native_executed: false,
+            complete_code_discovered: false,
+        })
+    }
+
+    fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
+        let (base, region) = self.region(pc).context("instruction mapping disappeared")?;
+        if let Some(block) = self.loaded.get(&pc.0) {
+            ensure!(
+                block.region_base == base && block.generation == region.generation,
+                "stale native block generation"
+            );
+            outcome.memory_cache_hits += 1;
+            return Ok(());
+        }
+        let prepared = self.prepare(pc)?;
+        let generation = prepared.generation;
+        let source_bytes = prepared.analysis.source_bytes;
+        let prepared = prepared.prepared;
+        let manifest = &prepared.manifest;
         let mut native = Vec::new();
-        std::fs::File::open(prepared.prepared.directory.join("native.bin"))?
+        std::fs::File::open(prepared.directory.join("native.bin"))?
             .take((MAX_NATIVE_BYTES + 1) as u64)
             .read_to_end(&mut native)?;
         ensure!(
@@ -179,7 +366,7 @@ impl BlockRuntime {
             "block native snapshot checksum mismatch"
         );
         let mapping = platform::Mapping::new(&native)?;
-        if prepared.prepared.cache_hit {
+        if prepared.cache_hit {
             outcome.disk_cache_hits += 1;
         } else {
             outcome.compiled_blocks += 1;
@@ -189,8 +376,8 @@ impl BlockRuntime {
             LoadedBlock {
                 region_base: base,
                 generation,
-                source_bytes: prepared.source_bytes,
-                prepared: prepared.prepared,
+                source_bytes,
+                prepared,
                 mapping,
             },
         );

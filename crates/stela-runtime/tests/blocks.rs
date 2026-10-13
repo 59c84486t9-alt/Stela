@@ -327,3 +327,235 @@ fn direct_ram_effects_survive_call_and_return_dispatch_boundaries() -> Result<()
     assert_eq!(thread.pc, GuestAddress(STOP));
     Ok(())
 }
+
+#[test]
+fn discovery_follows_both_conditional_edges_calls_continuations_and_loops_without_linear_scanning()
+-> Result<()> {
+    use stela_compiler::block::{DynamicEdgeKind, SuccessorKind};
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(91, cache.path().into());
+    runtime.register_code(
+        GuestAddress(BASE),
+        words(&[
+            transfer(BASE, 0x2000, true),
+            transfer(BASE + 4, 0x3000, false),
+            0,
+        ]),
+    )?;
+    runtime.register_code(
+        GuestAddress(0x2000),
+        words(&[0x54000040, RET, transfer(0x2008, 0x2000, false), 0]),
+    )?;
+    runtime.register_code(GuestAddress(0x3000), words(&[RET, 0]))?;
+    let report = runtime.discover(&[GuestAddress(BASE)], 32)?;
+    assert_eq!(
+        report.blocks.iter().map(|b| b.entry.0).collect::<Vec<_>>(),
+        [BASE, 0x2000, BASE + 4, 0x2008, 0x2004, 0x3000]
+    );
+    assert_eq!(report.compiled_blocks, 6);
+    assert_eq!(report.attempted_entries, 6);
+    assert!(report.issues.is_empty());
+    assert!(report.pending_entries.is_empty());
+    assert!(report.static_worklist_exhausted);
+    assert_eq!(
+        report.blocks[0]
+            .analysis
+            .static_successors
+            .iter()
+            .map(|e| e.kind)
+            .collect::<Vec<_>>(),
+        [SuccessorKind::CallTarget, SuccessorKind::CallContinuation]
+    );
+    assert_eq!(report.deferred_dynamic_edges.len(), 2);
+    assert!(
+        report
+            .deferred_dynamic_edges
+            .iter()
+            .all(|e| e.edge.kind == DynamicEdgeKind::Return)
+    );
+    assert!(report.dynamic_targets_unresolved);
+    assert!(
+        !report.native_executed && !report.native_pages_loaded && !report.complete_code_discovered
+    );
+    for block in &report.blocks {
+        assert!(runtime.loaded_manifest(block.entry).is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn discovery_prepares_faulting_guest_memory_code_but_does_not_map_or_execute_it() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(92, cache.path().into());
+    // LDR X0,[X1]; RET would dereference an unspecified guest pointer if invoked.
+    runtime.register_code(GuestAddress(BASE), words(&[0xf9400020, RET]))?;
+    let prepared = runtime.prepare(GuestAddress(BASE))?;
+    assert_eq!(prepared.analysis.source_bytes, 8);
+    assert!(!prepared.prepared.cache_hit);
+    assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
+    let report = runtime.discover(&[GuestAddress(BASE)], 1)?;
+    assert_eq!(report.disk_cache_hits, 1);
+    assert!(!report.native_executed && !report.native_pages_loaded);
+    assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
+    Ok(())
+}
+
+#[test]
+fn discovery_distinguishes_indirect_calls_returns_and_traps_without_inventing_targets() -> Result<()>
+{
+    use stela_compiler::block::DynamicEdgeKind;
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(93, cache.path().into());
+    runtime.register_code(GuestAddress(BASE), words(&[0xd63f0120, RET, 0]))?; // BLR X9; RET; unreachable data.
+    runtime.register_code(GuestAddress(0x2000), words(&[0xd61f0140, 0]))?; // BR X10.
+    runtime.register_code(GuestAddress(0x3000), words(&[0xd4001001, 0]))?;
+    let report = runtime.discover(
+        &[
+            GuestAddress(0x3000),
+            GuestAddress(0x2000),
+            GuestAddress(BASE),
+        ],
+        20,
+    )?;
+    assert_eq!(
+        report.roots.iter().map(|p| p.0).collect::<Vec<_>>(),
+        [BASE, 0x2000, 0x3000]
+    );
+    assert_eq!(report.blocks.len(), 4);
+    assert!(report.issues.is_empty());
+    assert_eq!(
+        report
+            .deferred_dynamic_edges
+            .iter()
+            .map(|e| (e.edge.kind, e.edge.register))
+            .collect::<Vec<_>>(),
+        [
+            (DynamicEdgeKind::Call, 9),
+            (DynamicEdgeKind::Branch, 10),
+            (DynamicEdgeKind::Return, 30)
+        ]
+    );
+    let trap = report.blocks.iter().find(|b| b.entry.0 == 0x3000).unwrap();
+    assert!(trap.analysis.trap.is_some());
+    assert!(trap.analysis.static_successors.is_empty());
+    Ok(())
+}
+
+#[test]
+fn discovery_reports_exact_unsupported_pc_missing_and_truncated_sources_with_bounded_work()
+-> Result<()> {
+    use stela_runtime::blocks::DiscoveryProblem;
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(94, cache.path().into());
+    runtime.register_code(GuestAddress(BASE), words(&[NOP, 0, RET]))?;
+    let mut partial = words(&[NOP]);
+    partial.extend([1, 2]);
+    runtime.register_code(GuestAddress(0x2000), partial)?;
+    let report = runtime.discover(
+        &[
+            GuestAddress(BASE),
+            GuestAddress(0x2004),
+            GuestAddress(0x9000),
+        ],
+        10,
+    )?;
+    assert!(report.blocks.is_empty());
+    assert_eq!(report.issues.len(), 3);
+    assert!(
+        matches!(&report.issues[0].problem,DiscoveryProblem::Unsupported{failure_pc,..} if failure_pc.0==BASE+4)
+    );
+    assert_eq!(
+        report.issues[1].problem,
+        DiscoveryProblem::TruncatedInstruction
+    );
+    assert_eq!(report.issues[2].problem, DiscoveryProblem::UnmappedTarget);
+    assert!(!report.static_worklist_exhausted);
+    assert_eq!(report.attempted_entries, 3);
+    assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
+    assert!(runtime.discover(&[], 1).is_err());
+    assert!(
+        runtime
+            .discover(&[GuestAddress(BASE), GuestAddress(BASE)], 1)
+            .is_err()
+    );
+    assert!(runtime.discover(&[GuestAddress(BASE + 1)], 1).is_err());
+    assert!(runtime.discover(&[GuestAddress(BASE)], 4097).is_err());
+    let zero = runtime.discover(&[GuestAddress(BASE)], 0)?;
+    assert_eq!(zero.attempted_entries, 0);
+    assert_eq!(zero.pending_entries, [GuestAddress(BASE)]);
+    Ok(())
+}
+
+#[test]
+fn prepared_aot_artifact_is_reused_by_jit_and_source_replacement_changes_identity() -> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(95, cache.path().into());
+    let original = words(&[ADD_ONE, RET]);
+    runtime.register_code(GuestAddress(BASE), original.clone())?;
+    let prepared = runtime.prepare(GuestAddress(BASE))?;
+    let key = prepared.prepared.key;
+    let generation = prepared.generation;
+    assert!(!prepared.prepared.cache_hit);
+    assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
+    let mut thread = state(BASE, 9);
+    // SAFETY: independently owned memory-free code and an explicit return sentinel.
+    let ran = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
+    assert_eq!(ran.compiled_blocks, 0);
+    assert_eq!(ran.disk_cache_hits, 1);
+    assert_eq!(thread.registers.x[0], 10);
+    assert_eq!(
+        runtime
+            .loaded_manifest(GuestAddress(BASE))
+            .unwrap()
+            .identity,
+        prepared.prepared.manifest.identity
+    );
+    runtime.register_code(GuestAddress(BASE), words(&[0x91000800, RET]))?;
+    assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
+    let replaced = runtime.prepare(GuestAddress(BASE))?;
+    assert!(replaced.generation > generation);
+    assert_ne!(replaced.prepared.key, key);
+    assert!(!replaced.prepared.cache_hit);
+    assert!(runtime.unregister_code(GuestAddress(BASE)));
+    assert!(runtime.prepare(GuestAddress(BASE)).is_err());
+    runtime.register_code(GuestAddress(BASE), original)?;
+    let restored = runtime.prepare(GuestAddress(BASE))?;
+    assert!(restored.prepared.cache_hit);
+    assert_eq!(restored.prepared.key, key);
+    Ok(())
+}
+
+#[test]
+fn discovery_budget_leaves_deterministic_candidates_and_new_runtime_uses_same_disk_artifacts()
+-> Result<()> {
+    let cache = tempfile::tempdir()?;
+    let code = words(&[0x54000040, RET, RET]);
+    let mut runtime = BlockRuntime::new(96, cache.path().into());
+    runtime.register_code(GuestAddress(BASE), code.clone())?;
+    let first = runtime.discover(&[GuestAddress(BASE)], 1)?;
+    assert_eq!(
+        first.pending_entries,
+        [GuestAddress(BASE + 8), GuestAddress(BASE + 4)]
+    );
+    assert_eq!(first.compiled_blocks, 1);
+    assert!(!first.static_worklist_exhausted);
+    let mut second = BlockRuntime::new(96, cache.path().into());
+    second.register_code(GuestAddress(BASE), code)?;
+    let warm = second.discover(&[GuestAddress(BASE)], 10)?;
+    assert_eq!(
+        warm.blocks.iter().map(|b| b.entry.0).collect::<Vec<_>>(),
+        [BASE, BASE + 8, BASE + 4]
+    );
+    assert_eq!(warm.disk_cache_hits, 1);
+    assert_eq!(warm.compiled_blocks, 2);
+    assert!(warm.static_worklist_exhausted);
+    assert_eq!(
+        first.blocks[0].prepared.manifest.identity,
+        warm.blocks[0].prepared.manifest.identity
+    );
+    assert_eq!(
+        first.blocks[0].prepared.manifest.native_sha256,
+        warm.blocks[0].prepared.manifest.native_sha256
+    );
+    Ok(())
+}
