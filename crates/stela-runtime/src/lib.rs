@@ -5,6 +5,7 @@ pub mod clock;
 pub mod darwin;
 pub mod dispatch;
 pub mod execution;
+pub mod mach;
 pub mod memory;
 pub mod pauth;
 pub mod process;

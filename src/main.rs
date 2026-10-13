@@ -156,6 +156,9 @@ enum Command {
         /// Service reviewed Darwin data-only mprotect calls over owned mappings.
         #[arg(long)]
         data_vm_services: bool,
+        /// Own host Mach bootstrap rights behind guest port names (macOS only).
+        #[arg(long)]
+        mach_port_services: bool,
         #[arg(long, requires = "memory", value_parser = parse_memory_query)]
         read_memory: Vec<MemoryQuery>,
         /// Explicit finite replay for one reviewed virtual-counter read.
@@ -1187,6 +1190,7 @@ fn run() -> Result<()> {
             software_pauth_keys,
             memory: memory_path,
             data_vm_services,
+            mach_port_services,
             read_memory,
             clock_snapshot: clock_snapshot_path,
         } => {
@@ -1257,9 +1261,12 @@ fn run() -> Result<()> {
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
             // SAFETY: This explicit research command accepts trusted guest code
             // and caller-provided direct native RAM addresses under its documented ABI.
-            let (outcome, data_vm_events) = unsafe {
-                if data_vm_services {
-                    let result = stela_runtime::darwin::run_data_vm(
+            let mut mach_ports = mach_port_services
+                .then(|| stela_runtime::mach::HostPorts::new(1))
+                .transpose()?;
+            let (outcome, data_vm_events, mach_port_events) = unsafe {
+                if data_vm_services || mach_port_services {
+                    let result = stela_runtime::darwin::run_services(
                         &mut runtime,
                         &mut thread,
                         stop_pc.map(stela_compiler::GuestAddress),
@@ -1268,9 +1275,11 @@ fn run() -> Result<()> {
                         stela_runtime::darwin::ExecutionServices {
                             pauth: context.as_ref(),
                             clock: clock.as_mut(),
+                            data_vm: data_vm_services,
+                            mach_ports: mach_ports.as_mut(),
                         },
                     )?;
-                    (result.execution, result.services)
+                    (result.execution, result.services, result.mach_services)
                 } else {
                     let outcome = if let Some(clock) = &mut clock {
                         runtime.run_with_clock(
@@ -1296,7 +1305,7 @@ fn run() -> Result<()> {
                             block_budget,
                         )?
                     };
-                    (outcome, Vec::new())
+                    (outcome, Vec::new(), Vec::new())
                 }
             };
             let memory_after = memory_hashes(&memory)?;
@@ -1310,6 +1319,8 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
                 "outcome":outcome,"abi":runtime.profile().abi(),"memory":memory_report,
+                "mach_port_profile":mach_port_services.then_some(stela_runtime::mach::HOST_PORT_PROFILE),
+                "mach_port_events":mach_port_events,"mach_port_rights":mach_ports.as_ref().map(|ports| ports.rights()),
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock.as_ref().map(|clock| serde_json::json!({

@@ -568,11 +568,88 @@ def self_rebase_cohort(cli, directory, view, image):
         'cases':rows,
         'limits':'Unchanged complete self-rebase startup path entered at original basic block with explicit live inputs, original raw mappings and software PAuth1 keys. All chained writes execute in original code. This does not execute earlier time/kdebug startup, following libc/Mach/TLS initialization, full ProcessConfig, application launch, Apple hardware PAC or macOS boot.'}
 
+
+def mach_ports_cohort(cli, directory, view, image):
+    """Original wrappers and initialization prefix; host results replayed at SVC."""
+    spec = importlib.util.spec_from_file_location('mach_ports_pauth', ROOT / 'dev/pauth-differential.py')
+    pac = importlib.util.module_from_spec(spec); spec.loader.exec_module(pac)
+    source, state_path, memory_path = directory/'mach-text.bin', directory/'mach-state.json', directory/'mach-memory.json'
+    source.write_bytes(view['text'])
+    keys_path = directory/'mach-keys.json'
+    keys_path.write_text(json.dumps({key:{'low':v[0],'high':v[1]} for key,v in pac.DOMAIN_KEYS.items()}))
+    source_paths = ('dev/dyld-entry-differential.py','dev/pauth-differential.py','dev/differential.py',
+                    'src/main.rs','crates/stela-runtime/src/mach.rs','crates/stela-runtime/src/darwin.rs')
+    hashes = {path:digest((ROOT/path).read_bytes()) for path in source_paths}
+    cli_hash, rows, compiler = digest(cli.read_bytes()), [], None
+    for base in (0x40000000000,0x40000004000):
+        for flags in (0,15):
+            for entry,stop,numbers in [(0x1634,VM_STOP,[26]),(0x1640,VM_STOP,[27]),
+                                       (0x164c,VM_STOP,[28]),(0x1658,VM_STOP,[29]),
+                                       (0x4c0c,base+0x4c38,[28,26])]:
+                initial = State.from_buffer_copy(states(all_flags=True)[flags]); initial.nzcv=flags<<28
+                initial.sp,initial.x[30] = 0x9000000f000,VM_STOP
+                regions = original_segment_regions(image,base)
+                regions.append({'address':0x90000000000,'virtual_bytes':65536,'initial_protection':3,'data':bytes(65536)})
+                memory=[]
+                for index,r in enumerate(regions):
+                    path=directory/f'mach-region-{index}.bin';path.write_bytes(r['data'])
+                    memory.append({'guest_address':r['address'],'virtual_bytes':r['virtual_bytes'],
+                        'initial_file':{'path':path.name,'bytes':len(r['data']),'sha256':digest(r['data'])},
+                        'readable':True,'writable':bool(r['initial_protection']&2)})
+                state_path.write_text(json.dumps(state_dict(initial)));memory_path.write_text(json.dumps({'regions':memory}))
+                native=json.loads(subprocess.check_output([str(cli),'run-blocks',str(source),'--guest-base',hex(base),
+                    '--entry',hex(base+entry),'--stop-pc',hex(stop),'--state',str(state_path),'--memory',str(memory_path),
+                    '--software-pauth-keys',str(keys_path),'--mach-port-services','--block-budget','32',
+                    '--cache-dir',str(directory/'mach-cache')],timeout=15))
+                require(native['outcome']['reason']=={'kind':'stop_address'} and native['pc']==stop,
+                        'native Mach fixture missed original continuation/return')
+                require(native['mach_port_profile']=='darwin-host-owned-mach-ports-v1' and native['data_vm_profile'] is None,
+                        'Mach service profile changed or implicitly enabled data VM')
+                events=native['mach_port_events']
+                require([e['request']['number'] for e in events]==numbers and all(e['result']>0 and e['declined'] is None for e in events),
+                        'original Mach requests did not obtain actual host-backed guest rights')
+                require(len(native['mach_port_rights'])==len(numbers), 'Mach owned rights count differs')
+                machine=pac.arm_machine(keys=pac.DOMAIN_KEYS)
+                for r in regions:
+                    machine.mem_map(r['address'],r['virtual_bytes']);machine.mem_write(r['address'],r['data'])
+                    machine.mem_protect(r['address'],r['virtual_bytes'],r['initial_protection'])
+                initialize_arm(machine,initial)
+                replay=iter(events);observed=[]
+                def svc(uc,number,unused):
+                    event=next(replay); observed.append(event)
+                    require(number==2 and uc.reg_read(arm.UC_ARM64_REG_PC)==event['trap']['exception_return_pc'],
+                            'original SVC return PC differs')
+                    require((uc.reg_read(arm.UC_ARM64_REG_X16)&0xffffffff)==(-event['request']['number'])&0xffffffff,
+                            'original Mach selector differs')
+                    # Pinned XNU arm_set_mach_syscall_ret assigns signed int to X0;
+                    # X1/NZCV and other saved registers are preserved.
+                    uc.reg_write(arm.UC_ARM64_REG_X0,event['result']&((1<<64)-1))
+                machine.hook_add(UC_HOOK_INTR,svc)
+                machine.emu_start(base+entry,stop,count=128)
+                require(machine.reg_read(arm.UC_ARM64_REG_PC)==stop and len(observed)==len(events), 'original Mach path differs')
+                expected=state_dict(capture_arm(machine,initial))
+                after=[{'address':r['address'],'bytes':r['virtual_bytes'],
+                        'sha256':digest(bytes(machine.mem_read(r['address'],r['virtual_bytes'])))} for r in regions]
+                require(native['state']==expected and native['memory']['memory_after']==after,
+                        'native original-wrapper/prefix CPU state or full RAM differs')
+                require(compiler in (None,native['compiler_source_sha256']), 'Mach cohort compiler changed')
+                compiler=native['compiler_source_sha256']
+                rows.append({'base':base,'entry_offset':entry,'incoming_nzcv':initial.nzcv,'state':expected,
+                             'events':events,'rights':native['mach_port_rights'],'memory_after':after})
+    require(digest(cli.read_bytes())==cli_hash and all(digest((ROOT/p).read_bytes())==h for p,h in hashes.items()),
+            'Mach cohort sources or executable changed')
+    return {'kind':'original_dyld_mach_ports_arm_vs_shared_native','passed':True,
+        'full_state_and_mapped_ram_comparisons':len(rows),'cases':rows,'compiler_source_sha256':compiler,
+        'compiler_executable_sha256':cli_hash,'shared_sources_sha256':hashes,
+        'container_sha256':CONTAINER_SHA256,'slice_sha256':SLICE_SHA256,
+        'limits':'Original Mach wrappers and initialization prefix execute unchanged. Actual host-backed guest port results are replayed at original ARM SVC using public XNU return rules; the ARM kernel itself is not executed. Full IPC, Mach messages, commpage initialization, TLS and process startup remain unsupported.'}
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dyld', type=Path, default=DEFAULT_DYLD)
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/dyld-entry-differential-report.json')
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--mach-ports', action='store_true', help='run only original Mach port wrappers and initialization prefix')
     parser.add_argument('--self-rebase', action='store_true', help='run only the focused original full self-rebase cohort')
     parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
@@ -588,10 +665,11 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
-    if args.self_rebase:
+    require(not (args.self_rebase and args.mach_ports), 'select one focused dyld cohort')
+    if args.self_rebase or args.mach_ports:
         with tempfile.TemporaryDirectory(prefix='stela-self-rebase-') as temporary:
-            report = self_rebase_cohort(cli,Path(temporary),view,image)
-        output = ROOT / '.stela/dyld-self-rebase-differential-report.json'
+            report = (mach_ports_cohort if args.mach_ports else self_rebase_cohort)(cli,Path(temporary),view,image)
+        output = ROOT / ('.stela/dyld-mach-ports-differential-report.json' if args.mach_ports else '.stela/dyld-self-rebase-differential-report.json')
         snapshot = write_evidence(output,report)
         print(json.dumps({'passed':True,'report':str(output),'snapshot':str(snapshot)}))
         return

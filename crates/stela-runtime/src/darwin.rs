@@ -118,7 +118,7 @@ impl fmt::Display for AbiError {
 
 impl Error for AbiError {}
 
-fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Result<(), AbiError> {
+pub(crate) fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Result<(), AbiError> {
     if trap.kind != TrapKind::SupervisorCall || trap.immediate != 0x80 {
         return Err(AbiError::UnsupportedTrap {
             trap_kind: trap.kind,
@@ -284,12 +284,15 @@ pub struct DataVmEvent {
     pub declined: Option<String>,
 }
 #[derive(Debug, Serialize)]
-pub struct DataVmRunOutcome {
+pub struct ServiceRunOutcome {
     pub execution: crate::blocks::RunOutcome,
     pub services: Vec<DataVmEvent>,
+    pub mach_services: Vec<crate::mach::Event>,
 }
 #[derive(Default)]
 pub struct ExecutionServices<'a> {
+    pub mach_ports: Option<&'a mut crate::mach::HostPorts>,
+    pub data_vm: bool,
     pub pauth: Option<&'a crate::pauth::Context>,
     pub clock: Option<&'a mut crate::clock::Context>,
 }
@@ -394,7 +397,7 @@ pub fn service_data_mprotect(
     event
 }
 
-/// Run the shared native dispatcher and service explicit data-VM SVC events.
+/// Run the shared native dispatcher with explicitly selected data-VM/Mach services.
 /// Unknown services remain precise trap stops, and a single aggregate budget
 /// counts every native block across resumptions.
 ///
@@ -402,17 +405,24 @@ pub fn service_data_mprotect(
 /// All BlockRuntime direct-RAM requirements apply; this owner must cover data
 /// used by trusted code. No concurrent guest execution or code/data mutation is
 /// allowed. Executable transitions are declined rather than invalidated here.
-pub unsafe fn run_data_vm(
+pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
     stop: Option<stela_compiler::GuestAddress>,
     budget: usize,
     memory: &mut crate::memory::OwnedMemory,
     mut services: ExecutionServices<'_>,
-) -> anyhow::Result<DataVmRunOutcome> {
+) -> anyhow::Result<ServiceRunOutcome> {
     use crate::blocks::{RunOutcome, StopReason};
     let mut aggregate: Option<RunOutcome> = None;
     let mut events = Vec::new();
+    let mut mach_events = Vec::new();
+    if let Some(ports) = services.mach_ports.as_ref() {
+        anyhow::ensure!(
+            ports.address_space() == runtime.address_space(),
+            "Mach ports belong to another guest address space"
+        );
+    }
     let mut executed = 0;
     loop {
         anyhow::ensure!(
@@ -453,9 +463,23 @@ pub unsafe fn run_data_vm(
         let Some(trap) = trap else {
             break;
         };
-        let event = service_data_mprotect(state, &trap, memory, runtime);
-        let serviced = event.completion.is_some();
-        events.push(event);
+        let serviced = if (state.registers.x[16] as u32 as i32) < 0 {
+            if let Some(ports) = services.mach_ports.as_deref_mut() {
+                let event = crate::mach::service(state, &trap, ports);
+                let serviced = event.result.is_some();
+                mach_events.push(event);
+                serviced
+            } else {
+                false
+            }
+        } else if services.data_vm {
+            let event = service_data_mprotect(state, &trap, memory, runtime);
+            let serviced = event.completion.is_some();
+            events.push(event);
+            serviced
+        } else {
+            false
+        };
         if !serviced {
             break;
         }
@@ -469,10 +493,27 @@ pub unsafe fn run_data_vm(
             break;
         }
     }
-    Ok(DataVmRunOutcome {
+    Ok(ServiceRunOutcome {
         execution: aggregate.expect("one native dispatch outcome"),
         services: events,
+        mach_services: mach_events,
     })
+}
+
+/// Data-only compatibility entry; Mach services remain absent unless supplied.
+///
+/// # Safety
+/// The same direct-RAM requirements as `run_services` apply.
+pub unsafe fn run_data_vm(
+    runtime: &mut crate::blocks::BlockRuntime,
+    state: &mut ThreadState,
+    stop: Option<stela_compiler::GuestAddress>,
+    budget: usize,
+    memory: &mut crate::memory::OwnedMemory,
+    mut services: ExecutionServices<'_>,
+) -> anyhow::Result<ServiceRunOutcome> {
+    services.data_vm = true;
+    unsafe { run_services(runtime, state, stop, budget, memory, services) }
 }
 
 #[cfg(test)]
