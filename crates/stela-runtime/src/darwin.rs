@@ -5,8 +5,9 @@
 //! This profile does not establish the private macOS 27 kernel contract.
 //! The #0x80 restriction is an initial Stela profile, not an XNU check of
 //! the SVC immediate. No service, host syscall, memory access or exception-level
-//! transition occurs here. A caller supplies a reviewed prototype and backend;
-//! declining a request means leaving its pending state unchanged.
+//! transition occurs in the ABI adapter itself. The opt-in data VM service below
+//! changes owned data protections; all other backends remain caller supplied.
+//! Declining a request means leaving its pending state unchanged.
 use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
@@ -269,6 +270,209 @@ impl PendingBsdCall {
         *state = next;
         Ok(())
     }
+}
+
+/// Explicit ARM process VM profile; ordinary data protections only. Executable
+/// transitions, trusted/TPRO flags and MAC/code-sign policy remain unsupported.
+pub const DATA_VM_PROFILE: &str = "darwin-arm64-va47-page16k-data-mprotect-v1";
+pub const GUEST_PAGE_BYTES: u64 = 16 * 1024;
+#[derive(Debug, Serialize)]
+pub struct DataVmEvent {
+    pub trap: SynchronousTrap,
+    pub request: Option<BsdRequest>,
+    pub completion: Option<BsdCompletion>,
+    pub declined: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct DataVmRunOutcome {
+    pub execution: crate::blocks::RunOutcome,
+    pub services: Vec<DataVmEvent>,
+}
+#[derive(Default)]
+pub struct ExecutionServices<'a> {
+    pub pauth: Option<&'a crate::pauth::Context>,
+    pub clock: Option<&'a mut crate::clock::Context>,
+}
+
+/// Service the reviewed BSD74 ABI using owned guest pages, never host pointers
+/// supplied unchecked by the guest. Unsupported requests preserve pending state.
+/// Reference: pinned XNU bsd/kern/kern_mman.c mprotect/mprotect_sanitize and
+/// syscalls.master. W implies R in that source; guest pages are16KiB regardless
+/// of the host's page size. This is not the complete Darwin security/VM policy.
+pub fn service_data_mprotect(
+    state: &mut ThreadState,
+    trap: &SynchronousTrap,
+    memory: &mut crate::memory::OwnedMemory,
+    runtime: &crate::blocks::BlockRuntime,
+) -> DataVmEvent {
+    let mut event = DataVmEvent {
+        trap: *trap,
+        request: None,
+        completion: None,
+        declined: None,
+    };
+    let result = (|| -> anyhow::Result<BsdCompletion> {
+        anyhow::ensure!(memory.is_usable(), "guest address space is unusable");
+        let selector = classify_bsd_call(state, trap)?;
+        anyhow::ensure!(
+            selector.number == 74,
+            "BSD service {} is not implemented by the data VM profile",
+            selector.number
+        );
+        let pending = PendingBsdCall::from_trap(
+            state,
+            trap,
+            BsdPrototype {
+                argument_count: 3,
+                return_type: BsdReturnType::Int,
+            },
+        )?;
+        let request = *pending.request();
+        event.request = Some(request);
+        let [address, length, raw_prot]: [u64; 3] = request.arguments().try_into()?;
+        let prot = raw_prot as u32;
+        anyhow::ensure!(
+            prot & !7 == 0,
+            "special/unknown mprotect flags require a reviewed platform policy"
+        );
+        anyhow::ensure!(
+            prot & 4 == 0,
+            "executable protection requires source publication/invalidation"
+        );
+        let completion = if !address.is_multiple_of(GUEST_PAGE_BYTES) {
+            BsdCompletion::Error { errno: 22 }
+        } else if let Some(end) = address
+            .checked_add(length)
+            .and_then(|e| e.checked_add(GUEST_PAGE_BYTES - 1))
+            .map(|e| e & !(GUEST_PAGE_BYTES - 1))
+        {
+            if address >= (1 << 47) || end > (1 << 47) {
+                BsdCompletion::Error { errno: 12 }
+            } else if length == 0 {
+                BsdCompletion::Success { values: [0, 0] }
+            } else {
+                anyhow::ensure!(
+                    !runtime.source_overlaps(address, end - address),
+                    "data protection overlaps a registered code snapshot"
+                );
+                let writable = prot & 2 != 0;
+                let readable = prot & 3 != 0;
+                match memory.protect_data(address, end - address, readable, writable) {
+                    Ok(()) => BsdCompletion::Success { values: [0, 0] },
+                    Err(crate::memory::ProtectionError::MaximumProtection) => {
+                        BsdCompletion::Error { errno: 13 }
+                    }
+                    Err(crate::memory::ProtectionError::UnmappedRange) => {
+                        BsdCompletion::Error { errno: 12 }
+                    }
+                    Err(crate::memory::ProtectionError::InvalidRange) => {
+                        BsdCompletion::Error { errno: 22 }
+                    }
+                    Err(crate::memory::ProtectionError::HostFailure {
+                        errno: Some(e),
+                        rollback_succeeded: true,
+                    }) if e == libc::ENOMEM => BsdCompletion::Error { errno: 12 },
+                    Err(crate::memory::ProtectionError::HostFailure {
+                        errno: Some(e),
+                        rollback_succeeded: true,
+                    }) if e == libc::EACCES => BsdCompletion::Error { errno: 13 },
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        } else {
+            BsdCompletion::Error { errno: 22 }
+        };
+        // Exclusive thread/owner borrows exclude mutation between capture and
+        // completion; service code does not otherwise touch architectural state.
+        pending.complete(state, completion)?;
+        Ok(completion)
+    })();
+    match result {
+        Ok(completion) => event.completion = Some(completion),
+        Err(error) => event.declined = Some(error.to_string()),
+    }
+    event
+}
+
+/// Run the shared native dispatcher and service explicit data-VM SVC events.
+/// Unknown services remain precise trap stops, and a single aggregate budget
+/// counts every native block across resumptions.
+///
+/// # Safety
+/// All BlockRuntime direct-RAM requirements apply; this owner must cover data
+/// used by trusted code. No concurrent guest execution or code/data mutation is
+/// allowed. Executable transitions are declined rather than invalidated here.
+pub unsafe fn run_data_vm(
+    runtime: &mut crate::blocks::BlockRuntime,
+    state: &mut ThreadState,
+    stop: Option<stela_compiler::GuestAddress>,
+    budget: usize,
+    memory: &mut crate::memory::OwnedMemory,
+    mut services: ExecutionServices<'_>,
+) -> anyhow::Result<DataVmRunOutcome> {
+    use crate::blocks::{RunOutcome, StopReason};
+    let mut aggregate: Option<RunOutcome> = None;
+    let mut events = Vec::new();
+    let mut executed = 0;
+    loop {
+        anyhow::ensure!(
+            memory.is_usable(),
+            "refusing execution in an unusable guest address space"
+        );
+        let mut part = unsafe {
+            match (services.pauth, services.clock.as_deref_mut()) {
+                (Some(pauth), Some(clock)) => {
+                    runtime.run_with_clock(state, stop, budget - executed, pauth, clock)?
+                }
+                (Some(pauth), None) => {
+                    runtime.run_with_pauth(state, stop, budget - executed, pauth)?
+                }
+                (None, None) => runtime.run(state, stop, budget - executed)?,
+                (None, Some(_)) => anyhow::bail!("clock execution requires a PAC context"),
+            }
+        };
+        executed += part.blocks_executed;
+        let trap = match &part.reason {
+            StopReason::SynchronousTrap { trap } => Some(*trap),
+            _ => None,
+        };
+        if let Some(total) = &mut aggregate {
+            total.reason = part.reason;
+            total.blocks_executed = executed;
+            total.compiled_blocks += part.compiled_blocks;
+            total.disk_cache_hits += part.disk_cache_hits;
+            total.memory_cache_hits += part.memory_cache_hits;
+            total.last_exit = part.last_exit.or(total.last_exit);
+            total
+                .pointer_authentication_events
+                .append(&mut part.pointer_authentication_events);
+            total.clock_events.append(&mut part.clock_events);
+        } else {
+            aggregate = Some(part);
+        }
+        let Some(trap) = trap else {
+            break;
+        };
+        let event = service_data_mprotect(state, &trap, memory, runtime);
+        let serviced = event.completion.is_some();
+        events.push(event);
+        if !serviced {
+            break;
+        }
+        let total = aggregate.as_mut().expect("one native dispatch outcome");
+        if stop == Some(state.pc) {
+            total.reason = StopReason::StopAddress;
+            break;
+        }
+        if executed == budget {
+            total.reason = StopReason::BudgetExhausted;
+            break;
+        }
+    }
+    Ok(DataVmRunOutcome {
+        execution: aggregate.expect("one native dispatch outcome"),
+        services: events,
+    })
 }
 
 #[cfg(test)]

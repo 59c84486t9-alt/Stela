@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
@@ -96,7 +97,7 @@ pub struct MemoryRegion {
     pub guest_address: u64,
     /// Exact guest-visible extent. Allocation padding is not guest memory.
     pub virtual_bytes: u64,
-    /// Host-page-rounded allocation owned by this region.
+    /// Host-page extent of this protection view; views never cross allocations.
     pub mapped_bytes: u64,
     pub initial_bytes: usize,
     pub readable: bool,
@@ -112,6 +113,43 @@ impl MemoryRegion {
     }
 }
 
+/// Maximum data rights supplied by the address-space loader. Omitted entries
+/// default to initial rights; executable snapshots are never mutable here.
+#[derive(Debug, Clone, Copy)]
+pub struct DataProtectionLimit {
+    pub guest_address: u64,
+    pub readable: bool,
+    pub writable: bool,
+}
+#[derive(Debug)]
+struct Allocation {
+    base: u64,
+    bytes: u64,
+    maximum_readable: bool,
+    maximum_writable: bool,
+    executable: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectionError {
+    InvalidRange,
+    UnmappedRange,
+    MaximumProtection,
+    ExecutableRegion,
+    WriteWithoutRead,
+    AddressSpaceUnusable,
+    AllocationFailure,
+    HostFailure {
+        errno: Option<i32>,
+        rollback_succeeded: bool,
+    },
+}
+impl std::fmt::Display for ProtectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest data protection failed: {self:?}")
+    }
+}
+impl std::error::Error for ProtectionError {}
+
 /// Private, non-shareable mappings, released together on failure or drop.
 ///
 /// Safe operations copy bytes; they never lend Rust references into memory that
@@ -121,6 +159,9 @@ impl MemoryRegion {
 pub struct OwnedMemory {
     regions: Vec<MemoryRegion>,
     backing_files: Vec<File>,
+    allocations: Vec<Allocation>,
+    page_bytes: u64,
+    usable: bool,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
@@ -145,6 +186,43 @@ impl OwnedMemory {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
             MAX_IMAGE_MEMORY_BYTES,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn map_with_data_limits(
+        specs: Vec<MemoryRegionSpec>,
+        limits: Vec<DataProtectionLimit>,
+    ) -> Result<Self> {
+        let mut table = BTreeMap::new();
+        for limit in limits {
+            ensure!(
+                table.insert(limit.guest_address, limit).is_none(),
+                "duplicate data protection limit"
+            );
+        }
+        for (&address, limit) in &table {
+            let spec = specs
+                .iter()
+                .find(|s| s.guest_address == address)
+                .context("data protection limit has no mapping")?;
+            ensure!(
+                !spec.executable,
+                "data protection limit cannot grant executable source rights"
+            );
+            ensure!(
+                !limit.writable || limit.readable,
+                "maximum write permission requires read permission"
+            );
+            ensure!(
+                (!spec.readable || limit.readable) && (!spec.writable || limit.writable),
+                "initial data protection exceeds maximum"
+            );
+        }
+        Self::map_specs(
+            specs.into_iter().map(MappingSpec::from).collect(),
+            MAX_IMAGE_MEMORY_BYTES,
+            table,
         )
     }
 
@@ -161,10 +239,15 @@ impl OwnedMemory {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
             MAX_FILE_MEMORY_BYTES,
+            BTreeMap::new(),
         )
     }
 
-    fn map_specs(mut specs: Vec<MappingSpec>, limit: u64) -> Result<Self> {
+    fn map_specs(
+        mut specs: Vec<MappingSpec>,
+        limit: u64,
+        limits: BTreeMap<u64, DataProtectionLimit>,
+    ) -> Result<Self> {
         ensure!(
             cfg!(all(
                 target_arch = "x86_64",
@@ -249,6 +332,9 @@ impl OwnedMemory {
         let mut memory = Self {
             regions: Vec::new(),
             backing_files: Vec::new(),
+            allocations: Vec::new(),
+            page_bytes: page,
+            usable: true,
             _not_send_sync: PhantomData,
         };
         for spec in specs {
@@ -300,6 +386,14 @@ impl OwnedMemory {
             }
             // Register ownership before anything else may fail, so Drop rolls
             // back both this range and all previously successful mappings.
+            let limit = limits.get(&spec.guest_address);
+            memory.allocations.push(Allocation {
+                base: spec.guest_address,
+                bytes: mapped_bytes,
+                maximum_readable: limit.map_or(spec.readable, |l| l.readable),
+                maximum_writable: limit.map_or(spec.writable, |l| l.writable),
+                executable: spec.executable,
+            });
             memory.regions.push(MemoryRegion {
                 guest_address: spec.guest_address,
                 virtual_bytes: spec.virtual_bytes,
@@ -342,7 +436,172 @@ impl OwnedMemory {
         &self.regions
     }
 
+    /// False only if a failed host operation could not restore prior rights.
+    /// Safe byte APIs then decline; native executors must also refuse resumption.
+    pub fn is_usable(&self) -> bool {
+        self.usable
+    }
+
+    /// Change owned data pages without ever granting host execute permission.
+    /// Address/length must be host-page multiples. Rounded allocation padding
+    /// may be protected but remains outside logical byte-access bounds. Source
+    /// snapshots require coordinated invalidation and are explicitly declined.
+    /// Caller excludes all concurrent translated execution during this operation.
+    pub fn protect_data(
+        &mut self,
+        address: u64,
+        bytes: u64,
+        readable: bool,
+        writable: bool,
+    ) -> std::result::Result<(), ProtectionError> {
+        self.protect_data_with(
+            address,
+            bytes,
+            readable,
+            writable,
+            |base, length, protection| {
+                // SAFETY: preflight proves exclusive ownership of every covered page.
+                let result = unsafe {
+                    libc::mprotect(
+                        base as usize as *mut libc::c_void,
+                        length as usize,
+                        protection,
+                    )
+                };
+                if result == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error())
+                }
+            },
+        )
+    }
+
+    fn protect_data_with(
+        &mut self,
+        address: u64,
+        bytes: u64,
+        readable: bool,
+        writable: bool,
+        mut protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
+    ) -> std::result::Result<(), ProtectionError> {
+        use ProtectionError as E;
+        if !self.usable {
+            return Err(E::AddressSpaceUnusable);
+        }
+        if writable && !readable {
+            return Err(E::WriteWithoutRead);
+        }
+        let end = address.checked_add(bytes).ok_or(E::InvalidRange)?;
+        if bytes == 0
+            || !address.is_multiple_of(self.page_bytes)
+            || !bytes.is_multiple_of(self.page_bytes)
+        {
+            return Err(E::InvalidRange);
+        }
+        let mut cursor = address;
+        for allocation in &self.allocations {
+            let limit = allocation.base + allocation.bytes;
+            if limit <= cursor {
+                continue;
+            }
+            if allocation.base > cursor {
+                return Err(E::UnmappedRange);
+            }
+            if allocation.executable {
+                return Err(E::ExecutableRegion);
+            }
+            if (readable && !allocation.maximum_readable)
+                || (writable && !allocation.maximum_writable)
+            {
+                return Err(E::MaximumProtection);
+            }
+            cursor = limit.min(end);
+            if cursor == end {
+                break;
+            }
+        }
+        if cursor != end {
+            return Err(E::UnmappedRange);
+        }
+        // Allocate the complete replacement metadata/rollback recipe before
+        // changing OS rights. No fallible allocation follows successful protect.
+        let mut next = Vec::new();
+        next.try_reserve(self.regions.len().saturating_mul(3))
+            .map_err(|_| E::AllocationFailure)?;
+        let mut rollback = Vec::new();
+        rollback
+            .try_reserve(self.regions.len())
+            .map_err(|_| E::AllocationFailure)?;
+        for region in &self.regions {
+            let physical_end = region.guest_address + region.mapped_bytes;
+            let begin = region.guest_address.max(address);
+            let stop = physical_end.min(end);
+            if begin >= stop {
+                next.push(region.clone());
+                continue;
+            }
+            rollback.push((
+                begin,
+                stop - begin,
+                host_protection(region.readable, region.writable),
+            ));
+            for (base, limit, r, w) in [
+                (
+                    region.guest_address,
+                    begin,
+                    region.readable,
+                    region.writable,
+                ),
+                (begin, stop, readable, writable),
+                (stop, physical_end, region.readable, region.writable),
+            ] {
+                if base >= limit {
+                    continue;
+                }
+                let virtual_end = region.end().min(limit);
+                if base >= virtual_end {
+                    continue;
+                }
+                let initialized_end = region.guest_address + region.initial_bytes as u64;
+                next.push(MemoryRegion {
+                    guest_address: base,
+                    virtual_bytes: virtual_end - base,
+                    mapped_bytes: limit - base,
+                    initial_bytes: initialized_end.saturating_sub(base).min(virtual_end - base)
+                        as usize,
+                    readable: r,
+                    writable: w,
+                    executable: region.executable,
+                });
+            }
+        }
+        if let Err(errno) = protect(address, bytes, host_protection(readable, writable)) {
+            // Some host kernels can partially change a failed range. Restore
+            // every covered old view, including the failed call's own pages.
+            let mut restored = true;
+            for (base, length, rights) in rollback {
+                if protect(base, length, rights).is_err() {
+                    restored = false;
+                }
+            }
+            if !restored {
+                self.usable = false;
+            }
+            return Err(E::HostFailure {
+                errno,
+                rollback_succeeded: restored,
+            });
+        }
+        self.regions = next;
+        Ok(())
+    }
+
     fn validate_access(&self, address: u64, length: usize, write: bool) -> Result<()> {
+        ensure!(
+            self.usable,
+            "guest address space is unusable after failed protection rollback"
+        );
         ensure!(
             length as u64 <= MAX_IMAGE_MEMORY_BYTES,
             "guest access exceeds memory limit"
@@ -429,15 +688,22 @@ impl OwnedMemory {
     }
 }
 
+fn host_protection(readable: bool, writable: bool) -> i32 {
+    (if readable {
+        libc::PROT_READ
+    } else {
+        libc::PROT_NONE
+    }) | (if writable { libc::PROT_WRITE } else { 0 })
+}
 impl Drop for OwnedMemory {
     fn drop(&mut self) {
-        for region in &self.regions {
-            // SAFETY: only exact allocations successfully owned by this object
-            // are recorded; no methods transfer or partially release ownership.
+        for allocation in &self.allocations {
+            // SAFETY: original allocation ownership survives view splitting and
+            // quarantine; no method transfers or partially releases this memory.
             unsafe {
                 libc::munmap(
-                    region.guest_address as usize as *mut libc::c_void,
-                    region.mapped_bytes as usize,
+                    allocation.base as usize as *mut libc::c_void,
+                    allocation.bytes as usize,
                 )
             };
         }
@@ -707,6 +973,227 @@ mod tests {
             }
         }
         panic!("cannot allocate test file mapping after 32 attempts");
+    }
+
+    #[test]
+    fn page_protection_splits_views_preserves_bytes_and_original_ownership() {
+        let page = host_page_size().unwrap();
+        let mut memory = allocate(|base, p| vec![spec(base, 4 * p)], 4);
+        let base = memory.regions()[0].guest_address;
+        let mut expected = vec![0u8; 4 * page];
+        expected[..3].copy_from_slice(&[7, 8, 9]);
+        for offset in [page - 1, page, 3 * page, 4 * page - 1] {
+            memory.write(base + offset as u64, &[42]).unwrap();
+            expected[offset] = 42;
+        }
+        memory
+            .protect_data(base + page as u64, 2 * page as u64, true, false)
+            .unwrap();
+        assert_eq!(memory.regions().len(), 3);
+        assert_eq!(memory.allocations.len(), 1);
+        assert_eq!(memory.read_snapshot(base, 4 * page).unwrap(), expected);
+        assert!(memory.write(base + page as u64, &[1]).is_err());
+        assert_eq!(os_protection(base), libc::PROT_READ | libc::PROT_WRITE);
+        assert_eq!(os_protection(base + page as u64), libc::PROT_READ);
+        memory
+            .protect_data(base + 2 * page as u64, page as u64, false, false)
+            .unwrap();
+        assert_eq!(os_protection(base + 2 * page as u64), libc::PROT_NONE);
+        assert!(memory.read_snapshot(base, 4 * page).is_err());
+        memory
+            .protect_data(base, 4 * page as u64, true, true)
+            .unwrap();
+        assert_eq!(memory.read_snapshot(base, 4 * page).unwrap(), expected);
+        for index in 0..4 {
+            assert_eq!(
+                os_protection(base + (index * page) as u64),
+                libc::PROT_READ | libc::PROT_WRITE
+            );
+        }
+        assert_eq!(
+            memory
+                .regions()
+                .iter()
+                .map(|r| r.initial_bytes)
+                .sum::<usize>(),
+            3
+        );
+        assert_eq!(
+            memory.regions().iter().map(|r| r.mapped_bytes).sum::<u64>(),
+            4 * page as u64
+        );
+    }
+    #[test]
+    fn data_maximum_and_code_guard_reject_before_changing_os_permissions() {
+        let page = host_page_size().unwrap();
+        let mut memory = allocate(
+            |base, p| {
+                vec![
+                    MemoryRegionSpec {
+                        writable: false,
+                        ..spec(base, p)
+                    },
+                    MemoryRegionSpec {
+                        guest_address: base + 2 * p,
+                        executable: true,
+                        writable: false,
+                        ..spec(base, p)
+                    },
+                ]
+            },
+            3,
+        );
+        let base = memory.regions()[0].guest_address;
+        let old = memory.regions().to_vec();
+        for (address, bytes, r, w, error) in [
+            (
+                base,
+                page as u64,
+                true,
+                true,
+                ProtectionError::MaximumProtection,
+            ),
+            (
+                base,
+                3 * page as u64,
+                true,
+                false,
+                ProtectionError::UnmappedRange,
+            ),
+            (
+                base + 2 * page as u64,
+                page as u64,
+                true,
+                false,
+                ProtectionError::ExecutableRegion,
+            ),
+            (
+                base + 1,
+                page as u64,
+                true,
+                false,
+                ProtectionError::InvalidRange,
+            ),
+            (base, 0, true, false, ProtectionError::InvalidRange),
+            (
+                base,
+                page as u64,
+                false,
+                true,
+                ProtectionError::WriteWithoutRead,
+            ),
+        ] {
+            assert_eq!(memory.protect_data(address, bytes, r, w), Err(error));
+            assert_eq!(memory.regions(), old);
+        }
+        assert_eq!(os_protection(base), libc::PROT_READ);
+        let mut explicit = (0..32)
+            .find_map(|_| {
+                let address = candidate(page);
+                OwnedMemory::map_with_data_limits(
+                    vec![MemoryRegionSpec {
+                        writable: false,
+                        ..spec(address, page as u64)
+                    }],
+                    vec![DataProtectionLimit {
+                        guest_address: address,
+                        readable: true,
+                        writable: true,
+                    }],
+                )
+                .ok()
+            })
+            .unwrap();
+        let address = explicit.regions()[0].guest_address;
+        explicit
+            .protect_data(address, page as u64, true, true)
+            .unwrap();
+        explicit.write(address, &[11]).unwrap();
+        explicit
+            .protect_data(address, page as u64, true, false)
+            .unwrap();
+        assert_eq!(explicit.read_snapshot(address, 1).unwrap(), [11]);
+    }
+    #[test]
+    fn protection_padding_remains_outside_logical_access_and_file_cow_is_preserved() {
+        let page = host_page_size().unwrap();
+        let mut source = backing_file(&[4, 5, 6], 3);
+        let mut memory = allocate_files(
+            |base, _| vec![file_spec(base, 3, source.try_clone().unwrap(), 0)],
+            1,
+        );
+        let base = memory.regions()[0].guest_address;
+        memory.protect_data(base, page as u64, true, false).unwrap();
+        assert_eq!(memory.regions()[0].virtual_bytes, 3);
+        assert!(memory.read_snapshot(base + 3, 1).is_err());
+        memory.protect_data(base, page as u64, true, true).unwrap();
+        memory.write(base, &[9]).unwrap();
+        let mut original = [0; 3];
+        source.seek(SeekFrom::Start(0)).unwrap();
+        source.read_exact(&mut original).unwrap();
+        assert_eq!(original, [4, 5, 6]);
+    }
+    #[test]
+    fn partial_host_failure_restores_views_and_failed_restore_quarantines_safe_access() {
+        let page = host_page_size().unwrap();
+        let mut memory = allocate(|base, p| vec![spec(base, 2 * p)], 2);
+        let base = memory.regions()[0].guest_address;
+        let before = memory.regions().to_vec();
+        let mut calls = 0;
+        let error = memory
+            .protect_data_with(
+                base,
+                2 * page as u64,
+                true,
+                false,
+                |address, bytes, rights| {
+                    calls += 1;
+                    // SAFETY: this test owns all supplied pages. Simulate a host that
+                    // changes only the first page before reporting an error.
+                    let status = unsafe {
+                        libc::mprotect(
+                            address as usize as *mut _,
+                            if calls == 1 { page } else { bytes as usize },
+                            rights,
+                        )
+                    };
+                    assert_eq!(status, 0);
+                    if calls == 1 {
+                        Err(Some(libc::ENOMEM))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ProtectionError::HostFailure {
+                errno: Some(libc::ENOMEM),
+                rollback_succeeded: true
+            }
+        );
+        assert!(memory.is_usable());
+        assert_eq!(memory.regions(), before);
+        assert_eq!(os_protection(base), libc::PROT_READ | libc::PROT_WRITE);
+        memory.write(base, &[42]).unwrap();
+        let failure = memory.protect_data_with(base, page as u64, false, false, |_, _, _| {
+            Err(Some(libc::EACCES))
+        });
+        assert_eq!(
+            failure,
+            Err(ProtectionError::HostFailure {
+                errno: Some(libc::EACCES),
+                rollback_succeeded: false
+            })
+        );
+        assert!(!memory.is_usable());
+        assert!(memory.read_snapshot(base, 1).is_err());
+        assert!(memory.write(base, &[1]).is_err());
+        assert_eq!(
+            memory.protect_data(base, page as u64, true, true),
+            Err(ProtectionError::AddressSpaceUnusable)
+        );
     }
 
     #[test]

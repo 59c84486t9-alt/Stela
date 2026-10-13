@@ -516,3 +516,210 @@ fn adapter_matches_original_macos27_formatter_windows() -> Result<()> {
     );
     Ok(())
 }
+
+fn vm_buffer(writable: bool) -> Result<(OwnedMemory, u64)> {
+    let address = NEXT_BUFFER.fetch_add(0x10000, Ordering::Relaxed);
+    let memory = OwnedMemory::map(vec![MemoryRegionSpec {
+        guest_address: address,
+        virtual_bytes: 32768,
+        initial_bytes: vec![7, 8, 9],
+        readable: true,
+        writable,
+        executable: false,
+    }])?;
+    Ok((memory, address))
+}
+fn vm_runtime(cache: &std::path::Path, base: u64, words: &[u32]) -> Result<BlockRuntime> {
+    let mut runtime = BlockRuntime::new(0x44415257494e, cache.into());
+    runtime.register_code(
+        GuestAddress(base),
+        words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    )?;
+    Ok(runtime)
+}
+#[test]
+fn data_vm_service_preserves_full_state_and_guest_page_rounding_on_success_and_errors() -> Result<()>
+{
+    use stela_runtime::darwin::{ExecutionServices, run_data_vm};
+    let cache = tempfile::tempdir()?;
+    for flags in 0..16 {
+        for indirect in [false, true] {
+            for case in 0..7 {
+                let (mut memory, address) = vm_buffer(case != 2)?;
+                let mut state = thread(flags, address);
+                state.registers.x[30] = STOP;
+                let (target, length, prot, errno) = match case {
+                    0 => (address, 1, 1, 0), // One byte protects a complete guest16KiB page.
+                    1 => (address, 1, 2, 0), // Darwin write implies read.
+                    2 => (address, 1, 3, 13),
+                    3 => (address + 1, 1, 1, 22),
+                    4 => (address + 0x8000, 1, 1, 12),
+                    5 => (address, 0, 1, 0),
+                    _ => (address, u64::MAX, 1, 22),
+                };
+                state.registers.x[16] = if indirect { 0 } else { 74 };
+                if indirect {
+                    state.registers.x[0] = 74;
+                    state.registers.x[1] = target;
+                    state.registers.x[2] = length;
+                    state.registers.x[3] = prot;
+                } else {
+                    state.registers.x[0] = target;
+                    state.registers.x[1] = length;
+                    state.registers.x[2] = prot;
+                }
+                let initial = state.clone();
+                let mut expected = initial.clone();
+                expected.pc = GuestAddress(STOP);
+                expected.registers.x[0] = errno;
+                expected.registers.x[1] = 0;
+                expected.registers.nzcv =
+                    (expected.registers.nzcv & !CARRY) | if errno == 0 { 0 } else { CARRY };
+                let mut runtime = vm_runtime(cache.path(), BASE, &[0xd4001001, 0xd65f03c0])?;
+                // SAFETY: original-style SVC/RET fixture never accesses guest RAM
+                // directly; the explicit service validates the exclusively owned pages.
+                let result = unsafe {
+                    run_data_vm(
+                        &mut runtime,
+                        &mut state,
+                        Some(GuestAddress(STOP)),
+                        2,
+                        &mut memory,
+                        ExecutionServices::default(),
+                    )?
+                };
+                assert_state(&state, &expected);
+                assert_eq!(result.execution.reason, StopReason::StopAddress);
+                assert_eq!(result.execution.blocks_executed, 2);
+                assert_eq!(result.services.len(), 1);
+                assert!(
+                    result.services[0].completion.is_some()
+                        && result.services[0].declined.is_none()
+                );
+                assert_eq!(memory.read_snapshot(address, 3)?, [7, 8, 9]);
+                if case == 0 {
+                    assert!(!memory.regions()[0].writable);
+                    assert_eq!(memory.regions()[0].virtual_bytes, 16384);
+                    assert!(memory.regions()[1].writable);
+                } else {
+                    assert_eq!(memory.regions()[0].writable, case != 2);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+#[test]
+fn data_vm_driver_reuses_aot_and_resumes_services_under_one_native_budget() -> Result<()> {
+    use stela_runtime::darwin::{ExecutionServices, run_data_vm};
+    let cache = tempfile::tempdir()?;
+    let (mut memory, address) = vm_buffer(true)?;
+    let words = [
+        0xaa1403e0, 0xaa1503e1, 0x52800022, 0xd2800950, 0xd4001001, 0xaa1403e0, 0xaa1503e1,
+        0x52800062, 0xd2800950, 0xd4001001, 0xd65f03c0,
+    ];
+    let mut runtime = vm_runtime(cache.path(), BASE, &words)?;
+    for pc in [BASE, BASE + 20, BASE + 40] {
+        runtime.prepare(GuestAddress(pc))?;
+    }
+    let mut state = thread(15, address);
+    state.registers.x[20] = address;
+    state.registers.x[21] = 1;
+    // SAFETY: these native instructions only select call arguments and return;
+    // protection services own/validate all data, with no concurrent execution.
+    let first = unsafe {
+        run_data_vm(
+            &mut runtime,
+            &mut state,
+            Some(GuestAddress(STOP)),
+            1,
+            &mut memory,
+            ExecutionServices::default(),
+        )?
+    };
+    assert_eq!(first.execution.reason, StopReason::BudgetExhausted);
+    assert_eq!(state.pc, GuestAddress(BASE + 20));
+    assert_eq!(first.services.len(), 1);
+    assert!(!memory.regions()[0].writable);
+    let second = unsafe {
+        run_data_vm(
+            &mut runtime,
+            &mut state,
+            Some(GuestAddress(STOP)),
+            2,
+            &mut memory,
+            ExecutionServices::default(),
+        )?
+    };
+    assert_eq!(second.execution.reason, StopReason::StopAddress);
+    assert_eq!(second.execution.blocks_executed, 2);
+    assert_eq!(second.services.len(), 1);
+    assert!(memory.regions()[0].writable);
+    assert_eq!(
+        first.execution.compiled_blocks + second.execution.compiled_blocks,
+        0
+    );
+    assert_eq!(
+        first.execution.disk_cache_hits + second.execution.disk_cache_hits,
+        3
+    );
+    state.pc = GuestAddress(BASE);
+    let warm = unsafe {
+        run_data_vm(
+            &mut runtime,
+            &mut state,
+            Some(GuestAddress(STOP)),
+            3,
+            &mut memory,
+            ExecutionServices::default(),
+        )?
+    };
+    assert_eq!(warm.services.len(), 2);
+    assert_eq!(warm.execution.blocks_executed, 3);
+    assert_eq!(warm.execution.memory_cache_hits, 3);
+    Ok(())
+}
+#[test]
+fn unsupported_vm_services_and_registered_code_aliases_preserve_pending_state() -> Result<()> {
+    use stela_runtime::darwin::{ExecutionServices, run_data_vm};
+    let cache = tempfile::tempdir()?;
+    for case in 0..4 {
+        let (mut memory, address) = vm_buffer(true)?;
+        let base = if case == 3 { address } else { BASE };
+        let mut runtime = vm_runtime(cache.path(), base, &[0xd4001001, 0xd65f03c0])?;
+        let mut state = thread(15, address);
+        state.pc = GuestAddress(base);
+        state.registers.x[16] = if case == 0 { 20 } else { 74 };
+        state.registers.x[0] = address;
+        state.registers.x[1] = 16384;
+        state.registers.x[2] = match case {
+            1 => 4,
+            2 => 0x10,
+            _ => 1,
+        };
+        let initial = state.clone();
+        let old = memory.regions().to_vec();
+        // SAFETY: SVC/RET accesses no data; all requested transitions are declined.
+        let result = unsafe {
+            run_data_vm(
+                &mut runtime,
+                &mut state,
+                Some(GuestAddress(STOP)),
+                8,
+                &mut memory,
+                ExecutionServices::default(),
+            )?
+        };
+        assert_state(&state, &initial);
+        assert!(matches!(
+            result.execution.reason,
+            StopReason::SynchronousTrap { .. }
+        ));
+        assert_eq!(result.execution.blocks_executed, 1);
+        assert_eq!(result.services.len(), 1);
+        assert!(result.services[0].completion.is_none() && result.services[0].declined.is_some());
+        assert_eq!(memory.regions(), old);
+        assert_eq!(memory.read_snapshot(address, 3)?, [7, 8, 9]);
+    }
+    Ok(())
+}

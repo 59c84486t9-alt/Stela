@@ -214,6 +214,20 @@ impl BlockRuntime {
         self.profile
     }
 
+    /// A permission service must not bypass immutable-source visibility or
+    /// invalidation by presenting registered code as an ordinary data mapping.
+    pub fn source_overlaps(&self, address: u64, bytes: u64) -> bool {
+        let Some(end) = address.checked_add(bytes) else {
+            return true;
+        };
+        bytes != 0
+            && self
+                .regions
+                .range(..end)
+                .next_back()
+                .is_some_and(|(&base, r)| base < end && r.end > address)
+    }
+
     /// Own an immutable file/code snapshot. Partial trailing bytes are retained
     /// but can never be padded into a fetchable instruction. Same-base replacement
     /// always advances generation, even when the source bytes are identical.
