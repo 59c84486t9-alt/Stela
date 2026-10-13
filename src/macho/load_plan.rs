@@ -5,8 +5,8 @@ use object::{
     read::macho::{LoadCommandData, LoadCommandVariant, MachHeader, Segment},
 };
 use serde::Serialize;
-use stela_core::sha256;
 use std::{collections::BTreeSet, error::Error, fmt};
+use stela_core::sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]

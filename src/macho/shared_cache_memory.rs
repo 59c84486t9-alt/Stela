@@ -7,8 +7,8 @@ use super::shared_cache::{file_identity, hash_file, same_file};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use stela_runtime::memory::{FileMemoryRegionSpec, OwnedMemory};
 use std::{fs::File, fs::Metadata, path::Path};
+use stela_runtime::memory::{FileMemoryRegionSpec, OwnedMemory};
 
 fn number(value: &Value, field: &str) -> Result<u64> {
     value[field]

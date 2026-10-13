@@ -3,13 +3,13 @@
 //! directory for a fresh, automatically removed cache. No guest data accesses.
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use std::{path::Path, time::Instant};
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
     block::{BLOCK_ABI, ExitKind},
 };
 use stela_core::sha256;
 use stela_runtime::blocks::{BlockRuntime, RunOutcome, StopReason, ThreadState};
-use std::{path::Path, time::Instant};
 
 const ENTRY: GuestAddress = GuestAddress(0x100000);
 const STOP: GuestAddress = GuestAddress(0x200000);

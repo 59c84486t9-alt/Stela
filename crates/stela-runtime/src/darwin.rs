@@ -10,8 +10,8 @@
 //! Declining a request means leaving its pending state unchanged.
 use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
-use stela_compiler::block::{SynchronousTrap, TrapKind};
 use std::{error::Error, fmt};
+use stela_compiler::block::{SynchronousTrap, TrapKind};
 
 pub const MAX_BSD_ARGUMENTS: usize = 8;
 const CARRY: u32 = 0x20000000;

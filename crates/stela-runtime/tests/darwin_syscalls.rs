@@ -3,6 +3,13 @@
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
 use anyhow::{Result, bail, ensure};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::Read,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    sync::atomic::{AtomicU64, Ordering},
+};
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{SynchronousTrap, TrapKind},
@@ -11,13 +18,6 @@ use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     darwin::{AbiError, BsdCompletion, BsdPrototype, BsdRequest, BsdReturnType, PendingBsdCall},
     memory::{MemoryRegionSpec, OwnedMemory},
-};
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::Read,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 const BASE: u64 = 0x10000;
@@ -371,8 +371,8 @@ fn unknown_bsd_service_declines_without_completing_or_mutating_guest_state() -> 
 #[ignore = "requires STELA_DARWIN_REFERENCE with the pinned kernel formatter receipt"]
 fn adapter_matches_original_macos27_formatter_windows() -> Result<()> {
     use serde_json::{Value, json};
-    use stela_core::sha256;
     use std::path::Path;
+    use stela_core::sha256;
 
     const KERNEL: &str = "ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203";
     const CODE_PAGE: &str = "65bd00f9e8fb459f36b6a5aeb53e087c661169e977afaaa76bc997b30814630e";

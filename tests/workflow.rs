@@ -68,10 +68,7 @@ fn executable_plan_selects_apple_slices_and_preserves_guest_identity() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["container_sha256"], stela_core::sha256(&fat));
     assert_eq!(report["slice_offset"], 8192);
-    assert_eq!(
-        report["plan"]["slice_sha256"],
-        stela_core::sha256(&arm64e)
-    );
+    assert_eq!(report["plan"]["slice_sha256"], stela_core::sha256(&arm64e));
     assert_eq!(report["plan"]["cpu_subtype"], 0x80000002u32);
     assert_eq!(report["plan"]["entry"]["guest_address"], 0x1_0000_0200u64);
     assert_eq!(report["plan"]["execution_supported"], false);

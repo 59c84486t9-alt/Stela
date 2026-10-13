@@ -16,8 +16,8 @@ pub mod shared_cache_slide;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;
-use stela_core::{Artifact, Inventory, ScanIssue, sha256};
 use std::{fs::File, io::Read, path::Path};
+use stela_core::{Artifact, Inventory, ScanIssue, sha256};
 
 fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
     let start = usize::try_from(offset)?;

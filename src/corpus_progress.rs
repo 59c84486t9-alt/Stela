@@ -3,9 +3,9 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use stela_compiler::{Backend, GuestAddress, Lifter, UnsupportedReason};
 use stela_core::sha256;
-use std::path::Path;
 
 const PROBE_VERSION: &str = "isolated-word-emission-v1";
 

@@ -113,10 +113,7 @@ pub struct SignedFixupPlan {
 impl DecodedFixups {
     /// Plan all rebase values under one explicit process key domain. This does
     /// not write an image, resolve binds, or replace original dyld's self-rebase.
-    pub fn sign_rebases(
-        &self,
-        context: &stela_runtime::pauth::Context,
-    ) -> Result<SignedFixupPlan> {
+    pub fn sign_rebases(&self, context: &stela_runtime::pauth::Context) -> Result<SignedFixupPlan> {
         ensure!(
             self.binds.is_empty() && self.authenticated_binds.is_empty(),
             "authenticated rebase planning requires explicit bind resolution first"
@@ -887,8 +884,7 @@ mod tests {
         image.slice_bytes = data.len() as u64;
         for payload in &mut image.payloads {
             let start = payload.file.offset as usize;
-            payload.sha256 =
-                stela_core::sha256(&data[start..start + payload.file.bytes as usize]);
+            payload.sha256 = stela_core::sha256(&data[start..start + payload.file.bytes as usize]);
         }
     }
     fn raw(format: u16, target: u64, high: u8, next: u64) -> u64 {

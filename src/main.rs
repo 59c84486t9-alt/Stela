@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use stela_core::{Progress, Stage, read_json, write_json};
 use std::{fs::File, path::PathBuf};
+use stela_core::{Progress, Stage, read_json, write_json};
 mod apple;
 mod containers;
 mod corpus_progress;
@@ -1697,9 +1697,9 @@ fn run() -> Result<()> {
             cache_dir,
             output,
         } => {
+            use std::io::Read;
             use stela_compiler::GuestAddress;
             use stela_runtime::blocks::BlockRuntime;
-            use std::io::Read;
             ensure!(
                 !output.try_exists()?,
                 "report exists; choose a new --output path"
@@ -1903,10 +1903,7 @@ fn run() -> Result<()> {
                                 .context("text address overflow")?;
                             words += 1;
                             if stela_compiler::aarch64::Decoder
-                                .lift(
-                                    stela_compiler::GuestAddress(pc),
-                                    u32::from_le_bytes(*word),
-                                )
+                                .lift(stela_compiler::GuestAddress(pc), u32::from_le_bytes(*word))
                                 .is_ok()
                             {
                                 recognized += 1;

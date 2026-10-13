@@ -1,9 +1,9 @@
 //! Native, serialized block-dispatch acceptance tests using only owned ARM code.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 use stela_compiler::{GuestAddress, GuestState};
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
-use std::path::{Path, PathBuf};
 
 const BASE: u64 = 0x1000;
 const STOP: u64 = 0xdead_0000;

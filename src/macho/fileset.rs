@@ -2,8 +2,8 @@
 //! Embedded images are not standalone files and must not be sliced blindly.
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_core::sha256;
 use std::collections::BTreeSet;
+use stela_core::sha256;
 
 fn range(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
     let end = offset.checked_add(size).context("fileset range overflow")?;

@@ -4,7 +4,6 @@
 use anyhow::{Context, Result, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::Serialize;
-use stela_core::sha256;
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -12,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use stela_core::sha256;
 
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_KEY: usize = 64 * 1024;

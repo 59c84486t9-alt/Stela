@@ -1,6 +1,7 @@
 //! Native helper/profile boundaries, process key ownership and precise state.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
+use std::path::Path;
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{BlockProfile, PointerAuthenticationOperation},
@@ -9,7 +10,6 @@ use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     pauth::{Context, Keys},
 };
-use std::path::Path;
 
 const BASE: u64 = 0x1000;
 const STOP: u64 = 0x1400;

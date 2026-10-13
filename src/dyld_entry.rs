@@ -3,13 +3,13 @@
 //! Main/dyld, stack and read-only clock mappings stay owned together.
 use crate::macho::{load_plan, mapped_image};
 use anyhow::{Context, Result, ensure};
+use std::path::{Path, PathBuf};
 use stela_compiler::{GuestAddress, GuestState};
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     memory::OwnedMemory,
     process::{ProcessArguments, plan_kernel_args},
 };
-use std::path::{Path, PathBuf};
 
 pub struct Options {
     pub dyld_slide: u64,
@@ -358,13 +358,12 @@ pub fn probe(
         before == after,
         "register-only startup changed argument memory"
     );
-    let target_analysis = match stela_compiler::block::analyze(
-        &0xd503237fu32.to_le_bytes(),
-        GuestAddress(target_pc),
-    ) {
-        Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
-        Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
-    };
+    let target_analysis =
+        match stela_compiler::block::analyze(&0xd503237fu32.to_le_bytes(), GuestAddress(target_pc))
+        {
+            Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
+            Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
+        };
     let selected_profile_target_analysis = match stela_compiler::block::analyze_with_profile(
         &0xd503237fu32.to_le_bytes(),
         GuestAddress(target_pc),

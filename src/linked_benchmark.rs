@@ -9,9 +9,6 @@ use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;
 use serde_json::{Value, json};
-use stela_compiler::{GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL};
-use stela_core::{sha256, write_json};
-use stela_runtime::blocks::{RunOutcome, StopReason, ThreadState};
 use std::{
     collections::BTreeMap,
     hint::black_box,
@@ -20,6 +17,9 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use stela_compiler::{GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL};
+use stela_core::{sha256, write_json};
+use stela_runtime::blocks::{RunOutcome, StopReason, ThreadState};
 
 const BASES: [u64; 2] = [0x40000000000, 0x50000000000];
 const STACK: u64 = 0x80000000000;

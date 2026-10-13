@@ -4,13 +4,13 @@
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+use std::{collections::BTreeSet, io::Write, path::Path};
 use stela_compiler::{GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL};
 use stela_core::sha256;
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     memory::{MemoryRegionSpec, OwnedMemory},
 };
-use std::{collections::BTreeSet, io::Write, path::Path};
 
 const KERNEL: &str = "ca55ea8c4c86170e870380ae5501b8b43adb2d2d3db28be4531b3040653be203";
 const CODE_PAGE: &str = "65bd00f9e8fb459f36b6a5aeb53e087c661169e977afaaa76bc997b30814630e";

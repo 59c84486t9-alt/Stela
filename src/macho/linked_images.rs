@@ -8,12 +8,12 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use std::{collections::BTreeMap, path::PathBuf};
 use stela_compiler::GuestAddress;
 use stela_runtime::{
     blocks::{BlockRuntime, RunOutcome, ThreadState},
     memory::{MemoryRegion, OwnedMemory},
 };
-use std::{collections::BTreeMap, path::PathBuf};
 
 pub struct ImageInput {
     pub data: Vec<u8>,

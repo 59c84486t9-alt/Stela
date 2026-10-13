@@ -7,11 +7,11 @@
 
 use crate::{Identity, Prepared, prepare_leaf};
 use anyhow::{Result, ensure};
-use stela_compiler::GuestAddress;
-use stela_core::sha256;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use stela_compiler::GuestAddress;
+use stela_core::sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchIdentity {

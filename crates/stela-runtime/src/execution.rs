@@ -7,11 +7,11 @@
 
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 use anyhow::{Context, Result, ensure};
-use stela_compiler::{GuestState, NATIVE_ABI, SOURCE_FINGERPRINT_MATERIAL};
-use stela_core::sha256;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use stela_compiler::{GuestState, NATIVE_ABI, SOURCE_FINGERPRINT_MATERIAL};
+use stela_core::sha256;
 
 // Deliberately bounded research entry point; an oversized cache artifact cannot
 // force an unbounded file allocation or executable mapping.
@@ -140,8 +140,8 @@ impl ExecutableLeaf {
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 pub(crate) mod platform {
     use anyhow::{Context, Result, ensure};
-    use stela_compiler::GuestState;
     use std::ptr::NonNull;
+    use stela_compiler::GuestState;
 
     pub fn ensure_supported() -> Result<()> {
         // Every x86-64 CPU implements Stela's integer and SSE2 baseline.

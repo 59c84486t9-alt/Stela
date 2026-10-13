@@ -1,12 +1,12 @@
 //! Owned native trap exits stop at the original instruction without host delivery.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
+use std::path::Path;
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{SynchronousTrap, TrapKind},
 };
 use stela_runtime::blocks::{BlockRuntime, RunOutcome, StopReason, ThreadState};
-use std::path::Path;
 
 const BASE: u64 = 0x1000;
 const STOP: u64 = 0xdead0000;

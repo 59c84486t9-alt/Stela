@@ -4,8 +4,8 @@
 use crate::{blocks::ThreadState, darwin::validate_trap};
 use anyhow::{Result, ensure};
 use serde::Serialize;
-use stela_compiler::block::SynchronousTrap;
 use std::{marker::PhantomData, rc::Rc};
+use stela_compiler::block::SynchronousTrap;
 
 pub const HOST_PORT_PROFILE: &str = "darwin-host-owned-mach-ports-v1";
 

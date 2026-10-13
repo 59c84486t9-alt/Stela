@@ -6,12 +6,12 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use std::path::PathBuf;
 use stela_compiler::GuestAddress;
 use stela_runtime::{
     blocks::{BlockRuntime, RunOutcome, ThreadState},
     memory::{DataProtectionLimit, MemoryRegion, MemoryRegionSpec, OwnedMemory, host_page_size},
 };
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StackSpec {

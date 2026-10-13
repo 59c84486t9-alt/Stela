@@ -4,6 +4,13 @@
 use crate::{Prepared, clock, execution::platform, pauth, prepare_block_for_target};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io::Read,
+    marker::PhantomData,
+    path::PathBuf,
+    rc::Rc,
+};
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
     block::{
@@ -14,13 +21,6 @@ use stela_compiler::{
     },
 };
 use stela_core::sha256;
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    io::Read,
-    marker::PhantomData,
-    path::PathBuf,
-    rc::Rc,
-};
 
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 

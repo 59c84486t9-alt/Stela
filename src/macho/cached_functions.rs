@@ -4,17 +4,17 @@ use super::shared_cache_exports::CacheResolver;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use stela_compiler::{
-    GuestAddress, GuestState, Lifter,
-    aarch64::{Decoder, Operation},
-};
-use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
+use stela_compiler::{
+    GuestAddress, GuestState, Lifter,
+    aarch64::{Decoder, Operation},
+};
+use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 
 #[derive(Debug, Clone)]
 pub struct FunctionInput {
