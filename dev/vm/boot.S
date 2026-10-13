@@ -36,7 +36,8 @@ _start:
     movl $0x0083, 0x3000
     lgdt gdt_pointer
     movl %cr4, %eax
-    orl $0x20, %eax
+    /* PAE, OSFXSR and OSXMMEXCPT: native x86-64/SSE2 baseline. */
+    orl $0x620, %eax
     movl %eax, %cr4
     movl $0x1000, %eax
     movl %eax, %cr3
@@ -45,7 +46,8 @@ _start:
     orl $0x100, %eax
     wrmsr
     movl %cr0, %eax
-    orl $0x80000001, %eax
+    andl $0xfffffff3, %eax /* clear EM/TS before native SIMD data moves */
+    orl $0x80000003, %eax /* PG/PE/MP */
     movl %eax, %cr0
     ljmpl $8, $long_mode
 
@@ -58,10 +60,10 @@ long_mode:
     movq $0x7000, %rsp
 payload:
 #ifdef STELA_TRANSLATED
-    /* ABI v2: zero GuestState at 0x6000; call AOT code loaded at 0x10000. */
+    /* Leaf ABI v3/block ABI v2: zero all784 state bytes, including V/FP. */
     xorq %rax, %rax
     movq $0x6000, %rdi
-    movq $33, %rcx
+    movq $98, %rcx
     rep stosq
     movq $0x6000, %rdi
     movq $0x10000, %rax

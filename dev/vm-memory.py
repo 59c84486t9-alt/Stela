@@ -13,11 +13,13 @@ from evidence import ROOT, write_evidence
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fixture", choices=("scalar", "pair"), default="scalar")
+    parser.add_argument("--fixture", choices=("scalar", "pair", "simd"), default="scalar")
+    parser.add_argument("--no-build", action="store_true", help="Use the already built, frozen CLI")
     args = parser.parse_args()
-    subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
+    if not args.no_build:
+        subprocess.run([str(ROOT / "dev/cargo"), "build", "--locked", "-p", "stela-cli"], check=True)
     cli = ROOT / "target/debug/stela"
-    assembly = ROOT / "tests/fixtures" / ("pair.S" if args.fixture == "pair" else "memory.S")
+    assembly = ROOT / "tests/fixtures" / {"scalar": "memory.S", "pair": "pair.S", "simd": "simd-memory.S"}[args.fixture]
     with tempfile.TemporaryDirectory(prefix="stela-vm-memory-") as temporary:
         directory = Path(temporary)
         object_path = directory / "memory.o"
@@ -37,6 +39,12 @@ def main():
     if args.fixture == "pair":
         checks = ["0x8000=40", "0x8008=2", "0x8010=0x0000000200000028", "0x8018=0x7fffffff80000000",
                   "0x8020=0xffffffff80000000", "0x8028=0x7fffffff", "0x8ff0=40", "0x8ff8=2", "0x60f8=0x9000"]
+    if args.fixture == "simd":
+        mask = "0xff00ff0000ff00ff"
+        checks = [f"0x8000={mask}", f"0x8008={mask}", "0x8010=255", "0x8018=0",
+                  "0x8020=255", "0x8028=0", f"0x8ff0={mask}", f"0x8ff8={mask}",
+                  "0x60f8=0x9000", "0x6108=255", "0x6110=0", "0x62f8=255", "0x6300=0",
+                  "0x6308=0"]
     arguments = [sys.executable, str(ROOT / "dev/vm.py"), "smoke", "--native", str(native_path)]
     for check in checks:
         arguments.extend(["--expect-memory", check])
@@ -46,7 +54,7 @@ def main():
               "arm_source_sha256": hashlib.sha256(source).hexdigest(), "aot_cache_key": prepared["key"],
               "translation_manifest": prepared["manifest"], "native_artifact": str(native_path), "vm": observed,
               "limits": "Original Stela fixture and identity-mapped RAM only. QEMU debug evidence, not macOS boot or a native performance benchmark."}
-    destination = ROOT / ".stela/vm" / ("pair-smoke-report.json" if args.fixture == "pair" else "memory-smoke-report.json")
+    destination = ROOT / ".stela/vm" / {"scalar": "memory-smoke-report.json", "pair": "pair-smoke-report.json", "simd": "simd-smoke-report.json"}[args.fixture]
     write_evidence(destination, report)
     print(json.dumps({"report": str(destination), "passed": True, "guest_x0": observed["expected_result"],
                       "checked_memory_locations": len(observed["memory_checks"]), "native_artifact": str(native_path)}, indent=2))
