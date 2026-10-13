@@ -235,7 +235,7 @@ def compile_batch(cli, directory, functions, index, block=False):
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -385,7 +385,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_batches(batches, pipe)})
+        pipe.send({'result': execute_integer_batches(batches) if batches[0].get('cohort')=='integer' else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -602,13 +602,114 @@ def verify_faults(cli, directory, compiler):
             'shared_fault_oracle_sha256': digest((ROOT / 'dev/memory-faults.py').read_bytes())}
 
 
+
+INTEGER_BASES = {'and':0x0e201c00,'bic':0x0e601c00,'orr':0x0ea01c00,'orn':0x0ee01c00,
+                 'eor':0x2e201c00,'bsl':0x2e601c00,'bit':0x2ea01c00,'bif':0x2ee01c00,
+                 'add':0x0e208400,'sub':0x2e208400,'abs':0x0e20b800,'neg':0x2e20b800}
+
+
+def integer_programs():
+    configurations=[]
+    for name,base in INTEGER_BASES.items():
+        if name in ('add','sub','abs','neg'):
+            configurations.extend((name,base|(q<<30)|(size<<22),8<<q,1<<size)
+                for q in (0,1) for size in range(4) if size!=3 or q)
+            configurations.append((name,(0x5ee08400 if name=='add' else 0x7ee08400 if name=='sub'
+                                         else 0x5ee0b800 if name=='abs' else 0x7ee0b800),8,8))
+        else: configurations.extend((name,base|(q<<30),8<<q,1) for q in (0,1))
+    programs=[]
+    for name,base,width,lane in configurations:
+        def operation(d,n,m):
+            unary=name in ('abs','neg')
+            return {'kind':'integer','name':name,'width':width,'lane':lane,'d':d,'n':n,'m':m,
+                    'word':base|(n<<5)|d|(0 if unary else m<<16)}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,30),(0,31,31),(31,0,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def integer_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v]
+    for op in operations:
+        name,width,lane,d,n,m=(op[k] for k in ('name','width','lane','d','n','m'))
+        mask=(1<<(width*8))-1
+        a,b,old=(vectors[r]&mask for r in (n,m,d))
+        logical={'and':a&b,'bic':a&~b,'orr':a|b,'orn':a|~b,'eor':a^b,
+                 'bsl':(old&a)|(~old&b),'bit':(old&~b)|(a&b),'bif':(old&b)|(a&~b)}
+        if name in logical: value=logical[name]&mask
+        else:
+            value=0;bits=lane*8;lane_mask=(1<<bits)-1
+            for offset in range(0,width*8,bits):
+                left,right=(v>>offset&lane_mask for v in (a,b))
+                signed=left-(1<<bits) if left&(1<<(bits-1)) else left
+                result=left+right if name=='add' else left-right if name=='sub' else abs(signed) if name=='abs' else -signed
+                value|=(result&lane_mask)<<offset
+        vectors[d]=value # Q=0/scalar writes clear every upper vector bit.
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
+
+
+def execute_integer_batches(batches):
+    corpus,comparisons=hashlib.sha256(),0
+    for batch in batches:
+        machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
+        machine.mem_map(BASE,(len(batch['source'])+4095)&~4095);machine.mem_write(BASE,batch['source'])
+        with executable(batch['native']) as address:
+            for function,entry,offset in zip(batch['functions'],batch['entries'],batch['offsets']):
+                native=ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+offset)
+                operations=function['operations'];lane=operations[0]['lane'];bits=lane*8
+                for flags in (0,15):
+                    for pattern in range(5):
+                        initial=State.from_buffer_copy(states(all_flags=True)[flags]);initial.nzcv=flags<<28
+                        initial.reserved=0x51ad1234
+                        seed_extended_state(initial,pattern*16+flags)
+                        if pattern<4:
+                            values=(0,(1<<bits)-1,1<<(bits-1),(1<<(bits-1))-1,1)
+                            for register in range(32):
+                                value=sum(values[(register+i+pattern)%len(values)]<<(i*bits) for i in range(128//bits))
+                                initial.v[register][:]=[value&MASK,value>>64]
+                        initialize_arm(machine,initial)
+                        end=BASE+(entry+len(operations))*4
+                        machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
+                        assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
+                        original=state_dict(capture_arm(machine,initial))
+                        mathematical=integer_mathematical(operations,initial)
+                        actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
+                        if mathematical!=original or original!=actual:
+                            raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
+                                'math':mathematical,'arm':original,'native':actual}))
+                        corpus.update(struct.pack('<'+'I'*len(operations),*(op['word'] for op in operations)))
+                        corpus.update(bytes(initial));comparisons+=1
+    return {'three_way_register_state_comparisons':comparisons,'state_corpus_sha256':corpus.hexdigest()}
+
+
+def run_integer_cohort(cli):
+    functions=integer_programs();started=time.monotonic()
+    cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
+    with tempfile.TemporaryDirectory(prefix='stela-simd-integer-') as temporary:
+        batch=compile_batch(cli,Path(temporary),functions,0);batch['cohort']='integer'
+        result=bounded_cases([batch])
+    assert digest(cli.read_bytes())==cli_hash and digest(Path(__file__).read_bytes())==harness_hash
+    report={'kind':'simd_integer_arm_vs_native_x86','passed':True,**result,'programs':len(functions),
+        'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
+        'harness_source_sha256':harness_hash,'shared_runner_sha256':digest((ROOT/'dev/differential.py').read_bytes()),
+        'corpus_sha256':digest(batch['source']),'compilation':batch['receipt'],
+        'verification_wall_seconds':time.monotonic()-started,
+        'limits':'Focused non-saturating integer/logical SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
+    write_evidence(ROOT/'.stela/simd-integer-differential-report.json',report)
+    print(json.dumps(report,indent=2))
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--focus', choices=['integer'], help='Only the focused SIMD integer implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
+    if arguments.focus:
+        run_integer_cohort(cli)
+        return
     cli_hash = digest(cli.read_bytes())
     source_paths = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'dev/memory-faults.py', ROOT / 'dev/native-memory-faults.c']
     identities = {str(path): digest(path.read_bytes()) for path in source_paths}

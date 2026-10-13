@@ -1,7 +1,7 @@
 //! Baseline SSE2 data movement. Original Arm bytes are never host instructions.
 //! Ordinary private RAM only: no 128-bit atomicity or guest fault delivery claim.
 use super::{memory_address, memory_writeback};
-use crate::aarch64::simd::Operand;
+use crate::aarch64::simd::{IntegerOperation, Operand};
 
 fn vector_offset(vector: u8) -> u32 {
     264 + u32::from(vector) * 16
@@ -16,6 +16,20 @@ fn commit(code: &mut Vec<u8>, vector: u8, xmm: u8) {
 fn read_vector(code: &mut Vec<u8>, vector: u8, xmm: u8) {
     code.extend([0xf3, 0x0f, 0x6f, 0x87 | (xmm << 3)]); // movdqu xmmN,[rdi+disp32]
     code.extend(vector_offset(vector).to_le_bytes());
+}
+
+fn packed(code: &mut Vec<u8>, opcode: u8, destination: u8, source: u8) {
+    code.extend([0x66, 0x0f, opcode, 0xc0 | (destination << 3) | source]);
+}
+
+fn subtract_opcode(lane_bytes: u8) -> u8 {
+    match lane_bytes {
+        1 => 0xf8,
+        2 => 0xf9,
+        4 => 0xfa,
+        8 => 0xfb,
+        _ => unreachable!("reviewed lane size"),
+    }
 }
 
 /// Transfer S/D/Q at [RAX+displacement], using XMM0/XMM1. Scalar loads
@@ -40,6 +54,98 @@ fn wide_memory(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement:
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     match *operand {
+        Operand::Integer {
+            operation,
+            destination,
+            left,
+            right,
+            bytes,
+            lane_bytes,
+        } => {
+            use IntegerOperation::*;
+            // Stage original sources before committing any overlapping V register.
+            read_vector(code, left, 0);
+            let mut result = 0;
+            if !matches!(operation, Abs | Neg) {
+                read_vector(code, right, 1);
+            }
+            match operation {
+                And => packed(code, 0xdb, 0, 1),
+                Bic => {
+                    packed(code, 0xdf, 1, 0);
+                    result = 1;
+                }
+                Orr => packed(code, 0xeb, 0, 1),
+                Orn => {
+                    packed(code, 0x76, 2, 2); // pcmpeqd: all ones, including dirty Q=0 upper bits
+                    packed(code, 0xef, 1, 2);
+                    packed(code, 0xeb, 0, 1);
+                }
+                Eor => packed(code, 0xef, 0, 1),
+                Bsl | Bit | Bif => {
+                    read_vector(code, destination, 2);
+                    if operation == Bsl {
+                        packed(code, 0xef, 0, 1);
+                        packed(code, 0xdb, 0, 2);
+                        packed(code, 0xef, 0, 1);
+                    } else {
+                        packed(code, 0xef, 0, 2);
+                        if operation == Bit {
+                            packed(code, 0xdb, 0, 1);
+                            packed(code, 0xef, 0, 2);
+                        } else {
+                            packed(code, 0xdf, 1, 0);
+                            packed(code, 0xef, 1, 2);
+                            result = 1;
+                        }
+                    }
+                }
+                Add => packed(
+                    code,
+                    match lane_bytes {
+                        1 => 0xfc,
+                        2 => 0xfd,
+                        4 => 0xfe,
+                        8 => 0xd4,
+                        _ => unreachable!("reviewed lane size"),
+                    },
+                    0,
+                    1,
+                ),
+                Sub => packed(code, subtract_opcode(lane_bytes), 0, 1),
+                Neg => {
+                    packed(code, 0xef, 1, 1);
+                    packed(code, subtract_opcode(lane_bytes), 1, 0);
+                    result = 1;
+                }
+                Abs => {
+                    packed(code, 0xef, 1, 1);
+                    packed(
+                        code,
+                        match lane_bytes {
+                            1 => 0x64,
+                            2 => 0x65,
+                            4 | 8 => 0x66,
+                            _ => unreachable!("reviewed lane size"),
+                        },
+                        1,
+                        0,
+                    );
+                    if lane_bytes == 8 {
+                        // SSE2 lacks a signed qword comparison: repeat each high
+                        // dword's sign across its qword, using only its sign bit.
+                        code.extend([0x66, 0x0f, 0x70, 0xc9, 0xf5]);
+                    }
+                    packed(code, 0xef, 0, 1);
+                    packed(code, subtract_opcode(lane_bytes), 0, 1);
+                }
+            }
+            if bytes == 8 {
+                // Arm clears the complete upper half on scalar/D vector writes.
+                code.extend([0xf3, 0x0f, 0x7e, 0xc0 | (result << 3) | result]);
+            }
+            commit(code, destination, result);
+        }
         Operand::MemoryPair {
             load,
             bytes,

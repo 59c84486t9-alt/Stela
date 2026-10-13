@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v12",
+  "registry_version": "apple-silicon-reviewed-forms-v13",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -159,6 +159,15 @@
       "required_measurements": {
         "programs": 311,
         "three_way_register_state_comparisons": 29856
+      }
+    },
+    "simd_integer": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-integer-differential-report.json",
+      "kind": "simd_integer_arm_vs_native_x86",
+      "required_measurements": {
+        "programs": 336,
+        "three_way_register_state_comparisons": 3360
       }
     }
   },
@@ -12987,6 +12996,478 @@
           "word": "0x9ac22c20",
           "expected_mnemonics": [
             "ror"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ABS_asimdmisc_R",
+      "category": "fp_simd",
+      "source_file": "abs_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e20b800",
+      "alias": false,
+      "source_sha256": "c4d3929521b207b5adc06d73f28a180f7234ff62a69219dd86ff6f19f46849f8",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e20b820",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee0b820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "ABS_asisdmisc_R",
+      "category": "fp_simd",
+      "source_file": "abs_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ee0b800",
+      "alias": false,
+      "source_sha256": "c4d3929521b207b5adc06d73f28a180f7234ff62a69219dd86ff6f19f46849f8",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee0b820",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ADD_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "add_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e208400",
+      "alias": false,
+      "source_sha256": "f6a749503bb6669d2c3746a8123641a5ab0f3f0707c1d7888e92897d0aaf8b03",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e228420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee28420",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "ADD_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "add_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee08400",
+      "alias": false,
+      "source_sha256": "f6a749503bb6669d2c3746a8123641a5ab0f3f0707c1d7888e92897d0aaf8b03",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee28420",
+          "expected_mnemonics": [
+            "add"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AND_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "and_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e201c00",
+      "alias": false,
+      "source_sha256": "b25591ddac286ca2e9634e45fbff503f5ab8d7fdf196a00b4250b73bf5161e5c",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e221c20",
+          "expected_mnemonics": [
+            "and"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BIC_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "bic_advsimd_reg.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e601c00",
+      "alias": false,
+      "source_sha256": "cc0ee151b9936ad999aa3e15d397ea41552c8ee570dec581ccd826a7533ac55b",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e621c20",
+          "expected_mnemonics": [
+            "bic"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BIF_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "bif_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ee01c00",
+      "alias": false,
+      "source_sha256": "573e5fd5b62690cd37506d014c2e06f7a102dd52572ec7d6e379954a901f740a",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ee21c20",
+          "expected_mnemonics": [
+            "bif"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BIT_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "bit_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ea01c00",
+      "alias": false,
+      "source_sha256": "efdfcc5f5afc7e4eb79373d22d67f87927d8ea9279a9e41fdb0869d07005d9ad",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ea21c20",
+          "expected_mnemonics": [
+            "bit"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BSL_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "bsl_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e601c00",
+      "alias": false,
+      "source_sha256": "9e8d08aecf3245fb939a1df07d2be9c34a7c371df202ff1830c8154407c94e92",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e621c20",
+          "expected_mnemonics": [
+            "bsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EOR_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "eor_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e201c00",
+      "alias": false,
+      "source_sha256": "4c20fd2e0475478bd618cc21d5cedcb88a718e96df2c2f104f7a5289b659f720",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e221c20",
+          "expected_mnemonics": [
+            "eor"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "NEG_asimdmisc_R",
+      "category": "fp_simd",
+      "source_file": "neg_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e20b800",
+      "alias": false,
+      "source_sha256": "bd4717beea29b4d949182a3e2b8760807a581459cce0c8403bb9b6f439f04b87",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e20b820",
+          "expected_mnemonics": [
+            "neg"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee0b820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "NEG_asisdmisc_R",
+      "category": "fp_simd",
+      "source_file": "neg_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x7ee0b800",
+      "alias": false,
+      "source_sha256": "bd4717beea29b4d949182a3e2b8760807a581459cce0c8403bb9b6f439f04b87",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee0b820",
+          "expected_mnemonics": [
+            "neg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ORN_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "orn_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ee01c00",
+      "alias": false,
+      "source_sha256": "36418d40fc8727ce2f290c96ce323cda6e430703e83ec36372c9e4a095f35077",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ee21c20",
+          "expected_mnemonics": [
+            "orn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ORR_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "orr_advsimd_reg.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ea01c00",
+      "alias": false,
+      "source_sha256": "0733ba6e8dce16250bfcf6e96bf2a47583befa16b9dc91ac87bd0bc21b9ef0e7",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ea21c20",
+          "expected_mnemonics": [
+            "orr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SUB_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "sub_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e208400",
+      "alias": false,
+      "source_sha256": "a83d6d2fa9d3d7d0ba3f5b89b766ad890ce6995ba98bd29ddcc29ab21c88b76a",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e228420",
+          "expected_mnemonics": [
+            "sub"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee28420",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "SUB_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "sub_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee08400",
+      "alias": false,
+      "source_sha256": "a83d6d2fa9d3d7d0ba3f5b89b766ad890ce6995ba98bd29ddcc29ab21c88b76a",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. All allocated scalar/vector lane sizes and Q widths, ordinary V31 data, all source/destination overlaps, modulo integer results and Q=0/scalar upper-half clearing. NZCV/FPCR/FPSR unchanged.",
+      "review": "Reviewed against pinned Arm 2026-06 fixed bits and integer/logical semantics; focused full-state original ARM, independent lane/Boolean math and baseline SSE2 execution. Saturation and FP arithmetic are separate forms.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee28420",
+          "expected_mnemonics": [
+            "sub"
           ]
         }
       ]

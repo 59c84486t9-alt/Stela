@@ -1,10 +1,35 @@
-//! Reviewed FP/SIMD data movement, with FP/AdvSIMD enabled and ordinary RAM.
+//! Reviewed SIMD data movement and integer operations, with FP/AdvSIMD enabled.
 //! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegerOperation {
+    And,
+    Bic,
+    Orr,
+    Orn,
+    Eor,
+    Bsl,
+    Bit,
+    Bif,
+    Add,
+    Sub,
+    Abs,
+    Neg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Integer {
+        operation: IntegerOperation,
+        destination: u8,
+        left: u8,
+        /// Unused for unary ABS/NEG. V31 is ordinary data in every role.
+        right: u8,
+        bytes: u8,
+        lane_bytes: u8,
+    },
     MemoryPair {
         load: bool,
         bytes: u8,
@@ -33,9 +58,60 @@ pub enum Operand {
 }
 
 /// None denotes another encoding class; Err is an unsupported/reserved member.
-/// Arithmetic, other MOVI forms, register offsets and structures decline.
+/// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    use IntegerOperation::*;
+    let logical = match word & 0xbfe0fc00 {
+        0x0e201c00 => Some(And),
+        0x0e601c00 => Some(Bic),
+        0x0ea01c00 => Some(Orr),
+        0x0ee01c00 => Some(Orn),
+        0x2e201c00 => Some(Eor),
+        0x2e601c00 => Some(Bsl),
+        0x2ea01c00 => Some(Bit),
+        0x2ee01c00 => Some(Bif),
+        _ => None,
+    };
+    let vector_math = match word & 0xbf20fc00 {
+        0x0e208400 => Some(Add),
+        0x2e208400 => Some(Sub),
+        _ => None,
+    }
+    .or(match word & 0xbf3ffc00 {
+        0x0e20b800 => Some(Abs),
+        0x2e20b800 => Some(Neg),
+        _ => None,
+    });
+    let scalar_math = match word & 0xffe0fc00 {
+        0x5ee08400 => Some(Add),
+        0x7ee08400 => Some(Sub),
+        _ => None,
+    }
+    .or(match word & 0xfffffc00 {
+        0x5ee0b800 => Some(Abs),
+        0x7ee0b800 => Some(Neg),
+        _ => None,
+    });
+    if let Some(operation) = logical.or(vector_math).or(scalar_math) {
+        let q = word & (1 << 30) != 0;
+        let lane_bytes = if logical.is_some() {
+            1
+        } else {
+            1 << ((word >> 22) & 3)
+        };
+        if vector_math.is_some() && !q && lane_bytes == 8 {
+            return Some(Err(()));
+        }
+        return Some(Ok(Operand::Integer {
+            operation,
+            destination: (word & 31) as u8,
+            left: ((word >> 5) & 31) as u8,
+            right: ((word >> 16) & 31) as u8,
+            bytes: if scalar_math.is_some() || !q { 8 } else { 16 },
+            lane_bytes,
+        }));
+    }
     if word & 0x3e000000 == 0x2c000000 {
         let opcode = word >> 30;
         let mode = match (word >> 23) & 3 {
@@ -116,6 +192,62 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 mod tests {
     use super::*;
     use crate::{GuestAddress, Lifter};
+
+    #[test]
+    fn integer_vectors_reject_single_d_lanes_and_keep_v31_as_data() {
+        for (base, unary) in [
+            (0x0e208400, false),
+            (0x2e208400, false),
+            (0x0e20b800, true),
+            (0x2e20b800, true),
+        ] {
+            for q in 0..2 {
+                for size in 0..4 {
+                    let word = base
+                        | (q << 30)
+                        | (size << 22)
+                        | (31 << 5)
+                        | 31
+                        | if unary { 0 } else { 31 << 16 };
+                    let decoded = decode(word).unwrap();
+                    if q == 0 && size == 3 {
+                        assert_eq!(decoded, Err(()));
+                    } else if let Ok(Operand::Integer {
+                        destination,
+                        left,
+                        right,
+                        bytes,
+                        lane_bytes,
+                        ..
+                    }) = decoded
+                    {
+                        assert_eq!((destination, left), (31, 31));
+                        if !unary {
+                            assert_eq!(right, 31);
+                        }
+                        assert_eq!(bytes, 8 << q);
+                        assert_eq!(lane_bytes, 1 << size);
+                    } else {
+                        panic!("integer vector decoded as another class");
+                    }
+                }
+            }
+        }
+        for base in [0x5ee08400, 0x7ee08400, 0x5ee0b800, 0x7ee0b800] {
+            assert!(matches!(
+                decode(base),
+                Some(Ok(Operand::Integer {
+                    bytes: 8,
+                    lane_bytes: 8,
+                    ..
+                }))
+            ));
+            for size in 0..3 {
+                let word = (base & !(3 << 22)) | (size << 22);
+                assert!(!matches!(decode(word), Some(Ok(Operand::Integer { .. }))));
+            }
+        }
+    }
 
     #[test]
     fn actual_xcode_words_keep_vector_bank_and_address_units() {
