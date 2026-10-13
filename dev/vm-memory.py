@@ -44,7 +44,10 @@ def main():
         checks = [f"0x8000={mask}", f"0x8008={mask}", "0x8010=255", "0x8018=0",
                   "0x8020=255", "0x8028=0", f"0x8ff0={mask}", f"0x8ff8={mask}",
                   "0x60f8=0x9000", "0x6108=255", "0x6110=0", "0x62f8=255", "0x6300=0",
-                  "0x6308=0"]
+                  "0x6308=0", "0x8030=255", "0x8038=0", "0x8040=255", "0x8048=0",
+                  "0x6148=255", "0x6150=0", "0x6158=255", "0x6160=0",
+                  f"0x6168={mask}", f"0x6170={mask}", f"0x6178={mask}", f"0x6180={mask}",
+                  f"0x8fe0={mask}", f"0x8fe8={mask}"]
     arguments = [sys.executable, str(ROOT / "dev/vm.py"), "smoke", "--native", str(native_path)]
     for check in checks:
         arguments.extend(["--expect-memory", check])
