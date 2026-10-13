@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Three-way carry and extended-register arithmetic; complete architectural state."""
+import argparse
 import hashlib
 import ctypes
 import json
@@ -12,7 +13,7 @@ import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import state_dict as complete_state
-from differential import compiler_cli, ROOT, State, arithmetic, executable, initialize_arm, capture_arm, states
+from differential import ROOT, State, arithmetic, executable, initialize_arm, capture_arm, states
 from evidence import write_evidence
 
 RET = 0xd65f03c0
@@ -305,9 +306,149 @@ def execute_cases(compiled):
             'extended_three_way_register_state_comparisons': counts['extended']['comparisons']}
 
 
+
+def scalar_control_cases():
+    """Focused implementation cohort; no new Cartesian matrix for each opcode."""
+    result = []
+    roles = ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 1),
+             (31, 1, 2), (0, 31, 2), (0, 1, 31), (31, 31, 31))
+    for width in (0, 1):
+        for shift in range(4):
+            for d, n, m in roles:
+                result.append({'family': 'scalar_control', 'width': width, 'roles': (d, n, m),
+                    'words': [(width << 31) | 0x1ac02000 | (shift << 10) | (m << 16) | (n << 5) | d, RET]})
+        for amount in range(32 << width):
+            # Every immediate plus rotation, source/destination overlap and ZR.
+            d, n, m = roles[amount % len(roles)]
+            result.append({'family': 'scalar_control', 'width': width, 'roles': (d, n, m),
+                'words': [(0x93c00000 if width else 0x13800000) | (amount << 10)
+                          | (m << 16) | (n << 5) | d, RET]})
+        for subtract in (0, 1):
+            for immediate in (0, 1):
+                for condition in range(18):
+                    # AL/NV always take the comparison; EQ additionally covers
+                    # fallback nibbles 14/15, unreachable under those conditions.
+                    cond, fallback = (condition, condition) if condition < 16 else (0, condition - 2)
+                    _, n, m = roles[condition % len(roles)]
+                    result.append({'family': 'scalar_control', 'width': width, 'roles': (31, n, m),
+                        'words': [(width << 31) | (subtract << 30) | 0x3a400000
+                                  | (immediate << 11) | (m << 16) | (cond << 12) | (n << 5) | fallback, RET]})
+    # Original dyld encodings and freshly generated flags consumed by a second
+    # conditional compare, followed by a carry consumer (no application behavior).
+    for word in (0x1ac22108, 0xfa489320, 0x93cb116b, 0x7a411904, 0x7a490100):
+        result.append({'family': 'scalar_control', 'width': word >> 31, 'roles': (0, 1, 2), 'words': [word, RET]})
+    for width in (0, 1):
+        result.append({'family': 'scalar_control', 'width': width, 'roles': (0, 1, 2),
+            'words': [(width << 31) | 0x7a420020, (width << 31) | 0x3a41c82f,
+                      encoding(width, 0, 0, 0, 31, 31), RET]})
+    decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    for case in result:
+        for word in case['words']:
+            instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
+            assert instruction is not None and instruction.mnemonic in (
+                'lsl', 'lsr', 'asr', 'ror', 'extr', 'ccmp', 'ccmn', 'adc', 'ret'), hex(word)
+    return result
+
+
+def scalar_control_reference(words, initial):
+    registers, flags = list(initial.x), initial.nzcv
+    for word in words[:-1]:
+        bits = 64 if word >> 31 else 32
+        mask, sign = (1 << bits) - 1, 1 << (bits - 1)
+        d, n, m = word & 31, (word >> 5) & 31, (word >> 16) & 31
+        a, b = ((registers[r] if r != 31 else 0) & mask for r in (n, m))
+        if word & 0x7fe0f000 == 0x1ac02000:
+            count, operation = b % bits, (word >> 10) & 3
+            values = (a << count, a >> count,
+                      (a - (1 << bits) if a & sign else a) >> count,
+                      (a >> count) | (a << (bits - count)))
+            value = values[operation] & mask
+        elif word & 0x7fa00000 == 0x13800000:
+            value = (((a << bits) | b) >> ((word >> 10) & 63)) & mask
+        elif word & 0x3fe00410 == 0x3a400000:
+            negative, zero, carry, overflow = (bool(flags & (1 << bit)) for bit in (31, 30, 29, 28))
+            predicates = (zero, not zero, carry, not carry, negative, not negative, overflow, not overflow,
+                          carry and not zero, not carry or zero, negative == overflow, negative != overflow,
+                          not zero and negative == overflow, zero or negative != overflow, True, True)
+            if not predicates[(word >> 12) & 15]:
+                flags = (word & 15) << 28
+            else:
+                if word & (1 << 11): b = m
+                subtract = bool(word & (1 << 30))
+                total = a - b if subtract else a + b
+                signed_a, signed_b = (v - (1 << bits) if v & sign else v for v in (a, b))
+                signed_total = signed_a - signed_b if subtract else signed_a + signed_b
+                flags = ((int(bool(total & sign)) << 31) | (int((total & mask) == 0) << 30)
+                         | (int(total >= 0 if subtract else total > mask) << 29)
+                         | (int(not -sign <= signed_total < sign) << 28))
+            continue
+        elif word & 0x7fe0fc00 == 0x1a000000:
+            value = (a + b + ((flags >> 29) & 1)) & mask
+        else: raise AssertionError(hex(word))
+        if d != 31: registers[d] = value
+    return {**complete_state(initial), 'x': registers, 'nzcv': flags}
+
+
+def execute_scalar_control(compiled):
+    corpus, comparisons = hashlib.sha256(), 0
+    initial_states = states(all_flags=True)
+    for case in compiled:
+        source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+        original = reusable_reference(source)
+        bits = 32 << case['width']
+        pairs = ((0, 0), (0x8000000080000000, 1), (0xffffffffffffffff, bits - 1),
+                 (0x7fffffff7fffffff, bits), (0xdeadc0de00000001, bits + 1),
+                 (0x0123456789abcdef, 0xffffffffffffffff))
+        with executable(case['native']) as address:
+            function = ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)
+            for first, second in pairs:
+                for initial in initial_states:
+                    state = State.from_buffer_copy(initial)
+                    for register, value in zip(case['roles'][1:], (first, second)):
+                        if register != 31: state.x[register] = value
+                    state.reserved = 0x5a17c0de
+                    expected = scalar_control_reference(case['words'], state)
+                    arm = original(state)
+                    actual = State.from_buffer_copy(state)
+                    function(ctypes.byref(actual))
+                    if expected != arm or arm != complete_state(actual):
+                        raise AssertionError(json.dumps({'case': {k:v for k,v in case.items() if k != 'native'},
+                            'initial': complete_state(state), 'math': expected, 'arm': arm,
+                            'native': complete_state(actual)}))
+                    corpus.update(source); corpus.update(bytes(state)); comparisons += 1
+    return {'programs': len(compiled), 'three_way_register_state_comparisons': comparisons,
+            'state_corpus_sha256': corpus.hexdigest()}
+
+
+def run_scalar_control(cli):
+    compiled, compiler, corpus = scalar_control_cases(), None, hashlib.sha256()
+    executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix='stela-scalar-control-') as temporary:
+        directory = Path(temporary)
+        for index, case in enumerate(compiled):
+            source = struct.pack('<' + 'I' * len(case['words']), *case['words'])
+            corpus.update(source)
+            path = directory / 'source.bin'; path.write_bytes(source)
+            output = directory / str(index)
+            manifest = json.loads(subprocess.check_output([str(cli), 'compile-leaf', str(path), '--output-dir', str(output)]))
+            assert compiler in (None, manifest['compiler_source_sha256'])
+            compiler = manifest['compiler_source_sha256']
+            case['native'] = (output / 'native.bin').read_bytes()
+        result = bounded_cases(compiled)
+    assert hashlib.sha256(cli.read_bytes()).hexdigest() == executable_hash
+    report = {'kind': 'scalar_control_arm_vs_native_x86', 'passed': True, **result,
+        'compiler_source_sha256': compiler, 'compiler_executable_sha256': executable_hash,
+        'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
+        'corpus_sha256': corpus.hexdigest(), 'verification_wall_seconds': time.monotonic() - started,
+        'limits': 'Focused scalar implementation checks, not the full regression checkpoint or application performance.'}
+    write_evidence(ROOT / '.stela/scalar-control-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
 def worker(pipe, compiled):
     try:
-        pipe.send(execute_cases(compiled))
+        pipe.send(execute_scalar_control(compiled) if compiled[0].get('family') == 'scalar_control' else execute_cases(compiled))
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -421,7 +562,16 @@ def reject_reserved_extended(cli, directory):
 
 
 def main():
-    cli = compiler_cli(__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--focus', choices=['scalar-control'], help='Run only the current scalar implementation cohort')
+    arguments = parser.parse_args()
+    if not arguments.no_build:
+        subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
+    cli = ROOT / 'target/debug/stela'
+    if arguments.focus:
+        run_scalar_control(cli)
+        return
     executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
     compiled = carry_cases()
     legacy = hashlib.sha256(b''.join(struct.pack('<' + 'I' * len(c['words']), *c['words']) for c in compiled)).hexdigest()

@@ -279,6 +279,7 @@ fn emit_instruction(
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
+        Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
         Operation::MemoryPair {
             transfer,

@@ -73,6 +73,7 @@ pub enum Operation {
     Bitfield(bitfield::Operand),
     PcRelative(pc_relative::Operand),
     ConditionalSelect(conditional_select::Operand),
+    ConditionalCompare(conditional_select::CompareOperand),
     IntegerMath(integer_math::Operand),
     MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
@@ -265,6 +266,8 @@ impl Lifter for Decoder {
             Operation::Bitfield(decoded)
         } else if let Some(decoded) = conditional_select::decode(word) {
             Operation::ConditionalSelect(decoded)
+        } else if let Some(decoded) = conditional_select::decode_compare(word) {
+            Operation::ConditionalCompare(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::decode(word) {
@@ -597,7 +600,6 @@ mod tests {
             0xba008400, // RMIF
             0x3a00080d, // SETF8
             0x3a00480d, // SETF16
-            0xfa420000, // CCMP
         ] {
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
         }

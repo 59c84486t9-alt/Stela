@@ -2138,15 +2138,15 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 292,
+    "implemented": 310,
     "partial": 13,
-    "unsupported": 4027,
+    "unsupported": 4009,
     "total": 4332,
-    "implementation_percentage": 6.740535549399815,
+    "implementation_percentage": 7.156048014773776,
     "categories": {
       "base_integer_system": {
-        "unsupported": 709,
-        "implemented": 241,
+        "unsupported": 691,
+        "implemented": 259,
         "partial": 4
       },
       "fp_simd": {
@@ -2162,75 +2162,16 @@
       }
     }
   },
-  "compiler_source_sha256": "b45f747fb6831dbea9873ef5e46d4af040758580e58aaf32578ddef4eba80474",
-  "evidence_reports": [
-    {
-      "report": ".stela/bitfield-differential-report.json",
-      "report_sha256": "f68bcd774b971dfe44090ef1643bbb257820529aa8deec8268f043333f7cbdd0"
-    },
-    {
-      "report": ".stela/arithmetic-differential-report.json",
-      "report_sha256": "482f6a7904cc78386ccae7397d20143ea3e6c7699b0a8d7d58b83d6f937a50f6"
-    },
-    {
-      "report": ".stela/conditional-select-differential-report.json",
-      "report_sha256": "78405185b741e4088187cf1d8fc60627b9b89d04e0dc8217a3c03dbd121a1bd7"
-    },
-    {
-      "report": ".stela/arithmetic-differential-report.json",
-      "report_sha256": "482f6a7904cc78386ccae7397d20143ea3e6c7699b0a8d7d58b83d6f937a50f6"
-    },
-    {
-      "report": ".stela/differential-report.json",
-      "report_sha256": "56cf07cd13ff5f91f5c70770d76cdfa665993cc921e644f64564bd8bf84934cb"
-    },
-    {
-      "report": ".stela/integer-math-differential-report.json",
-      "report_sha256": "afd05fcfee7b9100998521c75f2424b9cee8ff7b09ffd5263572675e28e92ee0"
-    },
-    {
-      "report": ".stela/pair-differential-report.json",
-      "report_sha256": "7e838374784fa406549a6aedcd2e4b338abc18740896a451c77c52b59d25c16d"
-    },
-    {
-      "report": ".stela/logical-immediate-differential-report.json",
-      "report_sha256": "c775bed7b6f7edf0a30be5e8c4fa614a8c45938da47cfe04f8e887eb95ae4474"
-    },
-    {
-      "report": ".stela/pc-relative-differential-report.json",
-      "report_sha256": "bf5c311d4675fc7b21215e1d89d77e0d56f8cc40817fea4fecf49666d0078a34"
-    },
-    {
-      "report": ".stela/register-offset-differential-report.json",
-      "report_sha256": "f6db01c66fa210f9df2d5e0128ee3828f66a9d55d69910400ae5c110e1b6b8e4"
-    },
-    {
-      "report": ".stela/memory-differential-report.json",
-      "report_sha256": "518c05f724b1ce6194902ff8488cd9bfb65e5fe257e0c3734546963e8e23f39a"
-    },
-    {
-      "report": ".stela/simd-differential-report.json",
-      "report_sha256": "3f6cf8dc0ed8c1a53c08c053a1aae8f7cd8be4de9e7cfe14dfed745715231fad"
-    },
-    {
-      "report": ".stela/simd-differential-report.json",
-      "report_sha256": "3f6cf8dc0ed8c1a53c08c053a1aae8f7cd8be4de9e7cfe14dfed745715231fad"
-    },
-    {
-      "report": ".stela/block-differential-report.json",
-      "report_sha256": "70415d98b80558986f97e1307d24ea3a192437fb05118f0a20b2ece4c9d4080f"
-    },
-    {
-      "report": ".stela/block-differential-report.json",
-      "report_sha256": "70415d98b80558986f97e1307d24ea3a192437fb05118f0a20b2ece4c9d4080f"
-    },
-    {
-      "report": ".stela/pauth-differential-report.json",
-      "report_sha256": "52614bedc56c908335898b808f8fb2a1f1abf02c0a1a00129539125f2775ab4b"
-    }
-  ],
-  "assessment_basis": "current_native_differential_evidence",
-  "last_verified_checkpoint": null,
+  "compiler_source_sha256": "b3ce6546bd1d64089d17306774018d957d9d7624f0e8de6269de42dc4d995320",
+  "evidence_reports": [],
+  "assessment_basis": "reviewed_implementation_and_emission_smoke",
+  "last_verified_checkpoint": {
+    "implemented": 292,
+    "total": 3119,
+    "compiler_source_sha256": "b45f747fb6831dbea9873ef5e46d4af040758580e58aaf32578ddef4eba80474",
+    "measured_at_utc": "2026-10-13T15:55:51Z",
+    "report_sha256": "e6673aaad69c8712258d7cc62215913ef2721a9972063ff041aab6f5591bf141"
+  },
   "forms": [
     {"id":"ABS_32_dp_1src","instruction_id":"ABS","mnemonic":"ABS","category":"base_integer_system","source_file":"abs.xml","encoding_mask":"0xfffffc00","encoding_value":"0x5ac02000","features":[{"feature":"FEAT_CSSC","name":"v8Ap9"}],"status":"unsupported","profiles":[]},
     {"id":"ABS_64_dp_1src","instruction_id":"ABS","mnemonic":"ABS","category":"base_integer_system","source_file":"abs.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac02000","features":[{"feature":"FEAT_CSSC","name":"v8Ap9"}],"status":"unsupported","profiles":[]},
@@ -2275,8 +2216,8 @@
     {"id":"AND_64_log_imm","instruction_id":"AND_log_imm","mnemonic":"AND","category":"base_integer_system","source_file":"and_log_imm.xml","encoding_mask":"0xff800000","encoding_value":"0x92000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"AND_64_log_shift","instruction_id":"AND_log_shift","mnemonic":"AND","category":"base_integer_system","source_file":"and_log_shift.xml","encoding_mask":"0xff200000","encoding_value":"0x8a000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"AND_asimdsame_only","instruction_id":"AND_advsimd","mnemonic":"AND","category":"fp_simd","source_file":"and_advsimd.xml","encoding_mask":"0xbfe0fc00","encoding_value":"0x0e201c00","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
-    {"id":"ASRV_32_dp_2src","instruction_id":"ASRV","mnemonic":"ASRV","category":"base_integer_system","source_file":"asrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02800","features":[],"status":"unsupported","profiles":[]},
-    {"id":"ASRV_64_dp_2src","instruction_id":"ASRV","mnemonic":"ASRV","category":"base_integer_system","source_file":"asrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02800","features":[],"status":"unsupported","profiles":[]},
+    {"id":"ASRV_32_dp_2src","instruction_id":"ASRV","mnemonic":"ASRV","category":"base_integer_system","source_file":"asrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
+    {"id":"ASRV_64_dp_2src","instruction_id":"ASRV","mnemonic":"ASRV","category":"base_integer_system","source_file":"asrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
     {"id":"AUTDA_64P_dp_1src","instruction_id":"AUTDA","mnemonic":"AUTDA","category":"base_integer_system","source_file":"autda.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac11800","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"AUTDB_64P_dp_1src","instruction_id":"AUTDB","mnemonic":"AUTDB","category":"base_integer_system","source_file":"autdb.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac11c00","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"AUTDZA_64Z_dp_1src","instruction_id":"AUTDA","mnemonic":"AUTDZA","category":"base_integer_system","source_file":"autda.xml","encoding_mask":"0xffffffe0","encoding_value":"0xdac13be0","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
@@ -2408,14 +2349,14 @@
     {"id":"CBNZ_64_compbranch","instruction_id":"CBNZ","mnemonic":"CBNZ","category":"base_integer_system","source_file":"cbnz.xml","encoding_mask":"0xff000000","encoding_value":"0xb5000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"partial","scope":"Only resolved internal direct targets in a supplied leaf region; external and runtime-discovered targets unsupported."},{"profile":"direct-private-ram-block-v1","status":"implemented","scope":"Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."}]},
     {"id":"CBZ_32_compbranch","instruction_id":"CBZ","mnemonic":"CBZ","category":"base_integer_system","source_file":"cbz.xml","encoding_mask":"0xff000000","encoding_value":"0x34000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"partial","scope":"Only resolved internal direct targets in a supplied leaf region; external and runtime-discovered targets unsupported."},{"profile":"direct-private-ram-block-v1","status":"implemented","scope":"Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."}]},
     {"id":"CBZ_64_compbranch","instruction_id":"CBZ","mnemonic":"CBZ","category":"base_integer_system","source_file":"cbz.xml","encoding_mask":"0xff000000","encoding_value":"0xb4000000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"partial","scope":"Only resolved internal direct targets in a supplied leaf region; external and runtime-discovered targets unsupported."},{"profile":"direct-private-ram-block-v1","status":"implemented","scope":"Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."}]},
-    {"id":"CCMN_32_condcmp_imm","instruction_id":"CCMN_imm","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0x3a400800","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMN_32_condcmp_reg","instruction_id":"CCMN_reg","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0x3a400000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMN_64_condcmp_imm","instruction_id":"CCMN_imm","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0xba400800","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMN_64_condcmp_reg","instruction_id":"CCMN_reg","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0xba400000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMP_32_condcmp_imm","instruction_id":"CCMP_imm","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0x7a400800","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMP_32_condcmp_reg","instruction_id":"CCMP_reg","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0x7a400000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMP_64_condcmp_imm","instruction_id":"CCMP_imm","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0xfa400800","features":[],"status":"unsupported","profiles":[]},
-    {"id":"CCMP_64_condcmp_reg","instruction_id":"CCMP_reg","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0xfa400000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"CCMN_32_condcmp_imm","instruction_id":"CCMN_imm","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0x3a400800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMN_32_condcmp_reg","instruction_id":"CCMN_reg","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0x3a400000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMN_64_condcmp_imm","instruction_id":"CCMN_imm","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0xba400800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMN_64_condcmp_reg","instruction_id":"CCMN_reg","mnemonic":"CCMN","category":"base_integer_system","source_file":"ccmn_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0xba400000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMP_32_condcmp_imm","instruction_id":"CCMP_imm","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0x7a400800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMP_32_condcmp_reg","instruction_id":"CCMP_reg","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0x7a400000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMP_64_condcmp_imm","instruction_id":"CCMP_imm","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_imm.xml","encoding_mask":"0xffe00c10","encoding_value":"0xfa400800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
+    {"id":"CCMP_64_condcmp_reg","instruction_id":"CCMP_reg","mnemonic":"CCMP","category":"base_integer_system","source_file":"ccmp_reg.xml","encoding_mask":"0xffe00c10","encoding_value":"0xfa400000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All conditions including AL/NV, NZCV fallback nibbles and register/ZR or unsigned imm5 operand; no GPR writes."}]},
     {"id":"CFINV_M_pstate","instruction_id":"CFINV","mnemonic":"CFINV","category":"base_integer_system","source_file":"cfinv.xml","encoding_mask":"0xfffff0ff","encoding_value":"0xd500401f","features":[{"feature":"FEAT_FlagM","name":"v8Ap4"}],"status":"unsupported","profiles":[]},
     {"id":"CHKFEAT_HF_hints","instruction_id":"CHKFEAT","mnemonic":"CHKFEAT","category":"base_integer_system","source_file":"chkfeat.xml","encoding_mask":"0xffffffff","encoding_value":"0xd503251f","features":[{"feature":"FEAT_CHK","name":"v9Ap4"}],"status":"unsupported","profiles":[]},
     {"id":"CLRBHB_HI_hints","instruction_id":"CLRBHB","mnemonic":"CLRBHB","category":"base_integer_system","source_file":"clrbhb.xml","encoding_mask":"0xffffffff","encoding_value":"0xd50322df","features":[{"feature":"FEAT_CLRBHB","name":"v8Ap9"}],"status":"unsupported","profiles":[]},
@@ -2589,8 +2530,8 @@
     {"id":"ERETAB_64E_branch_reg","instruction_id":"ERETA","mnemonic":"ERETAB","category":"base_integer_system","source_file":"ereta.xml","encoding_mask":"0xffffffff","encoding_value":"0xd69f0fff","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"unsupported","profiles":[]},
     {"id":"ERET_64E_branch_reg","instruction_id":"ERET","mnemonic":"ERET","category":"base_integer_system","source_file":"eret.xml","encoding_mask":"0xffffffff","encoding_value":"0xd69f03e0","features":[],"status":"unsupported","profiles":[]},
     {"id":"ESB_HI_hints","instruction_id":"ESB","mnemonic":"ESB","category":"base_integer_system","source_file":"esb.xml","encoding_mask":"0xffffffff","encoding_value":"0xd503221f","features":[{"feature":"FEAT_RAS","name":"v8Ap2"}],"status":"unsupported","profiles":[]},
-    {"id":"EXTR_32_extract","instruction_id":"EXTR","mnemonic":"EXTR","category":"base_integer_system","source_file":"extr.xml","encoding_mask":"0xffe08000","encoding_value":"0x13800000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"EXTR_64_extract","instruction_id":"EXTR","mnemonic":"EXTR","category":"base_integer_system","source_file":"extr.xml","encoding_mask":"0xffe00000","encoding_value":"0x93c00000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"EXTR_32_extract","instruction_id":"EXTR","mnemonic":"EXTR","category":"base_integer_system","source_file":"extr.xml","encoding_mask":"0xffe08000","encoding_value":"0x13800000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Full legal immediate range, concatenation and rotate aliases; ZR/overlap, NZCV preserved."}]},
+    {"id":"EXTR_64_extract","instruction_id":"EXTR","mnemonic":"EXTR","category":"base_integer_system","source_file":"extr.xml","encoding_mask":"0xffe00000","encoding_value":"0x93c00000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Full legal immediate range, concatenation and rotate aliases; ZR/overlap, NZCV preserved."}]},
     {"id":"EXT_asimdext_only","instruction_id":"EXT_advsimd","mnemonic":"EXT","category":"fp_simd","source_file":"ext_advsimd.xml","encoding_mask":"0xbfe08400","encoding_value":"0x2e000000","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
     {"id":"F1CVTL_asimdmisc_V","instruction_id":"F12CVTL_advsimd","mnemonic":"F1CVTL","category":"fp_simd","source_file":"f12cvtl_advsimd.xml","encoding_mask":"0xbffffc00","encoding_value":"0x2e217800","features":[{"feature":"FEAT_FP8","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"F2CVTL_asimdmisc_V","instruction_id":"F12CVTL_advsimd","mnemonic":"F2CVTL","category":"fp_simd","source_file":"f12cvtl_advsimd.xml","encoding_mask":"0xbffffc00","encoding_value":"0x2e617800","features":[{"feature":"FEAT_FP8","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
@@ -3584,10 +3525,10 @@
     {"id":"LDXRH_LR32_ldstexclr","instruction_id":"LDXRH","mnemonic":"LDXRH","category":"base_integer_system","source_file":"ldxrh.xml","encoding_mask":"0xffe08000","encoding_value":"0x48400000","features":[],"status":"unsupported","profiles":[]},
     {"id":"LDXR_LR32_ldstexclr","instruction_id":"LDXR","mnemonic":"LDXR","category":"base_integer_system","source_file":"ldxr.xml","encoding_mask":"0xffe08000","encoding_value":"0x88400000","features":[],"status":"unsupported","profiles":[]},
     {"id":"LDXR_LR64_ldstexclr","instruction_id":"LDXR","mnemonic":"LDXR","category":"base_integer_system","source_file":"ldxr.xml","encoding_mask":"0xffe08000","encoding_value":"0xc8400000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"LSLV_32_dp_2src","instruction_id":"LSLV","mnemonic":"LSLV","category":"base_integer_system","source_file":"lslv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"LSLV_64_dp_2src","instruction_id":"LSLV","mnemonic":"LSLV","category":"base_integer_system","source_file":"lslv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02000","features":[],"status":"unsupported","profiles":[]},
-    {"id":"LSRV_32_dp_2src","instruction_id":"LSRV","mnemonic":"LSRV","category":"base_integer_system","source_file":"lsrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02400","features":[],"status":"unsupported","profiles":[]},
-    {"id":"LSRV_64_dp_2src","instruction_id":"LSRV","mnemonic":"LSRV","category":"base_integer_system","source_file":"lsrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02400","features":[],"status":"unsupported","profiles":[]},
+    {"id":"LSLV_32_dp_2src","instruction_id":"LSLV","mnemonic":"LSLV","category":"base_integer_system","source_file":"lslv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
+    {"id":"LSLV_64_dp_2src","instruction_id":"LSLV","mnemonic":"LSLV","category":"base_integer_system","source_file":"lslv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
+    {"id":"LSRV_32_dp_2src","instruction_id":"LSRV","mnemonic":"LSRV","category":"base_integer_system","source_file":"lsrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02400","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
+    {"id":"LSRV_64_dp_2src","instruction_id":"LSRV","mnemonic":"LSRV","category":"base_integer_system","source_file":"lsrv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02400","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
     {"id":"LUTI2_asimdtbl_L5","instruction_id":"LUTI2_advsimd","mnemonic":"LUTI2","category":"fp_simd","source_file":"luti2_advsimd.xml","encoding_mask":"0xffe09c00","encoding_value":"0x4e801000","features":[{"feature":"FEAT_AdvSIMD && FEAT_LUT","name":"v8Ap0 && v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"LUTI2_asimdtbl_L6","instruction_id":"LUTI2_advsimd","mnemonic":"LUTI2","category":"fp_simd","source_file":"luti2_advsimd.xml","encoding_mask":"0xffe08c00","encoding_value":"0x4ec00000","features":[{"feature":"FEAT_AdvSIMD && FEAT_LUT","name":"v8Ap0 && v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"LUTI4_asimdtbl_L5","instruction_id":"LUTI4_advsimd","mnemonic":"LUTI4","category":"fp_simd","source_file":"luti4_advsimd.xml","encoding_mask":"0xffe0bc00","encoding_value":"0x4e402000","features":[{"feature":"FEAT_AdvSIMD && FEAT_LUT","name":"v8Ap0 && v9Ap5"}],"status":"unsupported","profiles":[]},
@@ -3752,8 +3693,8 @@
     {"id":"REV_32_dp_1src","instruction_id":"REV","mnemonic":"REV","category":"base_integer_system","source_file":"rev.xml","encoding_mask":"0xfffffc00","encoding_value":"0x5ac00800","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Reverse all four bytes of Wn. All Rd/Rn operands, in-place/discard/ZR behavior, W writes zero-extend, and NZCV preservation in the declared leaf profile. Complete PSTATE/DIT and platform integration remain outside profile."}]},
     {"id":"REV_64_dp_1src","instruction_id":"REV","mnemonic":"REV","category":"base_integer_system","source_file":"rev.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac00c00","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."}]},
     {"id":"RMIF_only_rmif","instruction_id":"RMIF","mnemonic":"RMIF","category":"base_integer_system","source_file":"rmif.xml","encoding_mask":"0xffe07c10","encoding_value":"0xba000400","features":[{"feature":"FEAT_FlagM","name":"v8Ap4"}],"status":"unsupported","profiles":[]},
-    {"id":"RORV_32_dp_2src","instruction_id":"RORV","mnemonic":"RORV","category":"base_integer_system","source_file":"rorv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02c00","features":[],"status":"unsupported","profiles":[]},
-    {"id":"RORV_64_dp_2src","instruction_id":"RORV","mnemonic":"RORV","category":"base_integer_system","source_file":"rorv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02c00","features":[],"status":"unsupported","profiles":[]},
+    {"id":"RORV_32_dp_2src","instruction_id":"RORV","mnemonic":"RORV","category":"base_integer_system","source_file":"rorv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x1ac02c00","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
+    {"id":"RORV_64_dp_2src","instruction_id":"RORV","mnemonic":"RORV","category":"base_integer_system","source_file":"rorv.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac02c00","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All width-masked register counts and ZR/overlapping sources/destination; NZCV preserved."}]},
     {"id":"RPRFM_R_ldst_regoff","instruction_id":"RPRFM_reg","mnemonic":"RPRFM","category":"base_integer_system","source_file":"rprfm_reg.xml","encoding_mask":"0xffe04c18","encoding_value":"0xf8a04818","features":[{"feature":"FEAT_RPRFM","name":"v8Ap9"}],"status":"unsupported","profiles":[]},
     {"id":"RSHRN_asimdshf_N","instruction_id":"RSHRN_advsimd","mnemonic":"RSHRN","category":"fp_simd","source_file":"rshrn_advsimd.xml","encoding_mask":"0xbf80fc00","encoding_value":"0x0f008c00","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},
     {"id":"RSUBHN_asimddiff_N","instruction_id":"RSUBHN_advsimd","mnemonic":"RSUBHN","category":"fp_simd","source_file":"rsubhn_advsimd.xml","encoding_mask":"0xbf20fc00","encoding_value":"0x2e206000","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"unsupported","profiles":[]},

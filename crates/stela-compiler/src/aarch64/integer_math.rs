@@ -2,10 +2,12 @@
 //!
 //! Semantics and fixed bits follow the pinned Arm 2026-06 MADD/MSUB,
 //! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH, SDIV/UDIV and scalar unary XML.
-use super::{Register, Width, register};
+use super::{Register, Shift, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    VariableShift { width: Width, shift: Shift },
+    Extract { width: Width, amount: u8 },
     LeadingZeros { width: Width },
     LeadingSignBits { width: Width },
     ReverseBits { width: Width },
@@ -31,6 +33,40 @@ pub struct Operand {
 /// MUL/MNEG and long aliases are represented by an ordinary ZR accumulator.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    let width = if word >> 31 == 0 {
+        Width::W32
+    } else {
+        Width::X64
+    };
+    let scalar = if word & 0x7fe0f000 == 0x1ac02000 {
+        Some(Kind::VariableShift {
+            width,
+            shift: match (word >> 10) & 3 {
+                0 => Shift::Lsl,
+                1 => Shift::Lsr,
+                2 => Shift::Asr,
+                _ => Shift::Ror,
+            },
+        })
+    } else if word & 0x7fa00000 == 0x13800000 {
+        let amount = ((word >> 10) & 63) as u8;
+        if ((word >> 22) & 1) != word >> 31 || (width == Width::W32 && amount >= 32) {
+            return Some(Err(()));
+        }
+        Some(Kind::Extract { width, amount })
+    } else {
+        None
+    };
+    if let Some(kind) = scalar {
+        return Some(Ok(Operand {
+            kind,
+            subtract: false,
+            destination: register(word & 31, false),
+            left: register((word >> 5) & 31, false),
+            right: register((word >> 16) & 31, false),
+            accumulator: Register::Zero,
+        }));
+    }
     let unary = match word & 0xfffffc00 {
         0x5ac01000 => Some(Kind::LeadingZeros { width: Width::W32 }),
         0xdac01000 => Some(Kind::LeadingZeros { width: Width::X64 }),
@@ -121,6 +157,61 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_shifts_and_extract_validate_width_immediates_and_zero_roles() {
+        for (sf, width) in [(0, Width::W32), (1u32 << 31, Width::X64)] {
+            for (op, shift) in [Shift::Lsl, Shift::Lsr, Shift::Asr, Shift::Ror]
+                .into_iter()
+                .enumerate()
+            {
+                let base = sf | 0x1ac02000 | ((op as u32) << 10);
+                let operand = decode(base | (31 << 16) | (31 << 5) | 31).unwrap().unwrap();
+                assert_eq!(operand.kind, Kind::VariableShift { width, shift });
+                assert_eq!(
+                    (operand.destination, operand.left, operand.right),
+                    (Register::Zero, Register::Zero, Register::Zero)
+                );
+                for bit in 0..32 {
+                    if 0x7fe0f000 & (1 << bit) != 0 {
+                        assert!(!matches!(
+                            decode(base ^ (1 << bit)),
+                            Some(Ok(Operand {
+                                kind: Kind::VariableShift { .. },
+                                ..
+                            }))
+                        ));
+                    }
+                }
+            }
+            let base = if width == Width::X64 {
+                0x93c00000
+            } else {
+                0x13800000
+            };
+            for amount in 0..64 {
+                let decoded = decode(base | (amount << 10) | (31 << 16) | (31 << 5) | 31).unwrap();
+                if width == Width::W32 && amount >= 32 {
+                    assert_eq!(decoded, Err(()));
+                } else {
+                    let operand = decoded.unwrap();
+                    assert_eq!(
+                        operand.kind,
+                        Kind::Extract {
+                            width,
+                            amount: amount as u8
+                        }
+                    );
+                    assert_eq!(
+                        (operand.destination, operand.left, operand.right),
+                        (Register::Zero, Register::Zero, Register::Zero)
+                    );
+                }
+            }
+            assert_eq!(decode(base ^ (1 << 22)), Some(Err(()))); // N must match sf.
+            assert!(decode(base | (1 << 21)).is_none()); // fixed o0
+        }
+    }
 
     #[test]
     fn unary_forms_use_exact_fixed_bits_and_zero_register_roles() {

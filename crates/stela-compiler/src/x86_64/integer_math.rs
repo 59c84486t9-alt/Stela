@@ -84,6 +84,41 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         _ => {}
     }
     right_operand(code, operand.right, Width::X64, Shift::Lsl, 0);
+    match operand.kind {
+        Kind::VariableShift { width, shift } => {
+            // A zero shift must still clear Xd's upper half for a W result.
+            if width == Width::W32 {
+                code.extend([0x89, 0xc0]);
+            } else {
+                code.push(0x48);
+            }
+            // CL masking implements Arm's modulo-width count without BMI2.
+            code.extend([
+                0xd3,
+                match shift {
+                    Shift::Lsl => 0xe0,
+                    Shift::Lsr => 0xe8,
+                    Shift::Asr => 0xf8,
+                    Shift::Ror => 0xc8,
+                },
+            ]);
+            store(code, operand.destination);
+            return;
+        }
+        Kind::Extract { width, amount } => {
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x0f, 0xac, 0xc1, amount]); // shrd (r/e)cx,(r/e)ax,imm
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x89, 0xc8]); // mov (r/e)ax,(r/e)cx; W also clears at shift zero
+            store(code, operand.destination);
+            return;
+        }
+        _ => {}
+    }
     if let Kind::Divide { signed, width } = operand.kind {
         divide(code, signed, width);
         store(code, operand.destination);
@@ -106,7 +141,9 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             Width::X64
         }
         Kind::Low { width } => width,
-        Kind::Divide { .. }
+        Kind::VariableShift { .. }
+        | Kind::Extract { .. }
+        | Kind::Divide { .. }
         | Kind::LeadingZeros { .. }
         | Kind::LeadingSignBits { .. }
         | Kind::ReverseBits { .. }

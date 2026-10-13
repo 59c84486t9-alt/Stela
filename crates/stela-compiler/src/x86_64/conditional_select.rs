@@ -1,9 +1,41 @@
 //! Branchless selection from the saved guest NZCV, independent of host flags.
-use super::{condition, load, right_operand, store};
+use super::{condition, load, nzcv, right_operand, store};
 use crate::aarch64::{
     Shift, Width,
-    conditional_select::{Operand, Otherwise},
+    conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
 };
+
+pub(super) fn emit_compare(code: &mut Vec<u8>, operand: &CompareOperand) {
+    let branch = condition(code, operand.condition).map(|jcc| {
+        code.extend([0x0f, jcc ^ 1]); // false predicate skips arithmetic
+        let offset = code.len();
+        code.extend([0; 4]);
+        offset
+    });
+    load(code, operand.left);
+    match operand.right {
+        CompareRight::Register(register) => {
+            right_operand(code, register, operand.width, Shift::Lsl, 0)
+        }
+        CompareRight::Immediate(value) => {
+            code.push(0xb9);
+            code.extend(u32::from(value).to_le_bytes());
+        }
+    }
+    if operand.width == Width::X64 {
+        code.push(0x48);
+    }
+    code.extend([if operand.subtract { 0x29 } else { 0x01 }, 0xc8]);
+    nzcv(code, operand.subtract);
+    if let Some(offset) = branch {
+        // The fallback is a constant NZCV nibble and never writes a GPR.
+        code.extend([0xeb, 10]);
+        let delta = i32::try_from(code.len() - (offset + 4)).expect("bounded conditional compare");
+        code[offset..offset + 4].copy_from_slice(&delta.to_le_bytes());
+        code.extend([0xc7, 0x87, 0, 1, 0, 0]);
+        code.extend((u32::from(operand.fallback) << 28).to_le_bytes());
+    }
+}
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     let predicate = condition(code, operand.condition);
