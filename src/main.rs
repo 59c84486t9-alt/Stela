@@ -216,6 +216,26 @@ enum Command {
         #[arg(long, value_parser = parse_address)]
         cache_base: Option<u64>,
     },
+    /// Discover static code paths and prepare shared AOT/JIT artifacts without execution.
+    DiscoverCode {
+        input: PathBuf,
+        #[arg(long)]
+        architecture: Option<String>,
+        /// Treat input as raw code registered at this address instead of a Mach-O.
+        #[arg(long, value_parser = parse_address)]
+        guest_base: Option<u64>,
+        #[arg(long, value_parser = parse_address)]
+        entry: Vec<u64>,
+        /// Include declared LC_FUNCTION_STARTS roots as well as the image entry.
+        #[arg(long)]
+        function_starts: bool,
+        #[arg(long, default_value_t = 128)]
+        block_budget: usize,
+        #[arg(long, default_value = ".stela/cache/blocks-v1")]
+        cache_dir: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Read typed exports and function boundaries from an unchanged cache image.
     CacheExports {
         input: PathBuf,
@@ -1109,6 +1129,86 @@ fn run() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&apple::aea::fetch_key(&input, &output)?)?
+            );
+        }
+        Command::DiscoverCode {
+            input,
+            architecture,
+            guest_base,
+            entry,
+            function_starts,
+            block_budget,
+            cache_dir,
+            output,
+        } => {
+            use stela_compiler::GuestAddress;
+            use stela_runtime::blocks::BlockRuntime;
+            use std::io::Read;
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            let mut data = Vec::new();
+            std::fs::File::open(&input)?
+                .take(256 * 1024 * 1024 + 1)
+                .read_to_end(&mut data)?;
+            ensure!(
+                data.len() <= 256 * 1024 * 1024,
+                "code-discovery input exceeds 256 MiB"
+            );
+            let mut runtime = BlockRuntime::new(0x534f_5245_414f_5401, cache_dir);
+            let mut regions = Vec::new();
+            let mut roots = entry;
+            let provenance;
+            if let Some(base) = guest_base {
+                ensure!(
+                    architecture.is_none() && !function_starts,
+                    "raw discovery has no Mach-O architecture or function-start metadata"
+                );
+                let generation = runtime.register_code(GuestAddress(base), data.clone())?;
+                regions.push(
+                    serde_json::json!({"guest_address":base,"source_bytes":data.len(),
+                    "source_sha256":stela_core::sha256(&data),"mapping_generation":generation}),
+                );
+                if roots.is_empty() {
+                    roots.push(base);
+                }
+                provenance =
+                    serde_json::json!({"format":"raw","source_sha256":stela_core::sha256(&data)});
+            } else {
+                let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
+                let image = macho::block_image::BlockImage::from_slice(bytes)?;
+                let sources = image.discovery_sources(bytes, function_starts)?;
+                roots.extend(sources.roots);
+                for region in sources.regions {
+                    let generation = runtime.register_code(
+                        GuestAddress(region.guest_address()),
+                        region.bytes().to_vec(),
+                    )?;
+                    regions.push(serde_json::json!({"segment":region.segment_name(),
+                        "guest_address":region.guest_address(),"file_offset":region.file_offset(),
+                        "source_bytes":region.bytes().len(),"source_sha256":stela_core::sha256(region.bytes()),
+                        "mapping_generation":generation}));
+                }
+                provenance = serde_json::json!({"format":"macho","slice_offset":slice_offset,
+                    "plan":image.plan(),"data_in_code":sources.data_in_code,
+                    "function_start_count":sources.function_start_count});
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            roots.retain(|root| seen.insert(*root));
+            let roots: Vec<_> = roots.into_iter().map(GuestAddress).collect();
+            let discovery = runtime.discover(&roots, block_budget)?;
+            let mut report = serde_json::json!({"schema_version":1,"kind":"apple_code_discovery_aot_preparation",
+                "input":input,"container_sha256":stela_core::sha256(&data),"provenance":provenance,
+                "executable_regions":regions,"discovery":discovery,
+                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "discovery_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/blocks.rs")),
+                "metadata_source_sha256":stela_core::sha256(include_bytes!("macho/block_image.rs")),
+                "native_executed":false,"complete_binary_verified":false});
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"native_executed":false,"complete_binary_verified":false})
             );
         }
         Command::CacheExports {
