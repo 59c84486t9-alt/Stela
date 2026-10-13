@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v22",
+  "registry_version": "apple-silicon-reviewed-forms-v23",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -291,9 +291,9 @@
       ],
       "required_measurements": {
         "programs": 1456,
-        "three_way_register_state_comparisons": 37912,
-        "cpu_profiles.baseline.three_way_register_state_comparisons": 37912,
-        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 529302
+        "three_way_register_state_comparisons": 39760,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 39760,
+        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 502360
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -310,7 +310,42 @@
         "programs": 1512,
         "three_way_register_state_comparisons": 30240,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 30240,
-        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 489364
+        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 482220
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_indexed_products": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-indexed_products-differential-report.json",
+      "kind": "simd_indexed_products_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 2376,
+        "three_way_register_state_comparisons": 42768
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_floating_bits": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-floating_bits-differential-report.json",
+      "kind": "simd_floating_bits_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 320,
+        "three_way_register_state_comparisons": 106480,
+        "cpu_profiles.baseline.qemu_original_vector_control_math_native_comparisons": 106480,
+        "cpu_profiles.baseline.complete_native_state_math_comparisons": 113408,
+        "cpu_profiles.baseline.qemu_original_scalar_component_math_native_comparisons": 113408,
+        "cpu_profiles.baseline.qemu_original_exact_vector_ah_divergences": 6928,
+        "cpu_profiles.baseline.unicorn_original_complete_state_math_native_comparisons": 12960
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -22190,6 +22225,820 @@
           ]
         }
       ]
+    },
+    {
+      "id": "FABS_D_floatdp1",
+      "instruction_id": "FABS_float",
+      "mnemonic": "FABS",
+      "category": "fp_simd",
+      "source_file": "fabs_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e60c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aec864e113c40f5de66c9f9ab7dbacf6a8753c614fac1be479b48de4ab756ef4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e60c020",
+          "expected_mnemonics": [
+            "fabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FABS_H_floatdp1",
+      "instruction_id": "FABS_float",
+      "mnemonic": "FABS",
+      "category": "fp_simd",
+      "source_file": "fabs_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee0c000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aec864e113c40f5de66c9f9ab7dbacf6a8753c614fac1be479b48de4ab756ef4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee0c020",
+          "expected_mnemonics": [
+            "fabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FABS_S_floatdp1",
+      "instruction_id": "FABS_float",
+      "mnemonic": "FABS",
+      "category": "fp_simd",
+      "source_file": "fabs_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e20c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aec864e113c40f5de66c9f9ab7dbacf6a8753c614fac1be479b48de4ab756ef4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e20c020",
+          "expected_mnemonics": [
+            "fabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FABS_asimdmisc_R",
+      "instruction_id": "FABS_advsimd",
+      "mnemonic": "FABS",
+      "category": "fp_simd",
+      "source_file": "fabs_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0ea0f800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "5800cc3ce5af78f55cbd619f7034d2061484de2f8df0ce45887531509cea7c0b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4ea0f820",
+          "expected_mnemonics": [
+            "fabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FABS_asimdmiscfp16_R",
+      "instruction_id": "FABS_advsimd",
+      "mnemonic": "FABS",
+      "category": "fp_simd",
+      "source_file": "fabs_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0ef8f800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "5800cc3ce5af78f55cbd619f7034d2061484de2f8df0ce45887531509cea7c0b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4ef8f820",
+          "expected_mnemonics": [
+            "fabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FCSEL_D_floatsel",
+      "instruction_id": "FCSEL_float",
+      "mnemonic": "FCSEL",
+      "category": "fp_simd",
+      "source_file": "fcsel_float.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x1e600c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0cb7e684ca6dc89fa7bb64e4ad11fff3d3c23cb03d1e5e2cde7bf301913f32ee",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e620c20",
+          "expected_mnemonics": [
+            "fcsel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FCSEL_H_floatsel",
+      "instruction_id": "FCSEL_float",
+      "mnemonic": "FCSEL",
+      "category": "fp_simd",
+      "source_file": "fcsel_float.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x1ee00c00",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0cb7e684ca6dc89fa7bb64e4ad11fff3d3c23cb03d1e5e2cde7bf301913f32ee",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee20c20",
+          "expected_mnemonics": [
+            "fcsel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FCSEL_S_floatsel",
+      "instruction_id": "FCSEL_float",
+      "mnemonic": "FCSEL",
+      "category": "fp_simd",
+      "source_file": "fcsel_float.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x1e200c00",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0cb7e684ca6dc89fa7bb64e4ad11fff3d3c23cb03d1e5e2cde7bf301913f32ee",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e220c20",
+          "expected_mnemonics": [
+            "fcsel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FNEG_D_floatdp1",
+      "instruction_id": "FNEG_float",
+      "mnemonic": "FNEG",
+      "category": "fp_simd",
+      "source_file": "fneg_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e614000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b62f2de1171f10f2a83b3d07466f12a4ccf3297acf481d945cad1df08697f9d3",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e614020",
+          "expected_mnemonics": [
+            "fneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FNEG_H_floatdp1",
+      "instruction_id": "FNEG_float",
+      "mnemonic": "FNEG",
+      "category": "fp_simd",
+      "source_file": "fneg_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee14000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b62f2de1171f10f2a83b3d07466f12a4ccf3297acf481d945cad1df08697f9d3",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee14020",
+          "expected_mnemonics": [
+            "fneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FNEG_S_floatdp1",
+      "instruction_id": "FNEG_float",
+      "mnemonic": "FNEG",
+      "category": "fp_simd",
+      "source_file": "fneg_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e214000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b62f2de1171f10f2a83b3d07466f12a4ccf3297acf481d945cad1df08697f9d3",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e214020",
+          "expected_mnemonics": [
+            "fneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FNEG_asimdmisc_R",
+      "instruction_id": "FNEG_advsimd",
+      "mnemonic": "FNEG",
+      "category": "fp_simd",
+      "source_file": "fneg_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2ea0f800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "900e65e476dea047ba73c41ea9a0d6224970a196627f931d75e8675418874842",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6ea0f820",
+          "expected_mnemonics": [
+            "fneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FNEG_asimdmiscfp16_R",
+      "instruction_id": "FNEG_advsimd",
+      "mnemonic": "FNEG",
+      "category": "fp_simd",
+      "source_file": "fneg_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2ef8f800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "900e65e476dea047ba73c41ea9a0d6224970a196627f931d75e8675418874842",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/FP16/AFP, ordinary non-streaming execution. FCSEL H/S/D selects raw bits for all conditions including AL/NV and clears upper destination. FABS/FNEG scalar H/S/D and allocated vector H/S/D preserve all NaN bits with AH=1; otherwise clear/toggle sign. Scalar NEP merges with old Vd; vector Q=0 clears upper 64 bits. Dynamic FPCR modes, signaling NaNs, aliasing and V31 are supported; NZCV/FPCR/FPSR and guest RAM unchanged. No numerical FP arithmetic, disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 FPAbs/FPNeg, no-exception FPUnpack and IsMerging contracts reviewed. Integer/SSE2 classification avoids host FP exceptions; checked SSE4.2 uses PCMPGTQ. Actual native complete state matches independent bit math for all control combinations and exhaustive half payloads. QEMU10 scalar/selection and vector AH=0 observations match directly. QEMU vector AH=1 ignores NaN preservation: 6,928 exact divergences per native target remain classified, with separate original scalar-per-lane component checks. Component/model evidence does not confer direct-original vector AH verification. Unicorn AFP readback limitations are retained. See compiler contract for precise counts and binary metrics.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd/floating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_floating_bits"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6ef8f820",
+          "expected_mnemonics": [
+            "fneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MLA_asimdelem_R",
+      "instruction_id": "MLA_advsimd_elt",
+      "mnemonic": "MLA",
+      "category": "fp_simd",
+      "source_file": "mla_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f000000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "41fe788eb6a6c538889cad83646d1f8497f4afa83a41bb297d06953621668e90",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f420020",
+          "expected_mnemonics": [
+            "mla"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MLS_asimdelem_R",
+      "instruction_id": "MLS_advsimd_elt",
+      "mnemonic": "MLS",
+      "category": "fp_simd",
+      "source_file": "mls_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f004000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "5da9c431e8979c49176b9b74a76445eead0f0106b330d06a21f141f77b989fab",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f424020",
+          "expected_mnemonics": [
+            "mls"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MUL_asimdelem_R",
+      "instruction_id": "MUL_advsimd_elt",
+      "mnemonic": "MUL",
+      "category": "fp_simd",
+      "source_file": "mul_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f008000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8ea5e7d9932a7ea3fceec377c9f5dbaf48c71e5d5e8dbe2f387b400d476e49a0",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f428020",
+          "expected_mnemonics": [
+            "mul"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMLAL_asimdelem_L",
+      "instruction_id": "SMLAL_advsimd_elt",
+      "mnemonic": "SMLAL",
+      "category": "fp_simd",
+      "source_file": "smlal_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f002000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "d9b2633931dce8b094d2939f68e250780173a18b1439f6205788da17dc9610be",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f422020",
+          "expected_mnemonics": [
+            "smlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMLSL_asimdelem_L",
+      "instruction_id": "SMLSL_advsimd_elt",
+      "mnemonic": "SMLSL",
+      "category": "fp_simd",
+      "source_file": "smlsl_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f006000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3459f31fd3e5fdf251b3fa7125351369e7bbb7017fea0cc7962d2bb7601b1192",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f426020",
+          "expected_mnemonics": [
+            "smlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMULL_asimdelem_L",
+      "instruction_id": "SMULL_advsimd_elt",
+      "mnemonic": "SMULL",
+      "category": "fp_simd",
+      "source_file": "smull_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f00a000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f7dc18e2c882bf25c364a5615b1cd3e907d61acd80e61811d1f0b3956084ad1c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f42a020",
+          "expected_mnemonics": [
+            "smull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMLAL_asimdelem_L",
+      "instruction_id": "UMLAL_advsimd_elt",
+      "mnemonic": "UMLAL",
+      "category": "fp_simd",
+      "source_file": "umlal_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f002000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "22a722b12007d56c16cdf9f0408f56a7abce048d9b0337aff0d2dbcc5ceb5368",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f422020",
+          "expected_mnemonics": [
+            "umlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMLSL_asimdelem_L",
+      "instruction_id": "UMLSL_advsimd_elt",
+      "mnemonic": "UMLSL",
+      "category": "fp_simd",
+      "source_file": "umlsl_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f006000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "13ed784f96f62f2182b723434e5ded89c4e8c3faab4ae7f6276133131bc6d6c9",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f426020",
+          "expected_mnemonics": [
+            "umlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMULL_asimdelem_L",
+      "instruction_id": "UMULL_advsimd_elt",
+      "mnemonic": "UMULL",
+      "category": "fp_simd",
+      "source_file": "umull_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f00a000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "45cb024dc85280892cc5e972a24400f37ec3698308f0fd09d841d8e8c71dd856",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated 16/32-bit indexed MUL/MLA/MLS and signed/unsigned long multiply/add/sub forms, vector widths, indices and source halves. Halfword indexed sources use V0..V15 and H:L:M; word sources use V0..V31 and H:L. Widening Q selects only the left source half. Full modular products/accumulation, all source/destination aliases, V31 and Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature traps, SME streaming or full application claim.",
+      "review": "Pinned Arm A64 2026-06 decode/operation contracts and local x86 mapping candidates reviewed. 2,376 programs cover every index, right register, destination, aliases, extrema and chains against original ARM, independent arbitrary-precision math and actual native baseline/checked SSE4.1 binaries. Shared product/doubling regressions pass. Retained binary body counts and dependent/independent native candidate timings informed recipe selection; small differences are noise-sensitive and do not establish application performance.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_indexed_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f42a020",
+          "expected_mnemonics": [
+            "umull"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -22210,6 +23059,8 @@
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
+    "crates/stela-compiler/src/aarch64/simd/floating.rs",
+    "crates/stela-compiler/src/x86_64/simd/floating.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",

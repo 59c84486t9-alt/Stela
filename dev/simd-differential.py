@@ -16,6 +16,9 @@ import json
 import mmap
 import math
 import multiprocessing
+import os
+import shutil
+import socket
 from pathlib import Path
 import random
 import signal
@@ -240,7 +243,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -832,7 +835,9 @@ def register_shift_counts(bits):
 
 
 def register_shift_pattern_count(operations):
-    return 8 if operations[0]['immediate'] else len(register_shift_counts(operations[0]['lane']*8))+2
+    if operations[0]['immediate']:
+        return 12 if operations[0]['amount']==1 else 8
+    return len(register_shift_counts(operations[0]['lane']*8))+2
 
 
 def register_shift_seed(initial,operations,pattern,flags):
@@ -841,6 +846,18 @@ def register_shift_seed(initial,operations,pattern,flags):
     for register in range(32):
         value=sum((values[(register+index+pattern)%len(values)]&mask)<<(index*bits) for index in range(128//bits))
         initial.v[register][:]=[value&MASK,value>>64]
+    if op['immediate'] and op['amount']==1 and 6<=pattern<10:
+        # Exact last-valid / first-saturating inputs for doubled signed and
+        # unsigned results. Uniform active lanes also expose scalar and Q=0 QC.
+        if op['unsigned_result'] and not op['signed']:
+            boundaries=((1<<(bits-1))-1,1<<(bits-1),(1<<(bits-1))+1,0)
+        else:
+            half=1<<(bits-2)
+            boundaries=(-half,-half-1,half-1,half)
+        value=boundaries[pattern-6]&mask
+        repeated=sum(value<<(index*bits) for index in range(128//bits))
+        for register in range(32):
+            initial.v[register][:]=[repeated&MASK,repeated>>64]
     counts=register_shift_counts(bits)
     if not op['immediate']:
         for operation in operations:
@@ -1304,6 +1321,370 @@ def seed_doubling_products(initial,operations,pattern,flags):
 
 
 
+def indexed_product_programs():
+    # Explicit Arm indexed encodings, independent from the Rust decoder catalog.
+    bases={'mul':0x0f008000,'mla':0x2f000000,'mls':0x2f004000,
+        'smull':0x0f00a000,'umull':0x2f00a000,'smlal':0x0f002000,
+        'umlal':0x2f002000,'smlsl':0x0f006000,'umlsl':0x2f006000}
+    programs=[]
+    for name,base in bases.items():
+        widen=name not in ('mul','mla','mls')
+        for q in (0,1):
+            for size in (1,2):
+                lane=1<<size
+                for index in range(16//lane):
+                    h=index>>(2 if lane==2 else 1)
+                    l=(index>>(1 if lane==2 else 0))&1
+                    encoded=base|(q<<30)|(size<<22)|(h<<11)|(l<<21)
+                    if lane==2: encoded|=(index&1)<<20
+                    config={'kind':'indexed_product','name':name,'lane':lane,
+                        'output_lane':lane*2 if widen else lane,'bytes':16 if widen else 8<<q,
+                        'signed':name.startswith('s'),'upper':widen and bool(q),'index':index,
+                        'accumulate':'add' if name in ('mla','smlal','umlal') else 'sub' if name in ('mls','smlsl','umlsl') else None}
+                    def operation(d,n,m):
+                        if lane==2: m&=15
+                        return {**config,'d':d,'n':n,'m':m,'word':encoded|(m<<16)|(n<<5)|d}
+                    for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31),(0,31,31),
+                                  (31,29,31),(15,15,15),(15,31,15),(31,15,15),(0,0,0)):
+                        programs.append({'operations':[operation(d,n,m)]})
+                    programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def indexed_product_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v]
+    for op in operations:
+        lane,out_lane=op['lane'],op['output_lane'];bits,out_bits=lane*8,out_lane*8
+        mask,out_mask=(1<<bits)-1,(1<<out_bits)-1
+        left,right,old=(vectors[op[k]] for k in ('n','m','d'))
+        if op['upper']: left>>=64
+        selected=right>>(op['index']*bits)&mask
+        if op['signed'] and selected&(1<<(bits-1)): selected-=1<<bits
+        result=0
+        for i in range(op['bytes']//out_lane):
+            value=left>>(i*bits)&mask
+            if op['signed'] and value&(1<<(bits-1)): value-=1<<bits
+            value*=selected
+            previous=old>>(i*out_bits)&out_mask
+            if op['accumulate']=='add': value=previous+value
+            elif op['accumulate']=='sub': value=previous-value
+            result|=(value&out_mask)<<(i*out_bits)
+        vectors[op['d']]=result
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
+
+
+def seed_indexed_products(initial,operations,pattern,flags):
+    bits=operations[0]['lane']*8;mask=(1<<bits)-1;minimum=1<<(bits-1)
+    values=(0,1,mask,minimum,minimum-1,minimum+1,mask-1)
+    for register in range(32):
+        if pattern<7:
+            lanes=[values[(pattern+register+i)%len(values)] for i in range(128//bits)]
+        elif pattern==7:
+            # Every source element differs, including low/high-half positions.
+            lanes=[((register+1)*257+(i+1)*37)&mask for i in range(128//bits)]
+        else: continue # Independently seeded random complete state.
+        value=sum(v<<(i*bits) for i,v in enumerate(lanes));initial.v[register][:]=[value&MASK,value>>64]
+    initial.fpsr=(initial.fpsr&~(1<<27))|((1<<27) if flags else 0)
+
+
+def floating_bit_programs():
+    """Canonical forms have multiple arrangements; keep both counts explicit."""
+    configurations=[]
+    for ftype,lane in ((0,4),(1,8),(3,2)):
+        for condition in range(16):
+            configurations.append({'name':'fcsel','base':0x1e200c00|(ftype<<22)|(condition<<12),
+                'lane':lane,'bytes':lane,'scalar':True,'condition':condition})
+        for name,base in (('fabs',0x1e20c000),('fneg',0x1e214000)):
+            configurations.append({'name':name,'base':base|(ftype<<22),'lane':lane,'bytes':lane,'scalar':True})
+    for name,half,ordinary in (('fabs',0x0ef8f800,0x0ea0f800),('fneg',0x2ef8f800,0x2ea0f800)):
+        for lane in (2,4,8):
+            for q in ((1,) if lane==8 else (0,1)):
+                base=(half if lane==2 else ordinary|((lane==8)<<22))|(q<<30)
+                configurations.append({'name':name,'base':base,'lane':lane,'bytes':8<<q,'scalar':False})
+    programs=[]
+    for config in configurations:
+        def operation(d,n,m):
+            word=config['base']|(n<<5)|d
+            if config['name']=='fcsel': word|=m<<16
+            return {**config,'kind':'floating_bits','d':d,'n':n,'m':m,'word':word}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def floating_bit_mathematical(operations,initial):
+    """Field classification follows FPUnpack(FALSE); it ignores AHP for FP16."""
+    vectors=[lo|(hi<<64) for lo,hi in initial.v]
+    flags=initial.nzcv>>28;n,z,c,v=(bool(flags&(1<<bit)) for bit in (3,2,1,0))
+    predicates=(z,c,n,v,c and not z,n==v,not z and n==v,True)
+    for op in operations:
+        lane,bits,d,source=op['lane'],op['lane']*8,op['d'],vectors[op['n']]
+        mask=(1<<bits)-1
+        if op['name']=='fcsel':
+            cond=op['condition'];holds=predicates[cond//2]
+            if cond<14 and cond&1: holds=not holds
+            result=(source if holds else vectors[op['m']])&mask
+        else:
+            result=0
+            exponent_bits={2:5,4:8,8:11}[lane];fraction_bits=bits-exponent_bits-1
+            for index in range(op['bytes']//lane):
+                value=source>>(index*bits)&mask
+                exponent=value>>fraction_bits&((1<<exponent_bits)-1)
+                fraction=value&((1<<fraction_bits)-1)
+                nan=exponent==((1<<exponent_bits)-1) and fraction!=0
+                if not (initial.fpcr&2 and nan):
+                    value=(value&~(1<<(bits-1))) if op['name']=='fabs' else value^(1<<(bits-1))
+                result|=value<<(index*bits)
+            if op['scalar'] and initial.fpcr&4: result|=vectors[d]&~mask
+        vectors[d]=result
+    return {**state_dict(initial),'v':[[value&MASK,value>>64] for value in vectors]}
+
+
+def seed_floating_bits(initial,operations,pattern):
+    bits=operations[0]['lane']*8;fraction=bits-{16:5,32:8,64:11}[bits]-1
+    infinity=((1<<(bits-fraction-1))-1)<<fraction;sign=1<<(bits-1)
+    values=(0,sign,infinity,infinity|sign,infinity|1,infinity|sign|1,
+        infinity|(1<<(fraction-1)),infinity|sign|(1<<(fraction-1))|3,
+        1,sign|1,(1<<fraction)-1,1<<fraction,infinity-1,sign|(infinity-1))
+    for register in range(32):
+        if pattern<len(values):
+            value=sum(values[(pattern+register+index)%len(values)]<<(index*bits) for index in range(128//bits))
+            initial.v[register][:]=[value&MASK,value>>64]
+
+
+def floating_bit_cases(functions,exhaustive_half=True):
+    templates=states(all_flags=True)
+    for index,function in enumerate(functions):
+        operations=function['operations'];select=operations[0]['name']=='fcsel'
+        controls=(0,7,0x07c80000,0x07c80007) if select else tuple(low|high for high in (0,0x07c80000) for low in range(8))
+        for control in controls:
+            for pattern in range(15):
+                for flags in (range(16) if select and pattern==0 else (0,15)):
+                    initial=State.from_buffer_copy(templates[flags]);seed_extended_state(initial,index*65536+pattern*16+flags)
+                    initial.reserved=0x51ad1234;initial.nzcv=flags<<28;initial.fpcr=control
+                    initial.fpsr=(1<<27)|0x9f if flags else 0
+                    seed_floating_bits(initial,operations,pattern)
+                    yield index,initial
+    if exhaustive_half:
+        for name in ('fabs','fneg'):
+            index=next(i for i,f in enumerate(functions) if len(f['operations'])==1 and
+                all(f['operations'][0].get(k)==v for k,v in {'name':name,'lane':2,'bytes':16,'scalar':False,'d':0,'n':1}.items()))
+            for ah in (0,2):
+                for first in range(0,65536,8):
+                    initial=State();seed_extended_state(initial,first+ah);initial.fpcr=0x07c80005|ah;initial.fpsr=(1<<27)|0x9f
+                    value=sum((first+lane)<<(lane*16) for lane in range(8))
+                    initial.v[1][:]=[value&MASK,value>>64]
+                    yield index,initial
+
+
+def floating_qemu_source(functions,count):
+    """Owned bare-metal transport. Only .inst lines are acceptance instructions."""
+    lines=['.arch armv8.7-a+fp16','.text','.global _start','_start:',
+        'mov x0,#0x300000','msr cpacr_el1,x0','isb',
+        'mov x19,#0x41000000','mov x20,#0x49000000','mov x23,#0x40070000','add x23,x23,#0x1000',
+        'adrp x21,functions','add x21,x21,:lo12:functions',f'add x24,x21,#{len(functions)*8}',
+        f'movz x22,#{count&65535}',f'movk x22,#{count>>16},lsl#16','again:']
+    for table in ('x21','x24'):
+        lines+=['ldr w0,[x19,#264]','msr nzcv,x0','ldr w0,[x19,#784]','msr fpcr,x0','ldr w0,[x19,#788]','msr fpsr,x0']
+        lines.extend(f'ldr q{i},[x19,#{272+i*16}]' for i in range(32))
+        lines+=['ldr x0,[x19]',f'ldr x0,[{table},x0,lsl#3]','blr x0']
+        lines.extend(f'str q{i},[x20,#{i*16}]' for i in range(32))
+        lines+=['mrs x0,nzcv','str w0,[x20,#512]','mrs x0,fpcr','str w0,[x20,#516]',
+            'mrs x0,fpsr','str w0,[x20,#520]','mov w0,#0x1234','str w0,[x20,#524]','add x20,x20,#528']
+    lines+=['add x19,x19,#800','subs x22,x22,#1','b.ne again',
+        'mov x0,#0x1234','mov x1,#0x40070000','str x0,[x1]','completed: b completed']
+    for index,function in enumerate(functions):
+        lines.append(f'function_{index}:')
+        lines.extend(f'.inst 0x{op["word"]:08x}' for op in function['operations'])
+        lines.append('ret')
+    for index,function in enumerate(functions):
+        lines.append(f'component_{index}:')
+        for op in function['operations']:
+            if op['scalar']:
+                lines.append(f'.inst 0x{op["word"]:08x}')
+                continue
+            # Independent original scalar FPAbs/FPNeg checks each vector lane.
+            # Preserve the unmodified original-vector result in its own record;
+            # this decomposition is explicitly a component oracle, not equality
+            # between the original vector instruction and the QEMU model.
+            lines+=['str q31,[x23]','str q30,[x23,#16]',f'str q{op["n"]},[x23,#32]','movi v31.2d,#0']
+            lane=op['lane'];suffix={2:'h',4:'s',8:'d'}[lane];ftype={2:3,4:0,8:1}[lane]
+            scalar=(0x1e20c000 if op['name']=='fabs' else 0x1e214000)|(ftype<<22)|(30<<5)|30
+            for element in range(op['bytes']//lane):
+                lines.extend([f'ldr {suffix}30,[x23,#{32+element*lane}]',f'.inst 0x{scalar:08x}',
+                    f'ins v31.{suffix}[{element}],v30.{suffix}[0]'])
+            lines+=['str q31,[x23,#64]','ldr q31,[x23]','ldr q30,[x23,#16]',f'ldr q{op["d"]},[x23,#64]']
+        lines.append('ret')
+    lines+=['.section .rodata','.balign 8','functions:']
+    lines.extend(f'.quad function_{index}' for index in range(len(functions)))
+    lines.extend(f'.quad component_{index}' for index in range(len(functions)))
+    return '\n'.join(lines)+'\n'
+
+
+def floating_qemu_results(functions):
+    """Execute unchanged original A64 with AFP; cache only hash-bound results."""
+    qemu=ROOT/'.tools/qemu/bin/qemu-system-aarch64'
+    if not qemu.exists():
+        found=shutil.which('qemu-system-aarch64')
+        if not found: raise AssertionError('AFP verification requires qemu-system-aarch64 with FEAT_AFP')
+        qemu=Path(found)
+    version=subprocess.check_output([str(qemu),'--version'],text=True).splitlines()[0]
+    binaries=[qemu,*sorted((ROOT/'.tools/qemu/Cellar/qemu').glob('*/bin/qemu-system-aarch64'))]
+    identities={str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):digest(path.read_bytes()) for path in binaries}
+    inputs=bytearray();count=0
+    for index,initial in floating_bit_cases(functions):
+        inputs+=struct.pack('<Q',index)+bytes(initial)+bytes(8);count+=1
+    if not 0<count<=160000: raise AssertionError(f'QEMU fixture RAM bounds exceeded: {count}')
+    assembly=floating_qemu_source(functions,count)
+    key=digest(bytes(inputs)+assembly.encode()+json.dumps(identities,sort_keys=True).encode()+Path(__file__).read_bytes())
+    directory=ROOT/'.stela/native-evidence/floating-original-qemu'/key;directory.mkdir(parents=True,exist_ok=True)
+    receipt_path=directory/'receipt.json';result_path=directory/'results.bin'
+    if receipt_path.exists():
+        receipt=json.loads(receipt_path.read_text())
+        for name,info in receipt['files'].items():
+            if digest((directory/name).read_bytes())!=info['sha256']: raise AssertionError('Immutable QEMU evidence changed')
+        return result_path.read_bytes(),receipt
+    (directory/'inputs.bin').write_bytes(inputs);(directory/'guest.S').write_text(assembly)
+    subprocess.run(['clang','--target=aarch64-unknown-none-elf','-c',str(directory/'guest.S'),'-o',str(directory/'guest.o')],check=True)
+    lld=shutil.which('ld.lld')
+    if not lld:
+        candidates=sorted((ROOT/'.tools/rust/rustup/toolchains').glob('*/lib/rustlib/*/bin/rust-lld'))
+        if not candidates: raise AssertionError('QEMU oracle ELF requires ld.lld or installed Rust rust-lld')
+        lld=str(candidates[0])
+    env=os.environ.copy()
+    if Path(lld).name=='rust-lld' and os.uname().sysname=='Darwin': env['DYLD_LIBRARY_PATH']=str(Path(lld).resolve().parents[3])
+    subprocess.run([lld,*(['-flavor','gnu'] if Path(lld).name=='rust-lld' else []),'-m','aarch64elf',
+        '-Ttext','0x40080000','-e','_start',str(directory/'guest.o'),'-o',str(directory/'guest.elf')],check=True,env=env)
+    # QMP dumps final RAM; no semihosting, guest libraries or external binaries.
+    with tempfile.TemporaryDirectory(prefix='stela-fp-qmp-') as temporary:
+        endpoint=Path(temporary)/'qmp'
+        command=[str(qemu),'-machine','virt','-cpu','max','-accel','tcg','-m','512M','-display','none','-serial','none',
+            '-monitor','none','-nic','none','-kernel',str(directory/'guest.elf'),'-device',
+            f'loader,file={directory/"inputs.bin"},addr=0x41000000,force-raw=on','-qmp',f'unix:{endpoint},server=on,wait=off','-S']
+        (directory/'command.json').write_text(json.dumps(command,indent=2)+'\n')
+        with (directory/'stderr.log').open('wb') as log:
+            process=subprocess.Popen(command,stdout=log,stderr=log)
+            connection=None;stream=None
+            try:
+                deadline=time.monotonic()+15
+                while not endpoint.exists():
+                    if process.poll() is not None or time.monotonic()>deadline: raise AssertionError('QEMU failed before QMP connection')
+                    time.sleep(0.02)
+                connection=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);connection.settimeout(10);connection.connect(str(endpoint))
+                stream=connection.makefile('rwb');json.loads(stream.readline())
+                def request(name,arguments=None):
+                    data={'execute':name}
+                    if arguments is not None: data['arguments']=arguments
+                    stream.write(json.dumps(data).encode()+b'\n');stream.flush()
+                    while True:
+                        reply=json.loads(stream.readline())
+                        if 'error' in reply: raise AssertionError(reply)
+                        if 'return' in reply: return reply['return']
+                request('qmp_capabilities');request('cont');deadline=time.monotonic()+60
+                while True:
+                    marker=request('human-monitor-command',{'command-line':'xp /1gx 0x40070000'})
+                    if marker.strip().endswith('0x0000000000001234'): break
+                    if process.poll() is not None or time.monotonic()>deadline:
+                        raise AssertionError(f'QEMU original fixture failed or timed out: {marker}')
+                    time.sleep(0.02)
+                request('stop')
+                request('human-monitor-command',{'command-line':f'pmemsave 0x49000000 {count*1056} "{result_path}"'})
+                request('quit');process.wait(timeout=5)
+            finally:
+                if stream is not None: stream.close()
+                if connection is not None: connection.close()
+                if process.poll() is None: process.kill();process.wait(timeout=5)
+    results=result_path.read_bytes()
+    if len(results)!=count*1056: raise AssertionError('QEMU returned a truncated register result stream')
+    files={name:{'path':str((directory/name).relative_to(ROOT)),'sha256':digest((directory/name).read_bytes()),
+        'bytes':(directory/name).stat().st_size} for name in ('inputs.bin','guest.S','guest.elf','results.bin','command.json','stderr.log')}
+    receipt={'engine':version,'cpu':'max','transport':'owned bare-metal A64 fixture, QMP physical RAM dump',
+        'qemu_executable_sha256':identities,'cases':count,'files':files,
+        'limits':'Original emulator execution, no Apple hardware claim. Captures all V registers, NZCV, FPCR and FPSR after each fixture; GPRs/SP are harness transport, not original architectural comparisons. Native/math comparisons additionally check every byte of GuestState. No disabled-FP trap or SME streaming claim.'}
+    receipt_path.write_text(json.dumps(receipt,indent=2)+'\n')
+    return results,receipt
+
+
+def execute_floating_bit_batches(batches):
+    corpus=hashlib.sha256();comparisons=0;unicorn_comparisons=0;original_equal=0;component_equal=0;divergences=[];divergence_count=0;dynamic=[]
+    receipts=[]
+    for batch in batches:
+        results,receipt=floating_qemu_results(batch['functions']);receipts.append(receipt)
+        machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM);machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+        machine.mem_map(BASE,(len(batch['source'])+4095)&~4095);machine.mem_write(BASE,batch['source'])
+        with executable(batch['native']) as address:
+            natives=[ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+offset) for offset in batch['offsets']]
+            for case,(index,initial) in enumerate(floating_bit_cases(batch['functions'])):
+                operations=batch['functions'][index]['operations']
+                expected=floating_bit_mathematical(operations,initial)
+                observations=[]
+                for component in (0,1):
+                    original=State.from_buffer_copy(initial)
+                    fields=struct.unpack_from('<64Q4I',results,case*1056+component*528)
+                    for register in range(32): original.v[register][:]=fields[register*2:register*2+2]
+                    original.nzcv,original.fpcr,original.fpsr=fields[64:67]
+                    if fields[67]!=0x1234: raise AssertionError('QEMU result sentinel missing')
+                    observations.append(state_dict(original))
+                original,component=observations
+                actual=State.from_buffer_copy(initial);natives[index](ctypes.byref(actual))
+                if component!=expected or state_dict(actual)!=expected:
+                    raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
+                        'math':expected,'qemu_original':original,'qemu_scalar_component':component,'native':state_dict(actual)}))
+                component_equal+=1
+                if original==expected: original_equal+=1
+                else:
+                    if operations[0]['scalar'] or not initial.fpcr&2: raise AssertionError('Unexpected original QEMU divergence')
+                    legacy_state=State.from_buffer_copy(initial);legacy_state.fpcr&=~2
+                    legacy=floating_bit_mathematical(operations,legacy_state);legacy['fpcr']=initial.fpcr
+                    if original!=legacy: raise AssertionError('QEMU difference is larger than exact vector AH NaN sign handling')
+                    divergence_count+=1
+                    if len(divergences)<32:
+                        divergences.append({'operations':operations,'initial_state_sha256':digest(bytes(initial)),
+                            'requested_fpcr':initial.fpcr,'original_v':original['v'],'spec_native_v':expected['v'],
+                            'classification':'QEMU10 vector FABS/FNEG ignores AH for NaN signs; scalar component oracle matches pinned specification'})
+                # Unicorn MAX implements FP16/FZ16 but not AFP. Never erase controls to
+                # turn a divergent original observation into an equality claim.
+                if initial.fpcr==0:
+                    initialize_arm(machine,initial);entry=batch['entries'][index];end=BASE+(entry+len(operations))*4
+                    machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
+                    if machine.reg_read(arm.UC_ARM64_REG_PC)!=end or state_dict(capture_arm(machine,initial))!=expected:
+                        raise AssertionError('Unicorn baseline differs from pinned FP bit semantics')
+                    unicorn_comparisons+=1
+                corpus.update(struct.pack('<Q',index));corpus.update(bytes(initial));comparisons+=1
+            rows=[]
+            representatives={}
+            for index,function in enumerate(batch['functions']):
+                if len(function['operations'])==1:
+                    shape=json.dumps(native_operation_shape(function['operations'][0]),sort_keys=True)
+                    representatives.setdefault(shape,index)
+            for index in representatives.values():
+                operation=batch['functions'][index]['operations'][0];entry=batch['entries'][index]
+                start=batch['instruction_offsets'][entry];end=batch['instruction_offsets'][entry+1]+1
+                for control in (0,2,4,6):
+                    for pattern in (4,8):
+                        initial=State();seed_extended_state(initial,index*16+pattern);seed_floating_bits(initial,[operation],pattern);initial.fpcr=control
+                        expected=floating_bit_mathematical([operation],initial);actual=State.from_buffer_copy(initial);natives[index](ctypes.byref(actual))
+                        emulated,counts=emulate_native_trace(batch['native'],start,end,initial)
+                        if state_dict(actual)!=expected or state_dict(emulated)!=expected: raise AssertionError('FP bit dynamic x86 trace disagrees')
+                        rows.append({'shape':native_operation_shape(operation),'fpcr':control,'pattern':pattern,
+                            'native_function_sha256':digest(batch['native'][start:end]),**counts})
+            dynamic.append({'reference':f'Unicorn {unicorn_version} x86 Haswell trace and actual host CPU; QEMU original results checked separately',
+                'complete_state_math_actual_native_emulator_comparisons':len(rows),'cases':rows,
+                'limits':'Executed instruction counts include dynamic AH/NEP branches, exclude harness RET in body totals; no hardware-cycle or application-performance claim.'})
+    probe=Uc(UC_ARCH_ARM64,UC_MODE_ARM);probe.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+    controls=[]
+    for value in (7,1<<19,0x9f00):
+        probe.reg_write(arm.UC_ARM64_REG_FPCR,value);controls.append({'requested_fpcr':value,'observed_fpcr':probe.reg_read(arm.UC_ARM64_REG_FPCR)})
+    if [row['observed_fpcr'] for row in controls]!=[0,1<<19,0]: raise AssertionError('Unicorn FP capabilities changed; review oracle classification')
+    return {'three_way_register_state_comparisons':original_equal,'qemu_original_vector_control_math_native_comparisons':original_equal,
+        'complete_native_state_math_comparisons':comparisons,'qemu_original_scalar_component_math_native_comparisons':component_equal,
+        'qemu_original_exact_vector_ah_divergences':divergence_count,'qemu_original_divergence_examples':divergences,
+        'unicorn_original_complete_state_math_native_comparisons':unicorn_comparisons,'unicorn_missing_control_observations':controls,
+        'qemu_original_evidence':receipts,'state_corpus_sha256':corpus.hexdigest(),'dynamic_x86_trace':dynamic,
+        'limits':'QEMU independently executes unchanged original FP instructions across AFP controls; complete native state compared to independent field oracle. QEMU captures V0..V31/NZCV/FPCR/FPSR, while GPR/SP use fixture transport. QEMU10 vector AH NaN sign divergences are exact classified observations, not direct-original verification; independent original scalar-per-lane decomposition is supplementary. No numerical FP arithmetic, guest exception delivery, streaming SME, or complete binary execution claim.'}
+
+
 REGISTER_COHORTS={
     'integer':(integer_programs,integer_mathematical),
     'rearrange':(rearrange_programs,rearrange_mathematical),
@@ -1312,13 +1693,16 @@ REGISTER_COHORTS={
     'reductions':(reduction_programs,reduction_mathematical),
     'saturating':(saturating_programs,saturating_mathematical),
     'products':(product_programs,product_mathematical),
+    'indexed_products':(indexed_product_programs,indexed_product_mathematical),
     'doubling_products':(doubling_product_programs,doubling_product_mathematical),
     'halving':(halving_programs,halving_mathematical),
     'immediates':(immediate_programs,immediate_mathematical),
+    'floating_bits':(floating_bit_programs,floating_bit_mathematical),
 }
 
 
 def execute_register_batches(batches):
+    if batches[0]['cohort']=='floating_bits': return execute_floating_bit_batches(batches)
     corpus,comparisons=hashlib.sha256(),0
     dynamic=[]
     templates=states(all_flags=True)
@@ -1341,6 +1725,7 @@ def execute_register_batches(batches):
                 immediates=batch.get('cohort')=='immediates'
                 patterns=(2 if operations[0]['kind']=='constant' else 8) if immediates else 9 if halving else 7 if saturation or products else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
                 if batch.get('cohort')=='doubling_products': patterns=10
+                if batch.get('cohort')=='indexed_products': patterns=9
                 if batch.get('cohort')=='register_shifts': patterns=register_shift_pattern_count(operations)
                 for flags in (0,15):
                     for pattern in range(patterns):
@@ -1427,6 +1812,7 @@ def execute_register_batches(batches):
                                     initial.v[register][:]=[full&MASK,full>>64]
                                     if register<31: initial.x[register]=(payload|((0xdeadbeefdeadbeef<<bits)&MASK))&MASK
                         if batch.get('cohort')=='doubling_products': seed_doubling_products(initial,operations,pattern,flags)
+                        if batch.get('cohort')=='indexed_products': seed_indexed_products(initial,operations,pattern,flags)
                         if batch.get('cohort')=='register_shifts': register_shift_seed(initial,operations,pattern,flags)
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
@@ -1555,6 +1941,14 @@ def native_trace_representatives(batch):
             {'name':'sqdmull','lane':4,'upper':True,'index':None},
             {'name':'sqdmlal','lane':4,'bytes':8,'index':3},{'name':'sqdmlsl','lane':2,'bytes':16,'upper':False},
             {'name':'sqrdmulh','lane':2,'bytes':8,'index':7}]
+    elif focus=='indexed_products':
+        selections=[{'name':'mul','lane':4,'bytes':16,'index':3},
+            {'name':'mla','lane':2,'bytes':8,'index':7},
+            {'name':'mls','lane':4,'bytes':16,'index':2},
+            {'name':'smull','lane':4,'upper':True,'index':3},
+            {'name':'umull','lane':2,'upper':True,'index':5},
+            {'name':'smlal','lane':4,'upper':False,'index':1},
+            {'name':'umlsl','lane':4,'upper':True,'index':3}]
     elif focus=='register_shifts':
         selections=[{'name':'sqshl','lane':8,'scalar':True,'immediate':False},
             {'name':'sshl','lane':1,'bytes':16,'immediate':False},
@@ -1580,12 +1974,13 @@ def count_representative_native_paths(batch):
         for index in native_trace_representatives(batch):
             function=batch['functions'][index];operations=function['operations'];entry=batch['entries'][index]
             start=batch['instruction_offsets'][entry];end=batch['instruction_offsets'][entry+1]+1
-            patterns=(0,7) if batch['cohort']=='doubling_products' else (0,6) if operations[0]['immediate'] else (
+            patterns=(0,7) if batch['cohort'] in ('doubling_products','indexed_products') else (0,6) if operations[0]['immediate'] else (
                 register_shift_counts(operations[0]['lane']*8).index(-64),register_shift_counts(operations[0]['lane']*8).index(1))
             native=ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+start)
             for pattern in patterns:
                 initial=State();seed_extended_state(initial,index*16+pattern);initial.nzcv=0xf0000000
                 if batch['cohort']=='doubling_products': seed_doubling_products(initial,operations,pattern,0)
+                elif batch['cohort']=='indexed_products': seed_indexed_products(initial,operations,pattern,0)
                 else: register_shift_seed(initial,operations,pattern,0)
                 mathematical=REGISTER_COHORTS[batch['cohort']][1](operations,initial)
                 actual=State.from_buffer_copy(initial);native(ctypes.byref(actual))
@@ -1651,6 +2046,8 @@ def run_register_cohort(cli, focus):
                 if '+ssse3' in target_id: expected.update(('pabsb','pabsw','pabsd'))
                 if '+sse4.1' in target_id: expected.add('packusdw')
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            elif focus=='indexed_products':
+                if '+sse4.1' in target_id: expected.update(('pmulld','pmuldq','pmovsxwd','pmovzxwd'))
             elif focus=='products':
                 if '+sse4.1' in target_id: expected.update(('pmulld','pmuldq'))
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
@@ -1658,6 +2055,7 @@ def run_register_cohort(cli, focus):
                 if '+ssse3' in target_id: expected.add('pmulhrsw')
                 if '+sse4.1' in target_id: expected.update(('pmuldq','pmulld'))
                 if '+pclmulqdq' in target_id: expected.add('pclmulqdq')
+            elif focus=='floating_bits' and '+sse4.2' in target_id: expected.add('pcmpgtq')
             elif focus=='halving':
                 if '+ssse3' in target_id: expected.add('pmaddubsw')
                 if '+sse4.1' in target_id: expected.update(('pmovsxdq','pmovzxdq'))
@@ -1673,7 +2071,7 @@ def run_register_cohort(cli, focus):
         'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
         'harness_source_sha256':harness_hash,'shared_runner_sha256':digest((ROOT/'dev/differential.py').read_bytes()),
         'corpus_sha256':digest(batch['source']),'compilation':baseline['compilation'],'cpu_profiles':profiles,
-        'original_cpu_model':'MAX (FP16 enabled)' if focus=='immediates' else 'default',
+        'original_cpu_model':('QEMU10 max with AFP/FP16 plus classified Unicorn MAX baseline' if focus=='floating_bits' else 'MAX (FP16 enabled)' if focus=='immediates' else 'default'),
         'total_profile_comparisons':sum(p['three_way_register_state_comparisons'] for p in profiles.values()),
         'verification_wall_seconds':time.monotonic()-started,
         'limits':f'Focused {focus} SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}

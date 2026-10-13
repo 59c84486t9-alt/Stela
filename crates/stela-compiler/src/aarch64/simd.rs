@@ -2,6 +2,7 @@
 //! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
+pub mod floating;
 pub mod halving;
 pub mod immediates;
 pub mod products;
@@ -40,6 +41,7 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Floating(floating::Operand),
     Immediate(immediates::Operand),
     Halving(halving::Operand),
     Product(products::Operand),
@@ -95,6 +97,9 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = floating::decode(word) {
+        return Some(decoded.map(Operand::Floating));
+    }
     if let Some(decoded) = immediates::decode(word) {
         return Some(decoded.map(Operand::Immediate));
     }

@@ -118,16 +118,17 @@ fn long_product(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
         packed(code, Host::MultiplyUnsignedDword, 0, 1);
     }
 }
-fn accumulate(code: &mut Vec<u8>, destination: u8, lane: u8, operation: Accumulate) {
+fn accumulate(code: &mut Vec<u8>, destination: u8, lane: u8, operation: Accumulate) -> u8 {
     if operation == Accumulate::None {
-        return;
+        return 0;
     }
     read_vector(code, destination, 1);
     if operation == Accumulate::Subtract {
         packed(code, arithmetic(lane, true), 1, 0);
-        packed(code, Host::MoveAligned, 0, 1);
+        1
     } else {
         packed(code, arithmetic(lane, false), 0, 1);
+        0
     }
 }
 fn absolute_difference(code: &mut Vec<u8>, lane: u8, signed: bool, target: TargetCpu) {
@@ -174,12 +175,92 @@ fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
     );
 }
 fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
-    Shift::RightBytes.emit(code, 1, index * lane);
     if lane == 2 {
-        // Repeat the low halfword without requiring PSHUFLW or SSSE3.
-        packed(code, Host::UnpackLowWord, 1, 1);
+        // Halfword shuffles leave the other 64-bit half unchanged. Broadcast
+        // one repeated dword from the selected half to complete all eight lanes.
+        packed(
+            code,
+            if index < 4 {
+                Host::ShuffleLowWord
+            } else {
+                Host::ShuffleHighWord
+            },
+            1,
+            1,
+        );
+        code.push((index % 4) * 0x55);
+        shuffle(code, 1, 1, if index < 4 { 0 } else { 0xaa });
+    } else {
+        // Select and broadcast the original dword in one packed operation.
+        shuffle(code, 1, 1, index * 0x55);
     }
-    shuffle(code, 1, 1, 0);
+}
+
+/// Indexed long products have a uniform right operand; avoid materializing
+/// widened input lanes which the native multiply does not consume.
+fn indexed_long_product(
+    code: &mut Vec<u8>,
+    lane: u8,
+    upper: bool,
+    signed: bool,
+    target: TargetCpu,
+) {
+    if lane == 2 && !upper && target >= TargetCpu::Sse41 {
+        let extension = if signed {
+            Host::SignExtendWordToDword
+        } else {
+            Host::ZeroExtendWordToDword
+        };
+        extension.register(code, 0, 0, target);
+        extension.register(code, 1, 1, target);
+        Host::MultiplyLowDword.register(code, 0, 1, target);
+    } else if lane == 2 {
+        packed(code, Host::MoveAligned, 2, 0);
+        packed(code, Host::MultiplyLowWord, 0, 1);
+        packed(
+            code,
+            if signed {
+                Host::MultiplyHighSignedWord
+            } else {
+                Host::MultiplyHighUnsignedWord
+            },
+            2,
+            1,
+        );
+        packed(
+            code,
+            if upper {
+                Host::UnpackHighWord
+            } else {
+                Host::UnpackLowWord
+            },
+            0,
+            2,
+        );
+    } else {
+        shuffle(code, 0, 0, if upper { 0xfa } else { 0x50 });
+        long_product(code, lane, signed, target);
+    }
+}
+
+fn indexed_low_product(code: &mut Vec<u8>, lane: u8, bytes: u8, target: TargetCpu) {
+    if lane != 4 || target >= TargetCpu::Sse41 {
+        low_product(code, lane, target);
+    } else if bytes == 8 {
+        // Both low dwords fit one PMULUDQ pair after repositioning the left
+        // operand; the right operand is already uniform in every dword.
+        shuffle(code, 0, 0, 0x50);
+        packed(code, Host::MultiplyUnsignedDword, 0, 1);
+        shuffle(code, 0, 0, 0x88);
+    } else {
+        packed(code, Host::MoveAligned, 2, 0);
+        packed(code, Host::MultiplyUnsignedDword, 0, 1);
+        Shift::RightBytes.emit(code, 2, 4);
+        packed(code, Host::MultiplyUnsignedDword, 2, 1);
+        shuffle(code, 0, 0, 0x88);
+        shuffle(code, 2, 2, 0x88);
+        packed(code, Host::UnpackLowDword, 0, 2);
+    }
 }
 /// Full-width 16-bit high products need no widening or per-half processing.
 /// PMULHRSW shares Arm's ties-up rounding but wraps MIN*MIN instead of clamping.
@@ -395,6 +476,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         read_vector(code, left, 0);
         read_vector(code, right, 1);
     }
+    let mut result = 0;
     match kind {
         Kind::Polynomial { widen } => polynomial(code, lane, widen, upper, target),
         Kind::Doubling { .. } => doubling(code, operand, target),
@@ -403,14 +485,21 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             widen,
             accumulate: operation,
         } => {
-            if widen {
+            if let Some(index) = operand.index {
+                indexed(code, lane, index);
+            }
+            if widen && operand.index.is_some() {
+                indexed_long_product(code, lane, upper, signed, target);
+            } else if widen {
                 extend(code, 0, lane, upper, signed);
                 extend(code, 1, lane, upper, signed);
                 long_product(code, lane, signed, target);
+            } else if operand.index.is_some() {
+                indexed_low_product(code, lane, bytes, target);
             } else {
                 low_product(code, lane, target);
             }
-            accumulate(
+            result = accumulate(
                 code,
                 destination,
                 if widen { lane * 2 } else { lane },
@@ -445,21 +534,86 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         }
     }
     if bytes == 8 {
-        packed(code, Host::MoveQword, 0, 0);
+        packed(code, Host::MoveQword, result, result);
     } else if bytes < 8 {
+        let mask = 1 - result;
         constant(
             code,
-            1,
+            mask,
             std::array::from_fn(|i| if i < usize::from(bytes) { 255 } else { 0 }),
         );
-        packed(code, Host::And, 0, 1);
+        packed(code, Host::And, result, mask);
     }
-    commit(code, destination, 0);
+    commit(code, destination, result);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_products_share_packed_lowering_and_checked_dword_multiply() {
+        for (word, lane, widen, signed) in [
+            (0x4f628820, 2, false, false),
+            (0x0f62a820, 2, true, true),
+            (0x2f62a820, 2, true, false),
+            (0x4f62a820, 2, true, true),
+            (0x6f62a820, 2, true, false),
+            (0x4fa28820, 4, false, false),
+            (0x4fa2a820, 4, true, true),
+            (0x6fa2a820, 4, true, false),
+        ] {
+            let operand = crate::aarch64::simd::products::decode(word)
+                .unwrap()
+                .unwrap();
+            for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
+                let mut code = Vec::new();
+                emit(&mut code, &operand, target);
+                let has = |opcode: Host| {
+                    code.windows(opcode.encoding().len())
+                        .any(|w| w == opcode.encoding())
+                };
+                let extended_words =
+                    lane == 2 && widen && !operand.upper && target >= TargetCpu::Sse41;
+                assert_eq!(
+                    has(Host::MultiplyLowDword),
+                    lane == 4 && !widen && target >= TargetCpu::Sse41 || extended_words
+                );
+                assert_eq!(
+                    has(Host::MultiplySignedDword),
+                    lane == 4 && widen && signed && target >= TargetCpu::Sse41
+                );
+                assert_eq!(has(Host::MultiplyLowWord), lane == 2 && !extended_words);
+                assert_eq!(has(Host::SignExtendWordToDword), extended_words && signed);
+                assert_eq!(has(Host::ZeroExtendWordToDword), extended_words && !signed);
+                assert_eq!(
+                    has(Host::MultiplyHighSignedWord),
+                    lane == 2 && widen && signed && !extended_words
+                );
+                assert_eq!(
+                    has(Host::MultiplyHighUnsignedWord),
+                    lane == 2 && widen && !signed && !extended_words
+                );
+                if lane == 4 && widen {
+                    assert!(
+                        !has(Host::UnpackLowDword),
+                        "PMULUDQ/PMULDQ consume only the selected even dwords"
+                    );
+                }
+                assert_eq!(
+                    code.windows(Host::LoadUnaligned.encoding().len())
+                        .filter(|w| *w == Host::LoadUnaligned.encoding())
+                        .count(),
+                    2
+                );
+                assert!(
+                    !has(Host::ByteSignMask),
+                    "ordinary multiplication preserves FPSR/QC"
+                );
+                assert!(code.len() < 160, "bounded whole-vector packed product");
+            }
+        }
+    }
 
     #[test]
     fn word_high_products_use_one_packed_pair_and_only_checked_rounding_extension() {

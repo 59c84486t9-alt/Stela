@@ -96,6 +96,9 @@ encodings! {
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = decode_indexed_product(word) {
+        return Some(decoded);
+    }
     if let Some(decoded) = decode_special(word) {
         return Some(decoded);
     }
@@ -119,6 +122,83 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         bytes: if widen || q { 16 } else { 8 },
         upper: widen && q,
         index: None,
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum IndexedProductEncoding {
+    Mul,
+    Mla,
+    Mls,
+    Smull,
+    Umull,
+    Smlal,
+    Umlal,
+    Smlsl,
+    Umlsl,
+}
+impl IndexedProductEncoding {
+    const ALL: &'static [Self] = &[
+        Self::Mul,
+        Self::Mla,
+        Self::Mls,
+        Self::Smull,
+        Self::Umull,
+        Self::Smlal,
+        Self::Umlal,
+        Self::Smlsl,
+        Self::Umlsl,
+    ];
+    fn facts(self) -> (u32, Kind) {
+        let (opcode, signed, widen, accumulate) = match self {
+            Self::Mul => (0x0f008000, false, false, NoAccumulate),
+            Self::Mla => (0x2f000000, false, false, Add),
+            Self::Mls => (0x2f004000, false, false, Subtract),
+            Self::Smull => (0x0f00a000, true, true, NoAccumulate),
+            Self::Umull => (0x2f00a000, false, true, NoAccumulate),
+            Self::Smlal => (0x0f002000, true, true, Add),
+            Self::Umlal => (0x2f002000, false, true, Add),
+            Self::Smlsl => (0x0f006000, true, true, Subtract),
+            Self::Umlsl => (0x2f006000, false, true, Subtract),
+        };
+        (
+            opcode,
+            Kind::Product {
+                signed,
+                widen,
+                accumulate,
+            },
+        )
+    }
+}
+
+#[allow(clippy::result_unit_err)]
+fn decode_indexed_product(word: u32) -> Option<Result<Operand, ()>> {
+    let (_, kind) = IndexedProductEncoding::ALL
+        .iter()
+        .map(|e| e.facts())
+        .find(|(opcode, _)| word & 0xbf00f400 == *opcode)?;
+    let size = (word >> 22) & 3;
+    if !matches!(size, 1 | 2) {
+        return Some(Err(()));
+    }
+    let q = word & (1 << 30) != 0;
+    let h = ((word >> 11) & 1) as u8;
+    let l = ((word >> 21) & 1) as u8;
+    let m = ((word >> 20) & 1) as u8;
+    Some(Ok(Operand {
+        kind,
+        destination: (word & 31) as u8,
+        left: ((word >> 5) & 31) as u8,
+        right: ((word >> 16) & if size == 1 { 15 } else { 31 }) as u8,
+        lane_bytes: 1 << size,
+        bytes: if kind.widened() || q { 16 } else { 8 },
+        upper: kind.widened() && q,
+        index: Some(if size == 1 {
+            (h << 2) | (l << 1) | m
+        } else {
+            (h << 1) | l
+        }),
     }))
 }
 
@@ -235,6 +315,60 @@ fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_indexed_products_validate_every_index_and_register_role() {
+        for encoding in IndexedProductEncoding::ALL {
+            let (base, kind) = encoding.facts();
+            for q in 0..2 {
+                for size in 0..4 {
+                    for fields in 0..8 {
+                        let h = fields >> 2;
+                        let l = fields >> 1 & 1;
+                        let m = fields & 1;
+                        let word = base
+                            | (q << 30)
+                            | (size << 22)
+                            | (h << 11)
+                            | (l << 21)
+                            | (m << 20)
+                            | (15 << 16)
+                            | (31 << 5)
+                            | 31;
+                        let decoded = decode(word).unwrap();
+                        if !matches!(size, 1 | 2) {
+                            assert!(decoded.is_err());
+                            continue;
+                        }
+                        let operand = decoded.unwrap();
+                        assert_eq!(operand.kind, kind);
+                        assert_eq!((operand.destination, operand.left), (31, 31));
+                        assert_eq!(
+                            operand.right,
+                            if size == 1 { 15 } else { 15 | (m << 4) as u8 }
+                        );
+                        assert_eq!(
+                            operand.index,
+                            Some(if size == 1 {
+                                fields as u8
+                            } else {
+                                (h << 1 | l) as u8
+                            })
+                        );
+                        assert_eq!(operand.upper, kind.widened() && q != 0);
+                        assert_eq!(operand.bytes, if kind.widened() || q != 0 { 16 } else { 8 });
+                        assert!(
+                            decode(word | (1 << 28)).is_none(),
+                            "ordinary integer products have no scalar form"
+                        );
+                        assert!(
+                            decode(word | (1 << 10)).is_none(),
+                            "reserved neighboring opcode"
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn doubling_encodings_validate_scalar_width_and_index_register_roles() {
         for encoding in DoublingEncoding::ALL {

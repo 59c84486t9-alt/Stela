@@ -26,6 +26,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/register_offset.rs"),
     include_str!("aarch64/simd.rs"),
     include_str!("x86_64/simd.rs"),
+    include_str!("aarch64/simd/floating.rs"),
+    include_str!("x86_64/simd/floating.rs"),
     include_str!("x86_64/isa.rs"),
     include_str!("aarch64/simd/rearrange.rs"),
     include_str!("x86_64/simd/rearrange.rs"),

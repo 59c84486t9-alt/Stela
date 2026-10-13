@@ -29,6 +29,9 @@ fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
     );
 }
 pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
+    if amount == 0 {
+        return;
+    }
     let opcode = match (left, lane_bytes) {
         (true, 1 | 2) => Shift::LeftWord,
         (true, 4) => Shift::LeftDword,
@@ -51,6 +54,9 @@ pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount:
     }
 }
 pub(super) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
+    if amount == 0 {
+        return;
+    }
     if !signed {
         logical_shift(code, xmm, lane_bytes, amount, false);
         return;
@@ -211,6 +217,16 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         }
         _ => {}
     }
+    if matches!(kind, Kind::Right { insert: true, .. }) && amount == lane_bytes * 8 {
+        // SRI by the complete element width preserves every active old bit.
+        // Retain a real load/store interval for precise source-map entries.
+        read_vector(code, destination, 0);
+        if bytes == 8 {
+            packed(code, Host::MoveQword, 0, 0);
+        }
+        commit(code, destination, 0);
+        return;
+    }
     read_vector(code, source, 0);
     match kind {
         Kind::Register { .. } | Kind::SaturatingImmediate { .. } => unreachable!(),
@@ -221,7 +237,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         Kind::Widen { signed, upper } => widen(code, lane_bytes, amount, signed, upper),
         Kind::Left { insert } => {
             logical_shift(code, 0, lane_bytes, amount, true);
-            if insert {
+            if insert && amount != 0 {
                 read_vector(code, destination, 1);
                 let preserve = (1u64 << amount) - 1; // amount is 0..lane_bits-1, including qword
                 lane_mask(code, 2, lane_bytes, preserve);
@@ -258,8 +274,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     commit(code, destination, 0);
 }
 
-/// Constant counts permit packed SSE2 shifts. XMM3 stages the wrapped result,
-/// XMM6 the original source, and XMM4 the complete per-lane saturation mask.
+/// Constant counts permit packed SSE2 shifts. The general path stages wrapped
+/// results in XMM3 and originals in XMM6; XMM4's active-byte sign bits publish QC.
 fn saturating_immediate_vector(
     code: &mut Vec<u8>,
     operand: &Operand,
@@ -268,6 +284,53 @@ fn saturating_immediate_vector(
 ) {
     let lane = operand.lane_bytes;
     read_vector(code, operand.source, 0);
+    if operand.amount == 0 {
+        if signed_source && unsigned_result {
+            // SQSHLU zero clamps negative lanes to zero. Publish their original
+            // sign mask before PANDN consumes it; the publisher only uses ECX.
+            super::saturating::sign_mask(code, 4, 0, lane);
+            super::saturating::publish_qc(code, operand.bytes);
+            packed(code, Host::AndNot, 4, 0);
+            finish_immediate_vector(code, operand, 4);
+        } else {
+            // SQSHL/UQSHL zero cannot saturate, including inactive poison lanes.
+            finish_immediate_vector(code, operand, 0);
+        }
+        return;
+    }
+    if operand.amount == 1 && lane <= 2 && signed_source != unsigned_result {
+        // A shift by one is a saturating add of identical operands. Unlike the
+        // general add_sub recipe, doubling needs no second source/copy. Signed
+        // overflow flips the sign between wrapped and saturated results. For
+        // unsigned inputs, saturation occurs exactly when the original MSB is
+        // set; signed-word replication prevents low-byte MSBs publishing QC.
+        if !signed_source && lane == 2 {
+            super::saturating::sign_mask(code, 4, 0, lane);
+        } else {
+            packed(code, Host::MoveAligned, 4, 0);
+        }
+        if signed_source {
+            add(code, 4, 4, lane);
+        }
+        packed(
+            code,
+            match (signed_source, lane) {
+                (true, 1) => Host::AddSignedSaturatingByte,
+                (true, 2) => Host::AddSignedSaturatingWord,
+                (false, 1) => Host::AddUnsignedSaturatingByte,
+                (false, 2) => Host::AddUnsignedSaturatingWord,
+                _ => unreachable!("reviewed doubling lane"),
+            },
+            0,
+            0,
+        );
+        if signed_source {
+            packed(code, Host::Xor, 4, 0);
+        }
+        super::saturating::publish_qc(code, operand.bytes);
+        finish_immediate_vector(code, operand, 0);
+        return;
+    }
     packed(code, Host::MoveAligned, 6, 0);
     logical_shift(code, 0, lane, operand.amount, true);
     packed(code, Host::MoveAligned, 3, 0);
@@ -285,7 +348,15 @@ fn saturating_immediate_vector(
             packed(code, Host::EqualDword, 1, 1);
             packed(code, Host::Xor, 5, 1); // positive bound=MAX, negative bound=0
         } else {
-            lane_mask(code, 1, lane, (1u64 << (lane * 8 - 1)) - 1);
+            packed(code, Host::EqualDword, 1, 1);
+            if lane == 1 {
+                // 0xffff >> 9 = 0x007f, in PACKUSWB's unsigned byte range.
+                // One bound serves all sixteen lanes without immediate loads.
+                Shift::RightWord.emit(code, 1, 9);
+                packed(code, Host::PackUnsignedWordToByte, 1, 1);
+            } else {
+                logical_shift(code, 1, lane, 1, false);
+            }
             packed(code, Host::Xor, 5, 1); // MAX for positive, MIN for negative
         }
     } else {
@@ -295,10 +366,14 @@ fn saturating_immediate_vector(
     packed(code, Host::And, 5, 4);
     packed(code, Host::Xor, 3, 5);
     super::saturating::publish_qc(code, operand.bytes);
+    finish_immediate_vector(code, operand, 3);
+}
+
+fn finish_immediate_vector(code: &mut Vec<u8>, operand: &Operand, result: u8) {
     if operand.bytes == 8 {
-        packed(code, Host::MoveQword, 3, 3);
+        packed(code, Host::MoveQword, result, result);
     }
-    commit(code, operand.destination, 3);
+    commit(code, operand.destination, result);
 }
 
 /// Local near branches avoid assuming that every lane recipe fits in rel8.
@@ -515,4 +590,101 @@ fn register_shift(
     code.extend(vector_offset(operand.destination).to_le_bytes());
     code.extend([0x4c, 0x89, 0x8f]);
     code.extend((vector_offset(operand.destination) + 8).to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn immediate(lane_bytes: u8, bytes: u8, amount: u8, signed: bool) -> Operand {
+        Operand {
+            kind: Kind::SaturatingImmediate {
+                signed_source: signed,
+                unsigned_result: !signed,
+            },
+            destination: 1,
+            source: 1, // Exercise the in-place emission shape too.
+            lane_bytes,
+            amount,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn nonsaturating_zero_immediates_keep_a_real_minimal_write_interval() {
+        for bytes in [8, 16] {
+            for lane in [1, 2, 4, 8] {
+                if bytes == 8 && lane == 8 {
+                    continue;
+                }
+                for signed in [false, true] {
+                    let mut code = vec![];
+                    emit(&mut code, &immediate(lane, bytes, 0, signed));
+                    // Load, optional upper clearing, store. No FPSR write and
+                    // no empty source-map interval for an in-place identity.
+                    assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn byte_and_word_immediate_doubling_use_baseline_saturating_adds() {
+        for (lane, signed, opcode) in [
+            (1, true, Host::AddSignedSaturatingByte),
+            (2, true, Host::AddSignedSaturatingWord),
+            (1, false, Host::AddUnsignedSaturatingByte),
+            (2, false, Host::AddUnsignedSaturatingWord),
+        ] {
+            for bytes in [8, 16] {
+                let mut code = vec![];
+                emit(&mut code, &immediate(lane, bytes, 1, signed));
+                let mut saturating_add = vec![];
+                packed(&mut saturating_add, opcode, 0, 0);
+                assert!(
+                    code.windows(saturating_add.len())
+                        .any(|w| w == saturating_add)
+                );
+                // Includes full sticky QC publication and the active-byte
+                // mask; excludes the harness RET supplied by the caller.
+                let body_bytes = if signed {
+                    57
+                } else if lane == 1 {
+                    49
+                } else {
+                    54
+                };
+                assert_eq!(code.len(), body_bytes + if bytes == 8 { 4 } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn identity_insert_immediates_preserve_destination_clearing() {
+        for bytes in [8, 16] {
+            for lane in [1, 2, 4, 8] {
+                if bytes == 8 && lane == 8 {
+                    continue;
+                }
+                for kind in [
+                    Kind::Left { insert: true },
+                    Kind::Right {
+                        signed: false,
+                        round: false,
+                        accumulate: false,
+                        insert: true,
+                    },
+                ] {
+                    let mut operand = immediate(lane, bytes, 0, false);
+                    operand.kind = kind;
+                    if matches!(kind, Kind::Right { .. }) {
+                        operand.amount = lane * 8;
+                    }
+                    let mut code = vec![];
+                    emit(&mut code, &operand);
+                    assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
+                }
+            }
+        }
+    }
 }
