@@ -1,17 +1,18 @@
-//! Explicit LP64 Darwin BSD-call ABI adaptation for a stopped SVC #0x80.
+//! Explicit LP64 Darwin BSD-call adaptation and bounded native service dispatch.
 //!
 //! Reference: public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
 //! bsd/dev/arm/systemcalls.c, bsd/sys/user.h and osfmk/arm64/sleh.c.
 //! This profile does not establish the private macOS 27 kernel contract.
 //! The #0x80 restriction is an initial Stela profile, not an XNU check of
 //! the SVC immediate. No service, host syscall, memory access or exception-level
-//! transition occurs in the ABI adapter itself. The opt-in data VM service below
-//! changes owned data protections; all other backends remain caller supplied.
+//! transition occurs in the ABI adapter itself. Opt-in backends separately own
+//! data protections, cross-architecture failure and Mach/thread services.
 //! Declining a request means leaving its pending state unchanged.
 use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
 use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
+pub mod crossarch;
 pub mod platform;
 
 pub const MAX_BSD_ARGUMENTS: usize = 8;
@@ -274,12 +275,9 @@ impl PendingBsdCall {
     }
 }
 
-/// Explicit ARM process VM profile; ordinary data protections only. Executable
-/// transitions, trusted/TPRO flags and MAC/code-sign policy remain unsupported.
-pub const DATA_VM_PROFILE: &str = "darwin-arm64-va47-page16k-data-mprotect-v1";
-pub const GUEST_PAGE_BYTES: u64 = 16 * 1024;
+/// Captured request and explicit completion/decline from one BSD backend.
 #[derive(Debug, Serialize)]
-pub struct DataVmEvent {
+pub struct BsdServiceEvent {
     pub trap: SynchronousTrap,
     pub request: Option<BsdRequest>,
     pub completion: Option<BsdCompletion>,
@@ -288,18 +286,25 @@ pub struct DataVmEvent {
 #[derive(Debug, Serialize)]
 pub struct ServiceRunOutcome {
     pub execution: crate::blocks::RunOutcome,
-    pub services: Vec<DataVmEvent>,
+    pub services: Vec<BsdServiceEvent>,
     pub mach_services: Vec<crate::mach::Event>,
     pub thread_services: Vec<crate::thread::Event>,
+    pub crossarch_services: Vec<BsdServiceEvent>,
 }
 #[derive(Default)]
 pub struct ExecutionServices<'a> {
     pub mach_ports: Option<&'a mut crate::mach::HostPorts>,
     pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
+    pub crossarch: bool,
     pub pauth: Option<&'a crate::pauth::Context>,
     pub clock: Option<&'a mut crate::clock::Context>,
 }
+
+/// Explicit ARM process VM profile; ordinary data protections only. Executable
+/// transitions, trusted/TPRO flags and MAC/code-sign policy remain unsupported.
+pub const DATA_VM_PROFILE: &str = "darwin-arm64-va47-page16k-data-mprotect-v1";
+pub const GUEST_PAGE_BYTES: u64 = 16 * 1024;
 
 /// Service the reviewed BSD74 ABI using owned guest pages, never host pointers
 /// supplied unchecked by the guest. Unsupported requests preserve pending state.
@@ -311,8 +316,8 @@ pub fn service_data_mprotect(
     trap: &SynchronousTrap,
     memory: &mut crate::memory::OwnedMemory,
     runtime: &crate::blocks::BlockRuntime,
-) -> DataVmEvent {
-    let mut event = DataVmEvent {
+) -> BsdServiceEvent {
+    let mut event = BsdServiceEvent {
         trap: *trap,
         request: None,
         completion: None,
@@ -401,7 +406,7 @@ pub fn service_data_mprotect(
     event
 }
 
-/// Run the shared native dispatcher with explicitly selected data-VM/Mach services.
+/// Run native dispatch with explicitly selected data-VM, crossarch and thread/Mach services.
 /// Unknown services remain precise trap stops, and a single aggregate budget
 /// counts every native block across resumptions.
 ///
@@ -422,6 +427,7 @@ pub unsafe fn run_services(
     let mut events = Vec::new();
     let mut mach_events = Vec::new();
     let mut thread_events = Vec::new();
+    let mut crossarch_events = Vec::new();
     anyhow::ensure!(
         services.mach_ports.is_none() || services.thread.is_none(),
         "thread services and independent Mach ports cannot have different owners"
@@ -519,6 +525,11 @@ pub unsafe fn run_services(
             } else {
                 false
             }
+        } else if services.crossarch && crossarch::handles(state, &trap) {
+            let event = crossarch::service(state, &trap);
+            let serviced = event.completion.is_some();
+            crossarch_events.push(event);
+            serviced
         } else if services.data_vm {
             let event = service_data_mprotect(state, &trap, memory, runtime);
             let serviced = event.completion.is_some();
@@ -545,6 +556,7 @@ pub unsafe fn run_services(
         services: events,
         mach_services: mach_events,
         thread_services: thread_events,
+        crossarch_services: crossarch_events,
     })
 }
 

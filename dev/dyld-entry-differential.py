@@ -636,6 +636,28 @@ THREAD_ERRNO_VALUES = (1, 0x7fff)
 THREAD_REGISTER_BLOCK_BUDGET = 48
 THREAD_FIXTURE_PAGE_BYTES = 4096
 THREAD_REGISTER_PAUTH_ABI = ABI + '-apple-arm64e-software-pauth-thread-v1'
+STARTUP_ABI = ABI + '-apple-arm64e-software-pauth-clock-thread-v1'
+STARTUP_RESEARCH = ROOT / '.stela/research/dyld-startup-continuation/receipt.json'
+STARTUP_RESEARCH_SHA256 = '595956d7e4a3b92ceb7bbf877ed00b04a408c7d69e938cf0a5ce2350aae1fec3'
+STARTUP_COUNTER_CONTINUATION = 0x805dc
+STARTUP_CROSSARCH_SVC, STARTUP_CROSSARCH_RETURN = 0x5cd0, 0x5cd4
+STARTUP_TIMER_RESULT, STARTUP_TIMER_GLOBAL = 0x304a4, 0xd1dc0
+STARTUP_STAGES = (ENTRY, TARGET, STARTUP_TIMER_RESULT, 0x304d0, SELF_REBASE_BEGIN,
+                  SELF_REBASE_END, MACH_INIT_ENTRY, 0x3057c, 0x30588, 0x305d4,
+                  0x71a54, 0x71988, STARTUP_CROSSARCH_SVC)
+STARTUP_SLEEP_TICKS = 123456
+STARTUP_MAIN_HEADER = 0x60000000000
+STARTUP_BLOCK_BUDGET, STARTUP_INSTRUCTION_BUDGET = 100000, 300000
+STARTUP_KDEBUG_OFFSET = 0x100
+STARTUP_CLOCK_PROFILE = 'darwin-arm64-legacy-clock-disabled-kdebug-v1'
+STARTUP_CLOCK_READS = ((0x80568, 0x91, 1), (0x80570, 0x90, 1),
+                       (STARTUP_COUNTER_CONTINUATION, 0xa8, UINT64_BYTES),
+                       (0x19f8, STARTUP_KDEBUG_OFFSET, UINT32_BYTES))
+STARTUP_MAPPED_RAM_BYTES = 1556480
+DARWIN_CROSSARCH_TRAP, DARWIN_ENOTSUP = 38, 45
+PAUTH_ADDRESS_DIVERSITY_BITS = 48
+A64_COUNTER_ACCESS_REGISTER = (3, 0, 14, 1, 0)  # CNTKCTL_EL1.
+A64_EL0_VIRTUAL_COUNTER_ENABLE = 1 << 1
 
 
 class MachBootstrapCase(NamedTuple):
@@ -1177,6 +1199,362 @@ def mach_bootstrap_cohort(cli, directory, view, image, page_sizes=False, threads
                    'Original Mach wrappers and initialization prefixes execute unchanged. Actual host-backed guest port results are replayed at original ARM SVC using public XNU return rules; the ARM kernel itself is not executed. Page-size mode verifies only the two modern RO fields and preserves BSD thread_selfid as a precise pending SVC. Legacy page-size fields, other commpage fields, full IPC, Mach messages, TLS and process startup remain unsupported.')}
 
 
+def startup_contract_sources(image):
+    raw = STARTUP_RESEARCH.read_bytes()
+    require(digest(raw) == STARTUP_RESEARCH_SHA256, 'pinned startup research receipt differs')
+    research = json.loads(raw)
+    require(research['executed_original'] and not research['native_executed']
+            and not research['original_code_patched']
+            and research['container_sha256'] == CONTAINER_SHA256
+            and research['slice_sha256'] == SLICE_SHA256, 'startup research identity/scope differs')
+    for source in research['source_pins']:
+        path = (ROOT / source['path']).resolve()
+        require(path.is_relative_to((ROOT / '.stela/research').resolve())
+                and digest(path.read_bytes()) == source['sha256'], 'pinned startup source differs')
+    for window in research['windows']:
+        begin, end = window['begin'], window['end']
+        require(0 <= begin < end <= len(image)
+                and digest(image[begin:end]) == window['sha256'], 'original startup window differs')
+    return {'research_sha256': STARTUP_RESEARCH_SHA256,
+            'source_pins': research['source_pins'], 'windows': research['windows']}
+
+
+def startup_inputs(image, base, flags):
+    initial = State.from_buffer_copy(states(all_flags=True)[flags])
+    raw_sp, payload = original_kernel_args(MACH_STACK_BASE, MACH_STACK_BYTES, STARTUP_MAIN_HEADER,
+        b'/usr/bin/true', {'argv': [list(b'/usr/bin/true')], 'environment': [], 'apple': []})
+    initial.sp = raw_sp
+    initial.x[1] = initial.x[2] = initial.x[3] = 0
+    stack = bytearray(MACH_STACK_BYTES)
+    stack[raw_sp - MACH_STACK_BASE:] = payload
+    regions = original_segment_regions(image, base)
+    regions.append({'name': 'stack', 'address': MACH_STACK_BASE, 'virtual_bytes': MACH_STACK_BYTES,
+                    'initial_protection': UC_PROT_READ | UC_PROT_WRITE, 'data': bytes(stack)})
+    return initial, regions
+
+
+def startup_fixup_values(pac, image, base):
+    values = []
+    for slot in pac.original_fixup_slots(image, base):
+        if 'authentication' in slot:
+            auth = slot['authentication']
+            modifier = (slot['guest_address'] & ((1 << PAUTH_ADDRESS_DIVERSITY_BITS) - 1)
+                        if auth['address_diversity'] else 0)
+            modifier |= auth['diversity'] << PAUTH_ADDRESS_DIVERSITY_BITS
+            value = pac.domain_sign(slot['target'], modifier, auth['key'])
+        else:
+            value = slot['value']
+        values.append((slot['guest_address'], slot['raw'], value))
+    return values
+
+
+class StartupOracle:
+    """One unchanged original execution, paused only to obtain its clock input."""
+
+    def __init__(self, pac, image, base, initial, regions, kernel_shift, serviced):
+        self.machine = pac.arm_machine(keys=pac.DOMAIN_KEYS)
+        self.machine.mem_unmap(pac.BASE, THREAD_FIXTURE_PAGE_BYTES)
+        # Enable the original EL0 virtual-counter read in the Unicorn CPU model.
+        self.machine.cpr_write(*A64_COUNTER_ACCESS_REGISTER,
+            self.machine.cpr_read(*A64_COUNTER_ACCESS_REGISTER) | A64_EL0_VIRTUAL_COUNTER_ENABLE)
+        self.base, self.image, self.initial, self.serviced = base, image, initial, serviced
+        self.pcs, self.checkpoints, self.page_reads, self.svcs = [], [], [], []
+        self.counter, self.timer_result, self.pending, self.replay = None, None, False, []
+        self.fixups = startup_fixup_values(pac, image, base)
+        self.rebase_slot_digest = None
+        self.clock_page = pac.clock_page(STARTUP_SLEEP_TICKS)
+        self.clock_base, self.clock_bytes = pac.CLOCK_BASE, pac.CLOCK_BYTES
+        require(struct.unpack_from('<I', self.clock_page, STARTUP_KDEBUG_OFFSET)[0] == 0,
+                'disabled kdebug input differs')
+        for region in regions + [
+            {'address': pac.CLOCK_BASE, 'virtual_bytes': pac.CLOCK_BYTES,
+             'data': self.clock_page, 'initial_protection': UC_PROT_READ},
+            {'address': PAGE_SIZE_BASE, 'virtual_bytes': PAGE_SIZE_BYTES,
+             'data': page_size_bytes(kernel_shift), 'initial_protection': UC_PROT_READ}]:
+            self.machine.mem_map(region['address'], region['virtual_bytes'])
+            self.machine.mem_write(region['address'], region['data'])
+            self.machine.mem_protect(region['address'], region['virtual_bytes'], region['initial_protection'])
+        initialize_arm(self.machine, initial)
+        self.machine.reg_write(arm.UC_ARM64_REG_TPIDRRO_EL0, 0)
+        self.machine.hook_add(UC_HOOK_CODE, self.code)
+        self.machine.hook_add(UC_HOOK_INTR, self.svc)
+        self.machine.hook_add(UC_HOOK_MEM_READ, self.read)
+
+    def code(self, machine, pc, size, unused):
+        offset = pc - self.base
+        require(size == A64_INSTRUCTION_BYTES and 0 <= offset <= len(self.image) - size
+                and bytes(machine.mem_read(pc, size)) == self.image[offset:offset + size],
+                'startup executed changed or nonoriginal instruction bytes')
+        if offset == STARTUP_COUNTER_CONTINUATION and self.counter is None:
+            self.counter = machine.reg_read(arm.UC_ARM64_REG_X8)
+            machine.emu_stop()
+            return  # Count this instruction only when the same machine resumes.
+        self.pcs.append(offset)
+        if offset in STARTUP_STAGES:
+            self.checkpoints.append({'pc': offset, 'instruction_ordinal': len(self.pcs),
+                'state': state_dict(capture_arm(machine, self.initial)),
+                'tpidrro_el0': machine.reg_read(arm.UC_ARM64_REG_TPIDRRO_EL0)})
+        if offset == STARTUP_TIMER_RESULT:
+            self.timer_result = machine.reg_read(arm.UC_ARM64_REG_X0)
+        if offset == SELF_REBASE_END:
+            evidence = hashlib.sha256()
+            for address, raw, value in self.fixups:
+                require(int.from_bytes(machine.mem_read(address, UINT64_BYTES), 'little') == value
+                        and value != raw, 'original joined rebase differs from independent fixup model')
+                evidence.update(struct.pack('<QQQ', address, raw, value))
+            self.rebase_slot_digest = evidence.hexdigest()
+
+    def read(self, machine, access, address, size, value, unused):
+        if (PAGE_SIZE_BASE <= address < PAGE_SIZE_BASE + PAGE_SIZE_BYTES
+                or self.clock_base <= address < self.clock_base + self.clock_bytes):
+            self.page_reads.append({'pc': machine.reg_read(arm.UC_ARM64_REG_PC) - self.base,
+                                    'address': address, 'bytes': size})
+
+    def svc(self, machine, number, unused):
+        return_pc = machine.reg_read(arm.UC_ARM64_REG_PC)
+        pc = return_pc - A64_INSTRUCTION_BYTES
+        selector = machine.reg_read(arm.UC_ARM64_REG_X16) & UINT32_MASK
+        require(number == UNICORN_SVC_INTERRUPT, 'startup encountered another original exception')
+        before = state_dict(capture_arm(machine, self.initial))
+        if selector == DARWIN_CROSSARCH_TRAP:
+            require(pc == self.base + STARTUP_CROSSARCH_SVC
+                    and before['x'][:3] == [0, 0, 0], 'original crossarch request differs')
+            if self.serviced:
+                machine.reg_write(arm.UC_ARM64_REG_X0, DARWIN_ENOTSUP)
+                machine.reg_write(arm.UC_ARM64_REG_X1, 0)
+                machine.reg_write(arm.UC_ARM64_REG_NZCV, before['nzcv'] | NZCV_CARRY)
+            else:
+                # Model the precise pending boundary after executing actual SVC;
+                # no kernel completion occurs and the saved CPU state is unchanged.
+                self.pending = True
+                machine.reg_write(arm.UC_ARM64_REG_PC, pc)
+                machine.emu_stop()
+            source = 'modeled-public-XNU-ENOTSUP' if self.serviced else 'pending-original-SVC'
+        else:
+            require(self.replay, 'unexpected original startup service')
+            event = self.replay.pop(0)
+            require(event['trap']['instruction_pc'] == pc
+                    and event['trap']['exception_return_pc'] == return_pc, 'startup service PC differs')
+            if event.get('kind') == 'identity':
+                require(selector == DARWIN_THREAD_SELFID, 'startup thread identity selector differs')
+                values = event['completion']['values']
+                machine.reg_write(arm.UC_ARM64_REG_X0, values[0] | values[1] << UINT32_BITS)
+                machine.reg_write(arm.UC_ARM64_REG_X1, 0)
+                machine.reg_write(arm.UC_ARM64_REG_NZCV, before['nzcv'] & ~NZCV_CARRY)
+            elif event.get('kind') == 'platform':
+                require(selector == THREAD_PLATFORM_SELECTOR
+                        and before['x'][3] & UINT32_MASK == THREAD_SET_TSD
+                        and before['x'][0] == self.base + MACH_INIT_TSD,
+                        'startup original platform request differs')
+                machine.reg_write(arm.UC_ARM64_REG_TPIDRRO_EL0, before['x'][0])
+            else:
+                require(selector == -event['request']['number'] & UINT32_MASK,
+                        'startup original Mach request differs')
+                machine.reg_write(arm.UC_ARM64_REG_X0, event['result'] & UINT64_MASK)
+            source = 'actual-native-result-with-modeled-public-XNU-effects'
+        self.svcs.append({'instruction_pc': pc, 'selector_low32': selector, 'source': source,
+                         'before': before, 'after': state_dict(capture_arm(machine, self.initial))})
+
+    def pause_counter(self):
+        self.machine.emu_start(self.base + ENTRY, self.base + len(self.image),
+                               count=STARTUP_INSTRUCTION_BUDGET)
+        require(self.counter is not None and self.machine.reg_read(arm.UC_ARM64_REG_PC)
+                == self.base + STARTUP_COUNTER_CONTINUATION, 'original timer pause differs')
+
+    def resume(self, native):
+        self.replay = list(native['mach_port_events']) + [
+            event['event'] | {'kind': event['kind']} for event in native['thread_service_events']]
+        self.machine.emu_start(self.base + STARTUP_COUNTER_CONTINUATION,
+            self.base + STARTUP_CROSSARCH_RETURN, count=STARTUP_INSTRUCTION_BUDGET)
+        expected_pc = self.base + (STARTUP_CROSSARCH_RETURN if self.serviced else STARTUP_CROSSARCH_SVC)
+        require(self.machine.reg_read(arm.UC_ARM64_REG_PC) == expected_pc
+                and self.pending == (not self.serviced) and not self.replay
+                and len(self.svcs) == 5 and self.pcs.count(STARTUP_COUNTER_CONTINUATION) == 1
+                and self.pcs[-1] == STARTUP_CROSSARCH_SVC
+                and [stage['pc'] for stage in self.checkpoints] == list(STARTUP_STAGES),
+                'original joined startup trace or pending boundary differs')
+
+
+def audit_startup_clock(native, pac, counter):
+    clock = native['clock']
+    region = clock['region']
+    snapshot = {'counter': counter, 'sleep_ticks': STARTUP_SLEEP_TICKS}
+    require(clock['profile_id'] == pac.CLOCK_PROFILE
+            and clock['legacy_configuration'] == {'kdebug': 'disabled'}
+            and clock['legacy_commpage_profile'] == STARTUP_CLOCK_PROFILE
+            and clock['source_id'] == 'explicit-finite-replay-v1'
+            and clock['snapshot'] == snapshot and len(clock['events']) == 2
+            and [event['sequence'] for event in clock['events']] == [0, 1]
+            and all(event['snapshot'] == snapshot for event in clock['events'])
+            and clock['page_sha256'] == digest(pac.clock_page(STARTUP_SLEEP_TICKS))
+            and (region['guest_address'], region['virtual_bytes'], region['readable'],
+                 region['writable'], region['executable']) == (pac.CLOCK_BASE, pac.CLOCK_BYTES, True, False, False),
+            'joined declared clock/commpage configuration or bytes differ')
+    events = native['outcome']['clock_events']
+    counters = [event for event in events if event['instruction']['operation']['kind'] == 'read_virtual_counter']
+    require(len(counters) == 1 and counters[0]['counter'] == counter,
+            'native joined startup did not consume original opaque counter exactly once')
+
+
+def audit_startup_crossarch(native, oracle):
+    events = native['crossarch_service_events']
+    require(native['crossarch_service_profile'] == (
+        'darwin-crossarch-unavailable-v1' if oracle.serviced else None), 'crossarch service profile differs')
+    before, after = oracle.svcs[-1]['before'], oracle.svcs[-1]['after']
+    require(before['x'][3] == after['x'][3], 'crossarch result pointer changed')
+    if oracle.serviced:
+        require(len(events) == 1 and events[0]['declined'] is None
+                and events[0]['request']['number'] == DARWIN_CROSSARCH_TRAP
+                and events[0]['request']['arguments'] == [0]
+                and events[0]['request']['prototype'] == {'argument_count': 1, 'return_type': 'int'}
+                and events[0]['request']['indirect'] is False
+                and events[0]['completion'] == {'kind': 'error', 'errno': DARWIN_ENOTSUP},
+                'generic namespace-zero crossarch completion differs')
+        wanted = dict(before, x=list(before['x']), nzcv=before['nzcv'] | NZCV_CARRY)
+        wanted['x'][0] = DARWIN_ENOTSUP
+        wanted['x'][1] = 0
+        require(after == wanted, 'crossarch completion changed unrelated CPU state')
+    else:
+        require(not events and before == after, 'pending crossarch service changed state')
+
+
+def audit_startup_commpage_reads(oracle, pac, kernel_shift):
+    expected = [{'pc': pc, 'address': pac.CLOCK_BASE + offset, 'bytes': size}
+                for pc, offset, size in STARTUP_CLOCK_READS]
+    expected.extend([
+        {'pc': MACH_INIT_KERNEL_SHIFT_LOAD, 'address': PAGE_SIZE_BASE + PAGE_SIZE_KERNEL_OFFSET, 'bytes': 1},
+        {'pc': MACH_INIT_USER_SHIFT_LOAD, 'address': PAGE_SIZE_BASE + PAGE_SIZE_USER_OFFSET, 'bytes': 1}])
+    require(oracle.page_reads == expected, 'joined original code read an undeclared commpage field')
+    require(bytes(oracle.machine.mem_read(pac.CLOCK_BASE, pac.CLOCK_BYTES)) == oracle.clock_page
+            and bytes(oracle.machine.mem_read(PAGE_SIZE_BASE, PAGE_SIZE_BYTES)) == page_size_bytes(kernel_shift),
+            'original joined commpage bytes changed')
+
+
+def startup_join_cohort(cli, directory, view, image):
+    spec = importlib.util.spec_from_file_location('startup_join_pauth', ROOT / 'dev/pauth-differential.py')
+    pac = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pac)
+    contracts = startup_contract_sources(image)
+    thread_contracts = thread_contract_sources(image)
+    (directory / 'mach-text.bin').write_bytes(view['text'])
+    (directory / 'mach-keys.json').write_text(json.dumps(
+        {key: {'low': value[0], 'high': value[1]} for key, value in pac.DOMAIN_KEYS.items()}))
+    source_paths = ('dev/dyld-entry-differential.py', 'dev/pauth-differential.py', 'dev/differential.py',
+        'src/main.rs', 'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/clock.rs',
+        'crates/stela-runtime/src/commpage.rs', 'crates/stela-runtime/src/commpage/legacy.rs',
+        'crates/stela-runtime/src/thread.rs',
+        'crates/stela-runtime/src/darwin.rs', 'crates/stela-runtime/src/darwin/platform.rs',
+        'crates/stela-runtime/src/darwin/crossarch.rs', 'crates/stela-runtime/src/mach.rs',
+        'crates/stela-runtime/src/memory.rs')
+    hashes = {path: digest((ROOT / path).read_bytes()) for path in source_paths}
+    cli_hash, compiler, rows = digest(cli.read_bytes()), None, []
+    for base in MACH_FIXTURE_BASES:
+        for flags in (0, 15):
+            for kernel_shift in PAGE_SIZE_KERNEL_SHIFTS:
+                for serviced in (False, True):
+                    initial, regions = startup_inputs(image, base, flags)
+                    require(sum(region['virtual_bytes'] for region in regions) == STARTUP_MAPPED_RAM_BYTES,
+                            'joined complete original image/stack extent differs')
+                    oracle = StartupOracle(pac, image, base, initial, regions, kernel_shift, serviced)
+                    oracle.pause_counter()
+                    write_mach_inputs(directory, regions, initial)
+                    clock_path = directory / 'startup-clock.json'
+                    clock_path.write_text(json.dumps({'counter': oracle.counter, 'sleep_ticks': STARTUP_SLEEP_TICKS}))
+                    command = [str(cli), 'run-blocks', str(directory / 'mach-text.bin'), '--guest-base', hex(base),
+                        '--entry', hex(base + ENTRY), '--cpu-target', 'baseline', '--state', str(directory / 'mach-state.json'),
+                        '--memory', str(directory / 'mach-memory.json'), '--software-pauth-keys',
+                        str(directory / 'mach-keys.json'), '--clock-snapshot', str(clock_path), '--disabled-kdebug',
+                        '--thread-services', '--guest-vm-max-address', hex(THREAD_VM_MAXIMUM),
+                        '--arm-commpage-kernel-page-shift', str(kernel_shift), '--block-budget', str(STARTUP_BLOCK_BUDGET),
+                        '--cache-dir', str(directory / 'startup-cache'),
+                        '--read-memory', f'{base + STARTUP_TIMER_GLOBAL:#x}:{UINT64_BYTES}']
+                    if serviced:
+                        command.extend(['--crossarch-services', '--stop-pc', hex(base + STARTUP_CROSSARCH_RETURN)])
+                    native = json.loads(subprocess.check_output(command, timeout=60))
+                    require(native['kind'] == 'native_block_run' and native['abi'] == STARTUP_ABI
+                            and native['target_cpu'] == 'x86_64-baseline'
+                            and native['source_sha256'] == digest(view['text'])
+                            and native['software_pauth_profile'] == pac.FULL_PROFILE
+                            and native['complete_binary_verified'] is False,
+                            'joined native source, ABI or scope differs')
+                    expected_pc = base + (STARTUP_CROSSARCH_RETURN if serviced else STARTUP_CROSSARCH_SVC)
+                    expected_reason = ({'kind': 'stop_address'} if serviced else {
+                        'kind': 'synchronous_trap', 'trap': {'kind': 'supervisor_call',
+                        'immediate': DARWIN_SVC_IMMEDIATE, 'instruction_pc': expected_pc,
+                        'exception_return_pc': expected_pc + A64_INSTRUCTION_BYTES}})
+                    require(native['pc'] == expected_pc and native['outcome']['reason'] == expected_reason,
+                            f'joined native boundary differs: {native["outcome"]["reason"]}')
+                    oracle.resume(native)
+                    expected = state_dict(capture_arm(oracle.machine, initial))
+                    before = [{'address': region['address'], 'bytes': region['virtual_bytes'],
+                               'sha256': digest(region['data'])} for region in regions]
+                    after = [{'address': region['address'], 'bytes': region['virtual_bytes'],
+                              'sha256': digest(bytes(oracle.machine.mem_read(region['address'], region['virtual_bytes'])))}
+                             for region in regions]
+                    require(native['state'] == expected and native['memory']['memory_before'] == before
+                            and native['memory']['memory_after'] == after, 'joined complete CPU state/image/stack RAM differs')
+                    require(oracle.machine.reg_read(arm.UC_ARM64_REG_TPIDRRO_EL0)
+                            == native['thread_context']['thread_specific_data'] == base + MACH_INIT_TSD,
+                            'joined separate original TPIDRRO/native TSD differs')
+                    audit_page_size_commpage(native, kernel_shift)
+                    audit_thread_service(native, base, MachBootstrapCase(MACH_INIT_ENTRY, expected_pc,
+                        MACH_INIT_REQUESTS, kernel_shift, thread_operation='initialize'))
+                    audit_startup_clock(native, pac, oracle.counter)
+                    audit_startup_crossarch(native, oracle)
+                    audit_startup_commpage_reads(oracle, pac, kernel_shift)
+                    require(oracle.timer_result == oracle.counter, 'joined timer differs from independent zero-offset clock model')
+                    timer_reads = native['memory']['memory_reads']
+                    require(len(timer_reads) == 1 and timer_reads[0]['address'] == base + STARTUP_TIMER_GLOBAL
+                            and bytes.fromhex(timer_reads[0]['hex']) == struct.pack('<Q', oracle.timer_result),
+                            'native joined startup timer overwrite differs')
+                    require(native['mach_port_profile'] == 'darwin-host-owned-mach-ports-v1'
+                            and native['data_vm_profile'] is None
+                            and tuple(event['request']['number'] for event in native['mach_port_events']) == MACH_INIT_REQUESTS
+                            and len(native['mach_port_rights']) == len(MACH_INIT_REQUESTS),
+                            'joined owned Mach requests/rights or enabled data VM differs')
+                    for address, raw, value in oracle.fixups:
+                        expected_value = oracle.timer_result if address == base + STARTUP_TIMER_GLOBAL else value
+                        require(int.from_bytes(oracle.machine.mem_read(address, UINT64_BYTES), 'little') == expected_value,
+                                'joined final fixup differs from independent rebase/startup overwrite model')
+                    require(compiler in (None, native['compiler_source_sha256']), 'joined compiler changed')
+                    compiler = native['compiler_source_sha256']
+                    rows.append({'base': base, 'incoming_nzcv': initial.nzcv, 'kernel_page_shift': kernel_shift,
+                        'crossarch_serviced': serviced, 'opaque_original_counter': oracle.counter,
+                        'initial': state_dict(initial), 'state': expected, 'native_pc': native['pc'],
+                        'original_instruction_count': len(oracle.pcs), 'original_unique_instructions': len(set(oracle.pcs)),
+                        'original_pc_trace_sha256': digest(b''.join(struct.pack('<I', pc) for pc in oracle.pcs)),
+                        'original_stage_checkpoints': oracle.checkpoints, 'original_svc_events': oracle.svcs,
+                        'original_commpage_reads': oracle.page_reads, 'memory_before': before, 'memory_after': after,
+                        'independent_fixup_slots': len(oracle.fixups), 'rebase_slot_sha256': oracle.rebase_slot_digest,
+                        'startup_overwritten_slot': {'address': base + STARTUP_TIMER_GLOBAL, 'value': oracle.timer_result},
+                        'native_outcome': {key: value for key, value in native['outcome'].items()
+                                           if key != 'pointer_authentication_events'},
+                        'pointer_authentication_events': len(native['outcome']['pointer_authentication_events']),
+                        'thread_context': native['thread_context'], 'thread_service_events': native['thread_service_events'],
+                        'mach_port_events': native['mach_port_events'], 'crossarch_service_events': native['crossarch_service_events'],
+                        'clock': native['clock'], 'page_size_commpage': native['page_size_commpage']})
+                    print(f'startup {base:#x}, NZCV {flags:x}, kernel shift {kernel_shift}, '
+                          f'BSD38 {"serviced" if serviced else "pending"}: {len(oracle.pcs):,} original instructions match', flush=True)
+    require(len(rows) == 16 and digest(cli.read_bytes()) == cli_hash
+            and all(digest((ROOT / path).read_bytes()) == value for path, value in hashes.items()),
+            'joined cohort bounds, executable or sources changed')
+    return {'kind': 'original_dyld_joined_startup_arm_vs_shared_native', 'passed': True,
+        'container_sha256': CONTAINER_SHA256, 'slice_sha256': SLICE_SHA256,
+        'original_text_sha256': digest(view['text']), 'compiler_source_sha256': compiler,
+        'compiler_executable_sha256': cli_hash, 'shared_sources_sha256': hashes, 'abi': STARTUP_ABI,
+        'target_cpu': 'x86_64-baseline',
+        'guest_state_bytes': ctypes.sizeof(State), 'full_state_and_mapped_ram_comparisons': len(rows),
+        'image_and_stack_ram_bytes_per_comparison': STARTUP_MAPPED_RAM_BYTES,
+        'startup_contract_sources': contracts, 'thread_contract_sources': thread_contracts, 'cases': rows,
+        'limits': 'Unchanged LC_UNIXTHREAD entry through timer, disabled kdebug, full self-rebase, _mach_init, '
+                  'KernelArgs and initial MemoryManager call. The same original Unicorn machine pauses before '
+                  'the post-CNTVCT instruction; its opaque counter is replayed natively without changing original '
+                  'code or register state. Actual native thread identity/Mach results are replayed at original SVC. '
+                  'Original BSD38 SVC executes; pending cases retain its instruction PC with no kernel completion, '
+                  'serviced cases model public XNU namespace-zero ENOTSUP. No privileged original kernel, Apple '
+                  'hardware PAC identity, full commpage, complete MemoryManager, application or process startup claim.'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dyld', type=Path, default=DEFAULT_DYLD)
@@ -1187,6 +1565,7 @@ def main():
     parser.add_argument('--mach-threads', action='store_true', help='verify complete original Mach initialization with owned thread identity and guest TSD')
     parser.add_argument('--thread-registers', action='store_true', help='verify generated TPIDRRO_EL0 probes and unchanged original errno after Mach initialization')
     parser.add_argument('--self-rebase', action='store_true', help='run only the focused original full self-rebase cohort')
+    parser.add_argument('--startup-join', action='store_true', help='join unchanged original startup through pending/completed BSD38')
     parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
     args = parser.parse_args()
@@ -1201,13 +1580,15 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
-    require(sum((args.self_rebase,args.mach_ports,args.mach_page_sizes,args.mach_threads,args.thread_registers))<=1, 'select one focused dyld cohort')
-    if args.self_rebase or args.mach_ports or args.mach_page_sizes or args.mach_threads or args.thread_registers:
+    require(sum((args.self_rebase,args.mach_ports,args.mach_page_sizes,args.mach_threads,args.thread_registers,args.startup_join))<=1, 'select one focused dyld cohort')
+    if args.self_rebase or args.mach_ports or args.mach_page_sizes or args.mach_threads or args.thread_registers or args.startup_join:
         with tempfile.TemporaryDirectory(prefix='stela-self-rebase-') as temporary:
-            report = (thread_register_cohort(cli,Path(temporary),view,image) if args.thread_registers else
+            report = (startup_join_cohort(cli,Path(temporary),view,image) if args.startup_join else
+                      thread_register_cohort(cli,Path(temporary),view,image) if args.thread_registers else
                       mach_bootstrap_cohort(cli,Path(temporary),view,image,page_sizes=args.mach_page_sizes,threads=args.mach_threads)
                       if args.mach_ports or args.mach_page_sizes or args.mach_threads else self_rebase_cohort(cli,Path(temporary),view,image))
-        output = ROOT / ('.stela/dyld-thread-registers-differential-report.json' if args.thread_registers else
+        output = ROOT / ('.stela/dyld-startup-join-differential-report.json' if args.startup_join else
+                         '.stela/dyld-thread-registers-differential-report.json' if args.thread_registers else
                          '.stela/dyld-mach-threads-differential-report.json' if args.mach_threads else
                          '.stela/dyld-mach-page-sizes-differential-report.json' if args.mach_page_sizes else
                          '.stela/dyld-mach-ports-differential-report.json' if args.mach_ports else '.stela/dyld-self-rebase-differential-report.json')

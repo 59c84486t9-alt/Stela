@@ -368,5 +368,75 @@ class ThreadRegisterGuards(unittest.TestCase):
                     suite.compare_thread_register_run(changed, machine, initial, regions, base, source, destination, instruction_pc)
 
 
+class StartupJoinGuards(unittest.TestCase):
+    def test_timer_pause_counts_post_counter_instruction_only_on_resume(self):
+        oracle = suite.StartupOracle.__new__(suite.StartupOracle)
+        oracle.base = suite.MACH_FIXTURE_BASES[0]
+        offset = suite.STARTUP_COUNTER_CONTINUATION
+        oracle.image = bytes(offset) + b'\x01\x02\x03\x04'
+        oracle.counter, oracle.pcs, oracle.checkpoints = None, [], []
+        machine = Mock()
+        machine.mem_read.return_value = oracle.image[offset:]
+        machine.reg_read.return_value = 123
+        oracle.code(machine, oracle.base + offset, suite.A64_INSTRUCTION_BYTES, None)
+        self.assertEqual((oracle.counter, oracle.pcs), (123, []))
+        machine.emu_stop.assert_called_once()
+        oracle.code(machine, oracle.base + offset, suite.A64_INSTRUCTION_BYTES, None)
+        self.assertEqual(oracle.pcs, [offset])
+        machine.mem_read.return_value = b'changed'
+        with self.assertRaises(AssertionError):
+            oracle.code(machine, oracle.base + offset, suite.A64_INSTRUCTION_BYTES, None)
+
+    def test_crossarch_audit_rejects_extra_service_and_unrelated_state_changes(self):
+        before = state_dict(State())
+        before['x'][3], before['nzcv'] = 0x123456, 0xf0000000
+        after = copy.deepcopy(before)
+        after['x'][0] = suite.DARWIN_ENOTSUP
+        oracle = Mock(serviced=True, svcs=[{'before': before, 'after': after}])
+        event = {'declined': None, 'request': {'number': suite.DARWIN_CROSSARCH_TRAP, 'arguments': [0],
+                     'prototype': {'argument_count': 1, 'return_type': 'int'}, 'indirect': False},
+                 'completion': {'kind': 'error', 'errno': suite.DARWIN_ENOTSUP}}
+        native = {'crossarch_service_events': [event], 'crossarch_service_profile': 'darwin-crossarch-unavailable-v1'}
+        suite.audit_startup_crossarch(native, oracle)
+        for field, value in [('declined', 'unsupported'), ('completion', {'kind': 'error', 'errno': 22}),
+                             ('request', {'number': suite.DARWIN_CROSSARCH_TRAP, 'arguments': [0, 0]})]:
+            changed = copy.deepcopy(native)
+            changed['crossarch_service_events'][0][field] = value
+            with self.assertRaises(AssertionError):
+                suite.audit_startup_crossarch(changed, oracle)
+        for index in (1, 3, 30):
+            changed = copy.deepcopy(after)
+            changed['x'][index] ^= 1
+            with self.assertRaises(AssertionError):
+                suite.audit_startup_crossarch(native, Mock(serviced=True, svcs=[{'before': before, 'after': changed}]))
+        pending = Mock(serviced=False, svcs=[{'before': before, 'after': copy.deepcopy(before)}])
+        suite.audit_startup_crossarch({'crossarch_service_events': [], 'crossarch_service_profile': None}, pending)
+        with self.assertRaises(AssertionError):
+            suite.audit_startup_crossarch(native, pending)
+
+    def test_clock_audit_requires_declared_fields_unchanged_bytes_and_single_counter_read(self):
+        pac = Mock(CLOCK_PROFILE='clock', CLOCK_BASE=0x10000, CLOCK_BYTES=16)
+        pac.clock_page.return_value = bytes(16)
+        snapshot = {'counter': 123, 'sleep_ticks': suite.STARTUP_SLEEP_TICKS}
+        native = {'clock': {'profile_id': pac.CLOCK_PROFILE, 'legacy_configuration': {'kdebug': 'disabled'},
+            'legacy_commpage_profile': suite.STARTUP_CLOCK_PROFILE, 'source_id': 'explicit-finite-replay-v1',
+            'snapshot': snapshot, 'events': [{'sequence': index, 'snapshot': snapshot} for index in (0, 1)],
+            'page_sha256': suite.digest(bytes(16)),
+            'region': {'guest_address': pac.CLOCK_BASE, 'virtual_bytes': pac.CLOCK_BYTES,
+                       'readable': True, 'writable': False, 'executable': False}},
+            'outcome': {'clock_events': [{'instruction': {'operation': {'kind': 'read_virtual_counter'}}, 'counter': 123}]}}
+        suite.audit_startup_clock(native, pac, 123)
+        for field, value in [('legacy_configuration', {'kdebug': None}), ('legacy_commpage_profile', 'other'),
+                             ('page_sha256', suite.digest(bytes(15))), ('events', [])]:
+            changed = copy.deepcopy(native)
+            changed['clock'][field] = value
+            with self.assertRaises(AssertionError):
+                suite.audit_startup_clock(changed, pac, 123)
+        changed = copy.deepcopy(native)
+        changed['outcome']['clock_events'] *= 2
+        with self.assertRaises(AssertionError):
+            suite.audit_startup_clock(changed, pac, 123)
+
+
 if __name__ == '__main__':
     unittest.main()

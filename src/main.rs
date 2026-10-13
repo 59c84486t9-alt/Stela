@@ -167,6 +167,9 @@ enum Command {
         /// Service reviewed Darwin data-only mprotect calls over owned mappings.
         #[arg(long)]
         data_vm_services: bool,
+        /// Complete the declared unavailable Darwin cross-architecture service.
+        #[arg(long)]
+        crossarch_services: bool,
         /// Own host Mach bootstrap rights behind guest port names (macOS only).
         #[arg(long)]
         mach_port_services: bool,
@@ -188,6 +191,9 @@ enum Command {
         /// Explicit finite replay for one reviewed virtual-counter read.
         #[arg(long, requires = "software_pauth_context")]
         clock_snapshot: Option<PathBuf>,
+        /// Explicitly declare legacy commpage kernel tracing disabled.
+        #[arg(long, requires = "clock_snapshot")]
+        disabled_kdebug: bool,
     },
     /// Probe trusted executable entry code; dyld/process setup remains unresolved.
     ProbeImageEntry {
@@ -1282,12 +1288,14 @@ fn run() -> Result<()> {
             software_pauth_keys,
             memory: memory_path,
             data_vm_services,
+            crossarch_services,
             mach_port_services,
             thread_services,
             guest_vm_max_address,
             arm_commpage_kernel_page_shift,
             read_memory,
             clock_snapshot: clock_snapshot_path,
+            disabled_kdebug,
         } => {
             use stela_runtime::blocks::{BlockRuntime, ThreadState};
             const ADDRESS_SPACE_ID: u64 = 1;
@@ -1344,11 +1352,15 @@ fn run() -> Result<()> {
                 .as_deref()
                 .map(|path| -> Result<_> {
                     let snapshot = clock_snapshot(path)?;
-                    stela_runtime::clock::Context::new(
+                    stela_runtime::clock::Context::new_with_commpage(
                         ADDRESS_SPACE_ID,
                         Box::new(stela_runtime::clock::ReplaySource::new(vec![
                             snapshot, snapshot,
                         ])?),
+                        stela_runtime::commpage::legacy::Configuration {
+                            kdebug: disabled_kdebug
+                                .then_some(stela_runtime::commpage::legacy::KdebugState::Disabled),
+                        },
                     )
                 })
                 .transpose()?;
@@ -1375,8 +1387,14 @@ fn run() -> Result<()> {
             } else {
                 None
             };
-            let (outcome, data_vm_events, mach_port_events, thread_service_events) = unsafe {
-                if data_vm_services || mach_port_services || thread_services {
+            let (
+                outcome,
+                data_vm_events,
+                mach_port_events,
+                thread_service_events,
+                crossarch_service_events,
+            ) = unsafe {
+                if data_vm_services || mach_port_services || thread_services || crossarch_services {
                     let result = stela_runtime::darwin::run_services(
                         &mut runtime,
                         &mut thread,
@@ -1387,6 +1405,7 @@ fn run() -> Result<()> {
                             pauth: context.as_ref(),
                             clock: clock.as_mut(),
                             data_vm: data_vm_services,
+                            crossarch: crossarch_services,
                             mach_ports: mach_ports.as_mut(),
                             thread: thread_context.as_mut(),
                         },
@@ -1396,6 +1415,7 @@ fn run() -> Result<()> {
                         result.services,
                         result.mach_services,
                         result.thread_services,
+                        result.crossarch_services,
                     )
                 } else {
                     let outcome = if let Some(clock) = &mut clock {
@@ -1422,7 +1442,7 @@ fn run() -> Result<()> {
                             block_budget,
                         )?
                     };
-                    (outcome, Vec::new(), Vec::new(), Vec::new())
+                    (outcome, Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 }
             };
             let memory_after = memory_hashes(&memory)?;
@@ -1441,6 +1461,8 @@ fn run() -> Result<()> {
                     .or_else(|| thread_context.as_ref().map(|thread| thread.ports())).map(|ports| ports.rights()),
                 "thread_context":thread_context.as_ref().map(|context| context.snapshot()),
                 "thread_service_events":thread_service_events,
+                "crossarch_service_profile":crossarch_services.then_some(stela_runtime::darwin::crossarch::PROFILE_ID),
+                "crossarch_service_events":crossarch_service_events,
                 "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
                     "profile_id":page.profile_id(),"address_space":page.address_space(),
                     "region":page.region(),"supported_fields":page.supported_fields(),
@@ -1448,10 +1470,13 @@ fn run() -> Result<()> {
                 })) }).transpose()?,
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
-                "clock":clock.as_ref().map(|clock| serde_json::json!({
+                "clock":clock.as_ref().map(|clock| -> Result<_> { Ok(serde_json::json!({
                     "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
-                    "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region()
-                })),
+                    "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region(),
+                    "legacy_configuration":clock.legacy_configuration(),
+                    "legacy_commpage_profile":clock.legacy_configuration().profile_id(),
+                    "page_sha256":clock.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES).map(|bytes| stela_core::sha256(&bytes))?
+                })) }).transpose()?,
                 "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "complete_binary_verified":false}))?
@@ -2439,6 +2464,27 @@ mod clock_cli_tests {
         assert_eq!(
             block_profile(true, true, true),
             BlockProfile::AppleArm64eSoftwarePauthClockThreadV1
+        );
+    }
+
+    #[test]
+    fn disabled_tracing_requires_an_explicit_clock_context() {
+        assert!(Cli::try_parse_from(["stela", "run-blocks", "code", "--disabled-kdebug"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "run-blocks",
+                "code",
+                "--disabled-kdebug",
+                "--clock-snapshot",
+                "clock.json",
+                "--software-pauth-keys",
+                "keys.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["stela", "run-blocks", "code", "--crossarch-services"]).is_ok()
         );
     }
 

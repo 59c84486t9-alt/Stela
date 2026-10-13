@@ -1,7 +1,8 @@
 //! Explicit 1 GHz guest clock profile, backed by a coherent host or replay sample.
 //!
 //! `counter` is continuous time; subtracting cumulative sleep gives absolute
-//! (awake) time. Only the declared clock fields of the ARM commpage are modeled.
+//! (awake) time. Clock publication changes only the declared time fields; the
+//! commpage owner preserves any separately declared static configuration.
 //! This is not a complete commpage, hardware counter, or Darwin service layer.
 //! Publication and translated reads must be serialized by the address-space
 //! owner; the read-only guest alias never grants guest write permission.
@@ -9,7 +10,14 @@
 //! Host contract: XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
 //! osfmk/i386/cpu_capabilities.h and libsyscall/wrappers/mach_continuous_time.c.
 //! The internal x86 commpage contract is validated, not assumed on other hosts.
-use crate::memory::{MemoryRegion, PublishedReadOnlyRegion};
+pub use crate::commpage::legacy::{
+    CONT_HW_TIMEBASE, CONT_HWCLOCK, CONT_TIMEBASE, GUEST_BASE, GUEST_BYTES, TIMEBASE_OFFSET,
+    USER_TIMEBASE,
+};
+use crate::{
+    commpage::legacy::{self, CLOCK_FIELD_END as FIELD_END, CLOCK_FIELD_START as FIELD_START},
+    memory::MemoryRegion,
+};
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -21,15 +29,6 @@ pub const PROFILE_ID: &str = "stela-continuous-ns-arm-commpage-clock-v1";
 pub const FREQUENCY: u64 = 1_000_000_000;
 /// Bounded diagnostic history for this initial execution profile.
 pub const MAX_COUNTER_EVENTS: usize = 65_536;
-pub const GUEST_BASE: u64 = 0xfffffc000;
-pub const GUEST_BYTES: usize = 16 * 1024;
-pub const TIMEBASE_OFFSET: usize = 0x88;
-pub const USER_TIMEBASE: usize = 0x90;
-pub const CONT_HWCLOCK: usize = 0x91;
-pub const CONT_TIMEBASE: usize = 0x98;
-pub const CONT_HW_TIMEBASE: usize = 0xa8;
-const FIELD_START: usize = TIMEBASE_OFFSET;
-const FIELD_END: usize = CONT_HW_TIMEBASE + 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
@@ -92,18 +91,26 @@ pub struct CounterEvent {
 pub struct Context {
     address_space: u64,
     source: Box<dyn ClockSource>,
-    page: PublishedReadOnlyRegion,
+    page: legacy::Page,
     events: Vec<CounterEvent>,
 }
 impl Context {
     /// Consumes and publishes the first source sample. Further samples are
     /// obtained only by read_counter, not by inspecting snapshot/region/events.
-    pub fn new(address_space: u64, mut source: Box<dyn ClockSource>) -> Result<Self> {
+    pub fn new(address_space: u64, source: Box<dyn ClockSource>) -> Result<Self> {
+        Self::new_with_commpage(address_space, source, legacy::Configuration::default())
+    }
+
+    /// Declare additional legacy fields without mixing their meaning into the
+    /// clock source. The commpage owner restricts publication to clock bytes.
+    pub fn new_with_commpage(
+        address_space: u64,
+        mut source: Box<dyn ClockSource>,
+        configuration: legacy::Configuration,
+    ) -> Result<Self> {
         let first = source.sample()?;
         validate(first, None)?;
-        let mut initial = vec![0u8; GUEST_BYTES];
-        initial[FIELD_START..FIELD_END].copy_from_slice(&fields(first));
-        let page = PublishedReadOnlyRegion::map(GUEST_BASE, &initial)?;
+        let page = legacy::Page::map(&fields(first), configuration)?;
         let mut events = Vec::with_capacity(64);
         events.push(CounterEvent {
             sequence: 0,
@@ -124,6 +131,9 @@ impl Context {
     }
     pub fn profile_id(&self) -> &'static str {
         PROFILE_ID
+    }
+    pub fn legacy_configuration(&self) -> legacy::Configuration {
+        self.page.configuration()
     }
     pub fn source_id(&self) -> &'static str {
         self.source.source_id()
@@ -158,7 +168,7 @@ impl Context {
         self.events.try_reserve(1)?;
         let sample = self.source.sample()?;
         validate(sample, Some(self.snapshot()))?;
-        self.page.publish(FIELD_START, &fields(sample))?;
+        self.page.publish_clock(&fields(sample))?;
         self.events.push(CounterEvent {
             sequence: self.events.len() as u64,
             snapshot: sample,
@@ -432,6 +442,38 @@ mod tests {
         assert_eq!(replacement.snapshot(), s(1, 0));
         Ok(())
     }
+    #[test]
+    fn clock_samples_preserve_explicit_legacy_configuration() -> Result<()> {
+        let _clock_guard = TEST_CONTEXT_LOCK.lock().unwrap();
+        let configuration = legacy::Configuration {
+            kdebug: Some(legacy::KdebugState::Disabled),
+        };
+        let mut context = Context::new_with_commpage(
+            93,
+            Box::new(ReplaySource::new(vec![s(100, 20), s(130, 40)])?),
+            configuration,
+        )?;
+        assert_eq!(context.legacy_configuration(), configuration);
+        let before = context.snapshot_bytes(0, GUEST_BYTES)?;
+        assert_eq!(context.read_counter()?, 130);
+        let after = context.snapshot_bytes(0, GUEST_BYTES)?;
+        let mut expected = before;
+        expected[FIELD_START..FIELD_END].copy_from_slice(&fields(s(130, 40)));
+        assert_eq!(after, expected);
+        let kdebug = &after[legacy::KDEBUG_ENABLE..legacy::KDEBUG_ENABLE + size_of::<u32>()];
+        assert_eq!(u32::from_le_bytes(kdebug.try_into()?), 0);
+        assert!(context.read_counter().is_err());
+        assert_eq!(context.snapshot_bytes(0, GUEST_BYTES)?, after);
+        assert_eq!(context.legacy_configuration(), configuration);
+        drop(context);
+        let clock_only = Context::new(94, Box::new(ReplaySource::new(vec![s(1, 0)])?))?;
+        assert_eq!(
+            clock_only.legacy_configuration(),
+            legacy::Configuration::default()
+        );
+        Ok(())
+    }
+
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn native_clock_does_not_guess_another_host_contract() {

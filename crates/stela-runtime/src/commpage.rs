@@ -1,4 +1,5 @@
-//! Explicit modern ARM commpage page-size fields for bounded Darwin execution.
+//! Explicit ARM commpage layouts for bounded Darwin execution.
+//! Modern page-size fields live here; the legacy clock/tracing layout is in `legacy`.
 //!
 //! XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
 //! osfmk/arm/cpu_capabilities.h and osfmk/arm/commpage/commpage.c.
@@ -7,6 +8,8 @@
 use crate::memory::{MemoryRegion, MemoryRegionSpec, OwnedMemory};
 use anyhow::Result;
 use serde::Serialize;
+
+pub mod legacy;
 
 pub const PROFILE_ID: &str = "darwin-arm64-page-sizes-v1";
 pub const GUEST_BASE: u64 = 0xfffff4000;

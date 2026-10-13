@@ -724,6 +724,237 @@ fn unsupported_vm_services_and_registered_code_aliases_preserve_pending_state() 
     Ok(())
 }
 
+mod native_crossarch {
+    use super::*;
+    use stela_runtime::darwin::{
+        ExecutionServices, ServiceRunOutcome,
+        crossarch::{DARWIN_EINVAL, DARWIN_ENOTSUP, SYSCALL_NUMBER},
+        run_services,
+    };
+
+    const SVC_DARWIN: u32 = 0xd4001001;
+    const RET_X30: u32 = 0xd65f03c0;
+    const INSTRUCTION_BYTES: u64 = 4;
+    const SELECTOR_REGISTER: usize = 16;
+    const UNUSED_OUTPUT_REGISTER: usize = 3;
+    const NZCV_COMBINATIONS: u32 = 16;
+    const OWNED_RAM_BYTES: usize = 32768;
+    const INVALID_OUTPUT_POINTER: u64 = u64::MAX;
+
+    fn request_state(flags: u32, indirect: bool, argument: u64, upper: u32) -> ThreadState {
+        let mut state = thread(flags, 0);
+        let upper = u64::from(upper) << 32;
+        state.registers.x[SELECTOR_REGISTER] = if indirect {
+            0
+        } else {
+            upper | u64::from(SYSCALL_NUMBER)
+        };
+        state.registers.x[usize::from(indirect)] = argument;
+        if indirect {
+            state.registers.x[0] = upper | u64::from(SYSCALL_NUMBER);
+        }
+        state.registers.x[UNUSED_OUTPUT_REGISTER] = INVALID_OUTPUT_POINTER;
+        state
+    }
+
+    fn run(
+        runtime: &mut BlockRuntime,
+        state: &mut ThreadState,
+        memory: &mut OwnedMemory,
+        budget: usize,
+        enabled: bool,
+    ) -> Result<ServiceRunOutcome> {
+        // SAFETY: immutable SVC/RET fixtures access no data. The declared
+        // unavailable service consumes a numeric namespace without pointers.
+        unsafe {
+            run_services(
+                runtime,
+                state,
+                Some(GuestAddress(STOP)),
+                budget,
+                memory,
+                ExecutionServices {
+                    crossarch: enabled,
+                    ..ExecutionServices::default()
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn native_error_completion_preserves_full_state_and_owned_ram() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, RET_X30])?;
+        let (mut memory, address) = vm_buffer(true)?;
+        let original_ram = memory.read_snapshot(address, OWNED_RAM_BYTES)?;
+        let original_regions = memory.regions().to_vec();
+        for indirect in [false, true] {
+            for flags in 0..NZCV_COMBINATIONS {
+                for upper in [0, 0xfeedface, u32::MAX] {
+                    for namespace in [0, 1, u32::MAX] {
+                        let argument = (u64::from(upper) << 32) | u64::from(namespace);
+                        let mut state = request_state(flags, indirect, argument, upper);
+                        let errno = if namespace == 0 {
+                            DARWIN_ENOTSUP
+                        } else {
+                            DARWIN_EINVAL
+                        };
+                        let mut expected = state.clone();
+                        expected.pc = GuestAddress(STOP);
+                        expected.registers.x[0] = u64::from(errno);
+                        expected.registers.x[1] = 0;
+                        expected.registers.nzcv |= CARRY;
+                        let outcome = run(&mut runtime, &mut state, &mut memory, 2, true)?;
+                        assert_eq!(outcome.execution.reason, StopReason::StopAddress);
+                        assert_eq!(outcome.execution.blocks_executed, 2);
+                        assert_eq!(outcome.crossarch_services.len(), 1);
+                        let event = &outcome.crossarch_services[0];
+                        let request = event.request.unwrap();
+                        assert_eq!(request.number, SYSCALL_NUMBER);
+                        assert_eq!(request.indirect, indirect);
+                        assert_eq!(request.arguments(), &[argument]);
+                        assert_eq!(request.prototype().argument_count, 1);
+                        assert_eq!(request.prototype().return_type, BsdReturnType::Int);
+                        assert_eq!(event.completion, Some(BsdCompletion::Error { errno }));
+                        assert!(event.declined.is_none());
+                        assert!(outcome.services.is_empty());
+                        assert!(outcome.mach_services.is_empty());
+                        assert!(outcome.thread_services.is_empty());
+                        assert_state(&state, &expected);
+                        assert_eq!(memory.regions(), original_regions);
+                        assert_eq!(
+                            memory.read_snapshot(address, OWNED_RAM_BYTES)?,
+                            original_ram
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn opt_out_unknown_calls_and_budget_resume_keep_precise_pending_state() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, RET_X30])?;
+        let (mut memory, address) = vm_buffer(true)?;
+        let original_ram = memory.read_snapshot(address, OWNED_RAM_BYTES)?;
+        let mut state = request_state(15, false, 0, 0);
+        let pending = state.clone();
+        let disabled = run(&mut runtime, &mut state, &mut memory, 2, false)?;
+        assert!(matches!(
+            disabled.execution.reason,
+            StopReason::SynchronousTrap { .. }
+        ));
+        assert_eq!(disabled.execution.blocks_executed, 1);
+        assert!(disabled.crossarch_services.is_empty());
+        assert_state(&state, &pending);
+        let zero = run(&mut runtime, &mut state, &mut memory, 0, true)?;
+        assert_eq!(zero.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(zero.execution.blocks_executed, 0);
+        assert!(zero.crossarch_services.is_empty());
+        assert_state(&state, &pending);
+        let completed = run(&mut runtime, &mut state, &mut memory, 1, true)?;
+        let mut expected = pending;
+        expected.pc = GuestAddress(BASE + INSTRUCTION_BYTES);
+        expected.registers.x[0] = u64::from(DARWIN_ENOTSUP);
+        expected.registers.x[1] = 0;
+        expected.registers.nzcv |= CARRY;
+        assert_eq!(completed.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(completed.execution.blocks_executed, 1);
+        assert_eq!(completed.crossarch_services.len(), 1);
+        assert_state(&state, &expected);
+        let returned = run(&mut runtime, &mut state, &mut memory, 1, true)?;
+        expected.pc = GuestAddress(STOP);
+        assert_eq!(returned.execution.reason, StopReason::StopAddress);
+        assert_eq!(returned.execution.blocks_executed, 1);
+        assert!(returned.crossarch_services.is_empty());
+        assert_state(&state, &expected);
+        for indirect in [false, true] {
+            for number in [SYSCALL_NUMBER - 1, SYSCALL_NUMBER + 1] {
+                let mut state = request_state(15, indirect, 0, 0);
+                state.registers.x[if indirect { 0 } else { SELECTOR_REGISTER }] = u64::from(number);
+                let expected = state.clone();
+                let outcome = run(&mut runtime, &mut state, &mut memory, 2, true)?;
+                assert!(matches!(
+                    outcome.execution.reason,
+                    StopReason::SynchronousTrap { .. }
+                ));
+                assert_eq!(outcome.execution.blocks_executed, 1);
+                assert!(outcome.crossarch_services.is_empty());
+                assert!(outcome.services.is_empty());
+                assert_state(&state, &expected);
+            }
+        }
+        assert_eq!(
+            memory.read_snapshot(address, OWNED_RAM_BYTES)?,
+            original_ram
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_budget_warm_cache_and_fresh_artifacts_preserve_service_results() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let words = [SVC_DARWIN, SVC_DARWIN, RET_X30];
+        let mut runtime = vm_runtime(cache.path(), BASE, &words)?;
+        for offset in [0, INSTRUCTION_BYTES, 2 * INSTRUCTION_BYTES] {
+            runtime.prepare(GuestAddress(BASE + offset))?;
+        }
+        let (mut memory, address) = vm_buffer(true)?;
+        let original_ram = memory.read_snapshot(address, OWNED_RAM_BYTES)?;
+        let initial = request_state(0, false, 0, 0);
+        let mut state = initial.clone();
+        let first = run(&mut runtime, &mut state, &mut memory, 1, true)?;
+        assert_eq!(first.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(first.execution.blocks_executed, 1);
+        assert_eq!(first.crossarch_services.len(), 1);
+        assert_eq!(state.pc, GuestAddress(BASE + INSTRUCTION_BYTES));
+        assert_eq!(state.registers.x[0], u64::from(DARWIN_ENOTSUP));
+        let second = run(&mut runtime, &mut state, &mut memory, 2, true)?;
+        assert_eq!(second.execution.reason, StopReason::StopAddress);
+        assert_eq!(second.execution.blocks_executed, 2);
+        assert_eq!(second.crossarch_services.len(), 1);
+        // The second actual SVC observes the first errno as its namespace.
+        let mut expected = initial.clone();
+        expected.pc = GuestAddress(STOP);
+        expected.registers.x[0] = u64::from(DARWIN_EINVAL);
+        expected.registers.x[1] = 0;
+        expected.registers.nzcv |= CARRY;
+        assert_state(&state, &expected);
+        assert_eq!(
+            first.execution.compiled_blocks + second.execution.compiled_blocks,
+            0
+        );
+        assert_eq!(
+            first.execution.disk_cache_hits + second.execution.disk_cache_hits,
+            3
+        );
+        state = initial.clone();
+        let warm = run(&mut runtime, &mut state, &mut memory, 3, true)?;
+        assert_eq!(warm.execution.reason, StopReason::StopAddress);
+        assert_eq!(warm.execution.blocks_executed, 3);
+        assert_eq!(warm.execution.memory_cache_hits, 3);
+        assert_eq!(warm.crossarch_services.len(), 2);
+        assert_state(&state, &expected);
+        drop(runtime);
+        let mut fresh = vm_runtime(cache.path(), BASE, &words)?;
+        state = initial;
+        let cached = run(&mut fresh, &mut state, &mut memory, 3, true)?;
+        assert_eq!(cached.execution.reason, StopReason::StopAddress);
+        assert_eq!(cached.execution.blocks_executed, 3);
+        assert_eq!(cached.execution.disk_cache_hits, 3);
+        assert_eq!(cached.execution.compiled_blocks, 0);
+        assert_eq!(cached.crossarch_services.len(), 2);
+        assert_state(&state, &expected);
+        assert_eq!(
+            memory.read_snapshot(address, OWNED_RAM_BYTES)?,
+            original_ram
+        );
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod native_thread_services {
     use super::*;
