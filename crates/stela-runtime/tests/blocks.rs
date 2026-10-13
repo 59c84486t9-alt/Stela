@@ -35,6 +35,7 @@ fn mov(destination: u32, source: u32) -> u32 {
 
 #[test]
 fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Result<()> {
+    use stela_compiler::aarch64::simd::saturating::FPSR_QC;
     use stela_compiler::{TargetCpu, block::BlockProfile};
     let cache = tempfile::tempdir()?;
     let program = words(&[
@@ -49,12 +50,15 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
         0x4e20598d, // CNT V13.16B,V12.16B
         0x4eedbdae, // ADDP V14.2D,V13.2D,V13.2D
         0x4e604a0f, // CLS V15.8H,V16.8H
+        0x5e207a30, // SQABS B16,B17: active MIN sets QC, clears upper bits
+        0x6e320e52, // UQADD V18.16B,V18.16B,V18.16B: zero sum retains QC
+        0x6ea12a93, // SQXTUN2 V19.4S,V20.2D: signed wide bounds, preserve low half
         RET,
     ]);
     let mut initial = state(BASE, 19);
     initial.registers.nzcv = 0xf0000000;
     initial.registers.fpcr = 0x03c00000;
-    initial.registers.fpsr = 0x0800001f;
+    initial.registers.fpsr = 0x1f;
     let source: [u8; 16] = std::array::from_fn(|i| (i * 17 + 3) as u8);
     let limbs = |bytes: [u8; 16]| {
         let value = u128::from_le_bytes(bytes);
@@ -67,6 +71,9 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     initial.registers.v[10] = [0x00000001ffffffff, 0x0000000080000000];
     initial.registers.v[11] = [0x0000000200000000, 0xffffffff7fffffff];
     initial.registers.v[16] = [u64::MAX; 2];
+    initial.registers.v[17] = [0x80, u64::MAX];
+    initial.registers.v[19] = [0x0123456789abcdef, u64::MAX];
+    initial.registers.v[20] = [u64::MAX, 0x100000000];
     let mut expected = initial.registers.clone();
     let shifted = source.map(|byte| byte.wrapping_shl(3));
     expected.v[0] = limbs(shifted);
@@ -83,10 +90,13 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
     expected.v[13] = [0x07080808, 0];
     expected.v[14] = [0x07080808; 2];
     expected.v[15] = [0x000f000f000f000f; 2];
+    expected.v[16] = [0x7f, 0];
+    expected.v[19] = [0x0123456789abcdef, 0xffffffff00000000];
+    expected.fpsr |= FPSR_QC;
     let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
     targets.dedup();
     for target in targets {
-        for disk in [false, true] {
+        for (phase, disk) in [false, true, true].into_iter().enumerate() {
             let mut runtime = BlockRuntime::new_for_target(
                 802,
                 cache.path().into(),
@@ -95,6 +105,9 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
             );
             runtime.register_code(GuestAddress(BASE), program.clone())?;
             let mut thread = initial.clone();
+            if phase == 2 {
+                thread.registers.fpsr |= FPSR_QC;
+            }
             // SAFETY: owned, finite register-only code; no guest RAM accesses.
             let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
             assert_eq!(result.reason, StopReason::StopAddress);

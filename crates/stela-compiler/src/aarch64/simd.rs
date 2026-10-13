@@ -4,6 +4,7 @@
 use super::{AddressMode, Register, register};
 pub mod rearrange;
 pub mod reductions;
+pub mod saturating;
 pub mod shifts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Saturate(saturating::Operand),
     Reduce(reductions::Operand),
     Shift(shifts::Operand),
     Rearrange(rearrange::Operand),
@@ -87,6 +89,9 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = saturating::decode(word) {
+        return Some(decoded.map(Operand::Saturate));
+    }
     if let Some(decoded) = reductions::decode(word) {
         return Some(decoded.map(Operand::Reduce));
     }

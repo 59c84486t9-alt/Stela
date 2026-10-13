@@ -12,6 +12,27 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_saturation_oracle_handles_mixed_65_bit_sums_and_sticky_qc(self):
+        initial=State()
+        initial.fpsr=0x1f
+        base={'d':0,'n':1,'m':2,'lane':8,'output_lane':8,'bytes':8,'upper':False}
+        initial.v[0][:]=[1<<63,0]
+        initial.v[1][:]=[suite.MASK,0]
+        observed=suite.saturating_mathematical([{**base,'name':'suqadd'}],initial)
+        self.assertEqual(observed['v'][0],[(1<<63)-1,0])
+        self.assertEqual(observed['fpsr'],0x1f)
+        initial.v[0][:]=[suite.MASK,0]
+        observed=suite.saturating_mathematical([{**base,'name':'suqadd'}],initial)
+        self.assertEqual(observed['v'][0],[(1<<63)-1,0])
+        self.assertEqual(observed['fpsr'],(1<<27)|0x1f)
+        initial.v[1][:]=[1<<63,0]
+        observed=suite.saturating_mathematical([{**base,'name':'usqadd'}],initial)
+        self.assertEqual(observed['v'][0],[(1<<63)-1,0])
+        self.assertEqual(observed['fpsr'],0x1f)
+        initial.fpsr=(1<<27)|0x1f
+        initial.v[1][:]=[0,0]
+        self.assertEqual(suite.saturating_mathematical([{**base,'name':'uqadd'}],initial)['fpsr'],initial.fpsr)
+
     def test_reduction_oracle_distinguishes_signed_long_sums_and_pair_grouping(self):
         initial=State()
         initial.v[1][:]=[suite.MASK,suite.MASK]
@@ -27,7 +48,7 @@ class SimdDifferentialTests(unittest.TestCase):
         registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
         for group,generator,count in [('simd_integer',suite.integer_programs,38),
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
-                ('simd_reductions',suite.reduction_programs,22)]:
+                ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22)]:
             forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
             operations=[o for p in generator() for o in p['operations']]
             self.assertEqual(len(forms),count,group)

@@ -54,6 +54,8 @@
     "crates/stela-compiler/src/x86_64/simd/shifts.rs",
     "crates/stela-compiler/src/aarch64/simd/reductions.rs",
     "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+    "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+    "crates/stela-compiler/src/x86_64/simd/saturating.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],

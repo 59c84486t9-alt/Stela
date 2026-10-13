@@ -6,6 +6,7 @@ use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 mod rearrange;
 mod reductions;
+mod saturating;
 mod shifts;
 
 fn vector_offset(vector: u8) -> u32 {
@@ -81,7 +82,12 @@ fn equal(code: &mut Vec<u8>, lane_bytes: u8, target: crate::TargetCpu) {
     }
 }
 
-fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
+pub(super) fn greater(
+    code: &mut Vec<u8>,
+    lane_bytes: u8,
+    unsigned: bool,
+    target: crate::TargetCpu,
+) {
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
         if unsigned {
             code.extend([0x48, 0xb9]);
@@ -153,6 +159,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 }
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
+        Operand::Saturate(ref operand) => saturating::emit(code, operand, target),
         Operand::Reduce(ref operand) => reductions::emit(code, operand, target),
         Operand::Shift(ref operand) => shifts::emit(code, operand),
         Operand::Rearrange(ref operand) => rearrange::emit(code, operand, target),

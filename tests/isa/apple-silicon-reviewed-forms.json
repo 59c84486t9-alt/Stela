@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v17",
+  "registry_version": "apple-silicon-reviewed-forms-v18",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -213,6 +213,22 @@
         "programs": 763,
         "three_way_register_state_comparisons": 11494,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 11494
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_saturating": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-saturating-differential-report.json",
+      "kind": "simd_saturating_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 805,
+        "three_way_register_state_comparisons": 11270,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 11270
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -16949,6 +16965,820 @@
           ]
         }
       ]
+    },
+    {
+      "id": "SQABS_asimdmisc_R",
+      "instruction_id": "SQABS_advsimd",
+      "mnemonic": "SQABS",
+      "category": "fp_simd",
+      "source_file": "sqabs_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e207800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b730779e480c0856046b487eb9e110ab74fc1d24c91ea36a475f21980a4ae009",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e207820",
+          "expected_mnemonics": [
+            "sqabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQABS_asisdmisc_R",
+      "instruction_id": "SQABS_advsimd",
+      "mnemonic": "SQABS",
+      "category": "fp_simd",
+      "source_file": "sqabs_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x5e207800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b730779e480c0856046b487eb9e110ab74fc1d24c91ea36a475f21980a4ae009",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e207820",
+          "expected_mnemonics": [
+            "sqabs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQADD_asimdsame_only",
+      "instruction_id": "SQADD_advsimd",
+      "mnemonic": "SQADD",
+      "category": "fp_simd",
+      "source_file": "sqadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e200c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "d52eb169114e69f5be1a5cf02a9989f89f42bc8365eae438e061adb5ad05d237",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e220c20",
+          "expected_mnemonics": [
+            "sqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQADD_asisdsame_only",
+      "instruction_id": "SQADD_advsimd",
+      "mnemonic": "SQADD",
+      "category": "fp_simd",
+      "source_file": "sqadd_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e200c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "d52eb169114e69f5be1a5cf02a9989f89f42bc8365eae438e061adb5ad05d237",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e220c20",
+          "expected_mnemonics": [
+            "sqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQNEG_asimdmisc_R",
+      "instruction_id": "SQNEG_advsimd",
+      "mnemonic": "SQNEG",
+      "category": "fp_simd",
+      "source_file": "sqneg_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e207800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "6ce2e24c015946e56cc48571a97e438a68ea35ca883abf7967d412e2dbf46411",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e207820",
+          "expected_mnemonics": [
+            "sqneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQNEG_asisdmisc_R",
+      "instruction_id": "SQNEG_advsimd",
+      "mnemonic": "SQNEG",
+      "category": "fp_simd",
+      "source_file": "sqneg_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x7e207800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "6ce2e24c015946e56cc48571a97e438a68ea35ca883abf7967d412e2dbf46411",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e207820",
+          "expected_mnemonics": [
+            "sqneg"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSUB_asimdsame_only",
+      "instruction_id": "SQSUB_advsimd",
+      "mnemonic": "SQSUB",
+      "category": "fp_simd",
+      "source_file": "sqsub_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e202c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "00d5daea2e21f34c3c851b0e30f3930d817685af1572858d80f270c1bcb8733e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e222c20",
+          "expected_mnemonics": [
+            "sqsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSUB_asisdsame_only",
+      "instruction_id": "SQSUB_advsimd",
+      "mnemonic": "SQSUB",
+      "category": "fp_simd",
+      "source_file": "sqsub_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e202c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "00d5daea2e21f34c3c851b0e30f3930d817685af1572858d80f270c1bcb8733e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e222c20",
+          "expected_mnemonics": [
+            "sqsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQXTN_asimdmisc_N",
+      "instruction_id": "SQXTN_advsimd",
+      "mnemonic": "SQXTN",
+      "category": "fp_simd",
+      "source_file": "sqxtn_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e214800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "72aad20590fc588fa68652c43de161b6ee0a0df926fc35362970a23c1c0ce1fb",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e214820",
+          "expected_mnemonics": [
+            "sqxtn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQXTN_asisdmisc_N",
+      "instruction_id": "SQXTN_advsimd",
+      "mnemonic": "SQXTN",
+      "category": "fp_simd",
+      "source_file": "sqxtn_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x5e214800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "72aad20590fc588fa68652c43de161b6ee0a0df926fc35362970a23c1c0ce1fb",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e214820",
+          "expected_mnemonics": [
+            "sqxtn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQXTUN_asimdmisc_N",
+      "instruction_id": "SQXTUN_advsimd",
+      "mnemonic": "SQXTUN",
+      "category": "fp_simd",
+      "source_file": "sqxtun_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e212800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3fa00cca03689590fa488ae064bcef88abcb71524aebab2ad4a3e0fa4dd2b1d6",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e212820",
+          "expected_mnemonics": [
+            "sqxtun"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQXTUN_asisdmisc_N",
+      "instruction_id": "SQXTUN_advsimd",
+      "mnemonic": "SQXTUN",
+      "category": "fp_simd",
+      "source_file": "sqxtun_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x7e212800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3fa00cca03689590fa488ae064bcef88abcb71524aebab2ad4a3e0fa4dd2b1d6",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e212820",
+          "expected_mnemonics": [
+            "sqxtun"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SUQADD_asimdmisc_R",
+      "instruction_id": "SUQADD_advsimd",
+      "mnemonic": "SUQADD",
+      "category": "fp_simd",
+      "source_file": "suqadd_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e203800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "929f5066f5a17087f13b301ce23ba2b35be9f80c5590174bae6bb3331756b329",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e203820",
+          "expected_mnemonics": [
+            "suqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SUQADD_asisdmisc_R",
+      "instruction_id": "SUQADD_advsimd",
+      "mnemonic": "SUQADD",
+      "category": "fp_simd",
+      "source_file": "suqadd_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x5e203800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "929f5066f5a17087f13b301ce23ba2b35be9f80c5590174bae6bb3331756b329",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e203820",
+          "expected_mnemonics": [
+            "suqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQADD_asimdsame_only",
+      "instruction_id": "UQADD_advsimd",
+      "mnemonic": "UQADD",
+      "category": "fp_simd",
+      "source_file": "uqadd_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e200c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c11da9f2e14c2593880b01e439d491bce26fc954520664ecd0a8d387a685c4b4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e220c20",
+          "expected_mnemonics": [
+            "uqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQADD_asisdsame_only",
+      "instruction_id": "UQADD_advsimd",
+      "mnemonic": "UQADD",
+      "category": "fp_simd",
+      "source_file": "uqadd_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e200c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c11da9f2e14c2593880b01e439d491bce26fc954520664ecd0a8d387a685c4b4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e220c20",
+          "expected_mnemonics": [
+            "uqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSUB_asimdsame_only",
+      "instruction_id": "UQSUB_advsimd",
+      "mnemonic": "UQSUB",
+      "category": "fp_simd",
+      "source_file": "uqsub_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e202c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "50c40737fdd9d227aecf258c4e6c9601eb0a5624fe5e5caec96f64d20cdfde42",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e222c20",
+          "expected_mnemonics": [
+            "uqsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSUB_asisdsame_only",
+      "instruction_id": "UQSUB_advsimd",
+      "mnemonic": "UQSUB",
+      "category": "fp_simd",
+      "source_file": "uqsub_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e202c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "50c40737fdd9d227aecf258c4e6c9601eb0a5624fe5e5caec96f64d20cdfde42",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e222c20",
+          "expected_mnemonics": [
+            "uqsub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQXTN_asimdmisc_N",
+      "instruction_id": "UQXTN_advsimd",
+      "mnemonic": "UQXTN",
+      "category": "fp_simd",
+      "source_file": "uqxtn_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e214800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a8e4a473452f1c896b4bb5b2d58f798fa871c0f523b15da9a20baf909b341fb0",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e214820",
+          "expected_mnemonics": [
+            "uqxtn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQXTN_asisdmisc_N",
+      "instruction_id": "UQXTN_advsimd",
+      "mnemonic": "UQXTN",
+      "category": "fp_simd",
+      "source_file": "uqxtn_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x7e214800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a8e4a473452f1c896b4bb5b2d58f798fa871c0f523b15da9a20baf909b341fb0",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e214820",
+          "expected_mnemonics": [
+            "uqxtn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USQADD_asimdmisc_R",
+      "instruction_id": "USQADD_advsimd",
+      "mnemonic": "USQADD",
+      "category": "fp_simd",
+      "source_file": "usqadd_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e203800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e383ed4189988daaadeb9b9598364a209c2176dc964f3fcd5a01914f4107dd75",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e203820",
+          "expected_mnemonics": [
+            "usqadd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USQADD_asisdmisc_R",
+      "instruction_id": "USQADD_advsimd",
+      "mnemonic": "USQADD",
+      "category": "fp_simd",
+      "source_file": "usqadd_advsimd.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x7e203800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e383ed4189988daaadeb9b9598364a209c2176dc964f3fcd5a01914f4107dd75",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar B/H/S/D and vector arrangement, V31 ordinary data and all source/destination aliases. Signed/unsigned saturation, MIN ABS/NEG clamping, mixed-signedness accumulation including mathematical overflow beyond 64 bits, and signed/unsigned narrowing with scalar clearing/upper-half preservation. Active-lane saturation sets sticky FPSR.QC; inactive lanes cannot set it. Other FPSR bits, FPCR, NZCV and guest RAM unchanged. No disabled-feature traps, SME streaming, floating-point arithmetic/exception handling or complete process claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review. Focused original ARM, arbitrary-precision independent lane math and baseline/native x86 full-state comparisons include range boundaries, incoming QC clear/set, poisoned inactive lanes, overlaps and dependency chains. Optional output instructions independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_saturating"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e203820",
+          "expected_mnemonics": [
+            "usqadd"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -16976,6 +17806,8 @@
     "crates/stela-compiler/src/x86_64/simd/shifts.rs",
     "crates/stela-compiler/src/aarch64/simd/reductions.rs",
     "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+    "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+    "crates/stela-compiler/src/x86_64/simd/saturating.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]
