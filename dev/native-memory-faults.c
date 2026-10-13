@@ -50,8 +50,19 @@ static void capture(int number, siginfo_t *info, void *context) {
 }
 
 int main(int argc, char **argv) {
+    uintptr_t mapping_base = 0;
+    if (argc >= 3 && !strcmp(argv[argc - 2], "--mapping-base")) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long value = strtoull(argv[argc - 1], &end, 0);
+        if (errno || !end || *end || end == argv[argc - 1] || !value ||
+            argv[argc - 1][0] < '0' || argv[argc - 1][0] > '9' || value > UINTPTR_MAX) return 17;
+        mapping_base = (uintptr_t)value;
+        argc -= 2;
+    }
     if (argc != 5 && argc != 6) return 2;
     page_size = (size_t)sysconf(_SC_PAGESIZE);
+    if (mapping_base && (mapping_base % page_size || mapping_base > UINTPTR_MAX - 3 * page_size)) return 17;
     observed_bytes = page_size;
     FILE *file = fopen(argv[1], "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 3;
@@ -61,8 +72,10 @@ int main(int argc, char **argv) {
     if (code == MAP_FAILED || fread(code, 1, (size_t)length, file) != (size_t)length) return 5;
     fclose(file);
     if (mprotect(code, (size_t)length, PROT_READ | PROT_EXEC)) return 6;
-    unsigned char *mapping = mmap(NULL, 3 * page_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    unsigned char *mapping = mmap((void *)mapping_base, 3 * page_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mapping == MAP_FAILED) return 7;
+    /* A hint may be refused; never replace an existing mapping with MAP_FIXED. */
+    if (mapping_base && (uintptr_t)mapping != mapping_base) return 18;
     ram = mapping + page_size;
     if (mprotect(ram, page_size, PROT_READ | PROT_WRITE)) return 8;
     memset(ram, 0xa5, page_size);
@@ -80,7 +93,17 @@ int main(int argc, char **argv) {
         target = (uintptr_t)(ram + 512);
         if (mprotect(ram, page_size, PROT_READ)) return 9;
     } else if (!strcmp(argv[2], "crossing")) {
-        target -= 4;
+        unsigned distance = 4;
+        if (argc == 6) {
+            char *end = NULL;
+            errno = 0;
+            unsigned long value = strtoul(argv[5], &end, 10);
+            if (errno || !end || *end || end == argv[5] ||
+                (value != 1 && value != 2 && value != 4 && value != 8 && value != 16) ||
+                argv[5][0] < '0' || argv[5][0] > '9') return 14;
+            distance = (unsigned)value;
+        }
+        target -= distance;
     } else if (!strcmp(argv[2], "pair_second") || !strcmp(argv[2], "pair_readonly")) {
         if (argc != 6) return 13;
         int distance = atoi(argv[5]);

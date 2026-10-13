@@ -27,6 +27,96 @@ bitfield = load_suite('bitfield-differential.py', 'bitfield_differential')
 x86_mappings = load_suite('x86-mappings.py', 'x86_mappings')
 
 
+register_offset = load_suite('register-offset-differential.py', 'register_offset_differential')
+pc_relative = load_suite('pc-relative-differential.py', 'pc_relative_differential')
+memory_faults = load_suite('memory-faults.py', 'memory_faults')
+
+
+class MemoryBatchOracleTests(unittest.TestCase):
+    def test_scalar_crossing_store_faults_include_zero_register_and_every_width(self):
+        cases = memory_faults.cases()
+        for size in (1, 2, 3):
+            for destination in (1, 31):
+                self.assertTrue(any(case["size"] == size and case["opcode"] == 0 and case["rt"] == destination
+                                    and case.get("crossing_bytes") == 1 for case in cases))
+
+    def test_simd_corpus_distinguishes_sp_from_zero_index_for_all_extensions(self):
+        cases = register_offset.simd_cases()
+        for option in register_offset.INDEX_OPTIONS:
+            self.assertTrue(any(case["rn"] == 31 and case["rm"] == 31 and case["option"] == option for case in cases))
+
+    def test_simd_register_offset_extends_before_scaling_and_zeros_upper_bits(self):
+        state = State()
+        state.x[0], state.x[2] = 0x1040, 0xdeadbeeffffffffe
+        state.v[31][:] = [0xffffffffffffffff, 0xffffffffffffffff]
+        ram = bytes(range(128))
+        case = {"simd": True, "size": 1, "opcode": 1, "rn": 0, "rt": 31, "rm": 2,
+                "option": register_offset.OPTION_SXTW, "scaled": True}
+        expected = state_dict(state)
+        expected["v"][31] = [int.from_bytes(ram[60:62], "little"), 0]
+        expected["memory"] = ram
+        self.assertEqual(register_offset.mathematical_reference(case, state, 0x1000, ram), expected)
+
+    def test_simd_register_banks_are_distinct_and_exact_store_width(self):
+        state = State()
+        state.x[1], state.x[2] = 0x1003, 0
+        state.v[1][:] = [0x123456789abcdef0, 0xfedcba9876543210]
+        ram = bytes(range(64))
+        case = {"simd": True, "size": 0, "opcode": 0, "rn": 1, "rt": 1, "rm": 2,
+                "option": register_offset.OPTION_LSL, "scaled": False}
+        expected = state_dict(state)
+        expected["memory"] = ram[:3] + b"\xf0" + ram[4:]
+        self.assertEqual(register_offset.mathematical_reference(case, state, 0x1000, ram), expected)
+
+    def test_literal_uses_actual_pc_signed_offset_and_integer_zero_register(self):
+        state = State()
+        ram = bytes(range(32))
+        case = {"form": "ldrsw", "immediate": -1, "destination": 3, "base": 0x1004, "prefix": 2}
+        negative_ram = ram[:8] + b"\x00\x00\x00\x80" + ram[12:]
+        expected = state_dict(state)
+        expected["x"][3] = 0xffffffff80000000
+        expected["memory"] = negative_ram
+        self.assertEqual(pc_relative.literal_math(case, state, 0x1000, negative_ram), expected)
+        case["destination"] = 31
+        expected["x"][3] = state.x[3]
+        self.assertEqual(pc_relative.literal_math(case, state, 0x1000, negative_ram), expected)
+        case["immediate"] = -100
+        with self.assertRaisesRegex(ValueError, 'outside supplied RAM'):
+            pc_relative.literal_math(case, state, 0x1000, ram)
+
+    def test_literal_vector31_is_writable_and_load_clears_upper_bits(self):
+        state = State()
+        state.v[31][:] = [0xffffffffffffffff, 0xffffffffffffffff]
+        case = {"form": "s", "immediate": 1, "destination": 31, "base": 0x1000, "prefix": 1}
+        ram = bytes(range(32))
+        expected = state_dict(state)
+        expected["v"][31] = [0x0b0a0908, 0]
+        expected["memory"] = ram
+        self.assertEqual(pc_relative.literal_math(case, state, 0x1000, ram), expected)
+
+    def test_literal_mathematical_address_wraps_at_architectural_width(self):
+        state = State()
+        case = {"form": "x", "immediate": 2, "destination": 0,
+                "base": pc_relative.MASK - 7, "prefix": 1}
+        ram = bytes(range(32))
+        expected = state_dict(state)
+        expected["x"][0] = int.from_bytes(ram[4:12], "little")
+        expected["memory"] = ram
+        self.assertEqual(pc_relative.literal_math(case, state, 0, ram), expected)
+
+    def test_literal_encoding_bounds_and_corpus_cover_six_forms(self):
+        for form, (base, _) in pc_relative.LITERAL_FORMS.items():
+            self.assertEqual(pc_relative.literal_encoding(form, 0, 31), base | 31)
+            self.assertEqual(pc_relative.literal_encoding(form, -1, 0), base | 0xffffe0)
+            for invalid in (-(1 << 18) - 1, 1 << 18):
+                with self.assertRaises(ValueError):
+                    pc_relative.literal_encoding(form, invalid, 0)
+        cases = pc_relative.literal_cases()
+        self.assertEqual({case["form"] for case in cases}, set(pc_relative.LITERAL_FORMS))
+        self.assertTrue(any(case["destination"] == 31 for case in cases))
+
+
+
 class ArithmeticOracleTests(unittest.TestCase):
     def test_original_carry_programs_are_byte_identical(self):
         cases = arithmetic.carry_cases()

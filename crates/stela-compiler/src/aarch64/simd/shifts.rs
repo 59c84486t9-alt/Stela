@@ -25,6 +25,12 @@ pub enum Kind {
         round: bool,
         upper: bool,
     },
+    SaturatingNarrow {
+        signed_source: bool,
+        unsigned_result: bool,
+        round: bool,
+        upper: bool,
+    },
     Widen {
         signed: bool,
         upper: bool,
@@ -71,6 +77,13 @@ const SHIFT_ROUND_ACCUMULATE_SIGNED: u32 = 0x0f003400;
 const SHIFT_ROUND_ACCUMULATE_UNSIGNED: u32 = 0x2f003400;
 const SHIFT_NARROW: u32 = 0x0f008400;
 const SHIFT_ROUND_NARROW: u32 = 0x0f008c00;
+const SATURATING_NARROW_SIGNED: u32 = 0x0f009400;
+const SATURATING_ROUND_NARROW_SIGNED: u32 = 0x0f009c00;
+const SATURATING_NARROW_UNSIGNED: u32 = 0x2f009400;
+const SATURATING_ROUND_NARROW_UNSIGNED: u32 = 0x2f009c00;
+const SATURATING_NARROW_SIGNED_TO_UNSIGNED: u32 = 0x2f008400;
+const SATURATING_ROUND_NARROW_SIGNED_TO_UNSIGNED: u32 = 0x2f008c00;
+const ROUND_NARROW: u32 = 1 << 11;
 const SHIFT_WIDEN_SIGNED: u32 = 0x0f00a400;
 const SHIFT_WIDEN_UNSIGNED: u32 = 0x2f00a400;
 
@@ -110,6 +123,23 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             round: opcode == SHIFT_ROUND_NARROW,
             upper: q,
         },
+        SATURATING_NARROW_SIGNED
+        | SATURATING_ROUND_NARROW_SIGNED
+        | SATURATING_NARROW_UNSIGNED
+        | SATURATING_ROUND_NARROW_UNSIGNED
+        | SATURATING_NARROW_SIGNED_TO_UNSIGNED
+        | SATURATING_ROUND_NARROW_SIGNED_TO_UNSIGNED => Kind::SaturatingNarrow {
+            signed_source: !matches!(
+                opcode,
+                SATURATING_NARROW_UNSIGNED | SATURATING_ROUND_NARROW_UNSIGNED
+            ),
+            unsigned_result: !matches!(
+                opcode,
+                SATURATING_NARROW_SIGNED | SATURATING_ROUND_NARROW_SIGNED
+            ),
+            round: opcode & ROUND_NARROW != 0,
+            upper: !scalar && q,
+        },
         SHIFT_WIDEN_SIGNED | SHIFT_WIDEN_UNSIGNED if !scalar => Kind::Widen {
             signed: opcode == SHIFT_WIDEN_SIGNED,
             upper: q,
@@ -123,8 +153,15 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } // modified-immediate class, not a shift
     let size = 7 - immh.leading_zeros() as u8;
     let lane_bytes = 1 << size;
-    let changes_width = matches!(kind, Kind::Narrow { .. } | Kind::Widen { .. });
-    if (scalar && (!q || (lane_bytes != 8 && !matches!(kind, Kind::SaturatingImmediate { .. }))))
+    let changes_width = matches!(
+        kind,
+        Kind::Narrow { .. } | Kind::SaturatingNarrow { .. } | Kind::Widen { .. }
+    );
+    let scalar_any_width = matches!(
+        kind,
+        Kind::SaturatingImmediate { .. } | Kind::SaturatingNarrow { .. }
+    );
+    if (scalar && (!q || (lane_bytes != 8 && !scalar_any_width)))
         || (changes_width && lane_bytes == 8)
         || (!scalar && !changes_width && !q && lane_bytes == 8)
     {
@@ -194,6 +231,62 @@ fn decode_register(word: u32, scalar: bool, q: bool) -> Option<Result<Operand, (
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saturating_narrow_allocations_cover_every_count_and_reserved_shape() {
+        for opcode in [
+            SATURATING_NARROW_SIGNED,
+            SATURATING_ROUND_NARROW_SIGNED,
+            SATURATING_NARROW_UNSIGNED,
+            SATURATING_ROUND_NARROW_UNSIGNED,
+            SATURATING_NARROW_SIGNED_TO_UNSIGNED,
+            SATURATING_ROUND_NARROW_SIGNED_TO_UNSIGNED,
+        ] {
+            for immediate in 0..128 {
+                for scalar in [false, true] {
+                    for q in [false, true] {
+                        let word = opcode
+                            | (immediate << 16)
+                            | (31 << 5)
+                            | 31
+                            | if scalar { SCALAR } else { 0 }
+                            | if q { Q } else { 0 };
+                        let decoded = decode(word);
+                        if immediate < 8 {
+                            assert_eq!(decoded, None, "{word:08x}");
+                            continue;
+                        }
+                        let result = decoded.expect("saturating narrow family");
+                        let valid = immediate < 64 && (!scalar || q);
+                        assert_eq!(result.is_ok(), valid, "{word:08x}");
+                        if let Ok(operand) = result {
+                            let bits = 1 << (31 - immediate.leading_zeros());
+                            let lane = bits / 8;
+                            assert_eq!(u32::from(operand.lane_bytes), lane);
+                            assert_eq!(u32::from(operand.amount), bits * 2 - immediate);
+                            assert_eq!(u32::from(operand.bytes), if scalar { lane } else { 16 });
+                            assert_eq!((operand.source, operand.destination), (31, 31));
+                            assert_eq!(
+                                operand.kind,
+                                Kind::SaturatingNarrow {
+                                    signed_source: !matches!(
+                                        opcode,
+                                        SATURATING_NARROW_UNSIGNED
+                                            | SATURATING_ROUND_NARROW_UNSIGNED
+                                    ),
+                                    unsigned_result: !matches!(
+                                        opcode,
+                                        SATURATING_NARROW_SIGNED | SATURATING_ROUND_NARROW_SIGNED
+                                    ),
+                                    round: opcode & ROUND_NARROW != 0,
+                                    upper: !scalar && q,
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn register_allocations_keep_counts_and_scalar_saturation_widths() {
         for opcode in [

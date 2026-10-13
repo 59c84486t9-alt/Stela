@@ -15,6 +15,8 @@ mod crc;
 mod flags;
 mod integer_math;
 pub mod isa;
+mod literal;
+mod memory_store;
 mod pc_relative;
 mod register_offset;
 mod simd;
@@ -58,13 +60,13 @@ fn memory(
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
-            match bytes {
-                1 => code.extend([0x88, 0x08]), // mov [rax],cl
-                2 => code.extend([0x66, 0x89, 0x08]),
-                4 => code.extend([0x89, 0x08]),
-                8 => code.extend([0x48, 0x89, 0x08]),
-                _ => unreachable!("decoder validates scalar size"),
-            }
+            memory_store::emit(
+                code,
+                bytes,
+                0,
+                memory_store::Source::Rcx,
+                memory_store::aligned_immediate(base, displacement, mode, bytes),
+            );
         }
         MemoryTransfer::Load { signed, width } => {
             if width == Width::X64 {
@@ -137,11 +139,9 @@ fn memory_pair(
             } else {
                 code.extend([0x45, 0x31, 0xc0]); // xor r8d,r8d
             }
-            if bytes == 8 {
-                code.push(0x48);
-            }
-            code.extend([0x89, 0x08]); // first element: [rax] <- (e/r)cx
-            code.extend([if bytes == 8 { 0x4c } else { 0x44 }, 0x89, 0x40, bytes]);
+            let aligned = memory_store::aligned_immediate(base, displacement, mode, bytes);
+            memory_store::emit(code, bytes, 0, memory_store::Source::Rcx, aligned);
+            memory_store::emit(code, bytes, bytes, memory_store::Source::R8, aligned);
         }
         MemoryTransfer::Load { signed, width } => {
             if width == Width::X64 {
@@ -287,6 +287,7 @@ fn emit_instruction(
         Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::Flags(operand) => flags::emit(code, &operand),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
+        Operation::Literal(operand) => literal::emit(code, &operand),
         Operation::MemoryPair {
             transfer,
             bytes,

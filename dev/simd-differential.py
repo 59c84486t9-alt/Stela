@@ -34,7 +34,7 @@ from unicorn import x86_const as intel
 from unicorn import __version__ as unicorn_version
 from differential import (ROOT, BASE, MASK, State, states, executable, initialize_arm,
                           capture_arm, state_dict, seed_extended_state, parse_fault_record, move)
-from evidence import write_evidence
+from evidence import retain_native_evidence, write_evidence
 
 RET = 0xd65f03c0
 STOP = 0x220000100000
@@ -243,7 +243,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -1321,6 +1321,228 @@ def seed_doubling_products(initial,operations,pattern,flags):
 
 
 
+FPSR_QC = 1 << 27
+VECTOR_BYTES = 16
+VECTOR_HALF_BYTES = 8
+SIMD_Q_BIT = 1 << 30
+SIMD_SCALAR_BIT = 1 << 28
+NARROW_SHIFT_BASES = {
+    'sqshrn': 0x0f009400, 'sqrshrn': 0x0f009c00,
+    'uqshrn': 0x2f009400, 'uqrshrn': 0x2f009c00,
+    'sqshrun': 0x2f008400, 'sqrshrun': 0x2f008c00,
+}
+
+
+def narrowing_shift_programs():
+    """All legal immediates; bounded aliases and boundary register chains."""
+    programs = []
+    for name, base in NARROW_SHIFT_BASES.items():
+        for output_lane in (1, 2, 4):
+            output_bits = output_lane * 8
+            for scalar, upper in ((False, False), (False, True), (True, False)):
+                for amount in range(1, output_bits + 1):
+                    encoded = base | ((2 * output_bits - amount) << 16)
+                    if scalar:
+                        encoded |= SIMD_Q_BIT | SIMD_SCALAR_BIT
+                    elif upper:
+                        encoded |= SIMD_Q_BIT
+                    config = {
+                        'kind': 'narrowing_shift', 'name': name,
+                        'lane': output_lane * 2, 'output_lane': output_lane,
+                        'bytes': output_lane if scalar else VECTOR_HALF_BYTES,
+                        'scalar': scalar, 'upper': upper, 'amount': amount,
+                        'signed': not name.startswith('u'),
+                        'unsigned_result': name.startswith('u') or name.endswith('un'),
+                        'round': 'rsh' in name,
+                    }
+
+                    def operation(d, n):
+                        return {**config, 'd': d, 'n': n, 'word': encoded | (n << 5) | d}
+
+                    for d, n in ((0, 1), (31, 31), (31, 0)):
+                        programs.append({'operations': [operation(d, n)]})
+                    if amount in (1, output_bits // 2, output_bits):
+                        programs.append({'operations': [operation(d, (d + 7) % 32) for d in range(32)]})
+    return programs
+
+
+def narrowing_shift_mathematical(operations, initial):
+    vectors = [lo | (hi << 64) for lo, hi in initial.v]
+    fpsr = initial.fpsr
+    for op in operations:
+        input_bits, output_bits = op['lane'] * 8, op['output_lane'] * 8
+        source, previous = vectors[op['n']], vectors[op['d']]
+        lower = 0 if op['unsigned_result'] else -(1 << (output_bits - 1))
+        upper = (1 << (output_bits - int(not op['unsigned_result']))) - 1
+        result = 0
+        for index in range(op['bytes'] // op['output_lane']):
+            value = (source >> (index * input_bits)) & ((1 << input_bits) - 1)
+            if op['signed'] and value & (1 << (input_bits - 1)):
+                value -= 1 << input_bits
+            if op['round']:
+                value += 1 << (op['amount'] - 1)
+            shifted = value >> op['amount']
+            saturated = min(upper, max(lower, shifted))
+            if shifted != saturated:
+                fpsr |= FPSR_QC
+            result |= (saturated & ((1 << output_bits) - 1)) << (index * output_bits)
+        if op['upper']:
+            result = (previous & MASK) | (result << 64)
+        vectors[op['d']] = result
+    return {**state_dict(initial), 'v': [[value & MASK, value >> 64] for value in vectors], 'fpsr': fpsr}
+
+
+def seed_narrowing_shifts(initial, operations, pattern, flags):
+    op = operations[0]
+    bits, output_bits, amount = op['lane'] * 8, op['output_lane'] * 8, op['amount']
+    mask = (1 << bits) - 1
+    rounding = (1 << (amount - 1)) if op['round'] else 0
+    low = 0 if op['unsigned_result'] else -(1 << (output_bits - 1))
+    high = (1 << (output_bits - int(not op['unsigned_result']))) - 1
+    thresholds = tuple((bound << amount) - rounding + delta
+                       for bound in (low, high, high + 1) for delta in (-1, 0, 1))
+    values = thresholds + (0, 1, -1, 1 << (bits - 1), (1 << (bits - 1)) - 1, mask)
+    for register in range(32):
+        if pattern < 9:
+            lanes = [thresholds[(pattern + i) % len(thresholds)] & mask for i in range(128 // bits)]
+        elif pattern == 9:
+            lanes = [values[9 + (register + i) % 6] & mask for i in range(128 // bits)]
+        elif pattern == 10:
+            # Every active source is zero; inactive scalar lanes would saturate.
+            active = op['bytes'] // op['output_lane']
+            lanes = [0 if i < active else 1 << (bits - 1) for i in range(128 // bits)]
+        else:
+            continue  # Retain independently seeded random full-state inputs.
+        value = sum(lane << (i * bits) for i, lane in enumerate(lanes))
+        initial.v[register][:] = [value & MASK, value >> 64]
+    initial.fpsr = (initial.fpsr & ~FPSR_QC) | (FPSR_QC if flags else 0)
+
+
+DOT_REGISTER_BASES = {'sdot': 0x0e009400, 'udot': 0x2e009400}
+DOT_INDEXED_BASES = {'sdot': 0x0f00e000, 'udot': 0x2f00e000}
+ROUND_PRODUCT_REGISTER_BASES = {'sqrdmlah': 0x2e008400, 'sqrdmlsh': 0x2e008c00}
+ROUND_PRODUCT_INDEXED_BASES = {'sqrdmlah': 0x2f00d000, 'sqrdmlsh': 0x2f00f000}
+
+
+def dot_round_product_programs():
+    programs = []
+    configurations = []
+    for name in DOT_REGISTER_BASES:
+        for q in (0, 1):
+            for index in (None, 0, 1, 2, 3):
+                encoded = (DOT_REGISTER_BASES if index is None else DOT_INDEXED_BASES)[name]
+                encoded |= (2 << 22) | (q << 30)
+                if index is not None:
+                    encoded |= ((index >> 1) << 11) | ((index & 1) << 21)
+                configurations.append((encoded, {
+                    'kind': 'dot_round_product', 'name': name, 'lane': 1,
+                    'output_lane': 4, 'bytes': 8 << q, 'scalar': False,
+                    'index': index, 'upper': False,
+                }))
+    for name in ROUND_PRODUCT_REGISTER_BASES:
+        for scalar in (False, True):
+            for q in ((1,) if scalar else (0, 1)):
+                for size in (1, 2):
+                    lane = 1 << size
+                    for index in (None, *range(VECTOR_BYTES // lane)):
+                        encoded = (ROUND_PRODUCT_REGISTER_BASES if index is None else ROUND_PRODUCT_INDEXED_BASES)[name]
+                        encoded |= (size << 22) | (q << 30) | (SIMD_SCALAR_BIT if scalar else 0)
+                        if index is not None:
+                            encoded |= (index >> (2 if lane == 2 else 1)) << 11
+                            encoded |= (((index >> 1) if lane == 2 else index) & 1) << 21
+                            if lane == 2:
+                                encoded |= (index & 1) << 20
+                        configurations.append((encoded, {
+                            'kind': 'dot_round_product', 'name': name, 'lane': lane,
+                            'output_lane': lane, 'bytes': lane if scalar else 8 << q,
+                            'scalar': scalar, 'index': index, 'upper': False,
+                        }))
+    for encoded, config in configurations:
+        def operation(d, n, m):
+            if config['index'] is not None and config['lane'] == 2:
+                m &= 15
+            return {**config, 'd': d, 'n': n, 'm': m, 'word': encoded | (m << 16) | (n << 5) | d}
+
+        for d, n, m in ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 1), (31, 31, 31), (31, 29, 31)):
+            programs.append({'operations': [operation(d, n, m)]})
+        programs.append({'operations': [operation(d, (d + 5) % 32, (d + 13) % 32) for d in range(32)]})
+    return programs
+
+
+def dot_round_product_mathematical(operations, initial):
+    vectors = [lo | (hi << 64) for lo, hi in initial.v]
+    fpsr = initial.fpsr
+
+    def signed(value, bits):
+        return value - (1 << bits) if value & (1 << (bits - 1)) else value
+
+    for op in operations:
+        left, right, previous = (vectors[op[key]] for key in ('n', 'm', 'd'))
+        bits, output_bits = op['lane'] * 8, op['output_lane'] * 8
+        input_mask, output_mask = (1 << bits) - 1, (1 << output_bits) - 1
+        result = 0
+        for lane in range(op['bytes'] // op['output_lane']):
+            accumulator = (previous >> (lane * output_bits)) & output_mask
+            if op['name'] in DOT_REGISTER_BASES:
+                value = accumulator
+                for byte in range(op['output_lane']):
+                    a = (left >> ((lane * op['output_lane'] + byte) * bits)) & input_mask
+                    right_lane = lane if op['index'] is None else op['index']
+                    b = (right >> ((right_lane * op['output_lane'] + byte) * bits)) & input_mask
+                    if op['name'] == 'sdot':
+                        a, b = signed(a, bits), signed(b, bits)
+                    value += a * b
+            else:
+                a = signed((left >> (lane * bits)) & input_mask, bits)
+                right_lane = lane if op['index'] is None else op['index']
+                b = signed((right >> (right_lane * bits)) & input_mask, bits)
+                product = 2 * a * b
+                if op['name'] == 'sqrdmlsh':
+                    product = -product
+                # One unbounded fused expression: no intermediate saturation or rounding.
+                rounded = ((signed(accumulator, bits) << bits) + product + (1 << (bits - 1))) >> bits
+                value = min((1 << (bits - 1)) - 1, max(-(1 << (bits - 1)), rounded))
+                if value != rounded:
+                    fpsr |= FPSR_QC
+            result |= (value & output_mask) << (lane * output_bits)
+        vectors[op['d']] = result
+    return {**state_dict(initial), 'v': [[value & MASK, value >> 64] for value in vectors], 'fpsr': fpsr}
+
+
+def seed_dot_round_products(initial, operations, pattern, flags):
+    op = operations[0]
+    bits = op['lane'] * 8
+    minimum, mask = 1 << (bits - 1), (1 << bits) - 1
+    values = (0, 1, mask, minimum, minimum - 1, minimum + 1, mask - 1, 1 << (bits - 2))
+    for register in range(32):
+        if pattern < 6:
+            lanes = [values[(pattern + register + i) % len(values)] for i in range(128 // bits)]
+        elif pattern in (6, 7):
+            lanes = [minimum] * (128 // bits)
+        elif pattern == 8:
+            # Saturation in inactive scalar/Q=0 source lanes must not set QC.
+            lanes = [0 if i * op['lane'] < op['bytes'] else minimum for i in range(128 // bits)]
+        else:
+            continue
+        value = sum(value << (i * bits) for i, value in enumerate(lanes))
+        initial.v[register][:] = [value & MASK, value >> 64]
+    if pattern in (6, 7) and op['name'] in ROUND_PRODUCT_REGISTER_BASES:
+        # With distinct registers: MIN*MIN cancels a negative accumulator on add,
+        # or positive accumulator on subtract; staged product saturation is wrong.
+        accumulator = mask if op['name'] == 'sqrdmlah' else minimum - 1
+        if pattern == 7:
+            accumulator = minimum - 1 if op['name'] == 'sqrdmlah' else minimum
+        value = sum(accumulator << (i * bits) for i in range(128 // bits))
+        initial.v[op['d']][:] = [value & MASK, value >> 64]
+    if pattern == 9 and op['name'] in ROUND_PRODUCT_REGISTER_BASES:
+        # Exact half-product: subtraction rounds the negative product as part
+        # of the fused expression; subtracting an already-rounded product fails.
+        for key, lane_value in (('d', 0), ('n', 1), ('m', 1 << (bits - 2))):
+            value = sum(lane_value << (i * bits) for i in range(128 // bits))
+            initial.v[op[key]][:] = [value & MASK, value >> 64]
+    initial.fpsr = (initial.fpsr & ~FPSR_QC) | (FPSR_QC if flags else 0)
+
+
 def indexed_product_programs():
     # Explicit Arm indexed encodings, independent from the Rust decoder catalog.
     bases={'mul':0x0f008000,'mla':0x2f000000,'mls':0x2f004000,
@@ -1695,6 +1917,8 @@ REGISTER_COHORTS={
     'products':(product_programs,product_mathematical),
     'indexed_products':(indexed_product_programs,indexed_product_mathematical),
     'doubling_products':(doubling_product_programs,doubling_product_mathematical),
+    'narrowing_shifts':(narrowing_shift_programs,narrowing_shift_mathematical),
+    'dot_round_products':(dot_round_product_programs,dot_round_product_mathematical),
     'halving':(halving_programs,halving_mathematical),
     'immediates':(immediate_programs,immediate_mathematical),
     'floating_bits':(floating_bit_programs,floating_bit_mathematical),
@@ -1708,7 +1932,7 @@ def execute_register_batches(batches):
     templates=states(all_flags=True)
     for batch in batches:
         machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
-        if batch['cohort']=='immediates': machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+        if batch['cohort'] in ('immediates','dot_round_products'): machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
         machine.mem_map(BASE,(len(batch['source'])+4095)&~4095);machine.mem_write(BASE,batch['source'])
         with executable(batch['native']) as address:
             for function,entry,offset in zip(batch['functions'],batch['entries'],batch['offsets']):
@@ -1727,6 +1951,8 @@ def execute_register_batches(batches):
                 if batch.get('cohort')=='doubling_products': patterns=10
                 if batch.get('cohort')=='indexed_products': patterns=9
                 if batch.get('cohort')=='register_shifts': patterns=register_shift_pattern_count(operations)
+                if batch.get('cohort')=='narrowing_shifts': patterns=12
+                if batch.get('cohort')=='dot_round_products': patterns=11
                 for flags in (0,15):
                     for pattern in range(patterns):
                         initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
@@ -1814,6 +2040,8 @@ def execute_register_batches(batches):
                         if batch.get('cohort')=='doubling_products': seed_doubling_products(initial,operations,pattern,flags)
                         if batch.get('cohort')=='indexed_products': seed_indexed_products(initial,operations,pattern,flags)
                         if batch.get('cohort')=='register_shifts': register_shift_seed(initial,operations,pattern,flags)
+                        if batch.get('cohort')=='narrowing_shifts': seed_narrowing_shifts(initial,operations,pattern,flags)
+                        if batch.get('cohort')=='dot_round_products': seed_dot_round_products(initial,operations,pattern,flags)
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
@@ -1958,6 +2186,19 @@ def native_trace_representatives(batch):
             {'name':'sqshlu','lane':1,'bytes':16,'immediate':True,'amount':0},
             {'name':'sqshlu','lane':8,'bytes':16,'immediate':True,'amount':0},
             {'name':'sqshl','lane':4,'bytes':16,'immediate':True,'amount':31}]
+    elif focus=='narrowing_shifts':
+        selections=[{'name':'sqshrn','lane':8,'scalar':True,'amount':32},
+            {'name':'sqrshrn','lane':4,'upper':True,'amount':1},
+            {'name':'uqshrn','lane':2,'scalar':False,'upper':False,'amount':8},
+            {'name':'uqrshrn','lane':8,'upper':True,'amount':1},
+            {'name':'sqshrun','lane':4,'scalar':True,'amount':16},
+            {'name':'sqrshrun','lane':2,'upper':True,'amount':1}]
+    elif focus=='dot_round_products':
+        selections=[{'name':'sdot','bytes':16,'index':None},
+            {'name':'udot','bytes':8,'index':3},
+            {'name':'sqrdmlah','lane':2,'bytes':16,'index':None},
+            {'name':'sqrdmlsh','lane':4,'scalar':True,'index':3},
+            {'name':'sqrdmlah','lane':2,'bytes':8,'index':7}]
     else: return []
     representatives=[]
     for selection in selections:
@@ -1974,13 +2215,24 @@ def count_representative_native_paths(batch):
         for index in native_trace_representatives(batch):
             function=batch['functions'][index];operations=function['operations'];entry=batch['entries'][index]
             start=batch['instruction_offsets'][entry];end=batch['instruction_offsets'][entry+1]+1
-            patterns=(0,7) if batch['cohort'] in ('doubling_products','indexed_products') else (0,6) if operations[0]['immediate'] else (
-                register_shift_counts(operations[0]['lane']*8).index(-64),register_shift_counts(operations[0]['lane']*8).index(1))
+            if batch['cohort'] == 'narrowing_shifts':
+                patterns = (0, 9)
+            elif batch['cohort'] == 'dot_round_products':
+                patterns = (6, 7, 9)
+            elif batch['cohort'] in ('doubling_products', 'indexed_products'):
+                patterns = (0, 7)
+            elif operations[0]['immediate']:
+                patterns = (0, 6)
+            else:
+                counts = register_shift_counts(operations[0]['lane'] * 8)
+                patterns = (counts.index(-64), counts.index(1))
             native=ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+start)
             for pattern in patterns:
                 initial=State();seed_extended_state(initial,index*16+pattern);initial.nzcv=0xf0000000
                 if batch['cohort']=='doubling_products': seed_doubling_products(initial,operations,pattern,0)
                 elif batch['cohort']=='indexed_products': seed_indexed_products(initial,operations,pattern,0)
+                elif batch['cohort']=='narrowing_shifts': seed_narrowing_shifts(initial,operations,pattern,0)
+                elif batch['cohort']=='dot_round_products': seed_dot_round_products(initial,operations,pattern,0)
                 else: register_shift_seed(initial,operations,pattern,0)
                 mathematical=REGISTER_COHORTS[batch['cohort']][1](operations,initial)
                 actual=State.from_buffer_copy(initial);native(ctypes.byref(actual))
@@ -1999,19 +2251,9 @@ def count_representative_native_paths(batch):
 
 
 def retain_native_binary_evidence(batch,accounting,dynamic):
-    manifest_data=(json.dumps(batch['manifest'],sort_keys=True,indent=2)+'\n').encode()
-    key=digest(batch['source']+batch['native']+manifest_data+Path(__file__).read_bytes())
-    directory=ROOT/'.stela/native-evidence'/f"simd-{batch['cohort']}"/key
-    directory.mkdir(parents=True,exist_ok=True)
-    files={'source.arm64':batch['source'],'native.bin':batch['native'],'manifest.json':manifest_data,
-        'accounting.json':(json.dumps({'static':accounting,'dynamic':dynamic},indent=2)+'\n').encode()}
-    receipts={}
-    for name,data in files.items():
-        path=directory/name
-        if path.exists() and path.read_bytes()!=data: raise AssertionError(f'Immutable native evidence changed: {path}')
-        if not path.exists(): path.write_bytes(data)
-        receipts[name]={'path':str(path.relative_to(ROOT)),'sha256':digest(data),'bytes':len(data)}
-    return receipts
+    return retain_native_evidence(
+        f"simd-{batch['cohort']}", batch['source'], batch['native'], batch['manifest'],
+        {'static': accounting, 'dynamic': dynamic}, Path(__file__).read_bytes(), root=ROOT)
 
 
 
@@ -2055,6 +2297,11 @@ def run_register_cohort(cli, focus):
                 if '+ssse3' in target_id: expected.add('pmulhrsw')
                 if '+sse4.1' in target_id: expected.update(('pmuldq','pmulld'))
                 if '+pclmulqdq' in target_id: expected.add('pclmulqdq')
+            elif focus=='narrowing_shifts':
+                if '+sse4.1' in target_id: expected.add('packusdw')
+                if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            elif focus=='dot_round_products':
+                if '+sse4.1' in target_id: expected.add('pmuldq')
             elif focus=='floating_bits' and '+sse4.2' in target_id: expected.add('pcmpgtq')
             elif focus=='halving':
                 if '+ssse3' in target_id: expected.add('pmaddubsw')
@@ -2070,11 +2317,22 @@ def run_register_cohort(cli, focus):
         'state_corpus_sha256':baseline['state_corpus_sha256'],'programs':len(functions),
         'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
         'harness_source_sha256':harness_hash,'shared_runner_sha256':digest((ROOT/'dev/differential.py').read_bytes()),
+        'shared_sources_sha256':{name:digest((ROOT/name).read_bytes())
+            for name in ('dev/differential.py','dev/evidence.py')},
         'corpus_sha256':digest(batch['source']),'compilation':baseline['compilation'],'cpu_profiles':profiles,
-        'original_cpu_model':('QEMU10 max with AFP/FP16 plus classified Unicorn MAX baseline' if focus=='floating_bits' else 'MAX (FP16 enabled)' if focus=='immediates' else 'default'),
+        'original_cpu_model':('QEMU10 max with AFP/FP16 plus classified Unicorn MAX baseline' if focus=='floating_bits' else 'MAX (FP16 enabled)' if focus=='immediates' else 'MAX (DotProd and RDM enabled)' if focus=='dot_round_products' else 'default'),
         'total_profile_comparisons':sum(p['three_way_register_state_comparisons'] for p in profiles.values()),
         'verification_wall_seconds':time.monotonic()-started,
         'limits':f'Focused {focus} SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
+    if focus in ('narrowing_shifts','dot_round_products'):
+        report['architectural_state_bytes']=ctypes.sizeof(State)
+        report['original_oracle_limits']=(
+            'Original A64 words execute unmodified under Unicorn with FP/AdvSIMD enabled. '
+            'The selected CPU model enables DotProd/RDM where needed. All 784 architectural '
+            'state bytes, including NZCV, FPCR, FPSR and every vector lane, compare against '
+            'independent unbounded-integer math and actual emitted x86 execution. '
+            'This is emulator conformance evidence; unavailable features, disabled FP access, '
+            'FP traps and hardware-specific exception delivery remain outside this cohort.')
     write_evidence(ROOT/f'.stela/simd-{focus}-differential-report.json',report)
     print(json.dumps(report,indent=2))
 

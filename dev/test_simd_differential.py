@@ -12,6 +12,98 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_narrowing_shift_encodings_cover_all_immediates_and_allocated_shapes(self):
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        operations = [op for function in suite.narrowing_shift_programs() for op in function['operations']]
+        for operation in operations:
+            decoded = list(decoder.disasm(struct.pack('<I', operation['word']), 0))
+            self.assertEqual(len(decoded), 1, operation)
+            self.assertEqual(decoded[0].mnemonic.rstrip('2'), operation['name'], operation)
+            self.assertTrue(operation['scalar'] or operation['upper'] == decoded[0].mnemonic.endswith('2'))
+        for name in suite.NARROW_SHIFT_BASES:
+            for lane in (1, 2, 4):
+                for scalar, upper in ((False, False), (False, True), (True, False)):
+                    subset = [op for op in operations if (op['name'], op['output_lane'], op['scalar'], op['upper']) == (name, lane, scalar, upper)]
+                    self.assertEqual({op['amount'] for op in subset}, set(range(1, lane * 8 + 1)))
+                    self.assertEqual({op['d'] for op in subset}, set(range(32)))
+                    self.assertTrue(any(op['d'] == op['n'] == 31 for op in subset))
+
+    def test_narrowing_rounding_carry_saturation_and_high_half_preservation(self):
+        initial = State()
+        initial.fpsr = 0x1f
+        initial.v[0][:] = [0x0123456789abcdef, suite.MASK]
+        initial.v[1][:] = [suite.MASK, suite.MASK]
+        operation = next(function['operations'][0] for function in suite.narrowing_shift_programs()
+                         if len(function['operations']) == 1 and all(function['operations'][0].get(key) == value
+                         for key, value in {'name': 'uqrshrn', 'output_lane': 4, 'amount': 32, 'upper': True, 'd': 0}.items()))
+        observed = suite.narrowing_shift_mathematical([operation], initial)
+        self.assertEqual(observed['v'][0], [0x0123456789abcdef, suite.MASK])
+        self.assertEqual(observed['fpsr'], suite.FPSR_QC | 0x1f)
+        operation = {**operation, 'scalar': True, 'upper': False, 'bytes': 4}
+        initial.v[1][:] = [0, suite.MASK]
+        self.assertEqual(suite.narrowing_shift_mathematical([operation], initial)['v'][0], [0, 0])
+        self.assertEqual(suite.narrowing_shift_mathematical([operation], initial)['fpsr'], 0x1f)
+        initial.fpsr |= suite.FPSR_QC
+        self.assertEqual(suite.narrowing_shift_mathematical([operation], initial)['fpsr'], initial.fpsr)
+
+    def test_dot_round_encodings_cover_indices_registers_and_scalar_shapes(self):
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        operations = [op for function in suite.dot_round_product_programs() for op in function['operations']]
+        for operation in operations:
+            decoded = list(decoder.disasm(struct.pack('<I', operation['word']), 0))
+            self.assertEqual(len(decoded), 1, operation)
+            self.assertEqual(decoded[0].mnemonic, operation['name'], operation)
+            if operation['index'] is not None:
+                self.assertIn(f"[{operation['index']}]", decoded[0].op_str)
+                if operation['lane'] == 2:
+                    self.assertLess(operation['m'], 16)
+        for name in ('sqrdmlah', 'sqrdmlsh'):
+            for lane in (2, 4):
+                subset = [op for op in operations if op['name'] == name and op['lane'] == lane]
+                self.assertEqual({op['index'] for op in subset if op['index'] is not None}, set(range(16 // lane)))
+                self.assertEqual({op['scalar'] for op in subset}, {False, True})
+                self.assertEqual({op['d'] for op in subset}, set(range(32)))
+        for name in ('sdot', 'udot'):
+            subset = [op for op in operations if op['name'] == name]
+            self.assertEqual({op['index'] for op in subset}, {None, 0, 1, 2, 3})
+            self.assertEqual({op['m'] for op in subset}, set(range(32)))
+
+    def test_rounding_doubling_accumulate_is_fused_and_qc_tracks_only_final_saturation(self):
+        for lane in (2, 4):
+            bits = lane * 8
+            minimum, mask = 1 << (bits - 1), (1 << bits) - 1
+            initial = State()
+            initial.fpsr = 0x1f
+            initial.v[0][:] = [mask, suite.MASK]
+            initial.v[1][:] = [minimum, suite.MASK]
+            initial.v[2][:] = [minimum, suite.MASK]
+            operation = {'name': 'sqrdmlah', 'd': 0, 'n': 1, 'm': 2, 'lane': lane,
+                         'output_lane': lane, 'bytes': lane, 'index': None}
+            observed = suite.dot_round_product_mathematical([operation], initial)
+            self.assertEqual(observed['v'][0], [minimum - 1, 0])
+            self.assertEqual(observed['fpsr'], 0x1f)
+            initial.v[0][:] = [0, suite.MASK]
+            self.assertEqual(suite.dot_round_product_mathematical([operation], initial)['fpsr'], 0x1f | suite.FPSR_QC)
+            initial.v[1][:] = [1, suite.MASK]
+            initial.v[2][:] = [1 << (bits - 2), suite.MASK]
+            self.assertEqual(suite.dot_round_product_mathematical([operation], initial)['v'][0], [1, 0])
+            self.assertEqual(suite.dot_round_product_mathematical([{**operation, 'name': 'sqrdmlsh'}], initial)['v'][0], [0, 0])
+
+    def test_dot_math_wraps_accumulation_and_uses_selected_four_byte_group(self):
+        initial = State()
+        initial.fpsr = suite.FPSR_QC | 0x1f
+        initial.v[0][:] = [suite.MASK, suite.MASK]
+        initial.v[1][:] = [suite.MASK, suite.MASK]
+        initial.v[2][:] = [0, 0xffffffff00000000]
+        operation = {'name': 'udot', 'd': 0, 'n': 1, 'm': 2, 'lane': 1,
+                     'output_lane': 4, 'bytes': 8, 'index': 3}
+        observed = suite.dot_round_product_mathematical([operation], initial)
+        lane = 4 * 255 * 255 - 1
+        self.assertEqual(observed['v'][0], [lane | (lane << 32), 0])
+        self.assertEqual(observed['fpsr'], initial.fpsr)
+        operation['name'] = 'sdot'
+        self.assertEqual(suite.dot_round_product_mathematical([operation], initial)['v'][0], [3 | (3 << 32), 0])
+
     def test_floating_sign_oracle_preserves_nan_payload_and_destination_merge(self):
         for lane in (2,4,8):
             bits=lane*8;fraction=bits-{2:5,4:8,8:11}[lane]-1

@@ -7,6 +7,12 @@ pub enum Accumulate {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Dot {
+        signed: bool,
+    },
+    RoundedDoublingAccumulate {
+        subtract: bool,
+    },
     Polynomial {
         widen: bool,
     },
@@ -96,6 +102,9 @@ encodings! {
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = decode_dot(word) {
+        return Some(decoded);
+    }
     if let Some(decoded) = decode_indexed_product(word) {
         return Some(decoded);
     }
@@ -223,6 +232,8 @@ enum DoublingEncoding {
     MulLong,
     AddLong,
     SubLong,
+    RoundAddHigh,
+    RoundSubHigh,
 }
 impl DoublingEncoding {
     const ALL: &'static [Self] = &[
@@ -231,14 +242,28 @@ impl DoublingEncoding {
         Self::MulLong,
         Self::AddLong,
         Self::SubLong,
+        Self::RoundAddHigh,
+        Self::RoundSubHigh,
     ];
     fn facts(self) -> (u32, u32, Kind) {
+        match self {
+            Self::RoundAddHigh | Self::RoundSubHigh => {
+                let subtract = matches!(self, Self::RoundSubHigh);
+                return (
+                    if subtract { 0x2e008c00 } else { 0x2e008400 },
+                    if subtract { 0x2f00f000 } else { 0x2f00d000 },
+                    Kind::RoundedDoublingAccumulate { subtract },
+                );
+            }
+            _ => {}
+        }
         let (register, indexed, high, rounding, accumulate) = match self {
             Self::MulHigh => (0x0e20b400, 0x0f00c000, true, false, NoAccumulate),
             Self::RoundMulHigh => (0x2e20b400, 0x0f00d000, true, true, NoAccumulate),
             Self::MulLong => (0x0e20d000, 0x0f00b000, false, false, NoAccumulate),
             Self::AddLong => (0x0e209000, 0x0f003000, false, false, Add),
             Self::SubLong => (0x0e20b000, 0x0f007000, false, false, Subtract),
+            Self::RoundAddHigh | Self::RoundSubHigh => unreachable!(),
         };
         (
             register,
@@ -250,6 +275,48 @@ impl DoublingEncoding {
             },
         )
     }
+}
+
+#[derive(Clone, Copy)]
+enum DotEncoding {
+    Signed,
+    Unsigned,
+}
+impl DotEncoding {
+    const ALL: &'static [Self] = &[Self::Signed, Self::Unsigned];
+    fn facts(self) -> (u32, u32, bool) {
+        match self {
+            Self::Signed => (0x0e009400, 0x0f00e000, true),
+            Self::Unsigned => (0x2e009400, 0x2f00e000, false),
+        }
+    }
+}
+
+#[allow(clippy::result_unit_err)]
+fn decode_dot(word: u32) -> Option<Result<Operand, ()>> {
+    const REGISTER_MASK: u32 = 0xbf20fc00;
+    const INDEXED_MASK: u32 = 0xbf00f400;
+    const DWORD_SIZE: u32 = 2;
+    let (_, indexed, signed) = DotEncoding::ALL
+        .iter()
+        .map(|encoding| encoding.facts())
+        .find(|(register, indexed, _)| {
+            word & REGISTER_MASK == *register || word & INDEXED_MASK == *indexed
+        })?;
+    if (word >> 22) & 3 != DWORD_SIZE {
+        return Some(Err(()));
+    }
+    Some(Ok(Operand {
+        kind: Kind::Dot { signed },
+        destination: (word & 31) as u8,
+        left: ((word >> 5) & 31) as u8,
+        right: ((word >> 16) & 31) as u8,
+        lane_bytes: 4,
+        bytes: if word & (1 << 30) != 0 { 16 } else { 8 },
+        upper: false,
+        index: (word & INDEXED_MASK == indexed)
+            .then_some((((word >> 11) & 1) << 1 | ((word >> 21) & 1)) as u8),
+    }))
 }
 #[allow(clippy::result_unit_err)]
 fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
@@ -315,6 +382,53 @@ fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dots_validate_dword_groups_full_index_registers_and_vector_only_forms() {
+        for encoding in DotEncoding::ALL {
+            let (register, indexed, signed) = encoding.facts();
+            for base in [register, indexed] {
+                for q in 0..2 {
+                    for size in 0..4 {
+                        for fields in 0..8 {
+                            let h = fields >> 2;
+                            let l = fields >> 1 & 1;
+                            let m = fields & 1;
+                            let word = base
+                                | (q << 30)
+                                | (size << 22)
+                                | (m << 20)
+                                | (15 << 16)
+                                | (31 << 5)
+                                | 31
+                                | if base == indexed {
+                                    (h << 11) | (l << 21)
+                                } else {
+                                    0
+                                };
+                            let decoded = decode(word).unwrap();
+                            if size != 2 {
+                                assert!(decoded.is_err());
+                                continue;
+                            }
+                            let operand = decoded.unwrap();
+                            assert_eq!(operand.kind, Kind::Dot { signed });
+                            assert_eq!((operand.destination, operand.left), (31, 31));
+                            assert_eq!(operand.right, 15 | (m << 4) as u8);
+                            assert_eq!(operand.lane_bytes, 4);
+                            assert_eq!(operand.bytes, if q != 0 { 16 } else { 8 });
+                            assert_eq!(
+                                operand.index,
+                                (base == indexed).then_some((h << 1 | l) as u8)
+                            );
+                            assert!(!operand.upper);
+                            assert!(decode(word | (1 << 28)).is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn ordinary_indexed_products_validate_every_index_and_register_role() {
         for encoding in IndexedProductEncoding::ALL {
@@ -383,11 +497,9 @@ mod tests {
                                 | (u32::from(q) << 30)
                                 | (size << 22)
                                 | (31 << 16)
-                                | (1 << 11)
+                                | if element { 1 << 11 } else { 0 }
                                 | (31 << 5)
                                 | 31;
-                            // H is allocated only in indexed forms.
-                            let word = if element { word } else { word & !(1 << 11) };
                             let decoded = decode(word).unwrap();
                             if !matches!(size, 1 | 2) || scalar && !q {
                                 assert!(decoded.is_err());

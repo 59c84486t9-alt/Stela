@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check native fault PC mapping, unchanged state/writeback and protected RAM.
+"""Check native fault PC mapping, state/writeback and architectural RAM effects.
 
 Data-abort cases compare original ARM execution in Unicorn. SP alignment cases
 check the compiler's explicitly enabled alignment policy against Arm's specified
@@ -25,10 +25,11 @@ memory_suite = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(memory_suite)
 
 
-def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly=False):
+def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly=False, guest_base=BASE):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-    machine.mem_map(BASE, 0x10000)
-    machine.mem_write(BASE, source)
+    code_page = guest_base // 4096 * 4096
+    machine.mem_map(code_page, 0x10000)
+    machine.mem_write(guest_base, source)
     observed_bytes = page_size * (2 if second_readonly else 1)
     machine.mem_map(ram_address, observed_bytes)
     machine.mem_write(ram_address, b"\xa5" * observed_bytes)
@@ -43,7 +44,7 @@ def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly
         return False
     machine.hook_add(UC_HOOK_MEM_INVALID, fault)
     try:
-        machine.emu_start(BASE, BASE + len(source), count=20)
+        machine.emu_start(guest_base, guest_base + len(source), count=20)
     except UcError:
         if not faults:
             raise
@@ -70,6 +71,13 @@ def cases():
         # A store must honor a mapped page's write protection, not just bounds.
         result.append({"size": size, "opcode": 0, "rn": 0, "rt": 1,
                        "offset": 16, "mode": "post", "protection": "readonly"})
+        for tail in (1, 2, 4):
+            if tail >= 1 << size:
+                continue
+            for rt in (1, 31):
+                result.append({"size": size, "opcode": 0, "rn": 0, "rt": rt,
+                               "offset": 0, "mode": "unsigned", "protection": "crossing",
+                               "crossing_bytes": tail})
     result.append({"size": 3, "opcode": 1, "rn": 0, "rt": 1,
                    "offset": 0, "mode": "unsigned", "protection": "crossing"})
     for opcode in (0, 1):
@@ -101,7 +109,10 @@ def main():
                 raise AssertionError("Compiler changed during fault suite")
             compiler = manifest["compiler_source_sha256"]
             pre_offset = case["offset"] if case["mode"] in ("pre", "unscaled") else 0
-            data = subprocess.check_output([str(observer), str(output / "native.bin"), case["protection"], str(case["rn"]), str(pre_offset)], timeout=10)
+            command = [str(observer), str(output / "native.bin"), case["protection"], str(case["rn"]), str(pre_offset)]
+            if "crossing_bytes" in case:
+                command.append(str(case["crossing_bytes"]))
+            data = subprocess.check_output(command, timeout=10)
             (code_address, ram_address, page_size), initial, (number, native_pc, fault_address), final, ram = parse_fault_record(data)
             if len(ram) != page_size:
                 raise AssertionError("Truncated fault observer output")
@@ -146,7 +157,7 @@ def main():
               "shared_runner_sha256": hashlib.sha256((ROOT / "dev/differential.py").read_bytes()).hexdigest(),
               "observer_source_sha256": hashlib.sha256(observer_source.read_bytes()).hexdigest(),
               "observer_executable_sha256": observer_hash, "results": reports,
-              "limits": "Host signal boundary, state/writeback and guest-PC mapping only. SP alignment checked against the declared enabled policy; Unicorn does not enforce it here. No guest syndrome/exception delivery, tagged pointers, MMIO or concurrency."}
+              "limits": "Host signal boundary, full state/writeback, mapped-prefix store effects and guest-PC mapping only. SP alignment checked against the declared enabled policy; Unicorn does not enforce it here. No guest syndrome/exception delivery, tagged pointers, MMIO or concurrency."}
     write_evidence(ROOT / ".stela/memory-faults-report.json", report)
     print(json.dumps({key: value for key, value in report.items() if key != "results"}, indent=2))
 

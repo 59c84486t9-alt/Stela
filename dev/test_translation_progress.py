@@ -390,7 +390,7 @@ class BlockProgressTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
-        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 543)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 585)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 18)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
@@ -403,7 +403,7 @@ class BlockProgressTests(unittest.TestCase):
                           'traps': {'native_comparisons': 320,
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
-        self.assertIn('| Leaf-profile instruction forms implemented | 543 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 585 |', text)
         self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('| Block-profile forms partially implemented | 2 |', text)

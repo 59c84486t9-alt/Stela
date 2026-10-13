@@ -12,6 +12,22 @@ pub enum IndexExtend {
     Sxtx,
 }
 
+impl IndexExtend {
+    pub(crate) const fn decode(option: u32) -> Option<Self> {
+        const UXTW: u32 = 0b010;
+        const LSL: u32 = 0b011;
+        const SXTW: u32 = 0b110;
+        const SXTX: u32 = 0b111;
+        match option {
+            UXTW => Some(Self::Uxtw),
+            LSL => Some(Self::Lsl),
+            SXTW => Some(Self::Sxtw),
+            SXTX => Some(Self::Sxtx),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Operand {
     pub transfer: MemoryTransfer,
@@ -47,12 +63,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         },
         _ => return Some(Err(())), // PRFM and reserved signed sizes
     };
-    let extend = match (word >> 13) & 7 {
-        2 => IndexExtend::Uxtw,
-        3 => IndexExtend::Lsl,
-        6 => IndexExtend::Sxtw,
-        7 => IndexExtend::Sxtx,
-        _ => return Some(Err(())), // sub-word index extensions are undefined
+    let Some(extend) = IndexExtend::decode((word >> 13) & 7) else {
+        return Some(Err(())); // sub-word index extensions are undefined
     };
     Some(Ok(Operand {
         transfer,

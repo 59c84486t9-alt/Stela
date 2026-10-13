@@ -1,10 +1,18 @@
 //! SSE2 packed immediate and native per-lane register shifts, including width
 //! changes. Host flags/MXCSR are never substituted for guest NZCV/FP status.
-use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle, vector_offset};
+use super::{
+    Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
+};
 use crate::{
+    TargetCpu,
     aarch64::simd::shifts::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+
+const BITS_PER_BYTE: u8 = 8;
+const VECTOR_BYTES: u8 = 16;
+const LOW_DWORDS_OF_QWORDS: u8 = 0x88;
+const HIGH_DWORDS_OF_QWORDS: u8 = 0xdd;
 
 fn lane_mask(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, value: u64) {
     let bytes = value.to_le_bytes();
@@ -111,6 +119,188 @@ fn narrow(
     rounded_right(code, lane_bytes * 2, amount, false, round);
     pack_truncated(code, lane_bytes, upper, destination);
 }
+
+/// Shift first, then clamp. Rounding is computed as shifted value plus the
+/// discarded high bit, so signed overflow and unsigned carry are never lost.
+fn saturating_narrow(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    signed_source: bool,
+    unsigned_result: bool,
+    round: bool,
+    upper: bool,
+    target: TargetCpu,
+) {
+    let lane = operand.lane_bytes;
+    let wide = lane * 2;
+    let may_saturate =
+        round || operand.amount != lane * BITS_PER_BYTE || signed_source == unsigned_result;
+    if !may_saturate {
+        // Both signednesses extract the source's high half as bits. Arithmetic
+        // H/S shifts put that half in signed pack range; D needs only a shuffle.
+        // QC stays untouched, including poisoned inactive scalar lanes.
+        match lane {
+            1 | 2 => {
+                right_shift(code, 0, wide, operand.amount, true);
+                packed(
+                    code,
+                    if lane == 1 {
+                        Host::PackSignedWordToByte
+                    } else {
+                        Host::PackSignedDwordToWord
+                    },
+                    0,
+                    0,
+                );
+            }
+            4 => shuffle(code, 0, 0, HIGH_DWORDS_OF_QWORDS),
+            _ => unreachable!("allocated in-range narrowing width"),
+        }
+        packed(code, Host::MoveAligned, 6, 0);
+    } else {
+        rounded_right(code, wide, operand.amount, signed_source, round);
+        if lane < 4 {
+            saturating_narrow_pack(code, lane, signed_source, unsigned_result, target);
+        } else {
+            saturating_narrow_qword(code, unsigned_result, signed_source, target);
+        }
+    }
+    let scalar = operand.bytes == lane;
+    if may_saturate {
+        super::saturating::publish_qc(code, if scalar { wide } else { VECTOR_BYTES });
+    }
+    if upper {
+        read_vector(code, operand.destination, 1);
+        packed(code, Host::UnpackLowQword, 1, 6);
+        commit(code, operand.destination, 1);
+    } else {
+        if scalar {
+            constant(
+                code,
+                1,
+                std::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
+            );
+            packed(code, Host::And, 6, 1);
+        } else {
+            packed(code, Host::MoveQword, 6, 6);
+        }
+        commit(code, operand.destination, 6);
+    }
+}
+
+/// Native packs clamp H/S sources. Reconstructing the result and comparing it
+/// with the shifted source derives QC without reimplementing the pack bounds.
+/// XMM6 retains the packed result and XMM4 receives the wide saturation mask.
+fn saturating_narrow_pack(
+    code: &mut Vec<u8>,
+    lane: u8,
+    signed_source: bool,
+    unsigned_result: bool,
+    target: TargetCpu,
+) {
+    let wide = lane * 2;
+    packed(code, Host::MoveAligned, 3, 0);
+    if !signed_source {
+        // Shift>=1 leaves only one possible negative signed representation:
+        // unsigned MAX rounded by one becomes exactly the wide sign bit.
+        // Change it to signed MAX before the signed-input host pack; both
+        // values saturate to the same bound. Compare against the original.
+        super::saturating::sign_mask(code, 4, 0, wide);
+        packed(code, Host::Xor, 0, 4);
+    }
+    match (unsigned_result, lane) {
+        (false, 1) => packed(code, Host::PackSignedWordToByte, 0, 0),
+        (true, 1) => packed(code, Host::PackUnsignedWordToByte, 0, 0),
+        (false, 2) => packed(code, Host::PackSignedDwordToWord, 0, 0),
+        (true, 2) if target >= TargetCpu::Sse41 => {
+            Host::PackUnsignedDwordToWord.register(code, 0, 0, target);
+        }
+        (true, 2) => {
+            // Translate [0,65535] into signed halfword bounds. The shifted
+            // source range keeps this subtraction within signed dword range.
+            let bias = 1u64 << (lane * BITS_PER_BYTE - 1);
+            lane_mask(code, 1, wide, bias);
+            packed(code, Host::SubDword, 0, 1);
+            packed(code, Host::PackSignedDwordToWord, 0, 0);
+            lane_mask(code, 1, lane, bias);
+            packed(code, Host::Xor, 0, 1);
+        }
+        _ => unreachable!("allocated native narrowing pack"),
+    }
+    packed(code, Host::MoveAligned, 6, 0);
+    if unsigned_result {
+        packed(code, Host::Xor, 1, 1);
+    } else {
+        super::saturating::sign_mask(code, 1, 0, lane);
+    }
+    packed(
+        code,
+        if lane == 1 {
+            Host::UnpackLowByte
+        } else {
+            Host::UnpackLowWord
+        },
+        0,
+        1,
+    );
+    packed(code, Host::MoveAligned, 4, 0);
+    packed(
+        code,
+        if wide == 2 {
+            Host::EqualWord
+        } else {
+            Host::EqualDword
+        },
+        4,
+        3,
+    );
+    packed(code, Host::EqualDword, 1, 1);
+    packed(code, Host::Xor, 4, 1);
+}
+
+/// SSE2 has no saturating qword pack. Compare both bounds before selecting
+/// clamped qwords; the checked SSE4.2 comparison replaces its baseline recipe.
+fn saturating_narrow_qword(
+    code: &mut Vec<u8>,
+    unsigned_result: bool,
+    signed_source: bool,
+    target: TargetCpu,
+) {
+    const DESTINATION_BYTES: u8 = 4;
+    const SOURCE_BYTES: u8 = DESTINATION_BYTES * 2;
+    let high = if unsigned_result {
+        u64::from(u32::MAX)
+    } else {
+        i32::MAX as u64
+    };
+    let low = if unsigned_result {
+        0
+    } else {
+        i64::from(i32::MIN) as u64
+    };
+    packed(code, Host::MoveAligned, 5, 0);
+    lane_mask(code, 1, SOURCE_BYTES, high);
+    greater(code, SOURCE_BYTES, !signed_source, target);
+    packed(code, Host::MoveAligned, 6, 0);
+    if signed_source {
+        lane_mask(code, 0, SOURCE_BYTES, low);
+        packed(code, Host::MoveAligned, 1, 5);
+        greater(code, SOURCE_BYTES, false, target);
+    } else {
+        packed(code, Host::Xor, 0, 0);
+    }
+    lane_mask(code, 1, SOURCE_BYTES, low);
+    packed(code, Host::Xor, 1, 5);
+    packed(code, Host::And, 1, 0);
+    packed(code, Host::Xor, 5, 1);
+    lane_mask(code, 1, SOURCE_BYTES, high);
+    packed(code, Host::Xor, 1, 5);
+    packed(code, Host::And, 1, 6);
+    packed(code, Host::Xor, 5, 1);
+    packed(code, Host::MoveAligned, 4, 0);
+    packed(code, Host::Or, 4, 6);
+    shuffle(code, 6, 5, LOW_DWORDS_OF_QWORDS);
+}
 pub(super) fn pack_truncated(code: &mut Vec<u8>, lane_bytes: u8, upper: bool, destination: u8) {
     match lane_bytes {
         1 => {
@@ -169,7 +359,7 @@ fn widen(code: &mut Vec<u8>, lane_bytes: u8, amount: u8, signed: bool, upper: bo
     logical_shift(code, 0, lane_bytes * 2, amount, true);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
         destination,
@@ -232,6 +422,23 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         Kind::Register { .. } | Kind::SaturatingImmediate { .. } => unreachable!(),
         Kind::Narrow { round, upper } => {
             narrow(code, lane_bytes, amount, round, upper, destination);
+            return;
+        }
+        Kind::SaturatingNarrow {
+            signed_source,
+            unsigned_result,
+            round,
+            upper,
+        } => {
+            saturating_narrow(
+                code,
+                operand,
+                signed_source,
+                unsigned_result,
+                round,
+                upper,
+                target,
+            );
             return;
         }
         Kind::Widen { signed, upper } => widen(code, lane_bytes, amount, signed, upper),
@@ -596,6 +803,86 @@ fn register_shift(
 mod tests {
     use super::*;
 
+    #[test]
+    fn full_width_nonround_narrowing_omits_qc_only_when_bounds_prove_it() {
+        for lane in [1, 2, 4] {
+            for scalar in [false, true] {
+                for upper in [false, true] {
+                    if scalar && upper {
+                        continue;
+                    }
+                    for (signed_source, unsigned_result) in
+                        [(true, false), (false, true), (true, true)]
+                    {
+                        for round in [false, true] {
+                            let operand = Operand {
+                                kind: Kind::SaturatingNarrow {
+                                    signed_source,
+                                    unsigned_result,
+                                    round,
+                                    upper,
+                                },
+                                destination: 31,
+                                source: 31,
+                                lane_bytes: lane,
+                                amount: lane * BITS_PER_BYTE,
+                                bytes: if scalar { lane } else { VECTOR_BYTES },
+                            };
+                            let mut code = vec![];
+                            emit(&mut code, &operand, TargetCpu::Baseline);
+                            let mut qc = vec![];
+                            Host::ByteSignMask.register(&mut qc, 1, 4, TargetCpu::Baseline);
+                            assert_eq!(
+                                code.windows(qc.len()).any(|w| w == qc),
+                                round || signed_source == unsigned_result
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saturating_narrow_packs_keep_checked_features_and_active_qc_masks() {
+        for lane in [1, 2, 4] {
+            for scalar in [false, true] {
+                for target in [TargetCpu::Baseline, TargetCpu::Sse41, TargetCpu::Sse42] {
+                    let operand = Operand {
+                        kind: Kind::SaturatingNarrow {
+                            signed_source: false,
+                            unsigned_result: true,
+                            round: true,
+                            upper: !scalar,
+                        },
+                        destination: 31,
+                        source: 31,
+                        lane_bytes: lane,
+                        amount: 1,
+                        bytes: if scalar { lane } else { VECTOR_BYTES },
+                    };
+                    let mut code = vec![];
+                    emit(&mut code, &operand, target);
+                    let mut checked_pack = vec![];
+                    Host::PackUnsignedDwordToWord.register(
+                        &mut checked_pack,
+                        0,
+                        0,
+                        TargetCpu::Sse41,
+                    );
+                    assert_eq!(
+                        code.windows(checked_pack.len()).any(|w| w == checked_pack),
+                        lane == 2 && target >= TargetCpu::Sse41,
+                    );
+                    let active_bytes = if scalar { lane * 2 } else { VECTOR_BYTES };
+                    let mut active_mask = vec![0x81, 0xe1]; // AND ECX, active mask
+                    active_mask.extend(((1u32 << active_bytes) - 1).to_le_bytes());
+                    assert!(code.windows(active_mask.len()).any(|w| w == active_mask));
+                }
+            }
+        }
+    }
+
     fn immediate(lane_bytes: u8, bytes: u8, amount: u8, signed: bool) -> Operand {
         Operand {
             kind: Kind::SaturatingImmediate {
@@ -619,7 +906,11 @@ mod tests {
                 }
                 for signed in [false, true] {
                     let mut code = vec![];
-                    emit(&mut code, &immediate(lane, bytes, 0, signed));
+                    emit(
+                        &mut code,
+                        &immediate(lane, bytes, 0, signed),
+                        TargetCpu::Baseline,
+                    );
                     // Load, optional upper clearing, store. No FPSR write and
                     // no empty source-map interval for an in-place identity.
                     assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
@@ -638,7 +929,11 @@ mod tests {
         ] {
             for bytes in [8, 16] {
                 let mut code = vec![];
-                emit(&mut code, &immediate(lane, bytes, 1, signed));
+                emit(
+                    &mut code,
+                    &immediate(lane, bytes, 1, signed),
+                    TargetCpu::Baseline,
+                );
                 let mut saturating_add = vec![];
                 packed(&mut saturating_add, opcode, 0, 0);
                 assert!(
@@ -681,7 +976,7 @@ mod tests {
                         operand.amount = lane * 8;
                     }
                     let mut code = vec![];
-                    emit(&mut code, &operand);
+                    emit(&mut code, &operand, TargetCpu::Baseline);
                     assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
                 }
             }

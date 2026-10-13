@@ -5,6 +5,7 @@ pub mod conditional_select;
 pub mod crc;
 pub mod flags;
 pub mod integer_math;
+pub mod literal;
 pub mod pc_relative;
 pub mod register_offset;
 pub mod simd;
@@ -79,6 +80,7 @@ pub enum Operation {
     Crc(crc::Operand),
     Flags(flags::Operand),
     IntegerMath(integer_math::Operand),
+    Literal(literal::Operand),
     MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
         transfer: MemoryTransfer,
@@ -278,6 +280,8 @@ impl Lifter for Decoder {
             Operation::Flags(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = literal::decode(pc, word) {
+            Operation::Literal(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::decode(word) {
             Operation::Simd(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = register_offset::decode(word) {

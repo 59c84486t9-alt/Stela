@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v25",
+  "registry_version": "apple-silicon-reviewed-forms-v26",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -394,6 +394,91 @@
         "shared_block_dispatch.cold_compiles": 7,
         "shared_block_dispatch.disk_cache_hits": 105
       }
+    },
+    "simd_narrowing_shifts": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-narrowing_shifts-differential-report.json",
+      "kind": "simd_narrowing_shifts_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py"
+      ],
+      "required_measurements": {
+        "programs": 3186,
+        "three_way_register_state_comparisons": 76464,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 76464,
+        "cpu_profiles.baseline.compilation.functions": 3186,
+        "architectural_state_bytes": 784
+      },
+      "required_positive_counts": [
+        "three_way_register_state_comparisons",
+        "total_profile_comparisons"
+      ],
+      "require_current_executable": true
+    },
+    "simd_dot_round_products": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-dot_round_products-differential-report.json",
+      "kind": "simd_dot_round_products_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py"
+      ],
+      "required_measurements": {
+        "programs": 728,
+        "three_way_register_state_comparisons": 16016,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 16016,
+        "cpu_profiles.baseline.compilation.functions": 728,
+        "architectural_state_bytes": 784
+      },
+      "required_positive_counts": [
+        "three_way_register_state_comparisons",
+        "total_profile_comparisons"
+      ],
+      "require_current_executable": true
+    },
+    "simd_register_offset": {
+      "harness": "dev/register-offset-differential.py",
+      "report": ".stela/register-offset-simd-differential-report.json",
+      "kind": "register_offset_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/memory-faults.py",
+        "dev/native-memory-faults.c"
+      ],
+      "required_measurements": {
+        "programs": 520,
+        "state_and_memory_comparisons": 4160,
+        "faults.cases": 55
+      },
+      "required_positive_counts": [
+        "state_and_memory_comparisons"
+      ],
+      "require_current_executable": true
+    },
+    "literal_loads": {
+      "harness": "dev/pc-relative-differential.py",
+      "report": ".stela/literal-differential-report.json",
+      "kind": "literal_arm_math_native_x86",
+      "comparison_field": "three_way_state_and_memory_comparisons",
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/memory-faults.py",
+        "dev/native-memory-faults.c"
+      ],
+      "required_measurements": {
+        "programs": 168,
+        "three_way_state_and_memory_comparisons": 1008,
+        "native_block_exit_checks": 504,
+        "faults.cases": 30
+      },
+      "required_positive_counts": [
+        "three_way_state_and_memory_comparisons",
+        "native_block_exit_checks"
+      ],
+      "require_current_executable": true
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -5911,7 +5996,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -5952,7 +6038,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -5993,7 +6080,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6034,7 +6122,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6075,7 +6164,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6116,7 +6206,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6158,7 +6249,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/register_offset.rs",
-        "crates/stela-compiler/src/x86_64/register_offset.rs"
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6200,7 +6292,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/register_offset.rs",
-        "crates/stela-compiler/src/x86_64/register_offset.rs"
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6239,7 +6332,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6278,7 +6372,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6317,7 +6412,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6356,7 +6452,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6395,7 +6492,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6434,7 +6532,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6474,7 +6573,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/register_offset.rs",
-        "crates/stela-compiler/src/x86_64/register_offset.rs"
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6515,7 +6615,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6556,7 +6657,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6597,7 +6699,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6638,7 +6741,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/register_offset.rs",
-        "crates/stela-compiler/src/x86_64/register_offset.rs"
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6679,7 +6783,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6720,7 +6825,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6761,7 +6867,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6802,7 +6909,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/register_offset.rs",
-        "crates/stela-compiler/src/x86_64/register_offset.rs"
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6841,7 +6949,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6880,7 +6989,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6921,7 +7031,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -6962,7 +7073,8 @@
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "smoke_samples": [
         {
@@ -8894,7 +9006,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -8949,7 +9062,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9004,7 +9118,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9059,7 +9174,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9114,7 +9230,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9169,7 +9286,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9224,7 +9342,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9279,7 +9398,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9334,7 +9454,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9389,7 +9510,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9444,7 +9566,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9499,7 +9622,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9554,7 +9678,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9609,7 +9734,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9664,7 +9790,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9719,7 +9846,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9774,7 +9902,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9829,7 +9958,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9884,7 +10014,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -9939,7 +10070,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Canonical encoding and operands reviewed against the selected official June 2026 XML; current original ARM, independent byte/mask math and native x86 state/RAM comparisons pass. Fault checks cover the declared private-RAM policy; smoke checks emission only.",
       "scope": "Enabled FP/AdvSIMD, 32 V registers, scalar loads and D MOVI zero upper vector bits; private ordinary little-endian RAM, untagged/authenticated addresses, incoming SP alignment checks and post-success base writeback. Q transfers have no concurrent128-bitatomicity or full guest exception-delivery guarantee. Other vector arithmetic, FP arithmetic/control, SVE/SME, MMIO and full system memory semantics excluded.",
@@ -10543,7 +10675,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10598,7 +10731,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10653,7 +10787,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10708,7 +10843,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10763,7 +10899,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10818,7 +10955,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10873,7 +11011,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10928,7 +11067,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -10983,7 +11123,8 @@
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
       ],
       "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
       "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim.",
@@ -23709,6 +23850,1965 @@
       ],
       "review": "Pinned Arm 2026-06 FlagM/FlagM2 semantics, baseline x86 mapping review and actual emitted-binary accounting. Original ARM MAX, independent Boolean/rotate math and native full-state checks cover canonical forms, every RMIF immediate/mask, register roles, high-bit poison, all incoming NZCV and dependency chains. Real RET/block dispatch and persistent-cache reuse are checked. Unicorn rejects nonzero ignored CRm fields: those observations are classified separately from native/math checks and receive no direct-original credit.",
       "scope": "Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."
+    },
+    {
+      "id": "LDRSW_64_loadlit",
+      "mnemonic": "LDRSW",
+      "category": "base_integer_system",
+      "source_file": "ldrsw_lit.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x98000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldrsw_lit.xml",
+      "source_sha256": "bb88da4e37d3bc7bb23e7fa34fd54898f6684a2697df1699bf9e5c2217db7e59",
+      "docvars": {
+        "address-form": "literal",
+        "address-form-reg-type": "literal-64-reg",
+        "atomic-ops": "LDRSW-64-reg",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "LDRSW",
+        "offset-type": "off19s",
+        "reg-type": "64-reg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x98800000",
+          "expected_mnemonics": [
+            "ldrsw"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "LDR_32_loadlit",
+      "mnemonic": "LDR",
+      "category": "base_integer_system",
+      "source_file": "ldr_lit_gen.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x18000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_lit_gen.xml",
+      "source_sha256": "2e1e8920375ee53c23cb5fdf443f8c48145c89472cce45f8d4d6ac357ce804e5",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off19s",
+        "address-form-reg-type": "literal-32-reg",
+        "atomic-ops": "LDR-32-reg",
+        "reg-type": "32-reg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x18800000",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "LDR_64_loadlit",
+      "mnemonic": "LDR",
+      "category": "base_integer_system",
+      "source_file": "ldr_lit_gen.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x58000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_lit_gen.xml",
+      "source_sha256": "2e1e8920375ee53c23cb5fdf443f8c48145c89472cce45f8d4d6ac357ce804e5",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off19s",
+        "address-form-reg-type": "literal-64-reg",
+        "atomic-ops": "LDR-64-reg",
+        "reg-type": "64-reg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x58800000",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "LDR_BL_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe0ec00",
+      "encoding_value": "0x3c606800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-8-fsreg",
+        "reg-type": "8-fsreg",
+        "reg-type-and-use": "8-fsreg-shifted-reg",
+        "reguse": "shifted-reg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3c626801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_B_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c600800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-8-fsreg",
+        "reg-type": "8-fsreg",
+        "reg-type-and-use": "8-fsreg-ext-reg",
+        "reguse": "ext-reg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3c624801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_D_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc600800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-64-fsreg",
+        "reg-type": "64-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xfc624801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_D_loadlit",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_lit_fpsimd.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x5c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_lit_fpsimd.xml",
+      "source_sha256": "bbaef7c50434465e90ec5f145fd78a13bf6f156e8b3a8491e1ae3815c06547a2",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off19s",
+        "address-form-reg-type": "literal-64-fsreg",
+        "atomic-ops": "LDR-64-fsreg",
+        "reg-type": "64-fsreg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5c800000",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "LDR_H_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c600800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-16-fsreg",
+        "reg-type": "16-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7c624801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_Q_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3ce00800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-128-fsreg",
+        "reg-type": "128-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3ce24801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_Q_loadlit",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_lit_fpsimd.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x9c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_lit_fpsimd.xml",
+      "source_sha256": "bbaef7c50434465e90ec5f145fd78a13bf6f156e8b3a8491e1ae3815c06547a2",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off19s",
+        "address-form-reg-type": "literal-128-fsreg",
+        "atomic-ops": "LDR-128-fsreg",
+        "reg-type": "128-fsreg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x9c800000",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "LDR_S_ldst_regoff",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc600800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_reg_fpsimd.xml",
+      "source_sha256": "467a4bd31f03e42c8e58b943b42561d989e23807986c7b5d17001e6299325942",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off-reg",
+        "atomic-ops": "LDR-32-fsreg",
+        "reg-type": "32-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xbc624801",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "LDR_S_loadlit",
+      "mnemonic": "LDR",
+      "category": "fp_simd",
+      "source_file": "ldr_lit_fpsimd.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0x1c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldr_lit_fpsimd.xml",
+      "source_sha256": "bbaef7c50434465e90ec5f145fd78a13bf6f156e8b3a8491e1ae3815c06547a2",
+      "docvars": {
+        "address-form": "literal",
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "LDR",
+        "offset-type": "off19s",
+        "address-form-reg-type": "literal-32-fsreg",
+        "atomic-ops": "LDR-32-fsreg",
+        "reg-type": "32-fsreg"
+      },
+      "evidence_groups": [
+        "literal_loads"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/literal.rs",
+        "crates/stela-compiler/src/x86_64/literal.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1c800000",
+          "expected_mnemonics": [
+            "ldr"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned exact June 2026 canonical pages and shared X/V/Mem accessor semantics reviewed; historical March raw pins are retained with a separate source-correction receipt. Original ARM, independent PC-relative/value math and baseline native leaf/block execution compare full 784-byte state and 4 MiB RAM across signed displacement extrema, placements, dirty upper bits and XZR/V31. Native signals check destination preservation and original source-PC attribution. Actual emitted binaries/source maps and MOVD/MOVQ versus MOVSS/MOVSD candidate measurements are retained; fault ordering and architectural exception delivery remain limited.",
+      "scope": "Private ordinary little-endian RAM; FP/AdvSIMD enabled for S/D/Q. Signed imm19 scaled by four is added modulo 64 bits to this instruction's original PC. Integer W/X/LDRSW and SIMD S/D/Q loads use exact access widths; W clears upper X bits, LDRSW sign-extends 32 to 64, and S/D clear upper vector bits. XZR discards only the result after the access; V31 is ordinary data. Loads stage before destination commit, preserving full state on native access faults. No SP operand or SP alignment check. NZCV/FPCR/FPSR and RAM are preserved. Wrapping/unmappable addresses are mathematical/native fault evidence only; no guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or full process claim."
+    },
+    {
+      "id": "SDOT_asimdelem_D",
+      "mnemonic": "SDOT",
+      "category": "fp_simd",
+      "source_file": "sdot_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f00e000",
+      "features": [
+        {
+          "feature": "FEAT_DotProd",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_advsimd_elt.xml",
+      "source_sha256": "a09471fa1a6fab29d793a7e3c6a8bfcd16df76c562100d664c9d194e471da3be",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SDOT"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f82e020",
+          "expected_mnemonics": [
+            "sdot"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/DotProd, ordinary non-streaming execution. Signed/unsigned byte dot products accumulate groups of four products modulo 32 bits into each original destination lane, including vector and indexed forms and every allocated Q/index shape. V31 and all aliases read original operands. Q=0 clears upper vector bits. All NZCV/FPCR/FPSR and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SDOT_asimdsame2_D",
+      "mnemonic": "SDOT",
+      "category": "fp_simd",
+      "source_file": "sdot_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e009400",
+      "features": [
+        {
+          "feature": "FEAT_DotProd",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_advsimd_vec.xml",
+      "source_sha256": "6f87784b303ac43d6f5e11601520684ff581300aba7ef39086ad5a5b41d052e9",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SDOT"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e829420",
+          "expected_mnemonics": [
+            "sdot"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/DotProd, ordinary non-streaming execution. Signed/unsigned byte dot products accumulate groups of four products modulo 32 bits into each original destination lane, including vector and indexed forms and every allocated Q/index shape. V31 and all aliases read original operands. Q=0 clears upper vector bits. All NZCV/FPCR/FPSR and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLAH_asimdelem_R",
+      "mnemonic": "SQRDMLAH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlah_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f00d000",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlah_advsimd_elt.xml",
+      "source_sha256": "a1b3beb2ab72a033df0f031f664ff8b2fd073d02be778650f821a8aa628a45a4",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLAH",
+        "advsimd-reguse": "2reg-element"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f42d020",
+          "expected_mnemonics": [
+            "sqrdmlah"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLAH_asimdsame2_only",
+      "mnemonic": "SQRDMLAH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlah_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e008400",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlah_advsimd_vec.xml",
+      "source_sha256": "c4dd0d6dca0c21d9340f23e14651ae9d723febe4b0200613486fed1bc5e9f13e",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLAH",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e428420",
+          "expected_mnemonics": [
+            "sqrdmlah"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLAH_asisdelem_R",
+      "mnemonic": "SQRDMLAH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlah_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x7f00d000",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlah_advsimd_elt.xml",
+      "source_sha256": "a1b3beb2ab72a033df0f031f664ff8b2fd073d02be778650f821a8aa628a45a4",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLAH",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f42d020",
+          "expected_mnemonics": [
+            "sqrdmlah"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLAH_asisdsame2_only",
+      "mnemonic": "SQRDMLAH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlah_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e008400",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlah_advsimd_vec.xml",
+      "source_sha256": "c4dd0d6dca0c21d9340f23e14651ae9d723febe4b0200613486fed1bc5e9f13e",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLAH",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e428420",
+          "expected_mnemonics": [
+            "sqrdmlah"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLSH_asimdelem_R",
+      "mnemonic": "SQRDMLSH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlsh_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f00f000",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlsh_advsimd_elt.xml",
+      "source_sha256": "25808f6f01675d9f659a9c00e170cf01fbb0eef41a742fe9b07f683d164c9903",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLSH",
+        "advsimd-reguse": "2reg-element"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f42f020",
+          "expected_mnemonics": [
+            "sqrdmlsh"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLSH_asimdsame2_only",
+      "mnemonic": "SQRDMLSH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlsh_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e008c00",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlsh_advsimd_vec.xml",
+      "source_sha256": "fe59c689a3b2662f398bed81b974d108d8da47831e5f8fe5d052d5585bc9ea1a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLSH",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e428c20",
+          "expected_mnemonics": [
+            "sqrdmlsh"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLSH_asisdelem_R",
+      "mnemonic": "SQRDMLSH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlsh_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x7f00f000",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlsh_advsimd_elt.xml",
+      "source_sha256": "25808f6f01675d9f659a9c00e170cf01fbb0eef41a742fe9b07f683d164c9903",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLSH",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f42f020",
+          "expected_mnemonics": [
+            "sqrdmlsh"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRDMLSH_asisdsame2_only",
+      "mnemonic": "SQRDMLSH",
+      "category": "fp_simd",
+      "source_file": "sqrdmlsh_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e008c00",
+      "features": [
+        {
+          "feature": "FEAT_RDM",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrdmlsh_advsimd_vec.xml",
+      "source_sha256": "fe59c689a3b2662f398bed81b974d108d8da47831e5f8fe5d052d5585bc9ea1a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRDMLSH",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e428c20",
+          "expected_mnemonics": [
+            "sqrdmlsh"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/RDM, ordinary non-streaming execution. All allocated scalar/vector/indexed H/S SQRDMLAH/SQRDMLSH forms. Combine the original signed accumulator and doubled signed product with architectural rounding before final signed saturation; MIN \u00d7 MIN may cancel with the accumulator without early product clamping. Only active-lane final saturation sets sticky FPSR.QC. Scalar/Q=0 upper clearing, V31 and every source/accumulator alias are supported. NZCV/FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRSHRN_asimdshf_N",
+      "mnemonic": "SQRSHRN",
+      "category": "fp_simd",
+      "source_file": "sqrshrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f009c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrshrn_advsimd.xml",
+      "source_sha256": "cc02e62d867c128a3e140708245ff04991ce0b5816c16518b5b5439499b1af28",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRSHRN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f9c20",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRSHRN_asisdshf_N",
+      "mnemonic": "SQRSHRN",
+      "category": "fp_simd",
+      "source_file": "sqrshrn_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x5f009c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrshrn_advsimd.xml",
+      "source_sha256": "cc02e62d867c128a3e140708245ff04991ce0b5816c16518b5b5439499b1af28",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRSHRN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f0f9c20",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRSHRUN_asimdshf_N",
+      "mnemonic": "SQRSHRUN",
+      "category": "fp_simd",
+      "source_file": "sqrshrun_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f008c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrshrun_advsimd.xml",
+      "source_sha256": "9efc7995e402844a1d204cf75a21e68ba8225502372d47a8c6a0b4c4b79b98ee",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRSHRUN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f8c20",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQRSHRUN_asisdshf_N",
+      "mnemonic": "SQRSHRUN",
+      "category": "fp_simd",
+      "source_file": "sqrshrun_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f008c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqrshrun_advsimd.xml",
+      "source_sha256": "9efc7995e402844a1d204cf75a21e68ba8225502372d47a8c6a0b4c4b79b98ee",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQRSHRUN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f0f8c20",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQSHRN_asimdshf_N",
+      "mnemonic": "SQSHRN",
+      "category": "fp_simd",
+      "source_file": "sqshrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqshrn_advsimd.xml",
+      "source_sha256": "5a0042757b1e913645586e59189f712dc0258637f3c9aed281cfbd7ed7ca2c13",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQSHRN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f9420",
+          "expected_mnemonics": [
+            "sqshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQSHRN_asisdshf_N",
+      "mnemonic": "SQSHRN",
+      "category": "fp_simd",
+      "source_file": "sqshrn_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x5f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqshrn_advsimd.xml",
+      "source_sha256": "5a0042757b1e913645586e59189f712dc0258637f3c9aed281cfbd7ed7ca2c13",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQSHRN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f0f9420",
+          "expected_mnemonics": [
+            "sqshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQSHRUN_asimdshf_N",
+      "mnemonic": "SQSHRUN",
+      "category": "fp_simd",
+      "source_file": "sqshrun_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f008400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqshrun_advsimd.xml",
+      "source_sha256": "f62586fa172c307fd4612327c7eb6d701df283c75302df103b678a56b3483b87",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQSHRUN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f8420",
+          "expected_mnemonics": [
+            "sqshrun"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "SQSHRUN_asisdshf_N",
+      "mnemonic": "SQSHRUN",
+      "category": "fp_simd",
+      "source_file": "sqshrun_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f008400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sqshrun_advsimd.xml",
+      "source_sha256": "f62586fa172c307fd4612327c7eb6d701df283c75302df103b678a56b3483b87",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "SQSHRUN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f0f8420",
+          "expected_mnemonics": [
+            "sqshrun"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "STR_BL_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe0ec00",
+      "encoding_value": "0x3c206800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-8-fsreg",
+        "reg-type": "8-fsreg",
+        "reg-type-and-use": "8-fsreg-shifted-reg",
+        "reguse": "shifted-reg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3c226801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "STR_B_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3c200800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-8-fsreg",
+        "reg-type": "8-fsreg",
+        "reg-type-and-use": "8-fsreg-ext-reg",
+        "reguse": "ext-reg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3c224801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "STR_D_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xfc200800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-64-fsreg",
+        "reg-type": "64-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xfc224801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "STR_H_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x7c200800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-16-fsreg",
+        "reg-type": "16-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7c224801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "STR_Q_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x3ca00800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-128-fsreg",
+        "reg-type": "128-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x3ca24801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "STR_S_ldst_regoff",
+      "mnemonic": "STR",
+      "category": "fp_simd",
+      "source_file": "str_reg_fpsimd.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xbc200800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/str_reg_fpsimd.xml",
+      "source_sha256": "2274b9abf511a42b0486404ad545e0169f1ce0f2d3133a0e227a2c38f6fa89fe",
+      "docvars": {
+        "instr-class": "fpsimd",
+        "isa": "A64",
+        "mnemonic": "STR",
+        "offset-type": "off-reg",
+        "atomic-ops": "STR-32-fsreg",
+        "reg-type": "32-fsreg"
+      },
+      "evidence_groups": [
+        "simd_register_offset"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/x86_64/register_offset.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xbc224801",
+          "expected_mnemonics": [
+            "str"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 instruction-page facts, address-extension rules and ordinary-RAM shared memory behavior reviewed. Original ARM, independent address/value math and baseline native x86 compare full CPU/RAM state across widths, extensions, scaling and register aliases. Native signal checks cover guard/read-only/SP and crossing-page boundaries with source-PC attribution. The shared store helper preserves completed prefixes where required; Unicorn crossing-store limitations are recorded rather than counted as full original/native fault equality.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. B/H/S/D/Q exact-width register-offset loads/stores; byte extended and shifted register forms are distinct. UXTW/LSL/SXTW/SXTX indices are extended before optional access-size scaling and modulo-64-bit address addition. X31 is SP as base and ZR as index; V31 is ordinary data. Incoming SP alignment is checked before address calculation. Loads stage before destination commit and clear upper vector bits; stores retain the completed mapped prefix on a later translation fault under the reviewed June ordinary-RAM policy. NZCV/FPCR/FPSR, unrelated state and base registers are preserved. Native fault/source-PC boundaries are checked; Unicorn crossing-store differences are classified. No guest syndrome delivery, tags/PAC, MMIO, concurrent atomicity or complete system memory semantics."
+    },
+    {
+      "id": "UDOT_asimdelem_D",
+      "mnemonic": "UDOT",
+      "category": "fp_simd",
+      "source_file": "udot_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x2f00e000",
+      "features": [
+        {
+          "feature": "FEAT_DotProd",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_advsimd_elt.xml",
+      "source_sha256": "aff2d36c932678d7feaab7ea048c7dd41b7c17318096ff2fb697f2573814a053",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UDOT"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f82e020",
+          "expected_mnemonics": [
+            "udot"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/DotProd, ordinary non-streaming execution. Signed/unsigned byte dot products accumulate groups of four products modulo 32 bits into each original destination lane, including vector and indexed forms and every allocated Q/index shape. V31 and all aliases read original operands. Q=0 clears upper vector bits. All NZCV/FPCR/FPSR and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "UDOT_asimdsame2_D",
+      "mnemonic": "UDOT",
+      "category": "fp_simd",
+      "source_file": "udot_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e009400",
+      "features": [
+        {
+          "feature": "FEAT_DotProd",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_advsimd_vec.xml",
+      "source_sha256": "920a82d6372c63f3417fe7cfad65c93259620cbbbd882ceb838d223476a98705",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UDOT"
+      },
+      "evidence_groups": [
+        "simd_dot_round_products"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e829420",
+          "expected_mnemonics": [
+            "udot"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and numerical integer-product facts reviewed. Original ARM with DotProd/RDM enabled, independent arbitrary-precision math and baseline/detected native x86 compare complete 784-byte state across every allocated shape/index, aliases, accumulator extrema, signed ties, MIN \u00d7 MIN cancellation and inactive lanes. Actual emitted binaries/source maps and representative execution paths are retained. Packed SSE2 dot/product recipes and checked host extensions preserve baseline semantics; application performance remains separate.",
+      "scope": "Enabled FP/AdvSIMD/DotProd, ordinary non-streaming execution. Signed/unsigned byte dot products accumulate groups of four products modulo 32 bits into each original destination lane, including vector and indexed forms and every allocated Q/index shape. V31 and all aliases read original operands. Q=0 clears upper vector bits. All NZCV/FPCR/FPSR and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "UQRSHRN_asimdshf_N",
+      "mnemonic": "UQRSHRN",
+      "category": "fp_simd",
+      "source_file": "uqrshrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f009c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uqrshrn_advsimd.xml",
+      "source_sha256": "831b3ba4f18fbd904ee32869e1fa6ae6b21efd3002163e14925ee40e3b07107c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UQRSHRN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f9c20",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "UQRSHRN_asisdshf_N",
+      "mnemonic": "UQRSHRN",
+      "category": "fp_simd",
+      "source_file": "uqrshrn_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f009c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uqrshrn_advsimd.xml",
+      "source_sha256": "831b3ba4f18fbd904ee32869e1fa6ae6b21efd3002163e14925ee40e3b07107c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UQRSHRN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f0f9c20",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "UQSHRN_asimdshf_N",
+      "mnemonic": "UQSHRN",
+      "category": "fp_simd",
+      "source_file": "uqshrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uqshrn_advsimd.xml",
+      "source_sha256": "1b3a0830130215afd045fcb0583741f22cdcb9a393ef4c163d8ca98d164d4109",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UQSHRN",
+        "advsimd-type": "simd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f9420",
+          "expected_mnemonics": [
+            "uqshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "UQSHRN_asisdshf_N",
+      "mnemonic": "UQSHRN",
+      "category": "fp_simd",
+      "source_file": "uqshrn_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f009400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uqshrn_advsimd.xml",
+      "source_sha256": "1b3a0830130215afd045fcb0583741f22cdcb9a393ef4c163d8ca98d164d4109",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "UQSHRN",
+        "advsimd-type": "sisd"
+      },
+      "evidence_groups": [
+        "simd_narrowing_shifts"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/aarch64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f0f9420",
+          "expected_mnemonics": [
+            "uqshrn"
+          ]
+        }
+      ],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
+      "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
     }
   ],
   "compiler_fingerprint_sources": [
@@ -23728,12 +25828,17 @@
     "crates/stela-compiler/src/x86_64/flags.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
     "crates/stela-compiler/src/x86_64/integer_math.rs",
+    "crates/stela-compiler/src/aarch64/literal.rs",
+    "crates/stela-compiler/src/x86_64/literal.rs",
     "crates/stela-compiler/src/aarch64/pc_relative.rs",
     "crates/stela-compiler/src/x86_64/pc_relative.rs",
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
+    "crates/stela-compiler/src/x86_64/memory_store.rs",
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
+    "crates/stela-compiler/src/aarch64/simd/memory.rs",
+    "crates/stela-compiler/src/x86_64/simd/memory.rs",
     "crates/stela-compiler/src/aarch64/simd/floating.rs",
     "crates/stela-compiler/src/x86_64/simd/floating.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",

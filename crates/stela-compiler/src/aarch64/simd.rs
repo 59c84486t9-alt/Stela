@@ -5,6 +5,7 @@ use super::{AddressMode, Register, register};
 pub mod floating;
 pub mod halving;
 pub mod immediates;
+pub mod memory;
 pub mod products;
 pub mod rearrange;
 pub mod reductions;
@@ -42,6 +43,7 @@ pub enum Comparison {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Floating(floating::Operand),
+    MemoryRegisterOffset(memory::Operand),
     Immediate(immediates::Operand),
     Halving(halving::Operand),
     Product(products::Operand),
@@ -94,9 +96,12 @@ pub enum Operand {
 }
 
 /// None denotes another encoding class; Err is an unsupported/reserved member.
-/// FP arithmetic, other MOVI forms, register offsets and structures decline.
+/// Each reviewed family validates its reserved encodings; structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = memory::decode(word) {
+        return Some(decoded.map(Operand::MemoryRegisterOffset));
+    }
     if let Some(decoded) = floating::decode(word) {
         return Some(decoded.map(Operand::Floating));
     }
@@ -543,13 +548,8 @@ mod tests {
             }
         }
         assert_eq!(decode(0x3cc00800), Some(Err(()))); // unprivileged/reserved SIMD mode
-        for word in [
-            0xfd000000 ^ (1 << 26),
-            0x3ce00800,
-            0x9c000000,
-            0x4c407000,
-            0xc85f7c00,
-        ] {
+        assert_eq!(decode(0x3ce00800), Some(Err(()))); // register offset with reserved option 000
+        for word in [0xfd000000 ^ (1 << 26), 0x9c000000, 0x4c407000, 0xc85f7c00] {
             assert!(decode(word).is_none());
         }
     }

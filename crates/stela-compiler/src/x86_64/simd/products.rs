@@ -262,6 +262,170 @@ fn indexed_low_product(code: &mut Vec<u8>, lane: u8, bytes: u8, target: TargetCp
         packed(code, Host::UnpackLowDword, 0, 2);
     }
 }
+
+/// Even/odd byte products form two exact PMADDWD pair sums per dword. Their
+/// sum is the four-byte dot product, with no saturating intermediate operation.
+fn dot(code: &mut Vec<u8>, operand: &Operand, signed: bool) {
+    const BYTE_BITS: u8 = 8;
+    const LOW_BYTE_MASK: u64 = 0x00ff;
+    if let Some(index) = operand.index {
+        indexed(code, 4, index);
+    }
+    packed(code, Host::MoveAligned, 2, 0);
+    packed(code, Host::MoveAligned, 3, 1);
+    if signed {
+        for xmm in [0, 1] {
+            Shift::LeftWord.emit(code, xmm, BYTE_BITS);
+            Shift::ArithmeticWord.emit(code, xmm, BYTE_BITS);
+        }
+        for xmm in [2, 3] {
+            Shift::ArithmeticWord.emit(code, xmm, BYTE_BITS);
+        }
+    } else {
+        lane_constant(code, 4, 2, LOW_BYTE_MASK);
+        for xmm in [0, 1] {
+            packed(code, Host::And, xmm, 4);
+        }
+        for xmm in [2, 3] {
+            Shift::RightWord.emit(code, xmm, BYTE_BITS);
+        }
+    }
+    packed(code, Host::MultiplyAddWords, 0, 1);
+    packed(code, Host::MultiplyAddWords, 2, 3);
+    packed(code, Host::AddDword, 0, 2);
+    accumulate(code, operand.destination, 4, Accumulate::Add);
+}
+
+/// Clamp signed doubled-width sums once, after the rounded product has been
+/// combined with the original accumulator. XMM6 survives for half assembly.
+fn clamp_rounded_accumulate(code: &mut Vec<u8>, lane: u8, active: u8) {
+    packed(code, Host::MoveAligned, 5, 0);
+    if lane == 2 {
+        packed(code, Host::PackSignedDwordToWord, 0, 0);
+        packed(code, Host::MoveAligned, 2, 0);
+        extend(code, 2, lane, false, true);
+        packed(code, Host::MoveAligned, 4, 5);
+        packed(code, Host::EqualDword, 4, 2);
+    } else {
+        const COMPACT_LOW_DWORDS: u8 = 0x88;
+        const SWAP_QWORD_DWORDS: u8 = 0xb1;
+        const DWORD_SIGN_BIT: u8 = 31;
+        // Sign-extend each truncated low dword. Equality with the original
+        // qword identifies exactly those sums which already fit signed32.
+        shuffle(code, 2, 0, COMPACT_LOW_DWORDS);
+        packed(code, Host::MoveAligned, 3, 2);
+        Shift::ArithmeticDword.emit(code, 3, DWORD_SIGN_BIT);
+        packed(code, Host::UnpackLowDword, 2, 3);
+        packed(code, Host::MoveAligned, 4, 5);
+        packed(code, Host::EqualDword, 4, 2);
+        shuffle(code, 3, 4, SWAP_QWORD_DWORDS);
+        packed(code, Host::And, 4, 3);
+    }
+    packed(code, Host::EqualDword, 3, 3);
+    packed(code, Host::Xor, 4, 3);
+    if lane == 4 {
+        const SIGNED_DWORD_MAXIMUM: u64 = i32::MAX as u64;
+        super::saturating::sign_mask(code, 2, 5, 8);
+        lane_constant(code, 3, 8, SIGNED_DWORD_MAXIMUM);
+        packed(code, Host::Xor, 2, 3);
+        packed(code, Host::Xor, 2, 5);
+        packed(code, Host::And, 2, 4);
+        packed(code, Host::Xor, 5, 2);
+        shuffle(code, 0, 5, 0x88);
+    }
+    super::saturating::publish_qc(code, active * 2);
+}
+
+/// floor((acc*2^n +/- 2*a*b + 2^(n-1))/2^n) equals
+/// acc + floor((+/- a*b + 2^(n-2))/2^(n-1)). The latter needs only
+/// signed2n intermediates and preserves MIN*MIN cancellation and subtract ties.
+fn rounded_accumulate_half(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    upper: bool,
+    active: u8,
+    subtract: bool,
+    target: TargetCpu,
+) {
+    const BITS_PER_BYTE: u8 = 8;
+    let lane = operand.lane_bytes;
+    let bits = lane * BITS_PER_BYTE;
+    read_vector(code, operand.left, 0);
+    read_vector(code, operand.right, 1);
+    if let Some(index) = operand.index {
+        indexed(code, lane, index);
+    }
+    if lane == 2 {
+        // Assemble full signed32 products directly; pre-extending halfwords
+        // would make the baseline perform two unnecessary dword multiplies.
+        packed(code, Host::MoveAligned, 2, 0);
+        packed(code, Host::MultiplyLowWord, 0, 1);
+        packed(code, Host::MultiplyHighSignedWord, 2, 1);
+        packed(
+            code,
+            if upper {
+                Host::UnpackHighWord
+            } else {
+                Host::UnpackLowWord
+            },
+            0,
+            2,
+        );
+    } else {
+        const REPEAT_LOW_DWORD_PAIR: u8 = 0x50;
+        const REPEAT_HIGH_DWORD_PAIR: u8 = 0xfa;
+        let selection = if upper {
+            REPEAT_HIGH_DWORD_PAIR
+        } else {
+            REPEAT_LOW_DWORD_PAIR
+        };
+        shuffle(code, 0, 0, selection);
+        if operand.index.is_none() {
+            shuffle(code, 1, 1, selection);
+        }
+        long_product(code, lane, true, target);
+    }
+    if subtract {
+        packed(code, Host::Xor, 1, 1);
+        packed(code, arithmetic(lane * 2, true), 1, 0);
+        packed(code, Host::MoveAligned, 0, 1);
+    }
+    lane_constant(code, 1, lane * 2, 1u64 << (bits - 2));
+    packed(code, arithmetic(lane * 2, false), 0, 1);
+    if lane == 2 {
+        Shift::ArithmeticDword.emit(code, 0, bits - 1);
+    } else {
+        // SSE2 has no arithmetic qword shift. Preserve the high sign above
+        // the n+1 significant result bits before shifting the exact product.
+        super::saturating::sign_mask(code, 1, 0, 8);
+        Shift::LeftQword.emit(code, 1, bits + 1);
+        Shift::RightQword.emit(code, 0, bits - 1);
+        packed(code, Host::Or, 0, 1);
+    }
+    packed(code, Host::MoveAligned, 5, 0);
+    read_vector(code, operand.destination, 0);
+    extend(code, 0, lane, upper, true);
+    packed(code, arithmetic(lane * 2, false), 0, 5);
+    clamp_rounded_accumulate(code, lane, active);
+}
+
+fn rounded_accumulate(code: &mut Vec<u8>, operand: &Operand, subtract: bool, target: TargetCpu) {
+    const SOURCE_HALF_BYTES: u8 = 8;
+    rounded_accumulate_half(
+        code,
+        operand,
+        false,
+        operand.bytes.min(SOURCE_HALF_BYTES),
+        subtract,
+        target,
+    );
+    if operand.bytes == 16 {
+        packed(code, Host::MoveAligned, 6, 0);
+        rounded_accumulate_half(code, operand, true, SOURCE_HALF_BYTES, subtract, target);
+        packed(code, Host::UnpackLowQword, 6, 0);
+        packed(code, Host::MoveAligned, 0, 6);
+    }
+}
 /// Full-width 16-bit high products need no widening or per-half processing.
 /// PMULHRSW shares Arm's ties-up rounding but wraps MIN*MIN instead of clamping.
 fn high_product_words(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
@@ -472,12 +636,19 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         upper,
         index: _,
     } = *operand;
-    if !matches!(kind, Kind::Doubling { high: true, .. }) {
+    if !matches!(
+        kind,
+        Kind::Doubling { high: true, .. } | Kind::RoundedDoublingAccumulate { .. }
+    ) {
         read_vector(code, left, 0);
         read_vector(code, right, 1);
     }
     let mut result = 0;
     match kind {
+        Kind::Dot { signed } => dot(code, operand, signed),
+        Kind::RoundedDoublingAccumulate { subtract } => {
+            rounded_accumulate(code, operand, subtract, target)
+        }
         Kind::Polynomial { widen } => polynomial(code, lane, widen, upper, target),
         Kind::Doubling { .. } => doubling(code, operand, target),
         Kind::Product {
@@ -550,6 +721,68 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dot_products_use_exact_unsaturated_pairs_on_every_target() {
+        for word in [0x4e829420, 0x6e829420, 0x4fa2e820, 0x6fa2e820] {
+            let operand = crate::aarch64::simd::products::decode(word)
+                .unwrap()
+                .unwrap();
+            for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
+                let mut code = Vec::new();
+                emit(&mut code, &operand, target);
+                let count = |opcode: Host| {
+                    code.windows(opcode.encoding().len())
+                        .filter(|bytes| *bytes == opcode.encoding())
+                        .count()
+                };
+                assert_eq!(count(Host::MultiplyAddWords), 2);
+                assert_eq!(count(Host::MultiplyAddUnsignedBytes), 0);
+                assert_eq!(
+                    count(Host::ByteSignMask),
+                    0,
+                    "dot accumulation preserves QC"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_accumulation_clamps_only_the_final_sum_and_checks_dword_multiply() {
+        for word in [0x6e428420, 0x6e428c20, 0x6e828420, 0x6e828c20] {
+            let operand = crate::aarch64::simd::products::decode(word)
+                .unwrap()
+                .unwrap();
+            for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
+                let mut code = Vec::new();
+                emit(&mut code, &operand, target);
+                let count = |opcode: Host| {
+                    code.windows(opcode.encoding().len())
+                        .filter(|bytes| *bytes == opcode.encoding())
+                        .count()
+                };
+                assert_eq!(
+                    count(Host::ByteSignMask),
+                    2,
+                    "one final QC decision per half"
+                );
+                assert_eq!(count(Host::AddSignedSaturatingWord), 0);
+                assert_eq!(count(Host::SubSignedSaturatingWord), 0);
+                assert_eq!(
+                    count(Host::MultiplySignedDword),
+                    if operand.lane_bytes == 4 && target >= TargetCpu::Sse41 {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    count(Host::MultiplyHighSignedWord),
+                    if operand.lane_bytes == 2 { 2 } else { 0 }
+                );
+            }
+        }
+    }
 
     #[test]
     fn indexed_products_share_packed_lowering_and_checked_dword_multiply() {

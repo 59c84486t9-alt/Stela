@@ -1,33 +1,66 @@
 //! Direct private-RAM register-offset accesses; guest NZCV is unchanged.
 use super::{
-    AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, offset, right_operand,
+    AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store, offset,
+    right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+    address(
+        code,
+        operand.base,
+        operand.index,
+        operand.extend,
+        operand.shift,
+    );
+    transfer(code, operand);
+}
+
+/// Shared integer/SIMD address calculation, without guest register writeback.
+/// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first.
+pub(super) fn address(
+    code: &mut Vec<u8>,
+    base: Register,
+    index: Register,
+    extend: IndexExtend,
+    shift: u8,
+) {
+    const MOV_ECX_ECX: &[u8] = &[0x89, 0xc9];
+    const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
+    const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
+    const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
-    memory_address(code, operand.base, 0, AddressMode::Offset);
-    right_operand(code, operand.index, Width::X64, Shift::Lsl, 0);
-    match operand.extend {
-        IndexExtend::Uxtw => code.extend([0x89, 0xc9]), // mov ecx,ecx
-        IndexExtend::Sxtw => code.extend([0x48, 0x63, 0xc9]), // movsxd rcx,ecx
+    memory_address(code, base, 0, AddressMode::Offset);
+    right_operand(code, index, Width::X64, Shift::Lsl, 0);
+    match extend {
+        IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
+        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_ECX),
         IndexExtend::Lsl | IndexExtend::Sxtx => {}
     }
-    if operand.shift != 0 {
-        code.extend([0x48, 0xc1, 0xe1, operand.shift]);
+    if shift != 0 {
+        code.extend(SHL_RCX_IMM8);
+        code.push(shift);
     }
-    code.extend([0x48, 0x8d, 0x04, 0x08]); // lea rax,[rax+rcx], modulo 2^64
+    code.extend(LEA_RAX_RAX_RCX); // modulo 2^64
+}
+
+fn transfer(code: &mut Vec<u8>, operand: &Operand) {
     match operand.transfer {
         MemoryTransfer::Store => {
             right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
-            match operand.bytes {
-                1 => code.extend([0x88, 0x08]),
-                2 => code.extend([0x66, 0x89, 0x08]),
-                4 => code.extend([0x89, 0x08]),
-                8 => code.extend([0x48, 0x89, 0x08]),
-                _ => unreachable!("decoder validates register-offset size"),
-            }
+            memory_store::emit(
+                code,
+                operand.bytes,
+                0,
+                memory_store::Source::Rcx,
+                memory_store::aligned_register_offset(
+                    operand.base,
+                    operand.index,
+                    operand.shift,
+                    operand.bytes,
+                ),
+            );
         }
         MemoryTransfer::Load { signed, width } => {
             if width == Width::X64 {

@@ -7,6 +7,7 @@ use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 mod floating;
 mod halving;
 mod immediates;
+pub(super) mod memory;
 mod products;
 mod rearrange;
 mod reductions;
@@ -137,26 +138,6 @@ pub(super) fn greater(
     packed(code, Host::Or, 0, 2);
 }
 
-/// Transfer S/D/Q at [RAX+displacement], using XMM0/XMM1. Scalar loads
-/// zero the rest of the 128-bit host value; no widened guest access is emitted.
-fn wide_memory(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement: u8) {
-    let (prefix, opcode) = match (load, bytes) {
-        (true, 4) => (0x66, 0x6e),   // MOVD xmm,m32
-        (true, 8) => (0xf3, 0x7e),   // MOVQ xmm,m64
-        (true, 16) => (0xf3, 0x6f),  // MOVDQU xmm,m128
-        (false, 4) => (0x66, 0x7e),  // MOVD m32,xmm
-        (false, 8) => (0x66, 0xd6),  // MOVQ m64,xmm
-        (false, 16) => (0xf3, 0x7f), // MOVDQU m128,xmm
-        _ => unreachable!("decoder validates wide vector memory width"),
-    };
-    let modrm = (xmm << 3) | if displacement == 0 { 0 } else { 0x40 };
-    code.extend([prefix, 0x0f, opcode, modrm]);
-    if displacement != 0 {
-        // Only the second pair element needs displacement: 4, 8 or 16 bytes.
-        code.push(displacement);
-    }
-}
-
 #[cfg(test)]
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     emit_for_target(code, operand, crate::TargetCpu::Baseline);
@@ -164,12 +145,13 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
+        Operand::MemoryRegisterOffset(ref operand) => memory::emit_register_offset(code, operand),
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),
         Operand::Saturate(ref operand) => saturating::emit(code, operand, target),
         Operand::Reduce(ref operand) => reductions::emit(code, operand, target),
-        Operand::Shift(ref operand) => shifts::emit(code, operand),
+        Operand::Shift(ref operand) => shifts::emit(code, operand, target),
         Operand::Rearrange(ref operand) => rearrange::emit(code, operand, target),
         Operand::Compare {
             operation,
@@ -323,9 +305,10 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
             mode,
         } => {
             memory_address(code, base, displacement, mode);
+            let aligned = super::memory_store::aligned_immediate(base, displacement, mode, bytes);
             if load {
-                wide_memory(code, true, bytes, 0, 0);
-                wide_memory(code, true, bytes, 1, bytes);
+                memory::wide_transfer(code, true, bytes, 0, 0, aligned);
+                memory::wide_transfer(code, true, bytes, 1, bytes, aligned);
                 // Neither guest destination changes if either load faults.
                 // Duplicate destinations were declined by the decoder.
                 commit(code, vectors[0], 0);
@@ -335,8 +318,8 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
                 // duplicate source indices are valid and retain the same value.
                 read_vector(code, vectors[0], 0);
                 read_vector(code, vectors[1], 1);
-                wide_memory(code, false, bytes, 0, 0);
-                wide_memory(code, false, bytes, 1, bytes);
+                memory::wide_transfer(code, false, bytes, 0, 0, aligned);
+                memory::wide_transfer(code, false, bytes, 1, bytes, aligned);
             }
             // Split private-RAM stores may expose the first completed element
             // if the second faults. Base writeback requires both to complete.
@@ -369,32 +352,13 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
             mode,
         } => {
             memory_address(code, base, displacement, mode);
-            if load {
-                match bytes {
-                    1 | 2 => {
-                        // MOVZX avoids over-reading narrow objects; MOVD clears
-                        // every destination vector bit above the loaded data.
-                        code.extend([0x0f, if bytes == 1 { 0xb6 } else { 0xb7 }, 0x08]);
-                        code.extend([0x66, 0x0f, 0x6e, 0xc1]); // movd xmm0,ecx
-                    }
-                    4 | 8 | 16 => wide_memory(code, true, bytes, 0, 0),
-                    _ => unreachable!("decoder validates vector memory width"),
-                }
-                // Stage the complete load before touching guest state. A native
-                // fault leaves the destination and base unchanged. GuestState
-                // is independently live/writable under the direct-RAM contract.
-                commit(code, vector, 0);
-            } else if bytes <= 2 {
-                code.extend([0x48, 0x8b, 0x8f]); // mov rcx,[rdi+disp32]
-                code.extend(vector_offset(vector).to_le_bytes());
-                if bytes == 2 {
-                    code.push(0x66);
-                }
-                code.extend([if bytes == 1 { 0x88 } else { 0x89 }, 0x08]);
-            } else {
-                read_vector(code, vector, 0);
-                wide_memory(code, false, bytes, 0, 0);
-            }
+            memory::transfer(
+                code,
+                load,
+                bytes,
+                vector,
+                super::memory_store::aligned_immediate(base, displacement, mode, bytes),
+            );
             // RDX retains the potential writeback across all SSE/GPR staging.
             memory_writeback(code, base, mode);
         }
