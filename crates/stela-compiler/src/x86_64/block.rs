@@ -35,10 +35,25 @@ fn conditional_exit(
     direct_exit(code, target, ExitKind::Direct);
 }
 
-pub(crate) fn emit(
+#[cfg(test)]
+fn emit(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
+) -> NativeBlock {
+    emit_for_target(
+        instructions,
+        terminal,
+        fallthrough,
+        crate::TargetCpu::Baseline,
+    )
+}
+
+pub(crate) fn emit_for_target(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
 ) -> NativeBlock {
     let mut block = NativeBlock {
         x86_64_code: vec![],
@@ -48,7 +63,7 @@ pub(crate) fn emit(
     let mut fixups = vec![];
     for instruction in instructions {
         block.source_map.push((instruction.pc, code.len()));
-        super::emit_instruction(code, instruction, &mut fixups);
+        super::emit_instruction(code, instruction, &mut fixups, target);
     }
     debug_assert!(
         fixups.is_empty(),

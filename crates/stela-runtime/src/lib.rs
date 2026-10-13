@@ -90,15 +90,25 @@ fn validate(directory: &Path, identity: &Identity) -> Result<Manifest> {
 }
 
 pub fn prepare_leaf(source: &[u8], base: GuestAddress, root: &Path) -> Result<Prepared> {
+    prepare_leaf_for_target(source, base, root, stela_compiler::TargetCpu::detect())
+}
+pub fn prepare_leaf_for_target(
+    source: &[u8],
+    base: GuestAddress,
+    root: &Path,
+    target: stela_compiler::TargetCpu,
+) -> Result<Prepared> {
     let identity = Identity {
         schema_version: 1,
         source_sha256: sha256(source),
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
         abi: NATIVE_ABI.into(),
-        target_cpu: "x86_64-baseline".into(),
+        target_cpu: target.id().into(),
     };
-    prepare(identity, root, || stela_compiler::compile(source, base))
+    prepare(identity, root, || {
+        stela_compiler::compile_for_target(source, base, target)
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +136,21 @@ pub fn prepare_block_with_profile(
     root: &Path,
     profile: stela_compiler::block::BlockProfile,
 ) -> Result<PreparedBlock> {
+    prepare_block_for_target(
+        source,
+        base,
+        root,
+        profile,
+        stela_compiler::TargetCpu::detect(),
+    )
+}
+pub fn prepare_block_for_target(
+    source: &[u8],
+    base: GuestAddress,
+    root: &Path,
+    profile: stela_compiler::block::BlockProfile,
+    target: stela_compiler::TargetCpu,
+) -> Result<PreparedBlock> {
     use stela_compiler::block;
     let source_bytes = block::source_bytes_with_profile(source, base, profile)?;
     let prefix = &source[..source_bytes];
@@ -135,10 +160,10 @@ pub fn prepare_block_with_profile(
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
         abi: profile.abi().into(),
-        target_cpu: "x86_64-baseline".into(),
+        target_cpu: target.id().into(),
     };
     let prepared = prepare(identity, root, || {
-        block::compile_with_profile(prefix, base, profile).map(|b| b.native)
+        block::compile_for_target(prefix, base, profile, target).map(|b| b.native)
     })?;
     Ok(PreparedBlock {
         source_bytes,
@@ -217,6 +242,38 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect()
+    }
+    #[test]
+    fn cpu_requirements_separate_leaf_and_block_cache_artifacts() -> Result<()> {
+        use stela_compiler::{TargetCpu, block::BlockProfile};
+        let root = tempfile::tempdir()?;
+        let input = source(42);
+        let mut keys = std::collections::BTreeSet::new();
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Ssse3,
+            TargetCpu::Sse41,
+            TargetCpu::Sse42,
+        ] {
+            let leaf = prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?;
+            let block = prepare_block_for_target(
+                &input,
+                GuestAddress(0x1000),
+                root.path(),
+                BlockProfile::Ordinary,
+                target,
+            )?
+            .prepared;
+            for artifact in [leaf, block] {
+                assert_eq!(artifact.manifest.identity.target_cpu, target.id());
+                assert!(keys.insert(artifact.key));
+            }
+            assert!(
+                prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?
+                    .cache_hit
+            );
+        }
+        Ok(())
     }
     #[test]
     fn clock_profile_cache_isolated_from_both_previous_profiles_and_exact_operands() -> Result<()> {

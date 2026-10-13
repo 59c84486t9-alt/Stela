@@ -1,39 +1,43 @@
 //! Baseline SSE2 data movement. Original Arm bytes are never host instructions.
 //! Ordinary private RAM only: no 128-bit atomicity or guest fault delivery claim.
+use super::isa::SimdOpcode;
+use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 
 fn vector_offset(vector: u8) -> u32 {
-    264 + u32::from(vector) * 16
+    (std::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
 }
 
 fn commit(code: &mut Vec<u8>, vector: u8, xmm: u8) {
     // GuestState has only 8-byte alignment; V0 begins at byte264.
-    code.extend([0xf3, 0x0f, 0x7f, 0x87 | (xmm << 3)]); // movdqu [rdi+disp32],xmmN
+    Host::StoreUnaligned.append(code, crate::TargetCpu::Baseline);
+    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
     code.extend(vector_offset(vector).to_le_bytes());
 }
 
 fn read_vector(code: &mut Vec<u8>, vector: u8, xmm: u8) {
-    code.extend([0xf3, 0x0f, 0x6f, 0x87 | (xmm << 3)]); // movdqu xmmN,[rdi+disp32]
+    Host::LoadUnaligned.append(code, crate::TargetCpu::Baseline);
+    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
     code.extend(vector_offset(vector).to_le_bytes());
 }
 
-fn packed(code: &mut Vec<u8>, opcode: u8, destination: u8, source: u8) {
-    code.extend([0x66, 0x0f, opcode, 0xc0 | (destination << 3) | source]);
+fn packed(code: &mut Vec<u8>, opcode: SimdOpcode, destination: u8, source: u8) {
+    opcode.register(code, destination, source, crate::TargetCpu::Baseline);
 }
 
-fn subtract_opcode(lane_bytes: u8) -> u8 {
+fn subtract_opcode(lane_bytes: u8) -> SimdOpcode {
     match lane_bytes {
-        1 => 0xf8,
-        2 => 0xf9,
-        4 => 0xfa,
-        8 => 0xfb,
+        1 => Host::SubByte,
+        2 => Host::SubWord,
+        4 => Host::SubDword,
+        8 => Host::SubQword,
         _ => unreachable!("reviewed lane size"),
     }
 }
 
 fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8) {
-    packed(code, 0x70, destination, source);
+    packed(code, Host::ShuffleDword, destination, source);
     code.push(control);
 }
 
@@ -47,18 +51,22 @@ fn unsigned_bias(code: &mut Vec<u8>, lane_bytes: u8) {
     code.extend([0x48, 0xb9]);
     code.extend(mask.to_le_bytes());
     code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]); // movq xmm4,rcx
-    packed(code, 0x6c, 4, 4);
-    packed(code, 0xef, 0, 4);
-    packed(code, 0xef, 1, 4);
+    packed(code, Host::UnpackLowQword, 4, 4);
+    packed(code, Host::Xor, 0, 4);
+    packed(code, Host::Xor, 1, 4);
 }
 
-fn equal(code: &mut Vec<u8>, lane_bytes: u8) {
+fn equal(code: &mut Vec<u8>, lane_bytes: u8, target: crate::TargetCpu) {
+    if lane_bytes == 8 && target >= crate::TargetCpu::Sse41 {
+        Host::EqualQword.register(code, 0, 1, target); // pcmpeqq xmm0,xmm1
+        return;
+    }
     packed(
         code,
         match lane_bytes {
-            1 => 0x74,
-            2 => 0x75,
-            4 | 8 => 0x76,
+            1 => Host::EqualByte,
+            2 => Host::EqualWord,
+            4 | 8 => Host::EqualDword,
             _ => unreachable!("reviewed comparison lane"),
         },
         0,
@@ -66,11 +74,23 @@ fn equal(code: &mut Vec<u8>, lane_bytes: u8) {
     );
     if lane_bytes == 8 {
         shuffle(code, 2, 0, 0xb1); // adjacent dword equality masks must both hold
-        packed(code, 0xdb, 0, 2);
+        packed(code, Host::And, 0, 2);
     }
 }
 
-fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool) {
+fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
+    if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
+        if unsigned {
+            code.extend([0x48, 0xb9]);
+            code.extend(0x8000000000000000u64.to_le_bytes());
+            code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]);
+            packed(code, Host::UnpackLowQword, 4, 4);
+            packed(code, Host::Xor, 0, 4);
+            packed(code, Host::Xor, 1, 4);
+        }
+        Host::GreaterQword.register(code, 0, 1, target); // pcmpgtq xmm0,xmm1
+        return;
+    }
     if unsigned {
         unsigned_bias(code, lane_bytes);
     }
@@ -78,9 +98,9 @@ fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool) {
         packed(
             code,
             match lane_bytes {
-                1 => 0x64,
-                2 => 0x65,
-                4 => 0x66,
+                1 => Host::GreaterByte,
+                2 => Host::GreaterWord,
+                4 => Host::GreaterDword,
                 _ => unreachable!("reviewed comparison lane"),
             },
             0,
@@ -89,19 +109,19 @@ fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool) {
         return;
     }
     // Compare high dwords first; equal high halves use unsigned low ordering.
-    packed(code, 0x6f, 2, 0);
-    packed(code, 0x66, 2, 1);
+    packed(code, Host::MoveAligned, 2, 0);
+    packed(code, Host::GreaterDword, 2, 1);
     shuffle(code, 2, 2, 0xf5);
-    packed(code, 0x6f, 3, 0);
-    packed(code, 0x76, 3, 1);
+    packed(code, Host::MoveAligned, 3, 0);
+    packed(code, Host::EqualDword, 3, 1);
     shuffle(code, 3, 3, 0xf5);
     if !unsigned {
         unsigned_bias(code, 8);
     }
-    packed(code, 0x66, 0, 1);
+    packed(code, Host::GreaterDword, 0, 1);
     shuffle(code, 0, 0, 0xa0);
-    packed(code, 0xdb, 0, 3);
-    packed(code, 0xeb, 0, 2);
+    packed(code, Host::And, 0, 3);
+    packed(code, Host::Or, 0, 2);
 }
 
 /// Transfer S/D/Q at [RAX+displacement], using XMM0/XMM1. Scalar loads
@@ -124,7 +144,11 @@ fn wide_memory(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement:
     }
 }
 
+#[cfg(test)]
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+    emit_for_target(code, operand, crate::TargetCpu::Baseline);
+}
+pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
         Operand::Compare {
             operation,
@@ -142,23 +166,28 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             if let Some(right) = right {
                 read_vector(code, right, right_xmm);
             } else {
-                packed(code, 0xef, right_xmm, right_xmm);
+                packed(code, Host::Xor, right_xmm, right_xmm);
             }
             match operation {
-                Equal => equal(code, lane_bytes),
+                Equal => equal(code, lane_bytes, target),
                 Test => {
-                    packed(code, 0xdb, 0, 1);
-                    packed(code, 0xef, 1, 1);
-                    equal(code, lane_bytes);
+                    packed(code, Host::And, 0, 1);
+                    packed(code, Host::Xor, 1, 1);
+                    equal(code, lane_bytes, target);
                 }
-                _ => greater(code, lane_bytes, matches!(operation, Higher | HigherEqual)),
+                _ => greater(
+                    code,
+                    lane_bytes,
+                    matches!(operation, Higher | HigherEqual),
+                    target,
+                ),
             }
             if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
-                packed(code, 0x76, 1, 1);
-                packed(code, 0xef, 0, 1);
+                packed(code, Host::EqualDword, 1, 1);
+                packed(code, Host::Xor, 0, 1);
             }
             if bytes == 8 {
-                code.extend([0xf3, 0x0f, 0x7e, 0xc0]);
+                packed(code, Host::MoveQword, 0, 0);
             }
             commit(code, destination, 0);
         }
@@ -178,32 +207,32 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
                 read_vector(code, right, 1);
             }
             match operation {
-                And => packed(code, 0xdb, 0, 1),
+                And => packed(code, Host::And, 0, 1),
                 Bic => {
-                    packed(code, 0xdf, 1, 0);
+                    packed(code, Host::AndNot, 1, 0);
                     result = 1;
                 }
-                Orr => packed(code, 0xeb, 0, 1),
+                Orr => packed(code, Host::Or, 0, 1),
                 Orn => {
-                    packed(code, 0x76, 2, 2); // pcmpeqd: all ones, including dirty Q=0 upper bits
-                    packed(code, 0xef, 1, 2);
-                    packed(code, 0xeb, 0, 1);
+                    packed(code, Host::EqualDword, 2, 2); // pcmpeqd: all ones, including dirty Q=0 upper bits
+                    packed(code, Host::Xor, 1, 2);
+                    packed(code, Host::Or, 0, 1);
                 }
-                Eor => packed(code, 0xef, 0, 1),
+                Eor => packed(code, Host::Xor, 0, 1),
                 Bsl | Bit | Bif => {
                     read_vector(code, destination, 2);
                     if operation == Bsl {
-                        packed(code, 0xef, 0, 1);
-                        packed(code, 0xdb, 0, 2);
-                        packed(code, 0xef, 0, 1);
+                        packed(code, Host::Xor, 0, 1);
+                        packed(code, Host::And, 0, 2);
+                        packed(code, Host::Xor, 0, 1);
                     } else {
-                        packed(code, 0xef, 0, 2);
+                        packed(code, Host::Xor, 0, 2);
                         if operation == Bit {
-                            packed(code, 0xdb, 0, 1);
-                            packed(code, 0xef, 0, 2);
+                            packed(code, Host::And, 0, 1);
+                            packed(code, Host::Xor, 0, 2);
                         } else {
-                            packed(code, 0xdf, 1, 0);
-                            packed(code, 0xef, 1, 2);
+                            packed(code, Host::AndNot, 1, 0);
+                            packed(code, Host::Xor, 1, 2);
                             result = 1;
                         }
                     }
@@ -211,10 +240,10 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
                 Add => packed(
                     code,
                     match lane_bytes {
-                        1 => 0xfc,
-                        2 => 0xfd,
-                        4 => 0xfe,
-                        8 => 0xd4,
+                        1 => Host::AddByte,
+                        2 => Host::AddWord,
+                        4 => Host::AddDword,
+                        8 => Host::AddQword,
                         _ => unreachable!("reviewed lane size"),
                     },
                     0,
@@ -222,35 +251,45 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
                 ),
                 Sub => packed(code, subtract_opcode(lane_bytes), 0, 1),
                 Neg => {
-                    packed(code, 0xef, 1, 1);
+                    packed(code, Host::Xor, 1, 1);
                     packed(code, subtract_opcode(lane_bytes), 1, 0);
                     result = 1;
                 }
                 Abs => {
-                    packed(code, 0xef, 1, 1);
-                    packed(
-                        code,
-                        match lane_bytes {
-                            1 => 0x64,
-                            2 => 0x65,
-                            4 | 8 => 0x66,
-                            _ => unreachable!("reviewed lane size"),
-                        },
-                        1,
-                        0,
-                    );
-                    if lane_bytes == 8 {
-                        // SSE2 lacks a signed qword comparison: repeat each high
-                        // dword's sign across its qword, using only its sign bit.
-                        code.extend([0x66, 0x0f, 0x70, 0xc9, 0xf5]);
+                    if lane_bytes <= 4 && target >= crate::TargetCpu::Ssse3 {
+                        let opcode = match lane_bytes {
+                            1 => Host::AbsByte,
+                            2 => Host::AbsWord,
+                            4 => Host::AbsDword,
+                            _ => unreachable!(),
+                        };
+                        opcode.register(code, 0, 0, target);
+                    } else {
+                        packed(code, Host::Xor, 1, 1);
+                        packed(
+                            code,
+                            match lane_bytes {
+                                1 => Host::GreaterByte,
+                                2 => Host::GreaterWord,
+                                4 | 8 => Host::GreaterDword,
+                                _ => unreachable!("reviewed lane size"),
+                            },
+                            1,
+                            0,
+                        );
+                        if lane_bytes == 8 {
+                            // SSE2 lacks a signed qword comparison: repeat each high
+                            // dword's sign across its qword, using only its sign bit.
+                            shuffle(code, 1, 1, 0xf5);
+                        }
+                        packed(code, Host::Xor, 0, 1);
+                        packed(code, subtract_opcode(lane_bytes), 0, 1);
                     }
-                    packed(code, 0xef, 0, 1);
-                    packed(code, subtract_opcode(lane_bytes), 0, 1);
                 }
             }
             if bytes == 8 {
                 // Arm clears the complete upper half on scalar/D vector writes.
-                code.extend([0xf3, 0x0f, 0x7e, 0xc0 | (result << 3) | result]);
+                packed(code, Host::MoveQword, result, result);
             }
             commit(code, destination, result);
         }

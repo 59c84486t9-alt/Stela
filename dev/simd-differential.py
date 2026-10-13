@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import time
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_ARCH_X86, CS_MODE_64
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_ERR_FETCH_UNMAPPED
 from unicorn import arm64_const as arm
 from differential import (ROOT, BASE, MASK, State, states, executable, initialize_arm,
@@ -212,7 +212,9 @@ def mathematical(operations, initial, memory, ram_address):
     return state, bytes(ram)
 
 
-def validate_manifest(manifest, source, native, block):
+def validate_manifest(manifest, source, native, block, target_cpu=None):
+    if target_cpu is not None and manifest.get("target_cpu") != target_cpu:
+        raise AssertionError("SIMD manifest CPU requirements differ from selection")
     if (manifest['schema_version'] != 1 or manifest['abi'] != (BLOCK_ABI if block else LEAF_ABI)
             or manifest['guest_base'] != BASE or manifest['source_sha256'] != digest(source)
             or manifest['native_sha256'] != digest(native) or manifest['native_bytes'] != len(native)
@@ -227,7 +229,7 @@ def validate_manifest(manifest, source, native, block):
     return [row[1] for row in mapping]
 
 
-def compile_batch(cli, directory, functions, index, block=False):
+def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline"):
     words, entries = [], []
     for function in functions:
         entries.append(len(words))
@@ -240,9 +242,9 @@ def compile_batch(cli, directory, functions, index, block=False):
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
     output = directory / f'native-{index}'
-    manifest = json.loads(subprocess.check_output([str(cli), 'compile-block' if block else 'compile-leaf', str(path), '--guest-base', hex(BASE), '--output-dir', str(output)], timeout=60))
+    manifest = json.loads(subprocess.check_output([str(cli), 'compile-block' if block else 'compile-leaf', str(path), '--guest-base', hex(BASE), '--output-dir', str(output), '--cpu-target', cpu_target], timeout=60))
     native = (output / 'native.bin').read_bytes()
-    offsets = validate_manifest(manifest, source, native, block)
+    offsets = validate_manifest(manifest, source, native, block, target_id)
     if not block:
         for entry, function in zip(entries, functions):
             if native[offsets[entry + len(function['operations'])]] != 0xc3:
@@ -252,7 +254,8 @@ def compile_batch(cli, directory, functions, index, block=False):
             'compiler': manifest['compiler_source_sha256'],
             'receipt': {'functions': len(functions), 'source_bytes': len(source), 'source_sha256': digest(source),
                         'native_bytes': len(native), 'native_sha256': digest(native),
-                        'source_map_sha256': digest(json.dumps(manifest['source_map']).encode()), 'block': block}}
+                        'source_map_sha256': digest(json.dumps(manifest['source_map']).encode()), 'block': block,
+                        'target_cpu': manifest['target_cpu']}}
 
 
 def initial_case(function, index, flags, ram_address, original_ram, templates):
@@ -701,14 +704,34 @@ def execute_integer_batches(batches):
 def run_integer_cohort(cli):
     functions=integer_programs();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
+    info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
+    selections=[('baseline','x86_64-baseline')]
+    if info['detected_target']!='x86_64-baseline': selections.append(('native',info['detected_target']))
+    profiles={}
     with tempfile.TemporaryDirectory(prefix='stela-simd-integer-') as temporary:
-        batch=compile_batch(cli,Path(temporary),functions,0);batch['cohort']='integer'
-        result=bounded_cases([batch])
+        for index,(selection,target_id) in enumerate(selections):
+            batch=compile_batch(cli,Path(temporary),functions,index,cpu_target=selection,target_id=target_id)
+            batch['cohort']='integer'
+            result=bounded_cases([batch])
+            decoded=list(Cs(CS_ARCH_X86,CS_MODE_64).disasm(batch['native'],0))
+            assert sum(i.size for i in decoded)==len(batch['native'])
+            mnemonics=Counter(i.mnemonic for i in decoded)
+            optional={o['mnemonic'] for o in info['simd_opcodes'] if o['minimum_target']!='x86_64-baseline'}
+            used=sorted(optional & mnemonics.keys())
+            expected={'pabsb','pabsw','pabsd'} if '+ssse3' in target_id else set()
+            if '+sse4.1' in target_id: expected.add('pcmpeqq')
+            if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            assert set(used)==expected,(target_id,used,expected)
+            profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used}
     assert digest(cli.read_bytes())==cli_hash and digest(Path(__file__).read_bytes())==harness_hash
-    report={'kind':'simd_integer_arm_vs_native_x86','passed':True,**result,'programs':len(functions),
+    baseline=profiles['baseline']
+    report={'kind':'simd_integer_arm_vs_native_x86','passed':True,
+        'three_way_register_state_comparisons':baseline['three_way_register_state_comparisons'],
+        'state_corpus_sha256':baseline['state_corpus_sha256'],'programs':len(functions),
         'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
         'harness_source_sha256':harness_hash,'shared_runner_sha256':digest((ROOT/'dev/differential.py').read_bytes()),
-        'corpus_sha256':digest(batch['source']),'compilation':batch['receipt'],
+        'corpus_sha256':digest(batch['source']),'compilation':baseline['compilation'],'cpu_profiles':profiles,
+        'total_profile_comparisons':sum(p['three_way_register_state_comparisons'] for p in profiles.values()),
         'verification_wall_seconds':time.monotonic()-started,
         'limits':'Focused non-saturating integer/logical SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
     write_evidence(ROOT/'.stela/simd-integer-differential-report.json',report)

@@ -47,6 +47,7 @@
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
+    "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],

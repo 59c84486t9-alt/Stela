@@ -712,11 +712,20 @@ pub fn compile_with_profile(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<CompiledBlock, CompileError> {
+    compile_for_target(source, base, profile, crate::TargetCpu::Baseline)
+}
+pub fn compile_for_target(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+    target: crate::TargetCpu,
+) -> Result<CompiledBlock, CompileError> {
     let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
-    let native = crate::x86_64::block::emit(
+    let native = crate::x86_64::block::emit_for_target(
         &parsed.instructions,
         parsed.terminal.as_ref(),
         parsed.next_pc,
+        target,
     );
     Ok(CompiledBlock {
         native,

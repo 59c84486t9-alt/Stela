@@ -12,6 +12,7 @@ mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
 mod integer_math;
+pub mod isa;
 mod pc_relative;
 mod register_offset;
 mod simd;
@@ -273,9 +274,10 @@ fn emit_instruction(
     code: &mut Vec<u8>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
+    target: crate::TargetCpu,
 ) {
     match instruction.operation {
-        Operation::Simd(operand) => simd::emit(code, &operand),
+        Operation::Simd(operand) => simd::emit_for_target(code, &operand, target),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
@@ -539,6 +541,15 @@ fn emit_instruction(
 
 impl Backend<Instruction> for Emitter {
     fn emit(&self, instructions: &[Instruction]) -> Result<NativeBlock, UnsupportedReason> {
+        self.emit_for_target(instructions, crate::TargetCpu::Baseline)
+    }
+}
+impl Emitter {
+    pub fn emit_for_target(
+        &self,
+        instructions: &[Instruction],
+        target: crate::TargetCpu,
+    ) -> Result<NativeBlock, UnsupportedReason> {
         let mut block = NativeBlock {
             x86_64_code: vec![],
             source_map: vec![],
@@ -547,7 +558,7 @@ impl Backend<Instruction> for Emitter {
         let mut fixups = vec![];
         for instruction in instructions {
             block.source_map.push((instruction.pc, code.len()));
-            emit_instruction(code, instruction, &mut fixups);
+            emit_instruction(code, instruction, &mut fixups, target);
         }
         let offsets: std::collections::BTreeMap<_, _> = block
             .source_map

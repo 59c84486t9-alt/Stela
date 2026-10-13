@@ -1,7 +1,7 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
-use crate::{Prepared, clock, execution::platform, pauth, prepare_block_with_profile};
+use crate::{Prepared, clock, execution::platform, pauth, prepare_block_for_target};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
@@ -130,6 +130,7 @@ struct LoadedBlock {
 pub struct BlockRuntime {
     address_space: u64,
     profile: BlockProfile,
+    target: stela_compiler::TargetCpu,
     cache_root: PathBuf,
     next_generation: u64,
     regions: BTreeMap<u64, CodeRegion>,
@@ -200,15 +201,33 @@ impl BlockRuntime {
         cache_root: PathBuf,
         profile: BlockProfile,
     ) -> Self {
+        Self::new_for_target(
+            address_space,
+            cache_root,
+            profile,
+            stela_compiler::TargetCpu::detect(),
+        )
+    }
+    pub fn new_for_target(
+        address_space: u64,
+        cache_root: PathBuf,
+        profile: BlockProfile,
+        target: stela_compiler::TargetCpu,
+    ) -> Self {
         Self {
             address_space,
             profile,
+            target,
             cache_root,
             next_generation: 0,
             regions: BTreeMap::new(),
             loaded: BTreeMap::new(),
             _serialized: PhantomData,
         }
+    }
+
+    pub fn target_cpu(&self) -> stela_compiler::TargetCpu {
+        self.target
     }
 
     pub fn address_space(&self) -> u64 {
@@ -295,7 +314,8 @@ impl BlockRuntime {
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let prepared = prepare_block_with_profile(window, pc, &self.cache_root, self.profile)?;
+        let prepared =
+            prepare_block_for_target(window, pc, &self.cache_root, self.profile, self.target)?;
         ensure!(
             prepared.source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
@@ -304,7 +324,7 @@ impl BlockRuntime {
         ensure!(
             manifest.identity.guest_base == pc.0
                 && manifest.identity.abi == self.profile.abi()
-                && manifest.identity.target_cpu == "x86_64-baseline"
+                && manifest.identity.target_cpu == self.target.id()
                 && manifest.identity.schema_version == 1,
             "unsupported block translation identity"
         );
@@ -456,6 +476,11 @@ impl BlockRuntime {
         ensure!(
             native.len() == manifest.native_bytes && sha256(&native) == manifest.native_sha256,
             "block native snapshot checksum mismatch"
+        );
+        ensure!(
+            self.target.supported(),
+            "host CPU lacks generated-code requirements {}",
+            self.target.id()
         );
         let mapping = platform::Mapping::new(&native)?;
         if prepared.cache_hit {

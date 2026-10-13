@@ -700,7 +700,7 @@ def main():
                     require(bytes(original) == bytes(expected), 'original prefix differs from independent semantics')
                     state_path.write_text(json.dumps(state_dict(initial)))
                     result = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source), '--guest-base', hex(slide),
-                        '--entry', hex(ENTRY + slide), '--state', str(state_path), '--block-budget', '2', '--cache-dir', str(cache)], timeout=15))
+                        '--entry', hex(ENTRY + slide), '--state', str(state_path), '--block-budget', '2', '--cache-dir', str(cache), '--cpu-target', 'baseline'], timeout=15))
                     require(compiler is None or compiler == result['compiler_source_sha256'], 'compiler changed during entry probe')
                     compiler = result['compiler_source_sha256']
                     validate_native(result, expected, digest(view['text']), slide, alignment == flags == 0)

@@ -55,9 +55,14 @@ impl ExecutableLeaf {
             "generated code uses a different compiler"
         );
         ensure!(identity.abi == NATIVE_ABI, "unsupported generated-code ABI");
+        let target = identity
+            .target_cpu
+            .parse::<stela_compiler::TargetCpu>()
+            .map_err(anyhow::Error::msg)?;
         ensure!(
-            identity.target_cpu == "x86_64-baseline",
-            "unsupported generated-code CPU requirements"
+            target.supported(),
+            "host CPU lacks generated-code requirements {}",
+            target.id()
         );
         ensure!(
             !manifest.verified,

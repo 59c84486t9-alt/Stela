@@ -23,6 +23,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report detected x86 capabilities and the named SIMD output catalog.
+    CpuInfo,
     /// Benchmark the known linked-image fixture in a release build.
     BenchmarkLinkedImages {
         input: PathBuf,
@@ -117,6 +119,9 @@ enum Command {
     /// Compile one native block with explicit guest-address exits.
     CompileBlock {
         input: PathBuf,
+        /// Select native host features or an explicit portable AOT tier.
+        #[arg(long,default_value="native",value_parser=parse_cpu_target)]
+        cpu_target: stela_compiler::TargetCpu,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
         #[arg(long)]
@@ -132,6 +137,9 @@ enum Command {
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
     RunBlocks {
         input: PathBuf,
+        /// Select native host features or an explicit portable AOT tier.
+        #[arg(long,default_value="native",value_parser=parse_cpu_target)]
+        cpu_target: stela_compiler::TargetCpu,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
         #[arg(long, value_parser = parse_address)]
@@ -381,6 +389,9 @@ enum Command {
     /// AOT-compile a raw ARM64 leaf region with internal branches into x86.
     CompileLeaf {
         input: PathBuf,
+        /// Select native host features or an explicit portable AOT tier.
+        #[arg(long,default_value="native",value_parser=parse_cpu_target)]
+        cpu_target: stela_compiler::TargetCpu,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
         #[arg(long)]
@@ -450,6 +461,14 @@ fn parse_library(value: &str) -> Result<LibraryInput, String> {
         path: path.into(),
         base: parse_address(base)?,
     })
+}
+
+fn parse_cpu_target(value: &str) -> Result<stela_compiler::TargetCpu, String> {
+    if value == "native" {
+        Ok(stela_compiler::TargetCpu::detect())
+    } else {
+        value.parse()
+    }
 }
 
 fn parse_memory_query(value: &str) -> Result<MemoryQuery, String> {
@@ -802,6 +821,29 @@ fn write_new_report(output: &std::path::Path, report: &mut serde_json::Value) ->
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::CpuInfo => {
+            use stela_compiler::{TargetCpu, x86_64::isa::SimdOpcode};
+            let opcodes: Vec<_> = SimdOpcode::ALL
+                .iter()
+                .map(|opcode| {
+                    serde_json::json!({
+                        "mnemonic": opcode.mnemonic(), "opcode_bytes": opcode.encoding(),
+                        "minimum_target": opcode.requires().id(),
+                        "available_on_host": opcode.requires().supported(),
+                        "lowering_enabled": *opcode != SimdOpcode::ByteShuffle,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "detected_target": TargetCpu::detect().id(),
+                    "baseline": TargetCpu::Baseline.id(),
+                    "simd_opcodes": opcodes,
+                    "scope": "Named legacy SIMD output forms; scalar encoding recipes remain in x86_64 modules. Catalog membership is not input ISA coverage.",
+                }))?
+            );
+        }
         Command::BenchmarkLinkedImages {
             input,
             library,
@@ -1147,6 +1189,7 @@ fn run() -> Result<()> {
         }
         Command::CompileBlock {
             input,
+            cpu_target,
             guest_base,
             output_dir,
             software_pauth,
@@ -1157,10 +1200,11 @@ fn run() -> Result<()> {
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
             let profile = block_profile(software_pauth, software_clock);
-            let compiled = stela_compiler::block::compile_with_profile(
+            let compiled = stela_compiler::block::compile_for_target(
                 window,
                 stela_compiler::GuestAddress(guest_base),
                 profile,
+                cpu_target,
             )?;
             ensure!(
                 !output_dir.exists(),
@@ -1168,7 +1212,7 @@ fn run() -> Result<()> {
             );
             std::fs::create_dir_all(&output_dir)?;
             std::fs::write(output_dir.join("native.bin"), &compiled.native.x86_64_code)?;
-            let manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot",
+            let manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
                 "source_bytes":compiled.source_bytes,"source_sha256":stela_core::sha256(&source[..compiled.source_bytes]),
                 "guest_base":guest_base,"abi":profile.abi(),
                 "native_sha256":stela_core::sha256(&compiled.native.x86_64_code),
@@ -1180,6 +1224,7 @@ fn run() -> Result<()> {
         }
         Command::RunBlocks {
             input,
+            cpu_target,
             guest_base,
             entry,
             stop_pc,
@@ -1253,10 +1298,11 @@ fn run() -> Result<()> {
                     )
                 })
                 .transpose()?;
-            let mut runtime = BlockRuntime::new_with_profile(
+            let mut runtime = BlockRuntime::new_for_target(
                 1,
                 cache_dir,
                 block_profile(context.is_some(), clock.is_some()),
+                cpu_target,
             );
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
             // SAFETY: This explicit research command accepts trusted guest code
@@ -1318,7 +1364,7 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
-                "outcome":outcome,"abi":runtime.profile().abi(),"memory":memory_report,
+                "outcome":outcome,"abi":runtime.profile().abi(),"target_cpu":runtime.target_cpu().id(),"memory":memory_report,
                 "mach_port_profile":mach_port_services.then_some(stela_runtime::mach::HOST_PORT_PROFILE),
                 "mach_port_events":mach_port_events,"mach_port_rights":mach_ports.as_ref().map(|ports| ports.rights()),
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
@@ -1876,12 +1922,16 @@ fn run() -> Result<()> {
         }
         Command::CompileLeaf {
             input,
+            cpu_target,
             guest_base,
             output_dir,
         } => {
             let source = std::fs::read(&input)?;
-            let block =
-                stela_compiler::compile(&source, stela_compiler::GuestAddress(guest_base))?;
+            let block = stela_compiler::compile_for_target(
+                &source,
+                stela_compiler::GuestAddress(guest_base),
+                cpu_target,
+            )?;
             ensure!(
                 !output_dir.exists(),
                 "output directory exists; choose a new one"
@@ -1894,6 +1944,7 @@ fn run() -> Result<()> {
             let manifest = serde_json::json!({
                 "schema_version": 1,
                 "kind": "raw_arm64_leaf_aot",
+                "target_cpu":cpu_target.id(),
                 "source_sha256": stela_core::sha256(&source),
                 "guest_base": guest_base,
                 "guest_instructions": source.len() / 4,
