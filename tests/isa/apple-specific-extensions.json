@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "kind": "apple_specific_extension_ledger",
+  "inventory_complete": false,
+  "scope": "Known Apple-specific instructions and architectural behavior, excluded from the documented standard A64 denominator. A tracked group is not one instruction or a complete extension inventory. Standard PAuth instructions belong in the A64 checklist; Apple ABI/key-lifetime work is tracked with platform services.",
+  "extensions": [
+    {
+      "id": "apple-amx",
+      "status": "unsupported",
+      "scope": "Apple matrix accelerator instructions; opcode operations 0..22 are described by firsthand research, with generation-dependent submodes. SET/CLR share operation17. Full generation/submode inventory and semantics remain open.",
+      "source": "https://github.com/corsix/amx/tree/483714bb051da088d08a66724b22dd08a5db3c99",
+      "evidence": ".stela/research/instruction-documentation/amx-static-scan.json",
+      "evidence_sha256": "7ac6e05990d3217b917796dc135902ca8cd6156d9f3db71bfb59f31956e803cb",
+      "observation": "Static aligned AMX encoding matches in original macOS26A434 Accelerate __text: BLAS159291, BNNS59950, vDSP7970, LAPACK109539. Reachability/hardware execution are unverified. Feature dispatch can select other paths; no profile requirement inferred from presence alone."
+    },
+    {
+      "id": "apple-private-system-controls",
+      "status": "unsupported",
+      "scope": "Apple-specific system-register meanings and protection/ordering controls. Standard MRS/MSR/SYS encoding coverage does not establish the selected register semantics.",
+      "source": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/arm64/proc_reg.h",
+      "observation": "Public XNU defines ACTLR EnTSO/EnAPFLG/EnAFP/EnPRSV. Original dyld uses S3_6_C15_C1_5 on conditional protection paths. Exact private semantics/profile availability remain unverified."
+    },
+    {
+      "id": "apple-rosetta-flag-assists",
+      "status": "unsupported",
+      "scope": "Apple reserved-NZCV parity/adjust and related flag behavior used by generated Rosetta ARM code. This does not imply a requirement for ordinary native ARM applications.",
+      "source": "https://dougallj.wordpress.com/2022/11/09/why-is-rosetta-2-fast/",
+      "observation": "Pinned original Rosetta output reads NZCV bit26; six of eight parity fixtures differ on generic Unicorn. Code is preserved unchanged; no Apple hardware validation. See docs/research/rosetta.md."
+    }
+  ]
+}

@@ -13,11 +13,13 @@ import tempfile
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from evidence import write_evidence
+import a64_checklist
 
 ROOT = Path(__file__).resolve().parents[1]
 STATUSES = ('implemented', 'partial', 'unsupported')
 RET = 0xd65f03c0
 BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
+SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
 
 
 def sha256(path):
@@ -121,14 +123,16 @@ def summarize(rows):
 
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf'):
-    if mode not in ('leaf', 'block'):
+    if mode not in ('leaf', 'block', 'service'):
         raise ValueError('Unknown compiler probe mode')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
     output = directory / 'native'
-    command = [str(cli), 'compile-' + mode, str(source), '--output-dir', str(output)]
-    if mode == 'block':
+    command = [str(cli), 'compile-' + ('block' if mode == 'service' else mode), str(source), '--output-dir', str(output)]
+    if mode != 'leaf':
         command.extend(['--guest-base', '0x10000000'])
+    if mode == 'service':
+        command.extend(['--software-pauth', '--software-clock'])
     process = run(command,
                   capture_output=True, text=True, timeout=30)
     if expect_failure:
@@ -139,8 +143,8 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
     manifest = json.loads(process.stdout)
     source_data = source.read_bytes()
-    if mode == 'block':
-        if manifest.get('abi') != BLOCK_ABI:
+    if mode != 'leaf':
+        if manifest.get('abi') != (SERVICE_ABI if mode == 'service' else BLOCK_ABI):
             raise ValueError('Compiler block probe ABI mismatch')
         consumed = manifest.get('source_bytes')
         if type(consumed) is not int or consumed != 4 or consumed > len(source_data):
@@ -157,7 +161,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     return {'word': f'0x{word:08x}', 'emitted': True, 'compiler_source_sha256': fingerprint,
             'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
             'native_bytes': native.stat().st_size,
-            **({'abi': BLOCK_ABI, 'source_bytes': consumed, 'compiler_mode': mode} if mode == 'block' else {})}
+            **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode} if mode != 'leaf' else {})}
 
 
 def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
@@ -217,10 +221,12 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
             raise ValueError(f'Native differential evidence has no comparisons: {name}')
         harness = root / repository_path(group['harness'])
         harness_hash = sha256(harness)
-        recorded = report.get('harness_source_sha256')
+        recorded = report.get('harness_source_sha256', report.get('sources_sha256', {}).get(group['harness']))
         if recorded != harness_hash:
             raise ValueError(f'Stale differential harness evidence: {name}')
         shared = {}
+        if 'sources_sha256' in report:
+            shared.update(report['sources_sha256'])
         if 'shared_runner_sha256' in report:
             shared['dev/differential.py'] = report['shared_runner_sha256']
         if 'shared_sources_sha256' in report:
@@ -254,6 +260,14 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
             if type(report.get(key)) is not int or report[key] <= 0:
                 raise ValueError(f'Differential evidence missing positive count {key}')
             results[name][key] = report[key]
+        for key, expected in group.get('required_measurements', {}).items():
+            value = report
+            for part in key.split('.'):
+                value = value.get(part) if isinstance(value, dict) else None
+            if type(value) is not int or value != expected:
+                raise ValueError(f'Differential evidence missing required measurement {key}')
+        if group.get('require_current_executable') and report.get('compiler_executable_sha256') != executable_hash:
+            raise ValueError('Stale service runtime executable evidence')
         if group['kind'] == 'arm64_block_control_flow_differential':
             if executable_hash is not None and report.get('compiler_executable_sha256') != executable_hash:
                 raise ValueError('Stale native block runtime executable evidence')
@@ -277,6 +291,22 @@ def validate_current_compiler(registry, compiler, root=ROOT):
 
 
 def markdown(report):
+    if 'documented_isa' in report:
+        row = report['documented_isa']['summary']
+        apple = report['apple_specific_extensions']
+        return ('| Measurement | Current evidence |\n| --- | --- |\n'
+                f"| Documented A64 ISA implemented | **{row['implemented']:,} / {row['total']:,} ({row['implementation_percentage']:.2f}%)** |\n"
+                f"| Documented forms partially implemented | {row['partial']:,} |\n"
+                f"| Documented forms unimplemented | {row['unsupported']:,} |\n"
+                f"| Apple-specific extension groups | {apple['implemented']} implemented / {apple['tracked']} tracked; inventory open |\n"
+                f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n\n"
+                f"Arm reference **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. "
+                'Each canonical encoding form counts once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
+                'The fixed denominator includes optional and privileged A64 extensions, including forms beyond Apple hardware. '
+                'This measures documented ISA implementation, not macOS or application completion.\n\n'
+                '[Complete checklist](tests/isa/a64-documented-checklist.json) · '
+                '[Apple extensions](tests/isa/apple-specific-extensions.json) · '
+                '[Scope and evidence](docs/development.md#documented-a64-checklist).\n')
     row = report['summary']['reviewed']
     block = report.get('block_profile_evidence')
     block_rows = ''
@@ -341,6 +371,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
     parser.add_argument('--block-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-block-forms.json')
+    parser.add_argument('--service-registry', type=Path, default=ROOT / 'tests/isa/a64-service-forms.json')
+    parser.add_argument('--checklist', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
@@ -352,6 +384,16 @@ def main():
     block_data = args.block_registry.read_bytes()
     block_registry = json.loads(block_data)
     block_rows = validate_registry(block_registry)
+    service_data = args.service_registry.read_bytes()
+    service_registry = json.loads(service_data)
+    service_rows = validate_registry(service_registry)
+    catalog_data = args.checklist.read_bytes()
+    catalog = json.loads(catalog_data)
+    apple = json.loads((ROOT / 'tests/isa/apple-specific-extensions.json').read_bytes())
+    if apple.get('kind') != 'apple_specific_extension_ledger' or apple.get('inventory_complete') is not False:
+        raise ValueError('Apple additions need a separate explicitly open inventory')
+    if len({r['id'] for r in apple['extensions']}) != len(apple['extensions']) or any(r['status'] not in STATUSES for r in apple['extensions']):
+        raise ValueError('Invalid Apple extension identity/status')
     if (block_registry['profile'].get('compiler_command') != 'compile-block'
             or block_registry['profile'].get('abi') != BLOCK_ABI):
         raise ValueError('Block registry must declare the native block-exit compiler ABI')
@@ -361,16 +403,25 @@ def main():
         block_directory = Path(temporary) / 'blocks'
         block_directory.mkdir()
         block_compiler, block_probes = smoke_forms(args.cli, block_rows, block_rows, block_directory, mode='block')
-        if block_compiler != compiler:
+        service_directory = Path(temporary) / 'services'
+        service_directory.mkdir()
+        service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory, mode='service')
+        if block_compiler != compiler or service_compiler != compiler:
             raise ValueError('Leaf and block compiler identities differ')
     evidence, sources = validate_evidence(registry, rows, compiler)
     block_evidence, block_sources = validate_evidence(block_registry, block_rows, compiler,
                                                       executable_hash=executable_hash)
+    service_evidence, service_sources = validate_evidence(service_registry, service_rows, compiler, executable_hash=executable_hash)
+    assessed, documented_summary = a64_checklist.assess(catalog, [registry, block_registry, service_registry])
+    assessed['compiler_source_sha256'] = compiler
+    assessed['evidence_reports'] = [{k: row[k] for k in ('report', 'report_sha256')}
+                                   for group in (evidence, block_evidence, service_evidence) for row in group.values()]
     fingerprint_sources = validate_current_compiler(registry, compiler)
     if validate_current_compiler(block_registry, compiler) != fingerprint_sources:
         raise ValueError('Leaf and block fingerprint recipes differ')
     if (sha256(args.cli) != executable_hash or args.registry.read_bytes() != registry_data
             or args.block_registry.read_bytes() != block_data
+            or args.service_registry.read_bytes() != service_data or args.checklist.read_bytes() != catalog_data
             or validate_current_compiler(registry, compiler) != fingerprint_sources
             or validate_current_compiler(block_registry, compiler) != fingerprint_sources):
         raise ValueError('Compiler/registry changed during measurement')
@@ -383,6 +434,14 @@ def main():
               'harness_source_sha256': sha256(__file__), 'compiler_sources_sha256': sources,
               'compiler_fingerprint_sources_sha256': fingerprint_sources,
               'profile': registry['profile'], 'summary': summarize(rows),
+              'documented_isa': {'version': catalog['version'], 'facts_sha256': catalog['facts_sha256'],
+                                'summary': documented_summary},
+              'apple_specific_extensions': {'tracked': len(apple['extensions']),
+                  'implemented': sum(r['status'] == 'implemented' for r in apple['extensions']),
+                  'inventory_complete': False},
+              'service_profile_evidence': {'registry_sha256': hashlib.sha256(service_data).hexdigest(),
+                  'native_differential_evidence': service_evidence, 'compiler_sources_sha256': service_sources,
+                  'compiler_smoke_probes': service_probes},
               'block_profile_evidence': {
                   'registry_version': block_registry['registry_version'],
                   'registry_sha256': hashlib.sha256(block_data).hexdigest(),
@@ -395,11 +454,12 @@ def main():
               'native_differential_evidence': evidence, 'compiler_smoke_probes': probes,
               'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
                                  for identity, row in rows.items()],
-              'limits': 'Apple-silicon arm64/arm64e to native x86_64 is the target. Required public and Apple-specific ISA inventory is incomplete. Reviewed form counts cannot establish an ISA or overall completion percentage. Status is reviewed implementation under the declared leaf/block profiles plus current differential evidence and representative compile smoke; neither smoke nor differential tests prove exhaustive correctness. Complete binary loading/execution and OS boot remain unverified.'}
+              'limits': 'Documented ISA percentage uses the fixed complete June2026 A64 reference superset, deduplicated across explicit execution profiles. Partial forms earn no credit. Apple-specific additions and required Apple CPU/VM inventory remain separate and open. Differential tests establish evidence, not exhaustive correctness or complete application/macOS execution.'}
     archive = write_evidence(args.output, report)
     if args.markdown_output:
         write_markdown(args.markdown_output, markdown(report))
     if args.update_readme:
+        a64_checklist.write(args.checklist, assessed)
         update_readme(ROOT / 'README.md', markdown(report))
     print(json.dumps({'report': str(args.output), 'archive': str(archive),
                       'compiler_source_sha256': compiler, 'summary': report['summary'],

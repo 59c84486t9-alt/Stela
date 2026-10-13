@@ -1,0 +1,1389 @@
+{
+  "schema_version": 2,
+  "kind": "reviewed_apple_silicon_instruction_forms",
+  "target_profile": {
+    "vendor": "Apple",
+    "guest_architectures": [
+      "arm64",
+      "arm64e"
+    ],
+    "host_architecture": "x86_64",
+    "scope": "Native Apple-silicon macOS binaries, including required public and Apple-specific extensions and ABI behavior; host extensions selected by explicit capability checks.",
+    "required_isa_inventory_complete": false,
+    "required_isa_form_count": null,
+    "inventory_limits": "Reviewed shared A64 forms only. This list is not a complete Apple CPU feature contract, private-extension inventory, or binary-compatibility denominator."
+  },
+  "instruction_sources": [
+    {
+      "archive_bytes": 34182920,
+      "archive_sha256": "63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354",
+      "other_release_directories_excluded": [
+        "ISA_A64_xml_A_profile-2026-03/"
+      ],
+      "publisher": "Arm Limited",
+      "redistribution_scope": "Only factual identifiers, names, categorical/feature metadata and fixed encoding bits are included. Arm XML, authored instruction prose and pseudocode remain local and are not redistributed.",
+      "release": "2026-06",
+      "release_reference_uri": "https://support.arm.com/documentation/ddi0487/mc/Preface/About-this-Manual/Corresponding-Collateral",
+      "selected_archive_prefix": "ISA_A64_xml_A_profile-2026-06/",
+      "type": "official machine-readable A64 XML",
+      "uri": "https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2026-06.tar.gz"
+    }
+  ],
+  "compiler_fingerprint_sources": [
+    "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/aarch64.rs",
+    "crates/stela-compiler/src/x86_64.rs",
+    "crates/stela-compiler/src/block.rs",
+    "crates/stela-compiler/src/x86_64/block.rs",
+    "crates/stela-compiler/src/aarch64/bitfield.rs",
+    "crates/stela-compiler/src/x86_64/bitfield.rs",
+    "crates/stela-compiler/src/aarch64/conditional_select.rs",
+    "crates/stela-compiler/src/x86_64/conditional_select.rs",
+    "crates/stela-compiler/src/aarch64/integer_math.rs",
+    "crates/stela-compiler/src/x86_64/integer_math.rs",
+    "crates/stela-compiler/src/aarch64/pc_relative.rs",
+    "crates/stela-compiler/src/x86_64/pc_relative.rs",
+    "crates/stela-compiler/src/aarch64/register_offset.rs",
+    "crates/stela-compiler/src/x86_64/register_offset.rs",
+    "crates/stela-compiler/src/aarch64/simd.rs",
+    "crates/stela-compiler/src/x86_64/simd.rs",
+    "crates/stela-compiler/Cargo.toml",
+    "Cargo.lock"
+  ],
+  "registry_version": "documented-a64-software-services-v1",
+  "profile": {
+    "id": "apple-arm64e-software-pauth-clock-v1",
+    "compiler_mode": "service",
+    "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-v1",
+    "description": "Classic software PAuth1 VA47 with explicit key domain and two bounded clock operations. Full standard A64 reference checklist assessments; no Apple hardware signature identity.",
+    "outside_scope": [
+      "PAuth2/FPAC/PAuth_LR/PACM/GCS/guarded BTI pages/PSTATE.BTYPE",
+      "architectural exception delivery",
+      "all system-register/barrier operations except admitted clock forms"
+    ]
+  },
+  "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
+  "evidence_groups": {
+    "software_services": {
+      "harness": "dev/pauth-differential.py",
+      "report": ".stela/pauth-differential-report.json",
+      "kind": "original_arm_pauth_vs_explicit_software_native",
+      "comparison_field": "native_math_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "required_measurements": {
+        "generic_pauth.canonical_forms": 33,
+        "authenticated_branches.canonical_forms": 8,
+        "clock_register_full_state_comparisons": 512
+      }
+    }
+  },
+  "forms": [
+    {
+      "id": "AUTDA_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autda.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac11800",
+      "alias": false,
+      "source_sha256": "eb648ad5e249ae0dca6c8229b4d9428655f96b5bc0e8cb016a1744b36c8fb105",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac11800",
+          "expected_mnemonics": [
+            "autda"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTDB_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autdb.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac11c00",
+      "alias": false,
+      "source_sha256": "a6ce3568ac00dc5e07446670afde1be4a068c42df0b10307fa7f2765a7312cde",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac11c00",
+          "expected_mnemonics": [
+            "autdb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTDZA_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autda.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac13be0",
+      "alias": false,
+      "source_sha256": "eb648ad5e249ae0dca6c8229b4d9428655f96b5bc0e8cb016a1744b36c8fb105",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac13be0",
+          "expected_mnemonics": [
+            "autdza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTDZB_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autdb.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac13fe0",
+      "alias": false,
+      "source_sha256": "a6ce3568ac00dc5e07446670afde1be4a068c42df0b10307fa7f2765a7312cde",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac13fe0",
+          "expected_mnemonics": [
+            "autdzb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIA1716_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503219f",
+      "alias": false,
+      "source_sha256": "cd05b0f749f45da1e81822d84cb753be40d733e51f13e850675886856280730b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503219f",
+          "expected_mnemonics": [
+            "autia1716"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIASP_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50323bf",
+      "alias": false,
+      "source_sha256": "cd05b0f749f45da1e81822d84cb753be40d733e51f13e850675886856280730b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd50323bf",
+          "expected_mnemonics": [
+            "autiasp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIAZ_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503239f",
+      "alias": false,
+      "source_sha256": "cd05b0f749f45da1e81822d84cb753be40d733e51f13e850675886856280730b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503239f",
+          "expected_mnemonics": [
+            "autiaz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIA_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autia.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac11000",
+      "alias": false,
+      "source_sha256": "cd05b0f749f45da1e81822d84cb753be40d733e51f13e850675886856280730b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac11000",
+          "expected_mnemonics": [
+            "autia"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIB1716_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50321df",
+      "alias": false,
+      "source_sha256": "9929c738b403bb4ad9a7f209604fe8d465af6d6963691600f89684bcc445d5dc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd50321df",
+          "expected_mnemonics": [
+            "autib1716"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIBSP_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50323ff",
+      "alias": false,
+      "source_sha256": "9929c738b403bb4ad9a7f209604fe8d465af6d6963691600f89684bcc445d5dc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd50323ff",
+          "expected_mnemonics": [
+            "autibsp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIBZ_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "autib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50323df",
+      "alias": false,
+      "source_sha256": "9929c738b403bb4ad9a7f209604fe8d465af6d6963691600f89684bcc445d5dc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd50323df",
+          "expected_mnemonics": [
+            "autibz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIB_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autib.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac11400",
+      "alias": false,
+      "source_sha256": "9929c738b403bb4ad9a7f209604fe8d465af6d6963691600f89684bcc445d5dc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac11400",
+          "expected_mnemonics": [
+            "autib"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIZA_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autia.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac133e0",
+      "alias": false,
+      "source_sha256": "cd05b0f749f45da1e81822d84cb753be40d733e51f13e850675886856280730b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac133e0",
+          "expected_mnemonics": [
+            "autiza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AUTIZB_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "autib.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac137e0",
+      "alias": false,
+      "source_sha256": "9929c738b403bb4ad9a7f209604fe8d465af6d6963691600f89684bcc445d5dc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac137e0",
+          "expected_mnemonics": [
+            "autizb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLRAAZ_64_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "blra.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd63f081f",
+      "alias": false,
+      "source_sha256": "adafc3a2b827b6609eaa5496aeb9468b5057a92e45e6d178c5877d7c5dc6eef5",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd63f081f",
+          "expected_mnemonics": [
+            "blraaz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLRAA_64P_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "blra.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd73f0800",
+      "alias": false,
+      "source_sha256": "adafc3a2b827b6609eaa5496aeb9468b5057a92e45e6d178c5877d7c5dc6eef5",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd73f0800",
+          "expected_mnemonics": [
+            "blraa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLRABZ_64_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "blra.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd63f0c1f",
+      "alias": false,
+      "source_sha256": "adafc3a2b827b6609eaa5496aeb9468b5057a92e45e6d178c5877d7c5dc6eef5",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd63f0c1f",
+          "expected_mnemonics": [
+            "blrabz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLRAB_64P_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "blra.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd73f0c00",
+      "alias": false,
+      "source_sha256": "adafc3a2b827b6609eaa5496aeb9468b5057a92e45e6d178c5877d7c5dc6eef5",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd73f0c00",
+          "expected_mnemonics": [
+            "blrab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BRAAZ_64_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "bra.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd61f081f",
+      "alias": false,
+      "source_sha256": "d780fb5b1d806147036ac0a8818670f8fbf5ebdf1f883b97261e9ff4d556c882",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd61f081f",
+          "expected_mnemonics": [
+            "braaz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BRAA_64P_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "bra.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd71f0800",
+      "alias": false,
+      "source_sha256": "d780fb5b1d806147036ac0a8818670f8fbf5ebdf1f883b97261e9ff4d556c882",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd71f0800",
+          "expected_mnemonics": [
+            "braa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BRABZ_64_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "bra.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xd61f0c1f",
+      "alias": false,
+      "source_sha256": "d780fb5b1d806147036ac0a8818670f8fbf5ebdf1f883b97261e9ff4d556c882",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd61f0c1f",
+          "expected_mnemonics": [
+            "brabz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BRAB_64P_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "bra.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd71f0c00",
+      "alias": false,
+      "source_sha256": "d780fb5b1d806147036ac0a8818670f8fbf5ebdf1f883b97261e9ff4d556c882",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd71f0c00",
+          "expected_mnemonics": [
+            "brab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ISB_BI_barriers",
+      "category": "base_integer_system",
+      "source_file": "isb.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd50330df",
+      "alias": false,
+      "source_sha256": "303b9a3e6273ce27718bf1798215615022f153455a85b3fd6313dc5e36d8565f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "partial",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "ISB SY only; native CPUID serialization, other barrier options declined.",
+      "rejected_samples": [
+        {
+          "word": "0xd50330df",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd5033fdf",
+          "expected_mnemonics": [
+            "isb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MRS_RS_systemmove",
+      "category": "base_integer_system",
+      "source_file": "mrs.xml",
+      "encoding_mask": "0xfff00000",
+      "encoding_value": "0xd5300000",
+      "alias": false,
+      "source_sha256": "d0dc95a34dbfd4dde54de527b0dd4679a8327c3911bcae736b4088d776d481f6",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "partial",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "MRS CNTVCT_EL0 only, every Rt including XZR; finite replay/native clock context. Other system registers declined.",
+      "rejected_samples": [
+        {
+          "word": "0xd53bd060",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xd53be040",
+          "expected_mnemonics": [
+            "mrs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACDA_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacda.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac10800",
+      "alias": false,
+      "source_sha256": "6f2b242a1632687e0578ba623716febbc25c5be7dbcf0c1818537bb42b92ef90",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac10800",
+          "expected_mnemonics": [
+            "pacda"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACDB_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacdb.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac10c00",
+      "alias": false,
+      "source_sha256": "a4322928e2a66b929ee5aecfcc292877d22fbe9d5199dd88ba874c96f9483a38",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac10c00",
+          "expected_mnemonics": [
+            "pacdb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACDZA_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacda.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac12be0",
+      "alias": false,
+      "source_sha256": "6f2b242a1632687e0578ba623716febbc25c5be7dbcf0c1818537bb42b92ef90",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac12be0",
+          "expected_mnemonics": [
+            "pacdza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACDZB_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacdb.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac12fe0",
+      "alias": false,
+      "source_sha256": "a4322928e2a66b929ee5aecfcc292877d22fbe9d5199dd88ba874c96f9483a38",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac12fe0",
+          "expected_mnemonics": [
+            "pacdzb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIA1716_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503211f",
+      "alias": false,
+      "source_sha256": "399beae039a9582a565c5bea5723b307a54901d970152789df06223c0e9cfc4f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503211f",
+          "expected_mnemonics": [
+            "pacia1716"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIASP_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503233f",
+      "alias": false,
+      "source_sha256": "399beae039a9582a565c5bea5723b307a54901d970152789df06223c0e9cfc4f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503233f",
+          "expected_mnemonics": [
+            "paciasp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIAZ_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacia.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503231f",
+      "alias": false,
+      "source_sha256": "399beae039a9582a565c5bea5723b307a54901d970152789df06223c0e9cfc4f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503231f",
+          "expected_mnemonics": [
+            "paciaz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIA_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacia.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac10000",
+      "alias": false,
+      "source_sha256": "399beae039a9582a565c5bea5723b307a54901d970152789df06223c0e9cfc4f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac10000",
+          "expected_mnemonics": [
+            "pacia"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIB1716_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503215f",
+      "alias": false,
+      "source_sha256": "b64a89e53081c5c3f91a80f50717ac29ca726b57d2a4e2ff6bdf16b319fa21c0",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503215f",
+          "expected_mnemonics": [
+            "pacib1716"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIBSP_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503237f",
+      "alias": false,
+      "source_sha256": "b64a89e53081c5c3f91a80f50717ac29ca726b57d2a4e2ff6bdf16b319fa21c0",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503237f",
+          "expected_mnemonics": [
+            "pacibsp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIBZ_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "pacib.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503235f",
+      "alias": false,
+      "source_sha256": "b64a89e53081c5c3f91a80f50717ac29ca726b57d2a4e2ff6bdf16b319fa21c0",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd503235f",
+          "expected_mnemonics": [
+            "pacibz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIB_64P_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacib.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac10400",
+      "alias": false,
+      "source_sha256": "b64a89e53081c5c3f91a80f50717ac29ca726b57d2a4e2ff6bdf16b319fa21c0",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac10400",
+          "expected_mnemonics": [
+            "pacib"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIZA_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacia.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac123e0",
+      "alias": false,
+      "source_sha256": "399beae039a9582a565c5bea5723b307a54901d970152789df06223c0e9cfc4f",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac123e0",
+          "expected_mnemonics": [
+            "paciza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACIZB_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "pacib.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac127e0",
+      "alias": false,
+      "source_sha256": "b64a89e53081c5c3f91a80f50717ac29ca726b57d2a4e2ff6bdf16b319fa21c0",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac127e0",
+          "expected_mnemonics": [
+            "pacizb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "RETAA_64E_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "reta.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd65f0bff",
+      "alias": false,
+      "source_sha256": "29cbea1a3f7416c260581f7eff1e040da8716ae89f84b9cf396563e13063a19b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd65f0bff",
+          "expected_mnemonics": [
+            "retaa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "RETAB_64E_branch_reg",
+      "category": "base_integer_system",
+      "source_file": "reta.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd65f0fff",
+      "alias": false,
+      "source_sha256": "29cbea1a3f7416c260581f7eff1e040da8716ae89f84b9cf396563e13063a19b",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd65f0fff",
+          "expected_mnemonics": [
+            "retab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "XPACD_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "xpac.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac147e0",
+      "alias": false,
+      "source_sha256": "2e741e5be0c2ada106ac9715acbd958da1c82f10635410408a04bdeb447ba9bc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac147e0",
+          "expected_mnemonics": [
+            "xpacd"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "XPACI_64Z_dp_1src",
+      "category": "base_integer_system",
+      "source_file": "xpac.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xdac143e0",
+      "alias": false,
+      "source_sha256": "2e741e5be0c2ada106ac9715acbd958da1c82f10635410408a04bdeb447ba9bc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xdac143e0",
+          "expected_mnemonics": [
+            "xpaci"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "XPACLRI_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "xpac.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50320ff",
+      "alias": false,
+      "source_sha256": "2e741e5be0c2ada106ac9715acbd958da1c82f10635410408a04bdeb447ba9bc",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Reviewed pinned June2026 integer/HINT/transfer fixed bits and explicit software PAuth1 semantics, independent QARMA model plus original ARM/native full-state tests.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/clock.rs"
+      ],
+      "evidence_groups": [
+        "software_services"
+      ],
+      "scope": "Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary.",
+      "smoke_samples": [
+        {
+          "word": "0xd50320ff",
+          "expected_mnemonics": [
+            "xpaclri"
+          ]
+        }
+      ]
+    }
+  ]
+}

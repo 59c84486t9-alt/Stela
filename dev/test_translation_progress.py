@@ -1,5 +1,6 @@
 """Synthetic Apple-silicon progress tests; no Apple input or native execution required."""
 import copy
+from collections import Counter
 import hashlib
 import importlib.util
 import json
@@ -40,6 +41,56 @@ def fixtures():
 
 
 class IsaProgressTests(unittest.TestCase):
+    def test_documented_checklist_uses_complete_pinned_facts_not_observed_subset(self):
+        path = progress.ROOT / 'tests/isa/a64-documented-checklist.json'
+        catalog = json.loads(path.read_bytes())
+        rows = progress.a64_checklist.validate(catalog)
+        self.assertEqual(len(rows), 4332)
+        self.assertEqual(Counter(r['category'] for r in rows.values()),
+                         {'base_integer_system': 954, 'fp_simd': 1212, 'sve': 1389, 'sme': 777})
+        for mutation in ('remove', 'duplicate', 'facts', 'rehashed_facts'):
+            changed = copy.deepcopy(catalog)
+            if mutation == 'remove':
+                changed['forms'].pop()
+            elif mutation == 'duplicate':
+                changed['forms'][-1] = changed['forms'][0]
+            else:
+                changed['forms'][0]['encoding_value'] = '0x00000000'
+                if mutation == 'rehashed_facts':
+                    changed['facts_sha256'] = progress.a64_checklist.facts_hash(changed)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                progress.a64_checklist.validate(changed)
+
+    def test_documented_counts_deduplicate_profiles_and_ignore_generated_status_claims(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        form = next(r for r in catalog['forms'] if r['id'] == 'RET_64R_branch_reg')
+        row = {**form, 'source_sha256': catalog['source_files_sha256'][form['source_file']],
+               'profile': 'one', 'scope': 'bounded reviewed semantics', 'status': 'partial'}
+        catalog['forms'][0]['status'] = 'implemented'  # Generated fields cannot confer support.
+        _, counts = progress.a64_checklist.assess(catalog, [{'forms': [row]}])
+        self.assertEqual((counts['implemented'], counts['partial'], counts['implementation_percentage']), (0, 1, 0))
+        assessed, counts = progress.a64_checklist.assess(catalog, [
+            {'forms': [row]}, {'forms': [{**row, 'profile': 'two', 'status': 'implemented'}]},
+            {'forms': [{**row, 'profile': 'three', 'status': 'implemented'}]}])
+        self.assertEqual((counts['implemented'], counts['partial'], counts['total']), (1, 0, 4332))
+        self.assertEqual(counts['implementation_percentage'], 100 / 4332)
+        self.assertEqual(len(next(r for r in assessed['forms'] if r['id'] == row['id'])['profiles']), 3)
+        for key, value in [('id', 'invented_alias'), ('encoding_mask', '0xffffffff'), ('source_sha256', '0' * 64)]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                progress.a64_checklist.assess(catalog, [{'forms': [{**row, key: value}]}])
+
+    def test_readme_reference_percentage_and_apple_ledger_are_separate(self):
+        report = {'summary': progress.summarize(progress.validate_registry(fixtures())),
+            'compiler_source_sha256': COMPILER,
+            'documented_isa': {'summary': {'implemented': 277, 'partial': 13, 'unsupported': 4042,
+                                          'total': 4332, 'implementation_percentage': 27700 / 4332}},
+            'apple_specific_extensions': {'implemented': 0, 'tracked': 3}}
+        text = progress.markdown(report)
+        self.assertIn('277 / 4,332 (6.39%)', text)
+        self.assertIn('13 |', text)
+        self.assertIn('0 implemented / 3 tracked; inventory open', text)
+        self.assertIn('not macOS or application completion', text)
+
     def test_reviewed_counts_never_manufacture_completion_denominator(self):
         registry = fixtures()
         rows = progress.validate_registry(registry)
