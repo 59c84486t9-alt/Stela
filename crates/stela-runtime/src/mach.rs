@@ -1,13 +1,23 @@
 //! ARM64 Mach trap ABI and opt-in host-owned bootstrap port rights.
 //! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
 //! osfmk/arm64/bsd_arm64.c and osfmk/kern/syscall_sw.c. This is not an IPC bridge.
-use crate::{blocks::ThreadState, darwin::validate_trap};
-use anyhow::{Result, ensure};
+use crate::{
+    blocks::ThreadState,
+    darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap},
+};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{marker::PhantomData, rc::Rc};
 use stela_compiler::block::SynchronousTrap;
 
 pub const HOST_PORT_PROFILE: &str = "darwin-host-owned-mach-ports-v1";
+pub const REPLY_PORT_TRAP: u32 = 26;
+pub const THREAD_SELF_TRAP: u32 = 27;
+pub const TASK_SELF_TRAP: u32 = 28;
+pub const HOST_SELF_TRAP: u32 = 29;
+const MAX_PORT_ACQUISITIONS: usize = 4096;
+const FIRST_GUEST_PORT: u32 = 0x101;
+const GUEST_PORT_STRIDE: u32 = 0x100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Request {
@@ -28,7 +38,7 @@ impl PendingCall {
         argument_count: usize,
     ) -> Result<Self> {
         validate_trap(state, trap)?;
-        let selector = state.registers.x[16] as u32 as i32;
+        let selector = state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
         ensure!(
             selector < 0 && selector != i32::MIN && selector != -3 && selector != -4,
             "selector is not an ordinary Mach trap"
@@ -113,17 +123,17 @@ impl HostPorts {
             "bootstrap port traps take no arguments"
         );
         let kind = match request.number {
-            26 => PortKind::ReplyReceive,
-            27 => PortKind::ThreadSend,
-            28 => PortKind::TaskSend,
-            29 => PortKind::HostSend,
+            REPLY_PORT_TRAP => PortKind::ReplyReceive,
+            THREAD_SELF_TRAP => PortKind::ThreadSend,
+            TASK_SELF_TRAP => PortKind::TaskSend,
+            HOST_SELF_TRAP => PortKind::HostSend,
             _ => anyhow::bail!(
                 "Mach trap {} is not implemented by the host port profile",
                 request.number
             ),
         };
         ensure!(
-            self.acquisitions < 4096,
+            self.acquisitions < MAX_PORT_ACQUISITIONS,
             "host port acquisition budget exhausted"
         );
         let host = acquire(kind)?;
@@ -139,7 +149,7 @@ impl HostPorts {
             right.references += 1;
             return Ok(right.guest_name as i32);
         }
-        let guest_name = 0x101 + self.rights.len() as u32 * 0x100;
+        let guest_name = FIRST_GUEST_PORT + self.rights.len() as u32 * GUEST_PORT_STRIDE;
         self.rights.push(PortRight {
             guest_name,
             kind,
@@ -147,6 +157,16 @@ impl HostPorts {
             host_name: host,
         });
         Ok(guest_name as i32)
+    }
+
+    /// Query only an owned current-thread send right, never an unchecked guest name.
+    pub fn thread_identifier(&self, guest_name: u32) -> Result<u64> {
+        let right = self
+            .rights
+            .iter()
+            .find(|right| right.guest_name == guest_name && right.kind == PortKind::ThreadSend)
+            .context("guest name is not an owned thread send right")?;
+        host_thread_identifier(right.host_name)
     }
 }
 
@@ -159,6 +179,67 @@ unsafe extern "C" {
     fn host_self_trap() -> u32;
     fn mach_port_destroy(task: u32, port: u32) -> i32;
     fn mach_port_deallocate(task: u32, port: u32) -> i32;
+    fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+}
+
+/// The temporary right is released on query success and failure. Guest port
+/// accounting stays unchanged because this is host context construction.
+pub(crate) fn current_thread_identifier() -> Result<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let port = acquire(PortKind::ThreadSend)?;
+        ensure!(port != 0, "current-thread send right is unavailable");
+        let result = host_thread_identifier(port);
+        // SAFETY: this right was acquired above in the current task and has not escaped.
+        let released = unsafe { mach_port_deallocate(mach_task_self_, port) };
+        ensure!(
+            released == 0,
+            "release current-thread query right failed: {released}"
+        );
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    anyhow::bail!("host thread identity requires macOS")
+}
+
+fn host_thread_identifier(port: u32) -> Result<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // Pinned osfmk/mach/thread_info.h. Pointer-like host fields never escape.
+        #[repr(C)]
+        #[derive(Default)]
+        struct ThreadIdentifierInfo {
+            thread_id: u64,
+            thread_handle: u64,
+            dispatch_qaddr: u64,
+        }
+        const THREAD_IDENTIFIER_INFO: i32 = 4;
+        const THREAD_IDENTIFIER_INFO_COUNT: u32 =
+            (size_of::<ThreadIdentifierInfo>() / size_of::<i32>()) as u32;
+        let mut info = ThreadIdentifierInfo::default();
+        let mut count = THREAD_IDENTIFIER_INFO_COUNT;
+        // SAFETY: the caller owns a current-thread send right. The aligned array
+        // has the exact public structure extent; count bounds the kernel write.
+        let status = unsafe {
+            thread_info(
+                port,
+                THREAD_IDENTIFIER_INFO,
+                (&mut info as *mut ThreadIdentifierInfo).cast(),
+                &mut count,
+            )
+        };
+        ensure!(
+            status == 0 && count == THREAD_IDENTIFIER_INFO_COUNT,
+            "host thread identifier query failed: status={status}, count={count}"
+        );
+        ensure!(info.thread_id != 0, "host thread identifier is zero");
+        Ok(info.thread_id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = port;
+        anyhow::bail!("host thread identity requires macOS")
+    }
 }
 fn acquire(kind: PortKind) -> Result<u32> {
     #[cfg(target_os = "macos")]

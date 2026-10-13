@@ -10,6 +10,7 @@ pub mod mach;
 pub mod memory;
 pub mod pauth;
 pub mod process;
+pub mod thread;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::io::Read;

@@ -189,6 +189,50 @@ class DataVmGuards(unittest.TestCase):
 
 
 class PageSizeCommpageGuards(unittest.TestCase):
+    def test_thread_mode_retains_existing_cohorts_and_declares_original_live_inputs(self):
+        base = suite.MACH_FIXTURE_BASES[0]
+        self.assertEqual(len(suite.mach_port_cases(base, False)) * 4, 20)
+        self.assertEqual(len(suite.mach_port_cases(base, True)) * 4, 16)
+        cases = [case for flags in range(16) for case in suite.mach_thread_cases(base, flags)]
+        full = [case for case in cases if case.thread_operation == 'initialize']
+        self.assertEqual(len(full) * 2, 8)
+        self.assertTrue(all(case.entry_offset == suite.MACH_INIT_ENTRY and case.stop_pc == suite.VM_STOP
+                            and case.request_numbers == suite.MACH_INIT_REQUESTS for case in full))
+        self.assertEqual({case.kernel_page_shift for case in full}, set(suite.PAGE_SIZE_KERNEL_SHIFTS))
+        self.assertTrue(any(case.entry_offset == suite.THREAD_PLATFORM_SVC
+                            and case.thread_operation == 'get' and case.selector_upper == suite.UINT32_MASK
+                            and case.subcode_upper == suite.UINT32_MASK for case in cases))
+        self.assertTrue({0, 1, suite.THREAD_VM_MAXIMUM - 1, suite.THREAD_VM_MAXIMUM,
+                         suite.THREAD_VM_MAXIMUM + 1, suite.UINT64_MASK}.issubset(
+                             {case.tsd_address for case in cases if case.thread_operation == 'set'}))
+
+    def test_thread_receipt_rejects_identity_owner_and_tsd_transition_drift(self):
+        base = suite.MACH_FIXTURE_BASES[0]
+        case = suite.MachBootstrapCase(suite.THREAD_PLATFORM_WRAPPER, suite.VM_STOP, (),
+                                 thread_operation='set', tsd_address=suite.THREAD_VM_MAXIMUM)
+        report = {'thread_context': {'profile_id': suite.THREAD_PROFILE,
+                  'address_space': suite.PAGE_SIZE_ADDRESS_SPACE, 'thread_id': 0x100000001,
+                  'thread_specific_data': suite.THREAD_VM_MAXIMUM,
+                  'guest_vm_max_address': suite.THREAD_VM_MAXIMUM},
+                  'thread_service_events': [{'kind': 'platform', 'event': {
+                      'completion': {'kind': 'set_thread_specific_data'}, 'declined': None,
+                      'request': {'kind': 'set_thread_specific_data', 'address': suite.THREAD_VM_MAXIMUM},
+                      'thread_specific_data_before': 0, 'thread_specific_data_after': suite.THREAD_VM_MAXIMUM}}]}
+        suite.audit_thread_service(report, base, case)
+        for key, value in [('profile_id', 'other'), ('address_space', 2), ('thread_id', 0),
+                           ('thread_specific_data', 0), ('guest_vm_max_address', suite.THREAD_VM_MAXIMUM - 1)]:
+            changed = copy.deepcopy(report)
+            changed['thread_context'][key] = value
+            with self.assertRaises(AssertionError):
+                suite.audit_thread_service(changed, base, case)
+        for key, value in [('completion', None), ('declined', 'unsupported'),
+                           ('thread_specific_data_before', 1), ('thread_specific_data_after', 0),
+                           ('request', {'kind': 'get_thread_specific_data'})]:
+            changed = copy.deepcopy(report)
+            changed['thread_service_events'][0]['event'][key] = value
+            with self.assertRaises(AssertionError):
+                suite.audit_thread_service(changed, base, case)
+
     def test_arm64_user_size_stays_16k_for_both_kernel_profiles(self):
         for kernel in suite.PAGE_SIZE_KERNEL_SHIFTS:
             page = suite.page_size_bytes(kernel)

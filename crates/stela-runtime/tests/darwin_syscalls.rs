@@ -723,3 +723,324 @@ fn unsupported_vm_services_and_registered_code_aliases_preserve_pending_state() 
     }
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+mod native_thread_services {
+    use super::*;
+    use stela_runtime::{
+        darwin::{ExecutionServices, ServiceRunOutcome, platform, run_services},
+        mach::{self, HostPorts},
+        memory::DIRECT_RAM_USER_END,
+        thread::{self as guest_thread, Context, VmMaximum},
+    };
+
+    const SVC_DARWIN: u32 = 0xd4001001;
+    const RET_X30: u32 = 0xd65f03c0;
+    const INSTRUCTION_BYTES: u64 = 4;
+    const SELECTOR_REGISTER: usize = 16;
+    const SUBCODE_REGISTER: usize = 3;
+    const NZCV_COMBINATIONS: u32 = 16;
+    const UNALIGNED_VM_MAXIMUM: u64 = 0x12345;
+    const CURRENT_HOST_THREAD: libc::pthread_t = 0;
+    const TLS_SENTINEL_VALUE: u64 = 0x123456789abcdef0;
+
+    struct HostTlsSentinel {
+        key: libc::pthread_key_t,
+        value: Box<u64>,
+    }
+    impl HostTlsSentinel {
+        fn new() -> Result<Self> {
+            let mut key = 0;
+            // SAFETY: key is a valid out-pointer; no destructor is needed for
+            // the separately owned Box, released after this private key.
+            ensure!(unsafe { libc::pthread_key_create(&mut key, None) } == 0);
+            let sentinel = Self {
+                key,
+                value: Box::new(TLS_SENTINEL_VALUE),
+            };
+            // SAFETY: the Box pointer is stable throughout the private key's
+            // lifetime; the host never owns or frees the pointed-to value.
+            ensure!(
+                unsafe {
+                    libc::pthread_setspecific(
+                        key,
+                        std::ptr::from_ref(sentinel.value.as_ref()).cast(),
+                    )
+                } == 0
+            );
+            Ok(sentinel)
+        }
+        fn assert_unchanged(&self) {
+            // SAFETY: this test owns a live key on the same host thread.
+            let actual = unsafe { libc::pthread_getspecific(self.key) };
+            assert_eq!(
+                actual.cast_const(),
+                std::ptr::from_ref(self.value.as_ref()).cast()
+            );
+            assert_eq!(*self.value, TLS_SENTINEL_VALUE);
+        }
+    }
+    impl Drop for HostTlsSentinel {
+        fn drop(&mut self) {
+            // SAFETY: this test uniquely owns the key, deleted before Box drop.
+            assert_eq!(unsafe { libc::pthread_key_delete(self.key) }, 0);
+        }
+    }
+
+    fn host_identity() -> Result<(libc::pthread_t, u64)> {
+        let mut identifier = 0;
+        // SAFETY: the zero thread selects the current host thread, and identifier
+        // is a valid writable u64. pthread_self neither transfers nor mutates TLS.
+        let (handle, status) = unsafe {
+            (
+                libc::pthread_self(),
+                libc::pthread_threadid_np(CURRENT_HOST_THREAD, &mut identifier),
+            )
+        };
+        ensure!(
+            status == 0 && identifier != 0,
+            "host pthread identity failed"
+        );
+        Ok((handle, identifier))
+    }
+
+    fn run(
+        runtime: &mut BlockRuntime,
+        state: &mut ThreadState,
+        context: &mut Context,
+        budget: usize,
+    ) -> Result<ServiceRunOutcome> {
+        let mut memory = OwnedMemory::map(Vec::new())?;
+        // SAFETY: every fixture is immutable owned SVC/RET code without loads or
+        // stores. Services store numeric guest TSD values without dereferencing.
+        unsafe {
+            run_services(
+                runtime,
+                state,
+                Some(GuestAddress(STOP)),
+                budget,
+                &mut memory,
+                ExecutionServices {
+                    thread: Some(context),
+                    ..ExecutionServices::default()
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn native_identity_matches_owned_thread_right_and_preserves_host_tls() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, RET_X30])?;
+        let before = host_identity()?;
+        let mut context = Context::native(
+            runtime.address_space(),
+            VmMaximum::new(DIRECT_RAM_USER_END)?,
+        )?;
+        assert_eq!(context.snapshot().thread_id, before.1);
+        assert_eq!(context.snapshot().thread_specific_data, 0);
+        assert!(context.ports().rights().is_empty());
+        let request = mach::Request {
+            number: mach::THREAD_SELF_TRAP,
+            arguments: Vec::new(),
+        };
+        let first = context.ports_mut().request(&request)? as u32;
+        let repeated = context.ports_mut().request(&request)? as u32;
+        assert_eq!(first, repeated);
+        assert_eq!(context.ports().thread_identifier(first)?, before.1);
+        assert_eq!(context.ports().rights()[0].references, 2);
+        let task = context.ports_mut().request(&mach::Request {
+            number: mach::TASK_SELF_TRAP,
+            arguments: Vec::new(),
+        })? as u32;
+        assert!(context.ports().thread_identifier(task).is_err());
+        assert!(context.ports().thread_identifier(u32::MAX).is_err());
+        for flags in 0..NZCV_COMBINATIONS {
+            for selector in [
+                u64::from(guest_thread::THREAD_SELFID_SYSCALL),
+                0xfeedface00000000 | u64::from(guest_thread::THREAD_SELFID_SYSCALL),
+                0,
+            ] {
+                let mut state = thread(flags, 1);
+                state.registers.x[SELECTOR_REGISTER] = selector;
+                if selector == 0 {
+                    state.registers.x[0] = u64::from(guest_thread::THREAD_SELFID_SYSCALL);
+                }
+                let mut expected = state.clone();
+                expected.pc = GuestAddress(STOP);
+                expected.registers.x[0] = before.1;
+                expected.registers.x[1] = 0;
+                expected.registers.nzcv &= !CARRY;
+                let outcome = run(&mut runtime, &mut state, &mut context, 2)?;
+                assert_state(&state, &expected);
+                assert_eq!(outcome.execution.reason, StopReason::StopAddress);
+                assert_eq!(outcome.thread_services.len(), 1);
+                let guest_thread::Event::Identity(event) = &outcome.thread_services[0] else {
+                    bail!("identity call was routed to another service");
+                };
+                assert!(event.completion.is_some() && event.declined.is_none());
+                assert!(event.request.unwrap().arguments().is_empty());
+                assert_eq!(context.snapshot().thread_id, before.1);
+            }
+        }
+        assert_eq!(host_identity()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_set_get_preserves_complete_state_without_guest_mapping_or_alignment() -> Result<()>
+    {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, RET_X30])?;
+        let before = host_identity()?;
+        let tls = HostTlsSentinel::new()?;
+        for maximum in [UNALIGNED_VM_MAXIMUM, DIRECT_RAM_USER_END] {
+            let mut context = Context::native(runtime.address_space(), VmMaximum::new(maximum)?)?;
+            for flags in 0..NZCV_COMBINATIONS {
+                for upper in [0, u32::MAX] {
+                    for address in [0, 1, maximum - 1, maximum, maximum + 1, u64::MAX] {
+                        let sanitized = if address > maximum { 0 } else { address };
+                        for subcode in [
+                            platform::SET_THREAD_SPECIFIC_DATA,
+                            platform::GET_THREAD_SPECIFIC_DATA,
+                        ] {
+                            let mut state = thread(flags, 1);
+                            state.registers.x[0] = address;
+                            state.registers.x[SELECTOR_REGISTER] = (u64::from(upper) << 32)
+                                | u64::from(platform::PLATFORM_CALL_SELECTOR as u32);
+                            state.registers.x[SUBCODE_REGISTER] =
+                                (u64::from(upper) << 32) | u64::from(subcode);
+                            let mut expected = state.clone();
+                            expected.pc = GuestAddress(STOP);
+                            if subcode == platform::GET_THREAD_SPECIFIC_DATA {
+                                expected.registers.x[0] = sanitized;
+                            }
+                            let outcome = run(&mut runtime, &mut state, &mut context, 2)?;
+                            assert_state(&state, &expected);
+                            assert_eq!(outcome.execution.reason, StopReason::StopAddress);
+                            assert_eq!(outcome.thread_services.len(), 1);
+                            assert!(outcome.thread_services[0].completed());
+                            assert!(
+                                outcome.services.is_empty() && outcome.mach_services.is_empty()
+                            );
+                            assert_eq!(context.snapshot().thread_specific_data, sanitized);
+                            tls.assert_unchanged();
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(host_identity()?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_calls_and_context_mismatches_leave_precise_pending_state() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, RET_X30])?;
+        let mut context = Context::native(
+            runtime.address_space(),
+            VmMaximum::new(DIRECT_RAM_USER_END)?,
+        )?;
+        for (selector, subcode) in [
+            (20, 0),
+            (u64::from(platform::PLATFORM_CALL_SELECTOR as u32), 0),
+            (u64::from(platform::PLATFORM_CALL_SELECTOR as u32), 1),
+            (u64::from(platform::PLATFORM_CALL_SELECTOR as u32), u64::MAX),
+        ] {
+            let mut state = thread(15, 1);
+            state.registers.x[SELECTOR_REGISTER] = selector;
+            state.registers.x[SUBCODE_REGISTER] = subcode;
+            let before = state.clone();
+            let snapshot = context.snapshot();
+            let outcome = run(&mut runtime, &mut state, &mut context, 8)?;
+            assert_state(&state, &before);
+            assert!(matches!(
+                outcome.execution.reason,
+                StopReason::SynchronousTrap { .. }
+            ));
+            assert_eq!(outcome.execution.blocks_executed, 1);
+            assert_eq!(context.snapshot(), snapshot);
+            assert_eq!(outcome.thread_services.len(), usize::from(selector != 20));
+            assert!(
+                outcome
+                    .thread_services
+                    .iter()
+                    .all(|event| !event.completed())
+            );
+        }
+        for foreign in [false, true] {
+            let owner = runtime.address_space() + u64::from(foreign);
+            let mut context = Context::native(owner, VmMaximum::new(DIRECT_RAM_USER_END)?)?;
+            let mut ports = HostPorts::new(runtime.address_space())?;
+            let mut memory = OwnedMemory::map(Vec::new())?;
+            let mut state = thread(15, 1);
+            let before = state.clone();
+            // SAFETY: validation must reject either foreign ownership or two
+            // independent port owners before any immutable fixture executes.
+            let outcome = unsafe {
+                run_services(
+                    &mut runtime,
+                    &mut state,
+                    Some(GuestAddress(STOP)),
+                    8,
+                    &mut memory,
+                    ExecutionServices {
+                        thread: Some(&mut context),
+                        mach_ports: if foreign { None } else { Some(&mut ports) },
+                        ..ExecutionServices::default()
+                    },
+                )
+            };
+            assert!(outcome.is_err());
+            assert_state(&state, &before);
+            assert!(context.ports().rights().is_empty() && ports.rights().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn budget_resume_and_fresh_disk_cache_preserve_thread_context() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, SVC_DARWIN, RET_X30])?;
+        for offset in [0, INSTRUCTION_BYTES, 2 * INSTRUCTION_BYTES] {
+            runtime.prepare(GuestAddress(BASE + offset))?;
+        }
+        let mut context = Context::native(
+            runtime.address_space(),
+            VmMaximum::new(DIRECT_RAM_USER_END)?,
+        )?;
+        let mut state = thread(15, 1);
+        state.registers.x[SELECTOR_REGISTER] = u64::from(guest_thread::THREAD_SELFID_SYSCALL);
+        let first = run(&mut runtime, &mut state, &mut context, 1)?;
+        assert_eq!(first.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(first.thread_services.len(), 1);
+        assert_eq!(state.pc, GuestAddress(BASE + INSTRUCTION_BYTES));
+        let second = run(&mut runtime, &mut state, &mut context, 2)?;
+        assert_eq!(second.execution.reason, StopReason::StopAddress);
+        assert_eq!(second.execution.blocks_executed, 2);
+        assert_eq!(second.thread_services.len(), 1);
+        assert_eq!(
+            first.execution.compiled_blocks + second.execution.compiled_blocks,
+            0
+        );
+        assert_eq!(
+            first.execution.disk_cache_hits + second.execution.disk_cache_hits,
+            3
+        );
+        let warm_state = state.registers.clone();
+        state.pc = GuestAddress(BASE);
+        let warm = run(&mut runtime, &mut state, &mut context, 3)?;
+        assert_eq!(warm.execution.memory_cache_hits, 3);
+        assert_eq!(warm.thread_services.len(), 2);
+        assert_eq!(state.registers, warm_state);
+        drop(runtime);
+        let mut fresh = vm_runtime(cache.path(), BASE, &[SVC_DARWIN, SVC_DARWIN, RET_X30])?;
+        state.pc = GuestAddress(BASE);
+        let cached = run(&mut fresh, &mut state, &mut context, 3)?;
+        assert_eq!(cached.execution.disk_cache_hits, 3);
+        assert_eq!(cached.execution.compiled_blocks, 0);
+        assert_eq!(state.registers, warm_state);
+        Ok(())
+    }
+}

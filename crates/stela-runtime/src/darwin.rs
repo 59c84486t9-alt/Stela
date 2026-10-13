@@ -12,8 +12,10 @@ use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
 use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
+pub mod platform;
 
 pub const MAX_BSD_ARGUMENTS: usize = 8;
+pub(crate) const SYSCALL_SELECTOR_REGISTER: usize = 16;
 const CARRY: u32 = 0x20000000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -151,7 +153,7 @@ pub fn classify_bsd_call(
     trap: &SynchronousTrap,
 ) -> Result<BsdSelector, AbiError> {
     validate_trap(state, trap)?;
-    let raw_x16 = state.registers.x[16];
+    let raw_x16 = state.registers.x[SYSCALL_SELECTOR_REGISTER];
     let dispatch = raw_x16 as u32 as i32;
     if dispatch == i32::MIN {
         return Err(AbiError::PlatformCall { raw_x16 });
@@ -288,10 +290,12 @@ pub struct ServiceRunOutcome {
     pub execution: crate::blocks::RunOutcome,
     pub services: Vec<DataVmEvent>,
     pub mach_services: Vec<crate::mach::Event>,
+    pub thread_services: Vec<crate::thread::Event>,
 }
 #[derive(Default)]
 pub struct ExecutionServices<'a> {
     pub mach_ports: Option<&'a mut crate::mach::HostPorts>,
+    pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
     pub pauth: Option<&'a crate::pauth::Context>,
     pub clock: Option<&'a mut crate::clock::Context>,
@@ -417,6 +421,17 @@ pub unsafe fn run_services(
     let mut aggregate: Option<RunOutcome> = None;
     let mut events = Vec::new();
     let mut mach_events = Vec::new();
+    let mut thread_events = Vec::new();
+    anyhow::ensure!(
+        services.mach_ports.is_none() || services.thread.is_none(),
+        "thread services and independent Mach ports cannot have different owners"
+    );
+    if let Some(thread) = services.thread.as_ref() {
+        anyhow::ensure!(
+            thread.address_space() == runtime.address_space(),
+            "thread context belongs to another guest address space"
+        );
+    }
     if let Some(ports) = services.mach_ports.as_ref() {
         anyhow::ensure!(
             ports.address_space() == runtime.address_space(),
@@ -463,8 +478,22 @@ pub unsafe fn run_services(
         let Some(trap) = trap else {
             break;
         };
-        let serviced = if (state.registers.x[16] as u32 as i32) < 0 {
-            if let Some(ports) = services.mach_ports.as_deref_mut() {
+        let serviced = if let Some(thread) = services
+            .thread
+            .as_deref_mut()
+            .filter(|_| crate::thread::handles(state, &trap))
+        {
+            let event = crate::thread::service(state, &trap, thread);
+            let serviced = event.completed();
+            thread_events.push(event);
+            serviced
+        } else if (state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32) < 0 {
+            let ports = if let Some(thread) = services.thread.as_deref_mut() {
+                Some(thread.ports_mut())
+            } else {
+                services.mach_ports.as_deref_mut()
+            };
+            if let Some(ports) = ports {
                 let event = crate::mach::service(state, &trap, ports);
                 let serviced = event.result.is_some();
                 mach_events.push(event);
@@ -497,6 +526,7 @@ pub unsafe fn run_services(
         execution: aggregate.expect("one native dispatch outcome"),
         services: events,
         mach_services: mach_events,
+        thread_services: thread_events,
     })
 }
 

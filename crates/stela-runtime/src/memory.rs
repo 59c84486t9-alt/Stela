@@ -16,8 +16,9 @@ pub const MAX_IMAGE_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 /// File-backed research mappings have a separate virtual-space budget. Safe
 /// snapshot/write operations retain the smaller MAX_IMAGE_MEMORY_BYTES bound.
 pub const MAX_FILE_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-// The initial x86-64 profile uses the lower, 48-bit canonical address range.
-const USER_ADDRESS_END: u64 = 1 << 47;
+/// Exclusive end of the lower canonical user range in the direct-RAM x86-64
+/// profile. This native mapping bound does not define a guest kernel VM maximum.
+pub const DIRECT_RAM_USER_END: u64 = 1 << 47;
 
 #[derive(Debug, Clone)]
 pub struct MemoryRegionSpec {
@@ -275,7 +276,7 @@ impl OwnedMemory {
                 .checked_add(mapped_bytes)
                 .context("guest mapping address overflow")?;
             ensure!(
-                end <= USER_ADDRESS_END,
+                end <= DIRECT_RAM_USER_END,
                 "guest mapping exceeds canonical user range"
             );
             usize::try_from(end).context("guest mapping exceeds native address range")?;
@@ -753,7 +754,7 @@ impl PublishedReadOnlyRegion {
                 && guest_base >= page
                 && guest_base
                     .checked_add(bytes)
-                    .is_some_and(|end| end <= USER_ADDRESS_END),
+                    .is_some_and(|end| end <= DIRECT_RAM_USER_END),
             "published region requires an aligned lower-user guest range"
         );
         let mut backing = tempfile::tempfile()?;
@@ -1334,7 +1335,7 @@ mod tests {
             (0, page, 0),
             (address + 1, page, 0),
             (address, 0, 0),
-            (USER_ADDRESS_END, page, 0),
+            (DIRECT_RAM_USER_END, page, 0),
             (address, page, 1),
             (address, page + 1, 0),
             (address, page, page),
@@ -1554,7 +1555,7 @@ mod tests {
             spec(0, page),
             spec(address + 1, page),
             spec(address, 0),
-            spec(USER_ADDRESS_END, page),
+            spec(DIRECT_RAM_USER_END, page),
             spec(u64::MAX - page + 1, page),
             spec(address, MAX_IMAGE_MEMORY_BYTES + page),
         ];
