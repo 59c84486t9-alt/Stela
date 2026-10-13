@@ -1,6 +1,6 @@
 //! Native probes of complete original cached register-only functions.
 //! This deliberately supplies no cache data mappings or macOS process state.
-use super::shared_cache_exports::{self, CachedImage};
+use super::shared_cache_exports::CacheResolver;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,7 +10,7 @@ use stela_compiler::{
 };
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -154,15 +154,26 @@ fn read_cases(path: &Path, stop_pc: u64) -> Result<(Vec<Case>, String)> {
     Ok((cases, stela_core::sha256(&bytes)))
 }
 
+pub struct ProbeOptions<'a> {
+    pub stop_pc: u64,
+    pub block_budget: usize,
+    pub cache_dir: &'a Path,
+    pub aot: bool,
+}
+
 pub fn probe(
     input: &Path,
     image_path: &str,
     cache_base: Option<u64>,
     functions: &[FunctionInput],
-    stop_pc: u64,
-    block_budget: usize,
-    cache_dir: &Path,
+    options: ProbeOptions<'_>,
 ) -> Result<Value> {
+    let ProbeOptions {
+        stop_pc,
+        block_budget,
+        cache_dir,
+        aot,
+    } = options;
     ensure!(
         !functions.is_empty() && functions.len() <= 16,
         "probe requires 1..16 named functions"
@@ -175,33 +186,55 @@ pub fn probe(
     let preferred = set["files"][0]["header"]["shared_region_start"]
         .as_u64()
         .context("missing cache base")?;
-    let mut image: CachedImage =
-        shared_cache_exports::read(&set, image_path, cache_base.unwrap_or(preferred))?;
+    let mut resolver = CacheResolver::new(&set, cache_base.unwrap_or(preferred))?;
+    let mut image = serde_json::to_value(resolver.image(image_path)?)?;
     let mut runtime = BlockRuntime::new(0x534f_5245_4341_4348, cache_dir.to_owned());
     let mut results = Vec::new();
     let mut symbols = BTreeSet::new();
     let mut total_cases = 0usize;
     // Validate every selected source/case profile before the first native call.
     let mut prepared = Vec::new();
+    let mut registered = BTreeMap::new();
     for function in functions {
         ensure!(
             symbols.insert(function.symbol.as_str()),
             "duplicate requested function"
         );
-        let snapshot = image.snapshot_function(&function.symbol)?;
+        let resolution = resolver.resolve(image_path, &function.symbol, false)?;
+        let snapshot = resolver.snapshot_resolved_function(&resolution)?;
+        image["sources"] = serde_json::to_value(&snapshot.sources)?;
         let pcs = profile(&snapshot.bytes, snapshot.extent.address, stop_pc)?;
         let (cases, cases_sha256) = read_cases(&function.cases, stop_pc)?;
         total_cases = total_cases
             .checked_add(cases.len())
             .context("case count overflow")?;
         ensure!(total_cases <= 8192, "probe total exceeds 8192 cases");
-        runtime.register_code(
-            GuestAddress(snapshot.extent.address),
-            snapshot.bytes.clone(),
-        )?;
-        prepared.push((function, snapshot, pcs, cases, cases_sha256));
+        if let Some(bytes) = registered.get(&snapshot.extent.address) {
+            ensure!(
+                bytes == &snapshot.bytes,
+                "aliased function snapshots differ"
+            );
+        } else {
+            runtime.register_code(
+                GuestAddress(snapshot.extent.address),
+                snapshot.bytes.clone(),
+            )?;
+            registered.insert(snapshot.extent.address, snapshot.bytes.clone());
+        }
+        prepared.push((function, resolution, snapshot, pcs, cases, cases_sha256));
     }
-    for (function, snapshot, pcs, cases, cases_sha256) in prepared {
+    let aot_preparation = if aot {
+        let roots: Vec<_> = registered.keys().copied().map(GuestAddress).collect();
+        let discovery = runtime.discover(&roots, 4096)?;
+        ensure!(
+            discovery.issues.is_empty() && discovery.pending_entries.is_empty(),
+            "vetted function AOT discovery left unresolved static paths"
+        );
+        Some(discovery)
+    } else {
+        None
+    };
+    for (function, resolution, snapshot, pcs, cases, cases_sha256) in prepared {
         let mut outputs = Vec::with_capacity(cases.len());
         let mut returned = 0;
         for case in cases {
@@ -231,13 +264,14 @@ pub fn probe(
         results.push(
             json!({"symbol":function.symbol,"cases_source":function.cases,
             "cases_sha256":cases_sha256,"cases":outputs,"returned_cases":returned,
-            "snapshot":snapshot,"native_block_manifests":manifests}),
+            "snapshot":snapshot,"resolution":resolution,"native_block_manifests":manifests}),
         );
     }
     Ok(
         json!({"schema_version":1,"kind":"original_cached_register_function_native_probe",
         "source_sha256":set["source_sha256"],"cache_base":cache_base.unwrap_or(preferred),
         "image":image,"results":results,"total_cases":total_cases,"stop_pc":stop_pc,
+        "aot_preparation":aot_preparation,
         "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         "probe_source_sha256":stela_core::sha256(include_bytes!("cached_functions.rs")),
         "fixups_applied":false,"cache_data_mapped":false,"complete_binary_verified":false,

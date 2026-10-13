@@ -226,6 +226,20 @@ enum Command {
         #[arg(long, value_parser = parse_address)]
         cache_base: Option<u64>,
     },
+    /// Resolve named exports through original cache dependency and reexport metadata.
+    ResolveCacheExports {
+        input: PathBuf,
+        #[arg(long)]
+        image: String,
+        #[arg(long, required = true)]
+        symbol: Vec<String>,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        cache_base: Option<u64>,
+        #[arg(long)]
+        weak_import: bool,
+    },
     /// Execute complete original cached register-only functions against case inputs.
     ProbeCachedFunctions {
         input: PathBuf,
@@ -243,6 +257,9 @@ enum Command {
         block_budget: usize,
         #[arg(long, default_value = ".stela/cache/blocks-v1")]
         cache_dir: PathBuf,
+        /// Prepare static paths before running; unresolved targets still use JIT.
+        #[arg(long)]
+        aot: bool,
     },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
@@ -1117,6 +1134,51 @@ fn run() -> Result<()> {
                 serde_json::json!({"report":output,"complete_binary_verified":false})
             );
         }
+        Command::ResolveCacheExports {
+            input,
+            image,
+            symbol,
+            output,
+            cache_base,
+            weak_import,
+        } => {
+            ensure!(
+                !output.try_exists()?,
+                "report exists; choose a new --output path"
+            );
+            ensure!(
+                !symbol.is_empty() && symbol.len() <= 64,
+                "resolve requires 1..64 symbols"
+            );
+            let mut names = std::collections::BTreeSet::new();
+            for name in &symbol {
+                ensure!(
+                    !name.is_empty() && name.len() <= 4096 && names.insert(name),
+                    "symbols must be distinct bounded nonempty names"
+                );
+            }
+            let set = macho::shared_cache::manifest_set(&input)?;
+            let preferred = set["files"][0]["header"]["shared_region_start"]
+                .as_u64()
+                .context("cache shared-region base is unavailable")?;
+            let base = cache_base.unwrap_or(preferred);
+            let mut resolver = macho::shared_cache_exports::CacheResolver::new(&set, base)?;
+            let mut resolutions = Vec::with_capacity(symbol.len());
+            for name in symbol {
+                resolutions.push(resolver.resolve(&image, &name, weak_import)?);
+            }
+            let mut report = serde_json::json!({
+                "schema_version":1,"kind":"original_shared_cache_export_resolution_batch",
+                "source_sha256":set["source_sha256"],"image_path":image,
+                "cache_base":base,"weak_import":weak_import,"resolutions":resolutions,
+                "cache_fixups_applied":false,"complete_binary_verified":false
+            });
+            write_new_report(&output, &mut report)?;
+            println!(
+                "{}",
+                serde_json::json!({"report":output,"complete_binary_verified":false})
+            );
+        }
         Command::ProbeCachedFunctions {
             input,
             image,
@@ -1126,6 +1188,7 @@ fn run() -> Result<()> {
             stop_pc,
             block_budget,
             cache_dir,
+            aot,
         } => {
             ensure!(
                 !output.try_exists()?,
@@ -1136,9 +1199,12 @@ fn run() -> Result<()> {
                 &image,
                 cache_base,
                 &function,
-                stop_pc,
-                block_budget,
-                &cache_dir,
+                macho::cached_functions::ProbeOptions {
+                    stop_pc,
+                    block_budget,
+                    cache_dir: &cache_dir,
+                    aot,
+                },
             )?;
             write_new_report(&output, &mut report)?;
             println!(

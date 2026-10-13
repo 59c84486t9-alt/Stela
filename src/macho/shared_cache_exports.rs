@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, Metadata},
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
@@ -98,6 +98,7 @@ struct Reader {
     bytes_read: u64,
     preferred: u64,
     slide: u64,
+    image_addresses: Option<BTreeMap<String, u64>>,
 }
 impl Reader {
     fn open(set: &Value, cache_base: u64) -> Result<Self> {
@@ -284,6 +285,7 @@ impl Reader {
             bytes_read,
             preferred,
             slide,
+            image_addresses: None,
         };
         r.verify_references()?;
         Ok(r)
@@ -357,30 +359,41 @@ impl Reader {
         Ok(())
     }
     fn image_address(&mut self, path: &str) -> Result<u64> {
-        let offset = u64::from(word(&self.sources[0].header, 448)?);
-        let count = u64::from(word(&self.sources[0].header, 452)?);
-        ensure!(
-            count > 0 && count <= 1_000_000,
-            "invalid original cache image count"
-        );
-        let table = self.file_read(0, offset, count * 32)?;
-        let mut found = None;
-        for b in table.as_chunks::<32>().0 {
-            let at = u64::from(word(b, 24)?);
-            let n = self.sources[0].identity.len().saturating_sub(at).min(4097);
-            let bytes = self.file_read(0, at, n)?;
-            let end = bytes
-                .iter()
-                .position(|b| *b == 0)
-                .context("unterminated original image path")?;
-            ensure!(end <= 4096, "excessive original image path");
-            let name = std::str::from_utf8(&bytes[..end])?;
-            if name == path {
-                ensure!(found.is_none(), "duplicate original image path");
-                found = Some(wide(b, 0)?);
+        if self.image_addresses.is_none() {
+            let offset = u64::from(word(&self.sources[0].header, 448)?);
+            let count = u64::from(word(&self.sources[0].header, 452)?);
+            ensure!(
+                count > 0 && count <= 1_000_000,
+                "invalid original cache image count"
+            );
+            let table = self.file_read(0, offset, count * 32)?;
+            let mut addresses = BTreeMap::new();
+            for b in table.as_chunks::<32>().0 {
+                let at = u64::from(word(b, 24)?);
+                let n = self.sources[0].identity.len().saturating_sub(at).min(4097);
+                let bytes = self.file_read(0, at, n)?;
+                let end = bytes
+                    .iter()
+                    .position(|b| *b == 0)
+                    .context("unterminated original image path")?;
+                ensure!(end <= 4096, "excessive original image path");
+                let name = std::str::from_utf8(&bytes[..end])?.to_owned();
+                ensure!(
+                    name.starts_with('/'),
+                    "nonabsolute original cache image path"
+                );
+                ensure!(
+                    addresses.insert(name, wide(b, 0)?).is_none(),
+                    "duplicate original image path"
+                );
             }
+            self.image_addresses = Some(addresses);
         }
-        found.context("image path absent from original cache image table")
+        self.image_addresses
+            .as_ref()
+            .and_then(|m| m.get(path))
+            .copied()
+            .context("image path absent from original cache image table")
     }
     fn vm(&mut self, address: u64, size: u64) -> Result<(Vec<u8>, Vec<SourceSpan>)> {
         ensure!(
@@ -467,6 +480,107 @@ pub struct CodeRange {
     pub bytes: u64,
 }
 #[derive(Debug, Clone, Serialize)]
+pub struct DylibIdentity {
+    pub name: String,
+    pub timestamp: u32,
+    pub current_version: u32,
+    pub compatibility_version: u32,
+}
+/// Effective linkage flags, independent in dylib_use_command. `kind` below
+/// remains the original load-command kind retained by the manifest inventory.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyAttributes {
+    pub modern: bool,
+    pub flags: u32,
+    pub weak_link: bool,
+    pub reexport: bool,
+    pub upward: bool,
+    pub delayed_init: bool,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct Dependency {
+    pub attributes: DependencyAttributes,
+    pub name: String,
+    pub kind: String,
+    pub library_ordinal: usize,
+    pub load_command_index: u32,
+    pub timestamp: u32,
+    pub current_version: u32,
+    pub compatibility_version: u32,
+}
+fn dylib_identity(command: &[u8]) -> Result<DylibIdentity> {
+    ensure!(command.len() >= 24, "truncated cached dylib command");
+    let offset = usize::try_from(word(command, 8)?)?;
+    ensure!(
+        offset >= 24 && offset < command.len(),
+        "invalid cached dylib name offset"
+    );
+    if word(command, 12)? == 0x1a741800 {
+        ensure!(
+            command.len() >= 28 && offset == 28,
+            "marked dylib_use_command requires complete 28-byte header and nameoff28"
+        );
+        ensure!(
+            word(command, 24)? & !0xf == 0,
+            "unknown dylib_use_command flags"
+        );
+        ensure!(
+            matches!(
+                word(command, 0)?,
+                0xc | 0x80000018 | 0x8000001f | 0x80000023
+            ),
+            "marked dylib_use_command on unsupported command kind"
+        );
+    }
+    let tail = &command[offset..];
+    let length = tail
+        .iter()
+        .take(4097)
+        .position(|b| *b == 0)
+        .context("unterminated/excessive cached dylib name")?;
+    ensure!(length > 0, "empty cached dylib name");
+    let name = std::str::from_utf8(&tail[..length])?.to_owned();
+    Ok(DylibIdentity {
+        name,
+        timestamp: word(command, 12)?,
+        current_version: word(command, 16)?,
+        compatibility_version: word(command, 20)?,
+    })
+}
+fn dependency_attributes(command: &[u8]) -> Result<DependencyAttributes> {
+    let modern = word(command, 12)? == 0x1a741800;
+    let flags = if modern {
+        ensure!(
+            command.len() >= 28 && word(command, 8)? == 28,
+            "invalid modern dependency header"
+        );
+        let flags = word(command, 24)?;
+        ensure!(flags & !0xf == 0, "unknown dylib_use_command flags");
+        flags
+    } else {
+        match word(command, 0)? {
+            0x80000018 => 1,
+            0x8000001f => 2,
+            0x80000023 => 4,
+            0xc | 0x20 => 0,
+            _ => bail!("unsupported dependency command"),
+        }
+    };
+    Ok(DependencyAttributes {
+        modern,
+        flags,
+        weak_link: flags & 1 != 0,
+        reexport: flags & 2 != 0,
+        upward: flags & 4 != 0,
+        delayed_init: flags & 8 != 0,
+    })
+}
+fn original_dependency_receipt(dependency: &Dependency) -> Value {
+    json!({"name":dependency.name,"kind":dependency.kind,"library_ordinal":dependency.library_ordinal,
+        "load_command_index":dependency.load_command_index,"timestamp":dependency.timestamp,
+        "current_version":dependency.current_version,"compatibility_version":dependency.compatibility_version})
+}
+#[derive(Debug, Clone, Serialize)]
 pub struct CachedExport {
     pub name: String,
     pub flags: u64,
@@ -503,6 +617,8 @@ pub struct CachedImage {
     pub cache_base: u64,
     pub preferred_base: u64,
     pub load_base: u64,
+    pub dylib_identity: Option<DylibIdentity>,
+    pub dependencies: Vec<Dependency>,
     pub segments: Vec<ImageRange>,
     pub executable_ranges: Vec<CodeRange>,
     pub exports: Vec<CachedExport>,
@@ -513,7 +629,8 @@ pub struct CachedImage {
     pub complete_binary_verified: bool,
     pub cache_fixups_applied: bool,
     #[serde(skip)]
-    reader: Reader,
+    #[cfg(test)]
+    reader: Option<Reader>,
 }
 impl CachedImage {
     pub fn lookup(&self, name: &str) -> Result<Option<&CachedExport>> {
@@ -572,35 +689,44 @@ impl CachedImage {
             boundary: boundary.into(),
         })
     }
-    pub fn snapshot_function(&mut self, name: &str) -> Result<CodeSnapshot> {
+    // Direct-reader verification helper; production snapshots use CacheResolver.
+    #[cfg(test)]
+    fn snapshot_function(&mut self, name: &str) -> Result<CodeSnapshot> {
         let extent = self.function_extent(name)?;
-        let (bytes, source_spans) = self.reader.vm(extent.preferred_address, extent.bytes)?;
-        for span in &source_spans {
-            let mapping = self
-                .reader
-                .mappings
-                .iter()
-                .find(|m| {
-                    m.source == span.source_cache_index
-                        && m.address <= span.preferred_address
-                        && span.preferred_address < m.address + m.size
-                })
-                .context("code snapshot source mapping unavailable")?;
-            ensure!(
-                mapping.protection & 4 != 0,
-                "code snapshot source mapping is not executable"
-            );
-        }
-        let sources = self.reader.finish()?;
-        Ok(CodeSnapshot {
-            sha256: stela_core::sha256(&bytes),
+        snapshot(
+            self.reader
+                .as_mut()
+                .context("cached metadata has no owned reader")?,
             extent,
-            bytes,
-            source_spans,
-            sources,
-            complete_binary_verified: false,
-        })
+        )
     }
+}
+fn snapshot(reader: &mut Reader, extent: FunctionExtent) -> Result<CodeSnapshot> {
+    let (bytes, source_spans) = reader.vm(extent.preferred_address, extent.bytes)?;
+    for span in &source_spans {
+        let mapping = reader
+            .mappings
+            .iter()
+            .find(|m| {
+                m.source == span.source_cache_index
+                    && m.address <= span.preferred_address
+                    && span.preferred_address < m.address + m.size
+            })
+            .context("code snapshot source mapping unavailable")?;
+        ensure!(
+            mapping.protection & 4 != 0,
+            "code snapshot source mapping is not executable"
+        );
+    }
+    let sources = reader.finish()?;
+    Ok(CodeSnapshot {
+        sha256: stela_core::sha256(&bytes),
+        extent,
+        bytes,
+        source_spans,
+        sources,
+        complete_binary_verified: false,
+    })
 }
 #[derive(Clone, Copy)]
 struct Payload {
@@ -619,7 +745,7 @@ fn payload_vm(link: &ImageRange, p: Payload) -> Result<u64> {
         .checked_add(relative)
         .context("linkedit VM address overflow")
 }
-fn function_starts(bytes: &[u8], base: u64, text_end: u64) -> Result<Vec<u64>> {
+pub(crate) fn function_starts(bytes: &[u8], base: u64, text_end: u64) -> Result<Vec<u64>> {
     let mut at = 0;
     let mut address = base;
     let mut starts = Vec::new();
@@ -664,24 +790,30 @@ fn function_starts(bytes: &[u8], base: u64, text_end: u64) -> Result<Vec<u64>> {
 /// Inspect one image from a previously acquired original set. `cache_base` is
 /// the shared-region load base, not the selected image's __TEXT load address.
 pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImage> {
+    let mut resolver = CacheResolver::new(set, cache_base)?;
+    resolver.load(image_path)?;
+    let mut image = resolver
+        .images
+        .remove(image_path)
+        .context("selected image unavailable")?;
+    image.sources = resolver.reader.finish()?;
+    #[cfg(test)]
+    {
+        image.reader = Some(resolver.reader);
+    }
+    Ok(image)
+}
+fn read_image(
+    reader: &mut Reader,
+    record: &Value,
+    image_path: &str,
+    cache_base: u64,
+) -> Result<CachedImage> {
     ensure!(
         image_path.starts_with('/') && image_path.len() <= 4096,
         "invalid original image path"
     );
-    let mut reader = Reader::open(set, cache_base)?;
     let address = reader.image_address(image_path)?;
-    let records = set["images"]
-        .as_array()
-        .context("missing set image records")?;
-    let matches = records
-        .iter()
-        .filter(|v| v["path"] == image_path)
-        .collect::<Vec<_>>();
-    ensure!(
-        matches.len() == 1,
-        "missing/duplicate selected image receipt"
-    );
-    let record = matches[0];
     ensure!(
         number(record, "address")? == address,
         "selected image address differs from original image table"
@@ -720,8 +852,10 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
     let mut legacy = None;
     let mut functions = None;
     let mut image_uuid = None;
+    let mut identity = None;
+    let mut dependencies = Vec::new();
     let mut at = 0;
-    for _ in 0..count {
+    for command_index in 0..count {
         let command = word(&commands, at)?;
         let n = usize::try_from(word(&commands, at + 4)?)?;
         ensure!(
@@ -757,8 +891,7 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
                     .checked_add(s.file_bytes)
                     .context("segment file extent overflow")?;
                 ensure!(
-                    s.bytes > 0
-                        && s.file_bytes <= s.bytes
+                    s.file_bytes <= s.bytes
                         && s.max_protection & !7 == 0
                         && s.initial_protection & !s.max_protection == 0,
                     "invalid cached segment bounds/protections"
@@ -792,6 +925,30 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
                     }
                 }
                 segments.push(s);
+            }
+            0xd => {
+                ensure!(identity.is_none(), "duplicate cached LC_ID_DYLIB");
+                identity = Some(dylib_identity(b)?);
+            }
+            0x20 => bail!("LC_LAZY_LOAD_DYLIB is outside the reviewed cache lookup profile"),
+            0xc | 0x80000018 | 0x8000001f | 0x80000023 => {
+                let d = dylib_identity(b)?;
+                let kind = match command {
+                    0xc => "load_dylib",
+                    0x80000018 => "load_weak_dylib",
+                    0x8000001f => "reexport_dylib",
+                    _ => "load_upward_dylib",
+                };
+                dependencies.push(Dependency {
+                    attributes: dependency_attributes(b)?,
+                    name: d.name,
+                    kind: kind.into(),
+                    library_ordinal: dependencies.len() + 1,
+                    load_command_index: command_index,
+                    timestamp: d.timestamp,
+                    current_version: d.current_version,
+                    compatibility_version: d.compatibility_version,
+                });
             }
             0x1b => {
                 ensure!(
@@ -837,6 +994,19 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
     ensure!(
         record["mach_o"]["uuid"] == image_uuid,
         "cached image UUID differs from receipt"
+    );
+    ensure!(
+        serde_json::to_value(&identity)? == record["mach_o"]["dylib_identity"],
+        "cached install identity differs from receipt"
+    );
+    ensure!(
+        serde_json::to_value(
+            dependencies
+                .iter()
+                .map(original_dependency_receipt)
+                .collect::<Vec<_>>()
+        )? == record["mach_o"]["dependencies"],
+        "cached dependency order/metadata differs from receipt"
     );
     executable_ranges.sort_by_key(|r| r.address);
     for pair in executable_ranges.windows(2) {
@@ -924,7 +1094,6 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
             starts = function_starts(&bytes, preferred_base, text.address + text.bytes)?;
         }
     }
-    let sources = reader.finish()?;
     Ok(CachedImage {
         kind: "original_cached_image_exports",
         source_pin: PIN,
@@ -936,17 +1105,382 @@ pub fn read(set: &Value, image_path: &str, cache_base: u64) -> Result<CachedImag
         cache_base,
         preferred_base,
         load_base,
+        dylib_identity: identity,
+        dependencies,
         segments,
         executable_ranges,
         exports: definitions,
         function_starts: starts,
         exports_payload,
         function_starts_payload,
-        sources,
+        sources: Vec::new(),
         complete_binary_verified: false,
         cache_fixups_applied: false,
-        reader,
+        #[cfg(test)]
+        reader: None,
     })
+}
+
+/// One ordinary definition reached through static two-level/reexport lookup.
+/// `weak_definition` is metadata; this lookup performs no global coalescing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderDefinition {
+    pub provider_image: String,
+    pub provider_symbol: String,
+    pub image_uuid: String,
+    pub header_and_commands_sha256: String,
+    pub preferred_base: u64,
+    pub load_base: u64,
+    pub preferred_address: u64,
+    pub address: u64,
+    pub flags: u64,
+    pub weak_definition: bool,
+    pub terminal: RawTerminal,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct LookupStep {
+    pub image: String,
+    pub symbol: String,
+    pub action: String,
+    pub dependency: Option<Dependency>,
+    pub target_symbol: Option<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedExport {
+    pub kind: &'static str,
+    pub requester_image: String,
+    pub requested_symbol: String,
+    pub weak_import: bool,
+    pub cache_base: u64,
+    pub definition: Option<ProviderDefinition>,
+    pub route: Vec<LookupStep>,
+    pub sources: Vec<Value>,
+    pub complete_binary_verified: bool,
+}
+struct Search {
+    weak_import: bool,
+    active: BTreeSet<(String, String)>,
+    completed: BTreeMap<(String, String), Option<ProviderDefinition>>,
+    route: Vec<LookupStep>,
+    visits: usize,
+}
+impl Search {
+    fn step(
+        &mut self,
+        image: &str,
+        symbol: &str,
+        action: &str,
+        dependency: Option<Dependency>,
+        target_symbol: Option<String>,
+    ) -> Result<()> {
+        ensure!(
+            self.route.len() < 4096,
+            "cache lookup route exceeds bounded budget"
+        );
+        self.route.push(LookupStep {
+            image: image.into(),
+            symbol: symbol.into(),
+            action: action.into(),
+            dependency,
+            target_symbol,
+        });
+        Ok(())
+    }
+}
+/// Shared opened originals and memoized image metadata. No cache pages, fixups,
+/// resolver code, initializers or host symbols are instantiated by this context.
+pub struct CacheResolver {
+    reader: Reader,
+    records: BTreeMap<String, Value>,
+    images: BTreeMap<String, CachedImage>,
+    cache_base: u64,
+}
+impl CacheResolver {
+    pub fn new(set: &Value, cache_base: u64) -> Result<Self> {
+        let mut reader = Reader::open(set, cache_base)?;
+        let records = set["images"]
+            .as_array()
+            .context("missing cache image receipts")?;
+        ensure!(
+            !records.is_empty() && records.len() <= 1_000_000,
+            "cache image receipt count exceeds budget"
+        );
+        let mut by_path: BTreeMap<String, Value> = BTreeMap::new();
+        for record in records {
+            let path = record["path"]
+                .as_str()
+                .context("cache image receipt has no path")?;
+            ensure!(
+                by_path.insert(path.into(), record.clone()).is_none(),
+                "duplicate cache image receipt path"
+            );
+        }
+        let first = by_path.keys().next().context("cache image table empty")?;
+        reader.image_address(first)?;
+        let original = reader
+            .image_addresses
+            .as_ref()
+            .context("original image table unavailable")?;
+        ensure!(
+            original.len() == by_path.len(),
+            "cache image receipt set differs from original table"
+        );
+        for (path, address) in original {
+            ensure!(
+                by_path.get(path).and_then(|v| v["address"].as_u64()) == Some(*address),
+                "cache image receipt differs from original path/address table"
+            );
+        }
+        Ok(Self {
+            reader,
+            records: by_path,
+            images: BTreeMap::new(),
+            cache_base,
+        })
+    }
+    fn load(&mut self, path: &str) -> Result<()> {
+        if self.images.contains_key(path) {
+            return Ok(());
+        }
+        ensure!(
+            self.images.len() < 256,
+            "cache lookup image count exceeds budget"
+        );
+        let record = self
+            .records
+            .get(path)
+            .context("dependency absent from original cache image table")?;
+        let image = read_image(&mut self.reader, record, path, self.cache_base)?;
+        self.images.insert(path.into(), image);
+        Ok(())
+    }
+    pub fn image(&mut self, path: &str) -> Result<&CachedImage> {
+        self.load(path)?;
+        self.images
+            .get(path)
+            .context("cached image metadata unavailable")
+    }
+    fn provider(&mut self, dependency: &Dependency) -> Result<bool> {
+        ensure!(
+            dependency.name.starts_with('/'),
+            "nonabsolute cached dependency needs unimplemented path resolution"
+        );
+        if !self.records.contains_key(&dependency.name) {
+            return Ok(false);
+        }
+        self.load(&dependency.name)?;
+        let image = &self.images[&dependency.name];
+        ensure!(
+            image.dylib_identity.as_ref().map(|id| id.name.as_str())
+                == Some(dependency.name.as_str()),
+            "cache dependency install identity mismatch"
+        );
+        Ok(true)
+    }
+    fn walk(
+        &mut self,
+        image_path: &str,
+        symbol: &str,
+        search: &mut Search,
+    ) -> Result<Option<ProviderDefinition>> {
+        search.visits += 1;
+        ensure!(
+            search.visits <= 4096 && search.active.len() < 64,
+            "cache symbol lookup exceeds recursion/work budget"
+        );
+        let key = (image_path.to_owned(), symbol.to_owned());
+        ensure!(
+            !search.active.contains(&key),
+            "cyclic cache reexport lookup for {image_path}:{symbol}"
+        );
+        if let Some(done) = search.completed.get(&key).cloned() {
+            search.step(image_path, symbol, "memoized_result", None, None)?;
+            return Ok(done);
+        }
+        search.active.insert(key.clone());
+        self.load(image_path)?;
+        let image = &self.images[image_path];
+        // No nlist fallback: this reviewed profile requires an original trie.
+        ensure!(
+            image.exports_payload["status"] == "present",
+            "cache lookup requires original export trie; legacy symbol-table fallback unsupported"
+        );
+        let local = image
+            .exports
+            .binary_search_by(|e| e.name.as_str().cmp(symbol))
+            .ok()
+            .map(|n| image.exports[n].clone());
+        let dependencies = image.dependencies.clone();
+        let found = if let Some(export) = local {
+            match &export.terminal {
+                RawTerminal::Regular { .. } | RawTerminal::Absolute { .. } => {
+                    search.step(image_path, symbol, "local_definition", None, None)?;
+                    Some(ProviderDefinition {
+                        provider_image: image_path.into(),
+                        provider_symbol: symbol.into(),
+                        image_uuid: image.image_uuid.clone(),
+                        header_and_commands_sha256: image.header_and_commands_sha256.clone(),
+                        preferred_base: image.preferred_base,
+                        load_base: image.load_base,
+                        preferred_address: export
+                            .preferred_address
+                            .context("definition lacks preferred address")?,
+                        address: export.address.context("definition lacks address")?,
+                        flags: export.flags,
+                        weak_definition: export.flags & 4 != 0,
+                        terminal: export.terminal,
+                    })
+                }
+                RawTerminal::Reexport {
+                    library_ordinal,
+                    import_name,
+                } => {
+                    let index = usize::try_from(*library_ordinal)
+                        .context("reexport ordinal overflows host size")?;
+                    ensure!(
+                        index > 0 && index <= dependencies.len(),
+                        "cache reexport ordinal out of dependency range"
+                    );
+                    let dependency = dependencies[index - 1].clone();
+                    let target = if import_name.is_empty() {
+                        symbol
+                    } else {
+                        import_name.as_str()
+                    };
+                    search.step(
+                        image_path,
+                        symbol,
+                        "terminal_reexport",
+                        Some(dependency.clone()),
+                        Some(target.into()),
+                    )?;
+                    if self.provider(&dependency)? {
+                        self.walk(&dependency.name, target, search)?
+                    } else {
+                        search.step(
+                            image_path,
+                            symbol,
+                            "missing_explicit_provider",
+                            Some(dependency),
+                            Some(target.into()),
+                        )?;
+                        ensure!(
+                            search.weak_import,
+                            "strong cache reexport provider is absent"
+                        );
+                        None
+                    }
+                }
+                _ => bail!(
+                    "unsupported cache export semantics for {image_path}:{symbol}: {:?}",
+                    export.terminal
+                ),
+            }
+        } else {
+            search.step(image_path, symbol, "local_absent", None, None)?;
+            let mut result = None;
+            for dependency in dependencies.into_iter().filter(|d| d.attributes.reexport) {
+                search.step(
+                    image_path,
+                    symbol,
+                    "dependency_reexport",
+                    Some(dependency.clone()),
+                    Some(symbol.into()),
+                )?;
+                if self.provider(&dependency)? {
+                    if let Some(found) = self.walk(&dependency.name, symbol, search)? {
+                        result = Some(found);
+                        break;
+                    }
+                } else {
+                    search.step(
+                        image_path,
+                        symbol,
+                        "missing_implicit_provider",
+                        Some(dependency),
+                        Some(symbol.into()),
+                    )?;
+                }
+            }
+            result
+        };
+        search.active.remove(&key);
+        search.completed.insert(key, found.clone());
+        Ok(found)
+    }
+    pub fn resolve(
+        &mut self,
+        image_path: &str,
+        symbol: &str,
+        weak_import: bool,
+    ) -> Result<ResolvedExport> {
+        ensure!(
+            !symbol.is_empty() && symbol.len() <= 4096 && !symbol.contains('\0'),
+            "invalid cache lookup symbol"
+        );
+        let mut search = Search {
+            weak_import,
+            active: BTreeSet::new(),
+            completed: BTreeMap::new(),
+            route: Vec::new(),
+            visits: 0,
+        };
+        let definition = self.walk(image_path, symbol, &mut search)?;
+        let sources = self.reader.finish()?;
+        Ok(ResolvedExport {
+            kind: "original_cached_export_resolution",
+            requester_image: image_path.into(),
+            requested_symbol: symbol.into(),
+            weak_import,
+            cache_base: self.cache_base,
+            definition,
+            route: search.route,
+            sources,
+            complete_binary_verified: false,
+        })
+    }
+    pub fn snapshot_resolved_function(
+        &mut self,
+        resolved: &ResolvedExport,
+    ) -> Result<CodeSnapshot> {
+        ensure!(
+            resolved.cache_base == self.cache_base,
+            "resolved export belongs to another cache placement"
+        );
+        let definition = resolved
+            .definition
+            .as_ref()
+            .context("cannot snapshot missing export")?;
+        self.load(&definition.provider_image)?;
+        let image = &self.images[&definition.provider_image];
+        let current = image
+            .lookup(&definition.provider_symbol)?
+            .context("resolved provider symbol disappeared")?;
+        ensure!(
+            definition.image_uuid == image.image_uuid
+                && definition.header_and_commands_sha256 == image.header_and_commands_sha256
+                && current.address == Some(definition.address)
+                && current.preferred_address == Some(definition.preferred_address)
+                && current.flags == definition.flags
+                && current.terminal == definition.terminal,
+            "resolved definition differs from verified provider metadata"
+        );
+        snapshot(
+            &mut self.reader,
+            image.function_extent(&definition.provider_symbol)?,
+        )
+    }
+}
+// Unit-test shorthand; production lookups share one CacheResolver per batch.
+#[cfg(test)]
+fn resolve(
+    set: &Value,
+    image_path: &str,
+    symbol: &str,
+    cache_base: u64,
+    weak_import: bool,
+) -> Result<ResolvedExport> {
+    CacheResolver::new(set, cache_base)?.resolve(image_path, symbol, weak_import)
 }
 
 #[cfg(test)]
@@ -1078,6 +1612,578 @@ mod tests {
         let set = super::super::shared_cache::manifest_set(&path).unwrap();
         (path, set)
     }
+    struct ImageSpec<'a> {
+        path: &'a str,
+        entries: Vec<(&'a str, u8, Vec<u8>)>,
+        dependencies: Vec<(u32, &'a str)>,
+    }
+    fn raw_trie(entries: &[(&str, u8, Vec<u8>)]) -> Vec<u8> {
+        let leaves = entries
+            .iter()
+            .map(|(_, flags, rest)| {
+                let mut payload = vec![*flags];
+                payload.extend(rest);
+                let mut leaf = uleb(payload.len() as u64);
+                leaf.extend(payload);
+                leaf.push(0);
+                leaf
+            })
+            .collect::<Vec<_>>();
+        let mut size = 2;
+        loop {
+            let mut next = 2;
+            let mut offset = size;
+            for ((name, _, _), leaf) in entries.iter().zip(&leaves) {
+                next += name.len() + 1 + uleb(offset as u64).len();
+                offset += leaf.len();
+            }
+            if next == size {
+                break;
+            }
+            size = next;
+        }
+        let mut bytes = vec![0, entries.len() as u8];
+        let mut offset = size;
+        for ((name, _, _), leaf) in entries.iter().zip(&leaves) {
+            bytes.extend(name.as_bytes());
+            bytes.push(0);
+            bytes.extend(uleb(offset as u64));
+            offset += leaf.len();
+        }
+        for leaf in leaves {
+            bytes.extend(leaf);
+        }
+        bytes
+    }
+    fn regular(name: &str, flags: u8) -> (&str, u8, Vec<u8>) {
+        (name, flags, uleb(0x400))
+    }
+    fn reexport<'a>(name: &'a str, ordinal: u64, target: &str) -> (&'a str, u8, Vec<u8>) {
+        let mut b = uleb(ordinal);
+        b.extend(target.as_bytes());
+        b.push(0);
+        (name, 8, b)
+    }
+    fn graph_fixture(directory: &std::path::Path, specs: &[ImageSpec<'_>]) -> Value {
+        assert!(!specs.is_empty() && specs.len() <= 3);
+        let (path, _) = fixture(directory);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let template = bytes[0x1000..0x1000 + 360].to_vec();
+        bytes[0x1000..0x4000].fill(0);
+        put32(&mut bytes, 448, 0x7000);
+        put32(&mut bytes, 452, specs.len() as u32);
+        for (index, spec) in specs.iter().enumerate() {
+            let file_offset = 0x1000 + index * 0x1000;
+            let address = BASE + file_offset as u64;
+            let mut image = template.clone();
+            put64(&mut image, 56, address);
+            put64(&mut image, 72, file_offset as u64);
+            put64(&mut image, 136, address + 0x400);
+            image[264..280].fill(0x40 + index as u8);
+            image[304..328].fill(0);
+            assert!(spec.path.len() < 24);
+            image[304..304 + spec.path.len()].copy_from_slice(spec.path.as_bytes());
+            for (command, name) in &spec.dependencies {
+                let size = (24 + name.len() + 1 + 7) & !7;
+                let mut b = vec![0; size];
+                put32(&mut b, 0, *command);
+                put32(&mut b, 4, size as u32);
+                put32(&mut b, 8, 24);
+                b[24..24 + name.len()].copy_from_slice(name.as_bytes());
+                image.extend(b);
+            }
+            put32(&mut image, 16, 6 + spec.dependencies.len() as u32);
+            let size = image.len() - 32;
+            put32(&mut image, 20, size as u32);
+            let trie = raw_trie(&spec.entries);
+            let trie_offset = 0x5000 + index * 0x400;
+            assert!(trie.len() < 0x400);
+            put32(&mut image, 336, (trie_offset + 0x4000) as u32);
+            put32(&mut image, 340, trie.len() as u32);
+            let starts_offset = 0x6000 + index * 16;
+            put32(&mut image, 352, (starts_offset + 0x4000) as u32);
+            bytes[file_offset..file_offset + image.len()].copy_from_slice(&image);
+            bytes[file_offset + 0x400..file_offset + 0x40c]
+                .copy_from_slice(&hex::decode("1f0000710054805ac0035fd6").unwrap());
+            bytes[trie_offset..trie_offset + trie.len()].copy_from_slice(&trie);
+            bytes[starts_offset..starts_offset + 8].copy_from_slice(&[0x80, 8, 12, 12, 0, 0, 0, 0]);
+            put64(&mut bytes, 0x7000 + index * 32, address);
+            put32(
+                &mut bytes,
+                0x7018 + index * 32,
+                (0x7100 + index * 64) as u32,
+            );
+            bytes[0x7100 + index * 64..0x7100 + index * 64 + spec.path.len()]
+                .copy_from_slice(spec.path.as_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        super::super::shared_cache::manifest_set(&path).unwrap()
+    }
+    #[test]
+    fn reexport_lookup_local_priority_dependency_order_and_weak_definition_metadata() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[
+                ImageSpec {
+                    path: "/main",
+                    entries: vec![regular("_local", 0)],
+                    dependencies: vec![(0xc, "/ordinary"), (0x8000001f, "/forward")],
+                },
+                ImageSpec {
+                    path: "/ordinary",
+                    entries: vec![regular("_abs", 0)],
+                    dependencies: vec![],
+                },
+                ImageSpec {
+                    path: "/forward",
+                    entries: vec![regular("_abs", 4), regular("_local", 0)],
+                    dependencies: vec![],
+                },
+            ],
+        );
+        let mut context = CacheResolver::new(&set, BASE + 0x4000).unwrap();
+        let local = context.resolve("/main", "_local", false).unwrap();
+        assert_eq!(local.definition.unwrap().provider_image, "/main");
+        assert_eq!(local.route.len(), 1);
+        let result = context.resolve("/main", "_abs", false).unwrap();
+        let definition = result.definition.as_ref().unwrap();
+        assert_eq!(definition.provider_image, "/forward");
+        assert!(definition.weak_definition);
+        assert_eq!(definition.address, BASE + 0x7400);
+        let edge = result
+            .route
+            .iter()
+            .find_map(|s| s.dependency.as_ref())
+            .unwrap();
+        assert_eq!(edge.library_ordinal, 2);
+        assert!(result.route.iter().all(|s| s.image != "/ordinary"));
+        let snapshot = context.snapshot_resolved_function(&result).unwrap();
+        assert_eq!(snapshot.extent.bytes, 12);
+        assert_eq!(snapshot.extent.address, BASE + 0x7400);
+        assert_eq!(
+            context.image("/main").unwrap().dependencies[0].kind,
+            "load_dylib"
+        );
+    }
+    #[test]
+    fn explicit_reexports_use_all_dependency_ordinals_and_preserve_renaming() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[
+                ImageSpec {
+                    path: "/main",
+                    entries: vec![reexport("_alias", 1, "_target"), reexport("_same", 2, "")],
+                    dependencies: vec![(0xc, "/ordinary"), (0x8000001f, "/forward")],
+                },
+                ImageSpec {
+                    path: "/ordinary",
+                    entries: vec![regular("_target", 0)],
+                    dependencies: vec![],
+                },
+                ImageSpec {
+                    path: "/forward",
+                    entries: vec![("_same", 2, uleb(123))],
+                    dependencies: vec![],
+                },
+            ],
+        );
+        let mut context = CacheResolver::new(&set, BASE + 0x4000).unwrap();
+        let alias = context.resolve("/main", "_alias", false).unwrap();
+        let found = alias.definition.unwrap();
+        assert_eq!(found.provider_image, "/ordinary");
+        assert_eq!(found.provider_symbol, "_target");
+        let same = context.resolve("/main", "_same", false).unwrap();
+        let found = same.definition.as_ref().unwrap();
+        assert_eq!(found.address, 123);
+        assert_eq!(found.preferred_address, 123);
+        assert!(context.snapshot_resolved_function(&same).is_err());
+    }
+    #[test]
+    fn missing_provider_and_missing_symbol_are_explicit_and_never_zero_definitions() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[ImageSpec {
+                path: "/main",
+                entries: vec![reexport("_missing", 1, ""), reexport("_bad_ordinal", 2, "")],
+                dependencies: vec![(0xc, "/missing")],
+            }],
+        );
+        let mut context = CacheResolver::new(&set, BASE).unwrap();
+        assert!(
+            context
+                .resolve("/main", "_missing", false)
+                .unwrap_err()
+                .to_string()
+                .contains("strong")
+        );
+        let weak = context.resolve("/main", "_missing", true).unwrap();
+        assert!(weak.definition.is_none());
+        assert_eq!(
+            weak.route.last().unwrap().action,
+            "missing_explicit_provider"
+        );
+        assert!(
+            context
+                .resolve("/main", "_bad_ordinal", true)
+                .unwrap_err()
+                .to_string()
+                .contains("ordinal")
+        );
+        assert!(
+            context
+                .resolve("/main", "_absent", false)
+                .unwrap()
+                .definition
+                .is_none()
+        );
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[
+                ImageSpec {
+                    path: "/main",
+                    entries: vec![],
+                    dependencies: vec![(0x8000001f, "/missing"), (0x8000001f, "/forward")],
+                },
+                ImageSpec {
+                    path: "/forward",
+                    entries: vec![regular("_abs", 0)],
+                    dependencies: vec![],
+                },
+            ],
+        );
+        let result = resolve(&set, "/main", "_abs", BASE, false).unwrap();
+        assert_eq!(result.definition.unwrap().provider_image, "/forward");
+        assert!(
+            result
+                .route
+                .iter()
+                .any(|s| s.action == "missing_implicit_provider")
+        );
+    }
+    #[test]
+    fn reexport_cycles_decline_but_renamed_revisit_can_reach_a_definition() {
+        for cycle in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let set = graph_fixture(
+                d.path(),
+                &[
+                    ImageSpec {
+                        path: "/main",
+                        entries: vec![reexport("_a", 1, "_b"), regular("_c", 0)],
+                        dependencies: vec![(0xc, "/forward")],
+                    },
+                    ImageSpec {
+                        path: "/forward",
+                        entries: vec![reexport("_b", 1, if cycle { "_a" } else { "_c" })],
+                        dependencies: vec![(0xc, "/main")],
+                    },
+                ],
+            );
+            let result = resolve(&set, "/main", "_a", BASE, false);
+            if cycle {
+                assert!(result.unwrap_err().to_string().contains("cyclic"));
+            } else {
+                assert_eq!(result.unwrap().definition.unwrap().provider_symbol, "_c");
+            }
+        }
+    }
+    #[test]
+    fn dag_absence_is_memoized_and_local_unsupported_terminal_stops_fallback() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[
+                ImageSpec {
+                    path: "/main",
+                    entries: vec![("_tlv", 1, uleb(0x400))],
+                    dependencies: vec![(0x8000001f, "/a"), (0x8000001f, "/b")],
+                },
+                ImageSpec {
+                    path: "/a",
+                    entries: vec![],
+                    dependencies: vec![(0x8000001f, "/b")],
+                },
+                ImageSpec {
+                    path: "/b",
+                    entries: vec![regular("_tlv", 0)],
+                    dependencies: vec![],
+                },
+            ],
+        );
+        let mut context = CacheResolver::new(&set, BASE).unwrap();
+        let absent = context.resolve("/main", "_absent", false).unwrap();
+        assert!(absent.definition.is_none());
+        assert!(absent.route.iter().any(|s| s.action == "memoized_result"));
+        assert!(
+            context
+                .resolve("/main", "_tlv", false)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+    }
+    #[test]
+    fn declared_provider_path_does_not_replace_its_install_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let _ = graph_fixture(
+            d.path(),
+            &[
+                ImageSpec {
+                    path: "/main",
+                    entries: vec![reexport("_abs", 1, "")],
+                    dependencies: vec![(0xc, "/provider")],
+                },
+                ImageSpec {
+                    path: "/provider",
+                    entries: vec![regular("_abs", 0)],
+                    dependencies: vec![],
+                },
+            ],
+        );
+        let path = d.path().join("cache");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0x2000 + 304..0x2000 + 328].fill(0);
+        bytes[0x2000 + 304..0x2000 + 310].copy_from_slice(b"/other");
+        std::fs::write(&path, bytes).unwrap();
+        let set = super::super::shared_cache::manifest_set(&path).unwrap();
+        assert!(
+            resolve(&set, "/main", "_abs", BASE, false)
+                .unwrap_err()
+                .to_string()
+                .contains("install identity")
+        );
+    }
+
+    #[test]
+    fn modern_dependency_flags_are_independent_and_override_legacy_command_attributes() {
+        for command_kind in [0xc, 0x80000018, 0x8000001f, 0x80000023] {
+            for flags in 0..16 {
+                let mut command = vec![0; 40];
+                put32(&mut command, 0, command_kind);
+                put32(&mut command, 4, 40);
+                put32(&mut command, 8, 28);
+                put32(&mut command, 12, 0x1a741800);
+                put32(&mut command, 16, 0x10203);
+                put32(&mut command, 20, 0x10000);
+                put32(&mut command, 24, flags);
+                command[28..31].copy_from_slice(b"/a\0");
+                let identity = dylib_identity(&command).unwrap();
+                assert_eq!(identity.name, "/a");
+                assert_eq!(identity.current_version, 0x10203);
+                assert_eq!(identity.compatibility_version, 0x10000);
+                let attributes = dependency_attributes(&command).unwrap();
+                assert!(attributes.modern);
+                assert_eq!(attributes.flags, flags);
+                assert_eq!(attributes.weak_link, flags & 1 != 0);
+                assert_eq!(attributes.reexport, flags & 2 != 0);
+                assert_eq!(attributes.upward, flags & 4 != 0);
+                assert_eq!(attributes.delayed_init, flags & 8 != 0);
+            }
+        }
+        for (kind, flags) in [
+            (0xc, 0),
+            (0x80000018, 1),
+            (0x8000001f, 2),
+            (0x80000023, 4),
+            (0x20, 0),
+        ] {
+            let mut command = vec![0; 32];
+            put32(&mut command, 0, kind);
+            put32(&mut command, 8, 24);
+            command[24..27].copy_from_slice(b"/a\0");
+            let attributes = dependency_attributes(&command).unwrap();
+            assert!(!attributes.modern);
+            assert_eq!(attributes.flags, flags);
+        }
+    }
+    #[test]
+    fn modern_dependency_header_bounds_reserved_flags_and_names_are_checked() {
+        let mut command = vec![0; 40];
+        put32(&mut command, 0, 0xc);
+        put32(&mut command, 8, 28);
+        put32(&mut command, 12, 0x1a741800);
+        command[28..31].copy_from_slice(b"/a\0");
+        for offset in [24, 27, 32, 40] {
+            let mut bad = command.clone();
+            put32(&mut bad, 8, offset);
+            assert!(dylib_identity(&bad).is_err());
+        }
+        for length in 24..=28 {
+            assert!(dylib_identity(&command[..length]).is_err());
+        }
+        let mut bad = command.clone();
+        put32(&mut bad, 24, 0x10);
+        assert!(dylib_identity(&bad).is_err());
+        assert!(dependency_attributes(&bad).is_err());
+        let mut bad = command.clone();
+        bad[28..].fill(b'x');
+        assert!(dylib_identity(&bad).is_err());
+        let mut bad = command.clone();
+        bad[28] = 0xff;
+        assert!(dylib_identity(&bad).is_err());
+        let mut bad = command.clone();
+        put32(&mut bad, 0, 0xd);
+        assert!(dylib_identity(&bad).is_err());
+    }
+    #[test]
+    fn modern_load_dylib_reexport_flag_drives_wholesale_lookup_without_changing_ordinals() {
+        for flags in [0, 2, 3, 12, 14] {
+            let d = tempfile::tempdir().unwrap();
+            let _ = graph_fixture(
+                d.path(),
+                &[
+                    ImageSpec {
+                        path: "/main",
+                        entries: vec![],
+                        dependencies: vec![(0xc, "/forward")],
+                    },
+                    ImageSpec {
+                        path: "/forward",
+                        entries: vec![regular("_abs", 0)],
+                        dependencies: vec![],
+                    },
+                ],
+            );
+            let path = d.path().join("cache");
+            let mut bytes = std::fs::read(&path).unwrap();
+            let at = 0x1000 + 360;
+            let size = word(&bytes, at + 4).unwrap() as usize;
+            bytes[at + 24..at + size].fill(0);
+            put32(&mut bytes, at + 8, 28);
+            put32(&mut bytes, at + 12, 0x1a741800);
+            put32(&mut bytes, at + 24, flags);
+            bytes[at + 28..at + 36].copy_from_slice(b"/forward");
+            std::fs::write(&path, bytes).unwrap();
+            let set = super::super::shared_cache::manifest_set(&path).unwrap();
+            let mut resolver = CacheResolver::new(&set, BASE).unwrap();
+            let dependency = resolver.image("/main").unwrap().dependencies[0].clone();
+            let result = resolver.resolve("/main", "_abs", false).unwrap();
+            assert_eq!(result.definition.is_some(), flags & 2 != 0);
+            if flags & 2 != 0 {
+                assert_eq!(result.definition.unwrap().provider_image, "/forward");
+            } else {
+                assert!(result.route.iter().all(|step| step.dependency.is_none()));
+            }
+            assert_eq!(dependency.kind, "load_dylib");
+            assert_eq!(dependency.library_ordinal, 1);
+            assert_eq!(dependency.attributes.flags, flags);
+            assert_eq!(dependency.attributes.reexport, flags & 2 != 0);
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_lazy_dependencies_instead_of_assigning_modern_ordinals() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[ImageSpec {
+                path: "/main",
+                entries: vec![regular("_abs", 0)],
+                dependencies: vec![(0x20, "/legacy")],
+            }],
+        );
+        let error = CacheResolver::new(&set, BASE)
+            .unwrap()
+            .resolve("/main", "_abs", false)
+            .unwrap_err();
+        assert!(error.to_string().contains("LC_LAZY_LOAD_DYLIB"));
+    }
+
+    #[test]
+    fn refuses_forged_resolution_source_identity_and_modern_dependency_attributes() {
+        let d = tempfile::tempdir().unwrap();
+        let set = graph_fixture(
+            d.path(),
+            &[ImageSpec {
+                path: "/main",
+                entries: vec![regular("_abs", 0)],
+                dependencies: vec![],
+            }],
+        );
+        let mut context = CacheResolver::new(&set, BASE).unwrap();
+        let mut result = context.resolve("/main", "_abs", false).unwrap();
+        result.definition.as_mut().unwrap().address += 4;
+        assert!(context.snapshot_resolved_function(&result).is_err());
+        let mut command = vec![0; 32];
+        put32(&mut command, 8, 24);
+        command[24..27].copy_from_slice(b"/a\0");
+        put32(&mut command, 12, 0x1a741800);
+        assert!(dylib_identity(&command).is_err());
+        put32(&mut command, 12, 0);
+        put32(&mut command, 8, 16);
+        assert!(dylib_identity(&command).is_err());
+        let mut forged = set.clone();
+        forged["images"] = json!([]);
+        assert!(CacheResolver::new(&forged, BASE).is_err());
+    }
+
+    #[test]
+    fn empty_original_segment_and_section_remain_metadata_without_code_coverage() {
+        for (file_bytes, section_bytes, accepted) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let (path, _) = fixture(directory.path());
+            let mut bytes = std::fs::read(&path).unwrap();
+            let mut segment = vec![0; 152];
+            put32(&mut segment, 0, 0x19);
+            put32(&mut segment, 4, 152);
+            segment[8..20].copy_from_slice(b"__DATA_CONST");
+            put64(&mut segment, 24, IMAGE + 0x800);
+            put64(&mut segment, 40, 0x280);
+            put64(&mut segment, 48, file_bytes);
+            put32(&mut segment, 56, 3);
+            put32(&mut segment, 60, 3);
+            put32(&mut segment, 64, 1);
+            segment[72..79].copy_from_slice(b"__empty");
+            segment[88..100].copy_from_slice(b"__DATA_CONST");
+            put64(&mut segment, 104, IMAGE + 0x800);
+            put64(&mut segment, 112, section_bytes);
+            put32(&mut segment, 136, 6); // Empty non-lazy pointer section, as in original caches.
+            let command_end = 0x1000 + 32 + word(&bytes, 0x1000 + 20).unwrap() as usize;
+            bytes[command_end..command_end + segment.len()].copy_from_slice(&segment);
+            let commands = word(&bytes, 0x1000 + 16).unwrap() + 1;
+            put32(&mut bytes, 0x1000 + 16, commands);
+            let command_bytes = word(&bytes, 0x1000 + 20).unwrap() + segment.len() as u32;
+            put32(&mut bytes, 0x1000 + 20, command_bytes);
+            std::fs::write(&path, bytes).unwrap();
+            let set = super::super::shared_cache::manifest_set(&path).unwrap();
+            let result = read(&set, NAME, BASE);
+            if accepted {
+                let image = result.unwrap();
+                let empty = image
+                    .segments
+                    .iter()
+                    .find(|s| s.name == "__DATA_CONST")
+                    .unwrap();
+                assert_eq!(
+                    (
+                        empty.bytes,
+                        empty.file_bytes,
+                        empty.file_offset,
+                        empty.max_protection,
+                        empty.initial_protection
+                    ),
+                    (0, 0, 0x280, 3, 3)
+                );
+                assert!(
+                    image
+                        .executable_ranges
+                        .iter()
+                        .all(|range| range.section != "__empty")
+                );
+                assert_eq!(
+                    image.lookup("_abs").unwrap().unwrap().address,
+                    Some(IMAGE + 0x400)
+                );
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
     #[test]
     fn original_linkedit_bias_lookup_unsupported_isolation_and_complete_code_snapshot() {
         let d = tempfile::tempdir().unwrap();
@@ -1213,7 +2319,7 @@ mod tests {
         image.function_starts.clear();
         assert!(image.snapshot_function("_abs").is_err());
         let mut image = read(&set, NAME, BASE).unwrap();
-        image.reader.mappings[0].protection = 1;
+        image.reader.as_mut().unwrap().mappings[0].protection = 1;
         assert!(image.snapshot_function("_abs").is_err());
     }
     #[cfg(unix)]
