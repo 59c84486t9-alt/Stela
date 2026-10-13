@@ -64,6 +64,19 @@ class IntegerMathOracleTests(unittest.TestCase):
         self.assertEqual(suite.unary_reference('CLZ32', 0xdeadc0de00000000), 32)
         self.assertEqual(suite.unary_reference('REV32', 0xdeadc0de01234567), 0x67452301)
         self.assertEqual(suite.unary_reference('REV16_32', 0xdeadc0deaabbccdd), 0xbbaaddcc)
+        self.assertEqual(suite.unary_reference('REV64', 0x0123456789abcdef), 0xefcdab8967452301)
+        self.assertEqual(suite.unary_reference('REV16_64', 0x0123456789abcdef), 0x23016745ab89efcd)
+        self.assertEqual(suite.unary_reference('REV32_64', 0x0123456789abcdef), 0x67452301efcdab89)
+        for bits in (32, 64):
+            mask = (1 << bits) - 1
+            for value in (0, mask):
+                self.assertEqual(suite.unary_reference('CLS' + str(bits), value), bits - 1)
+            for bit in range(bits):
+                self.assertEqual(suite.unary_reference('RBIT' + str(bits), 1 << bit), 1 << (bits - 1 - bit))
+            for count in range(bits - 1):
+                value = 1 << (bits - count - 2)
+                self.assertEqual(suite.unary_reference('CLS' + str(bits), value), count)
+                self.assertEqual(suite.unary_reference('CLS' + str(bits), mask ^ value), count)
         for form in ('REV32', 'REV16_32'):
             for value in (0, 1, 0xffffffff, 0x01234567, 0x80000000):
                 self.assertEqual(suite.unary_reference(form, suite.unary_reference(form, value)), value)

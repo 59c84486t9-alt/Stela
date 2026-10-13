@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v9",
+  "registry_version": "apple-silicon-reviewed-forms-v10",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -94,7 +94,11 @@
     "integer_math": {
       "harness": "dev/integer-math-differential.py",
       "report": ".stela/integer-math-differential-report.json",
-      "kind": "integer_math_arm_vs_native_x86"
+      "kind": "integer_math_arm_vs_native_x86",
+      "required_positive_counts": [
+        "scalar_unary_forms",
+        "unary_block_state_comparisons"
+      ]
     },
     "simd_data_movement": {
       "harness": "dev/simd-differential.py",
@@ -10729,6 +10733,279 @@
           ]
         }
       ]
+    },
+    {
+      "id": "CLS_32_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac01400",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CLS"
+      },
+      "source_file": "cls_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cls_int.xml",
+      "source_sha256": "3a75c532a964d562c4e86c0f17ff4854c271d7e95f1666c96f797302c76c3114",
+      "mnemonic": "CLS",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ac01420",
+          "expected_mnemonics": [
+            "cls"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "CLS_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac01400",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "CLS"
+      },
+      "source_file": "cls_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cls_int.xml",
+      "source_sha256": "3a75c532a964d562c4e86c0f17ff4854c271d7e95f1666c96f797302c76c3114",
+      "mnemonic": "CLS",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac01420",
+          "expected_mnemonics": [
+            "cls"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "RBIT_32_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac00000",
+      "docvars": {
+        "datatype": "32",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "RBIT"
+      },
+      "source_file": "rbit_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rbit_int.xml",
+      "source_sha256": "c2b3be9f325dcc13df59d1ae1d0a1eaf166e4d9423d8a6056f422747d6e3fc70",
+      "mnemonic": "RBIT",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ac00020",
+          "expected_mnemonics": [
+            "rbit"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "RBIT_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac00000",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "RBIT"
+      },
+      "source_file": "rbit_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rbit_int.xml",
+      "source_sha256": "c2b3be9f325dcc13df59d1ae1d0a1eaf166e4d9423d8a6056f422747d6e3fc70",
+      "mnemonic": "RBIT",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac00020",
+          "expected_mnemonics": [
+            "rbit"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "REV16_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac00400",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "REV16"
+      },
+      "source_file": "rev16_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rev16_int.xml",
+      "source_sha256": "51fb9196d28589ef791d6a4a9690ba6607335ab27beefa40c4308ec0bdfbb10b",
+      "mnemonic": "REV16",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac00420",
+          "expected_mnemonics": [
+            "rev16"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "REV32_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac00800",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "REV32"
+      },
+      "source_file": "rev32_int.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rev32_int.xml",
+      "source_sha256": "b7d19d6275350c8640ed508c33b444997ef1acc9a929f2858217794670be430c",
+      "mnemonic": "REV32",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac00820",
+          "expected_mnemonics": [
+            "rev32"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
+    },
+    {
+      "id": "REV_64_dp_1src",
+      "alias": false,
+      "category": "base_integer_system",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac00c00",
+      "docvars": {
+        "datatype": "64",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "REV"
+      },
+      "source_file": "rev.xml",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rev.xml",
+      "source_sha256": "77a1f97adc86403a7c5c966cb2f0174b7c0932bd114280d70f16b7d576ab83a8",
+      "mnemonic": "REV",
+      "features": [],
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "integer_math"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/integer_math.rs",
+        "crates/stela-compiler/src/x86_64/integer_math.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xdac00c20",
+          "expected_mnemonics": [
+            "rev"
+          ]
+        }
+      ],
+      "review": "All eleven scalar one-source forms reviewed against pinned June2026 XML. Integer-math suite compares independent bit strings/byte containers, original ARM and baseline x86 across all Rd/Rn, boundaries and NZCV; a separate shared runtime cohort executes genuine original RET and checks cold/disk reuse.",
+      "scope": "Complete scalar selected-width bit reversal, leading-sign count or byte-container reversal in declared private-RAM profile. Rn/Rd31 are ZR, aliases preserve inputs, W writes zero-extend; NZCV/V/FP and other state preserved. Full PSTATE/DIT remains outside profile."
     }
   ],
   "compiler_fingerprint_sources": [

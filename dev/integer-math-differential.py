@@ -30,11 +30,14 @@ MULTIPLY_FORMS = {
 DIVIDE_FORMS = {'SDIV32': 0x1ac00c00, 'SDIV64': 0x9ac00c00,
                 'UDIV32': 0x1ac00800, 'UDIV64': 0x9ac00800}
 UNARY_FORMS = {'CLZ32': 0x5ac01000, 'CLZ64': 0xdac01000,
-               'REV32': 0x5ac00800, 'REV16_32': 0x5ac00400}
+               'REV32': 0x5ac00800, 'REV16_32': 0x5ac00400,
+               'CLS32': 0x5ac01400, 'CLS64': 0xdac01400,
+               'RBIT32': 0x5ac00000, 'RBIT64': 0xdac00000,
+               'REV64': 0xdac00c00, 'REV16_64': 0xdac00400, 'REV32_64': 0xdac00800}
 FORMS = {**MULTIPLY_FORMS, **DIVIDE_FORMS, **UNARY_FORMS}
 MNEMONICS = {'madd', 'msub', 'mul', 'mneg', 'smaddl', 'smsubl', 'smull', 'smnegl',
               'umaddl', 'umsubl', 'umull', 'umnegl', 'smulh', 'umulh', 'sdiv', 'udiv',
-              'clz', 'rev', 'rev16', 'ret'}
+              'clz', 'cls', 'rbit', 'rev', 'rev16', 'rev32', 'ret'}
 
 
 def encoding(form, destination, left, right=0, accumulator=31):
@@ -154,17 +157,19 @@ def quotient(numerator, denominator, bits, is_signed):
 
 
 def unary_reference(form, value):
-    bits = 64 if form == 'CLZ64' else 32
+    bits = 64 if form.endswith('64') else 32
     value &= (1 << bits) - 1
     if form.startswith('CLZ'):
         return bits - value.bit_length()
+    if form.startswith('CLS'):
+        digits = f'{value:0{bits}b}'
+        return len(list(itertools.takewhile(lambda b: b == digits[0], digits))) - 1
+    if form.startswith('RBIT'):
+        return int(f'{value:0{bits}b}'[::-1], 2)
     # Independent byte-array transformations, not the emitter's BSWAP/ROR path.
-    data = value.to_bytes(4, 'little')
-    if form == 'REV32':
-        return int.from_bytes(data[::-1], 'little')
-    if form == 'REV16_32':
-        return int.from_bytes(data[0:2][::-1] + data[2:4][::-1], 'little')
-    raise AssertionError('Unexpected unary form')
+    data = value.to_bytes(bits // 8, 'little')
+    group = 2 if form.startswith('REV16_') else 4 if form == 'REV32_64' else len(data)
+    return int.from_bytes(b''.join(data[i:i+group][::-1] for i in range(0, len(data), group)), 'little')
 
 
 def mathematical_reference(words, initial):
@@ -218,14 +223,19 @@ def boundary_values(form):
     bits = 32 if form.endswith('32') or form.endswith('L') else 64
     sign, mask = 1 << (bits - 1), (1 << bits) - 1
     if form in UNARY_FORMS:
-        if form.startswith('CLZ'):
+        if form.startswith(('CLZ', 'CLS', 'RBIT')):
             values = [0] + [1 << bit for bit in range(bits)]
             values += [(1 << bit) - 1 for bit in range(1, bits + 1)]
+            if not form.startswith('CLZ'):
+                values += [mask ^ value for value in values]
         else:
             values = [0, 1, mask, 0x01234567, 0x89abcdef, 0xaabbccdd,
                       0x00112233, 0xff00ff00, 0x00ff00ff, 0x80000000,
                       0x00008000, 0x7fffffff, 0x0000ffff, 0xffff0000,
                       0xaaaaaaaa, 0x55555555]
+            if bits == 64:
+                values += [0x0123456789abcdef, 0xff00ff0000ff00ff, 0x8000000000000000,
+                           0xaaaaaaaa55555555, 0xffff00000000ffff]
         return ((value, 0, 0) for value in dict.fromkeys(values))
     values = (0, 1, 2, sign - 1, sign, mask, 0xaaaaaaaaaaaaaaaa & mask,
               0x5555555555555555 & mask)
@@ -361,6 +371,48 @@ def bounded_cases(compiled):
         receive.close()
 
 
+def unary_blocks(cli, directory):
+    """Unchanged ARM RET and native shared block dispatch, with disk reuse."""
+    from differential import initialize_arm, capture_arm, seed_extended_state
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+    from unicorn import arm64_const as arm
+    base, stop = 0x100000, 0x100800
+    source, state_path = directory / 'unary.arm64', directory / 'unary-state.json'
+    rows = []
+    incoming = states(all_flags=True)[:16]
+    for form in UNARY_FORMS:
+        words = [encoding(form, 0, 1), RET]
+        code = struct.pack('<2I', *words)
+        source.write_bytes(code)
+        for flag, template in enumerate(incoming):
+            initial = State.from_buffer_copy(template)
+            seed_extended_state(initial, (flag + FORMS[form]).to_bytes(8, 'little'))
+            initial.nzcv = flag << 28
+            initial.x[1] = (0, MASK, 1 << 63, 0x0123456789abcdef)[flag % 4]
+            initial.x[30] = stop
+            expected = mathematical_reference(words, initial)
+            machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+            machine.mem_map(base, 4096); machine.mem_write(base, code)
+            machine.reg_write(arm.UC_ARM64_REG_PSTATE, 0)
+            initialize_arm(machine, initial)
+            machine.emu_start(base, stop, count=4)
+            assert machine.reg_read(arm.UC_ARM64_REG_PC) == stop
+            assert complete_state(capture_arm(machine, initial)) == expected
+            state_path.write_text(json.dumps(complete_state(initial)))
+            native = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source),
+                '--state', str(state_path), '--guest-base', hex(base), '--stop-pc', hex(stop),
+                '--block-budget', '1', '--cache-dir', str(directory / 'unary-cache')], timeout=15))
+            assert native['state'] == expected and native['pc'] == stop
+            assert native['source_sha256'] == hashlib.sha256(code).hexdigest()
+            assert native['abi'] == 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
+            assert native['complete_binary_verified'] is False
+            outcome = native['outcome']
+            assert outcome['reason'] == {'kind': 'stop_address'} and outcome['blocks_executed'] == 1
+            assert outcome['compiled_blocks'] == int(flag == 0) and outcome['disk_cache_hits'] == int(flag != 0)
+            rows.append({'form': form, 'flags': flag, 'original': expected, 'native': native})
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true', help='Use the already built CLI')
@@ -387,10 +439,13 @@ def main():
             compiler = manifest['compiler_source_sha256']
             case['native'] = (output / 'native.bin').read_bytes()
         result = bounded_cases(compiled)
+        block_cases = unary_blocks(cli, directory)
     if executable_hash != hashlib.sha256(cli.read_bytes()).hexdigest():
         raise AssertionError('Compiler executable changed during integer-math suite')
     report = {'kind': 'integer_math_arm_vs_native_x86', 'passed': True, **result,
               'operations': list(FORMS),
+              'scalar_unary_forms': len(UNARY_FORMS), 'unary_block_state_comparisons': len(block_cases),
+              'unary_block_cases': block_cases,
               'reference': 'Unicorn ARM64 2.1.4 and independent unbounded signed/unsigned integer arithmetic',
               'native': 'baseline x86-64 integer products, guarded division, leading-zero and byte-reversal code in isolated worker; SIGFPE and other worker failures fail the suite; no LZCNT requirement',
               'tested_state': ["V0..V31, FPCR and FPSR preservation", 'x0..x30', 'SP and reserved ABI field preservation',
@@ -402,14 +457,14 @@ def main():
                                'SDIV/UDIV 32/64, truncation toward zero, zero divisors',
                                'signed MIN/-1 produces MIN without host SIGFPE',
                                'division/remainder combinations and mixed-signedness chains',
-                               'CLZ32/64 all leading counts including zero, REV32/REV16_32 byte patterns',
+                               'All eleven scalar unary forms: CLZ/CLS/RBIT32/64, REV32/64, REV16_32/64 and REV32_64; all leading-sign counts, every one-bit reversal and byte-container patterns',
                                'all 1024 Rd/Rn unary encodings per form, in-place/discard/ZR operands',
                                'unary and mixed-width dependency chains with dirty W upper halves'],
               'corpus_sha256': corpus.hexdigest(), 'compiler_source_sha256': compiler,
               'compiler_executable_sha256': executable_hash,
               'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'shared_runner_sha256': hashlib.sha256((ROOT / 'dev/differential.py').read_bytes()).hexdigest(),
-              'limits': 'Integer instruction results and complete GPR/SP/NZCV/reserved/V/FP state. Full PSTATE, system instructions, guest exceptions, memory, SIMD instructions, PAC, runtime dispatch and OS boot are not covered.'}
+              'limits': 'Integer instruction results and complete GPR/SP/NZCV/reserved/V/FP state; unary cohort also executes original RET and native shared block dispatch. Full PSTATE/DIT, system instructions, guest exceptions, memory, SIMD instructions, PAC and OS boot are not covered.'}
     write_evidence(ROOT / '.stela/integer-math-differential-report.json', report)
     print(json.dumps(report, indent=2))
 

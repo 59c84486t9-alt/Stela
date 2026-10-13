@@ -5,7 +5,21 @@ use crate::aarch64::integer_math::{Kind, Operand};
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     load(code, operand.left);
     match operand.kind {
-        Kind::LeadingZeros { width } => {
+        Kind::LeadingZeros { width } | Kind::LeadingSignBits { width } => {
+            let sign_bits = matches!(operand.kind, Kind::LeadingSignBits { .. });
+            if sign_bits {
+                let rex = if width == Width::X64 {
+                    &[0x48][..]
+                } else {
+                    &[][..]
+                };
+                code.extend(rex);
+                code.extend([0x89, 0xc1]); // mov (r/e)cx,(r/e)ax
+                code.extend(rex);
+                code.extend([0xc1, 0xf9, if width == Width::X64 { 63 } else { 31 }]); // sar sign mask
+                code.extend(rex);
+                code.extend([0x31, 0xc8]); // xor (r/e)ax,(r/e)cx: nonnegative original/complement
+            }
             if width == Width::X64 {
                 code.push(0x48);
             }
@@ -23,14 +37,46 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             }
             // Nonzero: (width-1)-MSB. Zero: (2*width-1) XOR (width-1)=width.
             code.extend([0x83, 0xf0, (bits - 1) as u8]);
+            if sign_bits {
+                code.extend([0x83, 0xe8, 1]); // sub eax,1: omit the sign bit itself
+            }
             store(code, operand.destination);
             return;
         }
-        Kind::ReverseBytes { halfwords } => {
-            code.extend([0x0f, 0xc8]); // bswap eax, always clears upper X half
-            if halfwords {
-                // Full reversal plus halfword rotation swaps each byte pair.
-                code.extend([0xc1, 0xc8, 16]); // ror eax,16
+        Kind::ReverseBits { width } => {
+            for (shift, mask) in [
+                (1, 0x5555555555555555),
+                (2, 0x3333333333333333),
+                (4, 0x0f0f0f0f0f0f0f0f),
+            ] {
+                swap_groups(code, width, shift, mask);
+            }
+            if width == Width::X64 {
+                code.push(0x48);
+            }
+            code.extend([0x0f, 0xc8]); // bswap: complete reversal of the independently reversed bytes
+            store(code, operand.destination);
+            return;
+        }
+        Kind::ReverseBytes { width, group_bytes } => {
+            if width == Width::X64 && group_bytes == 2 {
+                swap_groups(code, width, 8, 0x00ff00ff00ff00ff);
+            } else {
+                if width == Width::X64 {
+                    code.push(0x48);
+                }
+                code.extend([0x0f, 0xc8]); // bswap (r/e)ax
+                let rotate = match (width, group_bytes) {
+                    (Width::W32, 2) => Some(16),
+                    (Width::X64, 4) => Some(32),
+                    _ => None,
+                };
+                if let Some(amount) = rotate {
+                    if width == Width::X64 {
+                        code.push(0x48);
+                    }
+                    code.extend([0xc1, 0xc8, amount]); // ror restores container order
+                }
             }
             store(code, operand.destination);
             return;
@@ -60,7 +106,11 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             Width::X64
         }
         Kind::Low { width } => width,
-        Kind::Divide { .. } | Kind::LeadingZeros { .. } | Kind::ReverseBytes { .. } => {
+        Kind::Divide { .. }
+        | Kind::LeadingZeros { .. }
+        | Kind::LeadingSignBits { .. }
+        | Kind::ReverseBits { .. }
+        | Kind::ReverseBytes { .. } => {
             unreachable!("division and unary operations emitted above")
         }
     };
@@ -84,6 +134,34 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         code.extend([0x01, 0xc8]); // add (e/r)ax,(e/r)cx
     }
     store(code, operand.destination);
+}
+
+/// Swap adjacent bit groups with baseline shifts/masks. Inputs remain in RAX;
+/// only caller-saved RCX/RDX are scratch. No BMI, LZCNT, SIMD or helper calls.
+fn swap_groups(code: &mut Vec<u8>, width: Width, shift: u8, mask: u64) {
+    let rex = if width == Width::X64 {
+        &[0x48][..]
+    } else {
+        &[][..]
+    };
+    code.extend(rex);
+    code.extend([0x89, 0xc1]); // mov (r/e)cx,(r/e)ax
+    code.extend(rex);
+    code.extend([0xc1, 0xe8, shift]); // shr (r/e)ax,shift
+    if width == Width::X64 {
+        code.extend([0x48, 0xba]); // movabs rdx,mask
+        code.extend(mask.to_le_bytes());
+        code.extend([0x48, 0x21, 0xd0, 0x48, 0x21, 0xd1]); // and rax,rdx; and rcx,rdx
+    } else {
+        code.push(0x25); // and eax,mask32
+        code.extend((mask as u32).to_le_bytes());
+        code.extend([0x81, 0xe1]); // and ecx,mask32
+        code.extend((mask as u32).to_le_bytes());
+    }
+    code.extend(rex);
+    code.extend([0xc1, 0xe1, shift]); // shl (r/e)cx,shift
+    code.extend(rex);
+    code.extend([0x09, 0xc8]); // or (r/e)ax,(r/e)cx
 }
 
 fn branch(code: &mut Vec<u8>, opcode: Option<u8>) -> usize {

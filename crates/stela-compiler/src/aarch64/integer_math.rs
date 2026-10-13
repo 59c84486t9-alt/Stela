@@ -1,13 +1,15 @@
 //! Apple A64 scalar integer math encodings; register 31 is ZR.
 //!
 //! Semantics and fixed bits follow the pinned Arm 2026-06 MADD/MSUB,
-//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH, SDIV/UDIV, CLZ and REV instruction XML.
+//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH, SDIV/UDIV and scalar unary XML.
 use super::{Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     LeadingZeros { width: Width },
-    ReverseBytes { halfwords: bool },
+    LeadingSignBits { width: Width },
+    ReverseBits { width: Width },
+    ReverseBytes { width: Width, group_bytes: u8 },
     Divide { signed: bool, width: Width },
     Low { width: Width },
     Long { signed: bool },
@@ -32,8 +34,30 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let unary = match word & 0xfffffc00 {
         0x5ac01000 => Some(Kind::LeadingZeros { width: Width::W32 }),
         0xdac01000 => Some(Kind::LeadingZeros { width: Width::X64 }),
-        0x5ac00800 => Some(Kind::ReverseBytes { halfwords: false }),
-        0x5ac00400 => Some(Kind::ReverseBytes { halfwords: true }),
+        0x5ac01400 => Some(Kind::LeadingSignBits { width: Width::W32 }),
+        0xdac01400 => Some(Kind::LeadingSignBits { width: Width::X64 }),
+        0x5ac00000 => Some(Kind::ReverseBits { width: Width::W32 }),
+        0xdac00000 => Some(Kind::ReverseBits { width: Width::X64 }),
+        0x5ac00800 => Some(Kind::ReverseBytes {
+            width: Width::W32,
+            group_bytes: 4,
+        }),
+        0x5ac00400 => Some(Kind::ReverseBytes {
+            width: Width::W32,
+            group_bytes: 2,
+        }),
+        0xdac00c00 => Some(Kind::ReverseBytes {
+            width: Width::X64,
+            group_bytes: 8,
+        }),
+        0xdac00800 => Some(Kind::ReverseBytes {
+            width: Width::X64,
+            group_bytes: 4,
+        }),
+        0xdac00400 => Some(Kind::ReverseBytes {
+            width: Width::X64,
+            group_bytes: 2,
+        }),
         _ => None,
     };
     if let Some(kind) = unary {
@@ -103,8 +127,45 @@ mod tests {
         let forms = [
             (0x5ac01000, Kind::LeadingZeros { width: Width::W32 }),
             (0xdac01000, Kind::LeadingZeros { width: Width::X64 }),
-            (0x5ac00800, Kind::ReverseBytes { halfwords: false }),
-            (0x5ac00400, Kind::ReverseBytes { halfwords: true }),
+            (0x5ac01400, Kind::LeadingSignBits { width: Width::W32 }),
+            (0xdac01400, Kind::LeadingSignBits { width: Width::X64 }),
+            (0x5ac00000, Kind::ReverseBits { width: Width::W32 }),
+            (0xdac00000, Kind::ReverseBits { width: Width::X64 }),
+            (
+                0x5ac00800,
+                Kind::ReverseBytes {
+                    width: Width::W32,
+                    group_bytes: 4,
+                },
+            ),
+            (
+                0x5ac00400,
+                Kind::ReverseBytes {
+                    width: Width::W32,
+                    group_bytes: 2,
+                },
+            ),
+            (
+                0xdac00c00,
+                Kind::ReverseBytes {
+                    width: Width::X64,
+                    group_bytes: 8,
+                },
+            ),
+            (
+                0xdac00800,
+                Kind::ReverseBytes {
+                    width: Width::X64,
+                    group_bytes: 4,
+                },
+            ),
+            (
+                0xdac00400,
+                Kind::ReverseBytes {
+                    width: Width::X64,
+                    group_bytes: 2,
+                },
+            ),
         ];
         for (base, kind) in forms {
             for destination in 0..32 {
@@ -123,8 +184,8 @@ mod tests {
                 }
             }
         }
-        // X64 reversal encodings and CLS are outside these four admitted forms.
-        for word in [0xdac00800, 0xdac00400, 0xdac00c00, 0x5ac01400, 0xdac01400] {
+        // W32 REV with the X64-only opcode and reserved one-source neighbors.
+        for word in [0x5ac00c00, 0x5ac01800, 0xdac01800, 0x5ac02000, 0xdac02000] {
             assert!(decode(word).is_none(), "{word:08x}");
         }
     }
