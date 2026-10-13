@@ -5,6 +5,7 @@ use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 mod rearrange;
+mod reductions;
 mod shifts;
 
 fn vector_offset(vector: u8) -> u32 {
@@ -152,6 +153,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 }
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
+        Operand::Reduce(ref operand) => reductions::emit(code, operand, target),
         Operand::Shift(ref operand) => shifts::emit(code, operand),
         Operand::Rearrange(ref operand) => rearrange::emit(code, operand, target),
         Operand::Compare {

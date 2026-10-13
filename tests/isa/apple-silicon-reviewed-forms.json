@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v16",
+  "registry_version": "apple-silicon-reviewed-forms-v17",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -197,6 +197,22 @@
         "programs": 9600,
         "three_way_register_state_comparisons": 96000,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 96000
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_reductions": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-reductions-differential-report.json",
+      "kind": "simd_reductions_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 763,
+        "three_way_register_state_comparisons": 11494,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 11494
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -16119,6 +16135,820 @@
           ]
         }
       ]
+    },
+    {
+      "id": "ADDV_asimdall_only",
+      "instruction_id": "ADDV_advsimd",
+      "mnemonic": "ADDV",
+      "category": "fp_simd",
+      "source_file": "addv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e31b800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "bdaf7893b2a93c5f58d44d17a3d78f6373bf3be63f1ddedfb59831a249bef04b",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e31b820",
+          "expected_mnemonics": [
+            "addv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CLS_asimdmisc_R",
+      "instruction_id": "CLS_advsimd",
+      "mnemonic": "CLS",
+      "category": "fp_simd",
+      "source_file": "cls_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e204800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "514e0e3f32a91d259bfc65ee04784fa6c1a138b8850fcde8fd4d8b1597e9dac8",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e204820",
+          "expected_mnemonics": [
+            "cls"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CLZ_asimdmisc_R",
+      "instruction_id": "CLZ_advsimd",
+      "mnemonic": "CLZ",
+      "category": "fp_simd",
+      "source_file": "clz_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e204800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c9da46ed759b2078080ae49fd084b5d8939392f68c4809781ad5fe9f0affc8d4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e204820",
+          "expected_mnemonics": [
+            "clz"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CNT_asimdmisc_R",
+      "instruction_id": "CNT_advsimd",
+      "mnemonic": "CNT",
+      "category": "fp_simd",
+      "source_file": "cnt_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e205800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "767d7a5222edb4b1d4815b7fa14cb19c65307962566facf9f47fa9c3a5efe0e4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e205820",
+          "expected_mnemonics": [
+            "cnt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "NOT_asimdmisc_R",
+      "instruction_id": "NOT_advsimd",
+      "mnemonic": "NOT",
+      "category": "fp_simd",
+      "source_file": "not_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e205800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3f222dbffd5ef300de8df07fec3ae685fa1025b1c3d0d85311cf42e3329fb2e8",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e205820",
+          "expected_mnemonics": [
+            "mvn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "RBIT_asimdmisc_R",
+      "instruction_id": "RBIT_advsimd",
+      "mnemonic": "RBIT",
+      "category": "fp_simd",
+      "source_file": "rbit_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e605800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9d79de855acfb27381650b211bec09ad348e4ed3dc8f6b90129b37e50b51f11c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e605820",
+          "expected_mnemonics": [
+            "rbit"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SADDLV_asimdall_only",
+      "instruction_id": "SADDLV_advsimd",
+      "mnemonic": "SADDLV",
+      "category": "fp_simd",
+      "source_file": "saddlv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e303800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "060df461f190ac920ca93cc703e61a586e9967841e41832413cf2e0477da1c3e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e303820",
+          "expected_mnemonics": [
+            "saddlv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMAXP_asimdsame_only",
+      "instruction_id": "SMAXP_advsimd",
+      "mnemonic": "SMAXP",
+      "category": "fp_simd",
+      "source_file": "smaxp_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20a400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "471a399a3b50c8f923e1614d22f71e106f7e9995a38502e0495a4c7e33c6bfae",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22a420",
+          "expected_mnemonics": [
+            "smaxp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMAXV_asimdall_only",
+      "instruction_id": "SMAXV_advsimd",
+      "mnemonic": "SMAXV",
+      "category": "fp_simd",
+      "source_file": "smaxv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e30a800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8998e42fefbc008df68072bdd59c7ef17b3792b0eb8e5a782771c71001cdbfba",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e30a820",
+          "expected_mnemonics": [
+            "smaxv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMAX_asimdsame_only",
+      "instruction_id": "SMAX_advsimd",
+      "mnemonic": "SMAX",
+      "category": "fp_simd",
+      "source_file": "smax_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e206400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b74331d8eb52d735f537b6cdc13dbac084e4962f1727c307a1235ae947a70e39",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e226420",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMINP_asimdsame_only",
+      "instruction_id": "SMINP_advsimd",
+      "mnemonic": "SMINP",
+      "category": "fp_simd",
+      "source_file": "sminp_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20ac00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "aa770356243235753c0215c3b6b7771c32e879e3f41123116202ae71a5fffb89",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22ac20",
+          "expected_mnemonics": [
+            "sminp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMINV_asimdall_only",
+      "instruction_id": "SMINV_advsimd",
+      "mnemonic": "SMINV",
+      "category": "fp_simd",
+      "source_file": "sminv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e31a800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4383d19ed34451426bbabc1959618bc02df94e6f4f2e4a945a39808a949cdad4",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e31a820",
+          "expected_mnemonics": [
+            "sminv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMIN_asimdsame_only",
+      "instruction_id": "SMIN_advsimd",
+      "mnemonic": "SMIN",
+      "category": "fp_simd",
+      "source_file": "smin_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e206c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "da718a220f679255f683483833f2d349f6d3864e32b30daa415ebeb51af8d5c7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e226c20",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UADDLV_asimdall_only",
+      "instruction_id": "UADDLV_advsimd",
+      "mnemonic": "UADDLV",
+      "category": "fp_simd",
+      "source_file": "uaddlv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e303800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "d11d937c3b7a905197b7efc1f1350e399435ce4e20b5051fd71ee8d4dbbf871a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e303820",
+          "expected_mnemonics": [
+            "uaddlv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMAXP_asimdsame_only",
+      "instruction_id": "UMAXP_advsimd",
+      "mnemonic": "UMAXP",
+      "category": "fp_simd",
+      "source_file": "umaxp_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e20a400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4a1f21dd854d1de2262855a6968dbc10e9379e22d06c14e05ae01858425c8f4e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22a420",
+          "expected_mnemonics": [
+            "umaxp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMAXV_asimdall_only",
+      "instruction_id": "UMAXV_advsimd",
+      "mnemonic": "UMAXV",
+      "category": "fp_simd",
+      "source_file": "umaxv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e30a800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "5c9567be8792255b1e900b665249705c5bb1f04a9f4492f45bf4e6b2b50f657a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e30a820",
+          "expected_mnemonics": [
+            "umaxv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMAX_asimdsame_only",
+      "instruction_id": "UMAX_advsimd",
+      "mnemonic": "UMAX",
+      "category": "fp_simd",
+      "source_file": "umax_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e206400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "804d7fc851e2d06b404148f8bb6658fd9d6a86b39f2bc842d922f658e67fe7a3",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e226420",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMINP_asimdsame_only",
+      "instruction_id": "UMINP_advsimd",
+      "mnemonic": "UMINP",
+      "category": "fp_simd",
+      "source_file": "uminp_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e20ac00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "864bfa4194d83ff5ab99d803342768f6c16fc6ef0b31515c24e3abd77e7d7f4c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22ac20",
+          "expected_mnemonics": [
+            "uminp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMINV_asimdall_only",
+      "instruction_id": "UMINV_advsimd",
+      "mnemonic": "UMINV",
+      "category": "fp_simd",
+      "source_file": "uminv_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e31a800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "657820577886220d60394ae064bb86af267e1546581a02078f8dd096f3877d9c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e31a820",
+          "expected_mnemonics": [
+            "uminv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMIN_asimdsame_only",
+      "instruction_id": "UMIN_advsimd",
+      "mnemonic": "UMIN",
+      "category": "fp_simd",
+      "source_file": "umin_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e206c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "bc25e8cb5e0d74cae04f3ad77d6d9aeba4aba2f7cca70b84ee03e8ae56f1d590",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e226c20",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ADDP_asimdsame_only",
+      "instruction_id": "ADDP_advsimd_vec",
+      "mnemonic": "ADDP",
+      "category": "fp_simd",
+      "source_file": "addp_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20bc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "cadb01983e2df97b3b7e026108a230ec6442bfc3674d7f9dd5e58747d2d0b661",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22bc20",
+          "expected_mnemonics": [
+            "addp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ADDP_asisdpair_only",
+      "instruction_id": "ADDP_advsimd_pair",
+      "mnemonic": "ADDP",
+      "category": "fp_simd",
+      "source_file": "addp_advsimd_pair.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ef1b800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "58295b873f03517ff9684dd4bbbb9a4e19087c853ff25cca845369ecf6931c5c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated vector width and integer lane size; V31 ordinary data and all aliases. Signed/unsigned lane, pairwise and across min/max; modular sums, signed/unsigned widening sums and scalar ADDP D source pair. Across results clear all upper vector bits. Independent byte CNT/RBIT/NOT and 8/16/32-bit CLZ/CLS, including zero/all-one and all leading counts. Q=0 upper clearing. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-feature exceptions, SME streaming, FP arithmetic or complete application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. Focused complete-state original ARM, independent integer/bit math and native SSE2/SSE4.1/SSSE3 checks cover all arrangements, aliases and dependency chains. Optional host instruction use is independently disassembled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/simd/reductions.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_reductions"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ef1b820",
+          "expected_mnemonics": [
+            "addp"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -16144,6 +16974,8 @@
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
     "crates/stela-compiler/src/aarch64/simd/shifts.rs",
     "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+    "crates/stela-compiler/src/aarch64/simd/reductions.rs",
+    "crates/stela-compiler/src/x86_64/simd/reductions.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

@@ -12,15 +12,31 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
-    def test_shift_cohort_covers_all_26_forms_and_full_width_rounding_boundaries(self):
+    def test_reduction_oracle_distinguishes_signed_long_sums_and_pair_grouping(self):
+        initial=State()
+        initial.v[1][:]=[suite.MASK,suite.MASK]
+        base={'d':0,'n':1,'m':2,'lane':1,'bytes':16}
+        self.assertEqual(suite.reduction_mathematical([{**base,'name':'saddlv'}],initial)['v'][0],[0xfff0,0])
+        self.assertEqual(suite.reduction_mathematical([{**base,'name':'uaddlv'}],initial)['v'][0],[4080,0])
+        initial.v[1][:]=struct.unpack('<2Q',bytes(range(16)))
+        initial.v[2][:]=struct.unpack('<2Q',bytes(reversed(range(16))))
+        observed=suite.reduction_mathematical([{**base,'name':'addp','bytes':8}],initial)
+        self.assertEqual(observed['v'][0],[int.from_bytes(bytes([1,5,9,13,29,25,21,17]),'little'),0])
+
+    def test_registered_register_cohorts_cover_each_form_and_destination(self):
         registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
-        forms=[f for f in registry['forms'] if 'simd_shifts' in f.get('evidence_groups',[])]
-        operations=[o for p in suite.shift_programs() for o in p['operations']]
-        self.assertEqual(len(forms),26)
-        for form in forms:
-            matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
-            self.assertTrue(matches,form['id'])
-            self.assertEqual({o['d'] for o in matches},set(range(32)))
+        for group,generator,count in [('simd_integer',suite.integer_programs,38),
+                ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
+                ('simd_reductions',suite.reduction_programs,22)]:
+            forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
+            operations=[o for p in generator() for o in p['operations']]
+            self.assertEqual(len(forms),count,group)
+            for form in forms:
+                matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
+                self.assertTrue(matches,form['id'])
+                self.assertEqual({o['d'] for o in matches},set(range(32)),form['id'])
+
+    def test_shift_oracle_full_width_rounding_boundaries(self):
         initial=State()
         initial.v[1][:]=[suite.MASK,suite.MASK]
         base={'d':0,'n':1,'lane':8,'output_lane':8,'bytes':8,'amount':64,'upper':False}
@@ -28,15 +44,8 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(suite.shift_mathematical([{**base,'name':'srshr'}],initial)['v'][0],[0,0])
         self.assertEqual(suite.shift_mathematical([{**base,'name':'sshr'}],initial)['v'][0],[suite.MASK,0])
 
-    def test_rearrangement_cohort_covers_all_27_canonical_forms_and_both_widths(self):
-        registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
-        forms=[f for f in registry['forms'] if 'simd_rearrange' in f.get('evidence_groups',[])]
+    def test_table_corpus_contains_register_wrapping_and_both_widths(self):
         operations=[o for p in suite.rearrange_programs() for o in p['operations']]
-        self.assertEqual(len(forms),27)
-        for form in forms:
-            matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
-            self.assertTrue(matches,form['id'])
-            self.assertEqual({o['d'] for o in matches},set(range(32)))
         for name in ('tbl','tbx'):
             tables=[o for o in operations if o['name']==name]
             self.assertEqual({o['registers'] for o in tables},{1,2,3,4})

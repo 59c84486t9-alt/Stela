@@ -28,7 +28,7 @@ fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
         source,
     );
 }
-fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
+pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
     let opcode = match (left, lane_bytes) {
         (true, 1 | 2) => Shift::LeftWord,
         (true, 4) => Shift::LeftDword,

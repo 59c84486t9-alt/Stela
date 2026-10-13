@@ -237,7 +237,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -388,7 +388,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts') else execute_batches(batches, pipe)})
+        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts','reductions') else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -788,6 +788,66 @@ def shift_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
+def reduction_programs():
+    configurations=[]
+    bases={'smin':0x0e206c00,'smax':0x0e206400,'umin':0x2e206c00,'umax':0x2e206400,
+        'sminp':0x0e20ac00,'smaxp':0x0e20a400,'uminp':0x2e20ac00,'umaxp':0x2e20a400,
+        'sminv':0x0e31a800,'smaxv':0x0e30a800,'uminv':0x2e31a800,'umaxv':0x2e30a800,
+        'addv':0x0e31b800,'addp':0x0e20bc00,'saddlv':0x0e303800,'uaddlv':0x2e303800,
+        'cnt':0x0e205800,'clz':0x2e204800,'cls':0x0e204800,'rbit':0x2e605800,'not':0x2e205800}
+    for name,base in bases.items():
+        for q in (0,1):
+            for size in (range(4) if name=='addp' else (0,) if name in ('cnt','rbit','not') else range(3)):
+                if size==3 and not q: continue
+                if name.endswith('v') and size==2 and not q: continue
+                configurations.append({'name':name,'base':base|(q<<30)|(size<<22),'lane':1<<size,'bytes':8<<q})
+    configurations.append({'name':'addp_scalar','base':0x5ef1b800,'lane':8,'bytes':16})
+    programs=[]
+    for config in configurations:
+        def operation(d,n,m):
+            name=config['name'];binary=(name in ('smin','smax','umin','umax') or name.endswith('p'))
+            return {**config,'kind':'reduction','d':d,'n':n,'m':m,
+                    'word':config['base']|(n<<5)|d|(m<<16 if binary else 0)}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31),(0,31,31),(31,29,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def reduction_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v]
+    for op in operations:
+        name,d,n,m,lane,width=(op[k] for k in ('name','d','n','m','lane','bytes'))
+        bits=lane*8;mask=(1<<bits)-1
+        signed=name.startswith('s')
+        def lanes(vector):
+            values=[vector>>offset&mask for offset in range(0,width*8,bits)]
+            return [v-(1<<bits) if signed and v&(1<<(bits-1)) else v for v in values]
+        a,b=lanes(vectors[n]),lanes(vectors[m]);out_bits=bits
+        if name=='addp_scalar': result=[sum(a)]
+        elif name in ('cnt','rbit','not','clz','cls'):
+            result=[]
+            for value in a:
+                if name=='cnt': value=value.bit_count()
+                elif name=='rbit': value=int(f'{value:08b}'[::-1],2)
+                elif name=='not': value=~value
+                elif name=='clz': value=bits-value.bit_length()
+                else:
+                    if value&(1<<(bits-1)): value^=mask
+                    value=bits-value.bit_length()-1
+                result.append(value)
+        else:
+            operation=min if 'min' in name else max if 'max' in name else sum
+            if name.endswith('v'):
+                result=[operation(a)]
+                if name in ('saddlv','uaddlv'): out_bits*=2
+            elif name.endswith('p'):
+                values=a+b;result=[operation(values[i:i+2]) for i in range(0,len(values),2)]
+            else: result=[operation([left,right]) for left,right in zip(a,b)]
+        vectors[d]=sum((v&((1<<out_bits)-1))<<(i*out_bits) for i,v in enumerate(result))
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
+
+
 def integer_mathematical(operations,initial):
     vectors=[lo|(hi<<64) for lo,hi in initial.v]
     for op in operations:
@@ -827,8 +887,12 @@ def execute_register_batches(batches):
                 operations=function['operations'];lane=operations[0]['lane'];bits=lane*8
                 rearrange=batch.get('cohort')=='rearrange'
                 table=rearrange and operations[0]['name'] in ('tbl','tbx')
+                reduction=batch.get('cohort')=='reductions'
+                bit_bytes=reduction and operations[0]['name'] in ('cnt','rbit')
+                leading=reduction and operations[0]['name'] in ('clz','cls')
+                patterns=256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
                 for flags in (0,15):
-                    for pattern in range(256//operations[0]['bytes'] if table else 5):
+                    for pattern in range(patterns):
                         initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
                         initial.reserved=0x51ad1234
                         seed_extended_state(initial,pattern*16+flags)
@@ -841,6 +905,18 @@ def execute_register_batches(batches):
                             for register in range(32):
                                 value=sum(values[(register+i+pattern)%len(values)]<<(i*bits) for i in range(128//bits))
                                 initial.v[register][:]=[value&MASK,value>>64]
+                        if bit_bytes:
+                            for register in range(32):
+                                values=bytes((pattern*operations[0]['bytes']+i+register)%256 for i in range(16))
+                                initial.v[register][:]=struct.unpack('<2Q',values)
+                        if leading and pattern<=bits:
+                            # Every zero/sign leading count, plus dirty upper lanes and all-one input.
+                            lane_mask=(1<<bits)-1
+                            for register in range(32):
+                                values=[((1<<((pattern+register+i)%(bits+1)))-1) for i in range(128//bits)]
+                                if flags: values=[value^lane_mask for value in values]
+                                value=sum(v<<(i*bits) for i,v in enumerate(values))
+                                initial.v[register][:]=[value&MASK,value>>64]
                         if table:
                             # The output lanes collectively cover every unsigned index 0..255, including all table edges.
                             for op in operations:
@@ -851,7 +927,7 @@ def execute_register_batches(batches):
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
                         assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
                         original=state_dict(capture_arm(machine,initial))
-                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical}[batch['cohort']](operations,initial)
+                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical,'reductions':reduction_mathematical}[batch['cohort']](operations,initial)
                         actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
                         if mathematical!=original or original!=actual:
                             raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
@@ -862,7 +938,7 @@ def execute_register_batches(batches):
 
 
 def run_register_cohort(cli, focus):
-    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs}[focus]();started=time.monotonic()
+    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs,'reductions':reduction_programs}[focus]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
     info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
     selections=[('baseline','x86_64-baseline')]
@@ -884,6 +960,9 @@ def run_register_cohort(cli, focus):
                 if '+sse4.1' in target_id: expected.add('pcmpeqq')
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
             elif focus=='rearrange' and '+ssse3' in target_id: expected.add('pshufb')
+            elif focus=='reductions':
+                if '+ssse3' in target_id: expected.add('pshufb')
+                if '+sse4.1' in target_id: expected.update(('pminsb','pmaxsb','pminuw','pmaxuw','pminsd','pmaxsd','pminud','pmaxud'))
             assert set(used)==expected,(target_id,used,expected)
             profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used,
                 'packed_shifts_used':sorted({o['mnemonic'] for o in info['simd_immediate_shifts']} & mnemonics.keys())}
@@ -904,7 +983,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['integer','rearrange','shifts'], help='Only the focused SIMD register implementation cohort')
+    parser.add_argument('--focus', choices=['integer','rearrange','shifts','reductions'], help='Only the focused SIMD register implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)

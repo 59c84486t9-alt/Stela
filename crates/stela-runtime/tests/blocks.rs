@@ -34,7 +34,7 @@ fn mov(destination: u32, source: u32) -> u32 {
 }
 
 #[test]
-fn simd_shift_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Result<()> {
+fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Result<()> {
     use stela_compiler::{TargetCpu, block::BlockProfile};
     let cache = tempfile::tempdir()?;
     let program = words(&[
@@ -44,6 +44,11 @@ fn simd_shift_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Res
         0x5f402483, // SRSHR D3,D4,#64
         0x7f4024c5, // URSHR D5,D6,#64
         0x6f404507, // SRI V7.2D,V8.2D,#64: preserve both old lanes
+        0x6eab6d49, // UMIN V9.4S,V10.4S,V11.4S
+        0x6eb0a92c, // UMAXV S12,V9.4S
+        0x4e20598d, // CNT V13.16B,V12.16B
+        0x4eedbdae, // ADDP V14.2D,V13.2D,V13.2D
+        0x4e604a0f, // CLS V15.8H,V16.8H
         RET,
     ]);
     let mut initial = state(BASE, 19);
@@ -59,6 +64,9 @@ fn simd_shift_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Res
     initial.registers.v[4] = [u64::MAX, 0x12345678];
     initial.registers.v[6] = [u64::MAX, 0x87654321];
     initial.registers.v[7] = [0x0123456789abcdef, 0xfedcba9876543210];
+    initial.registers.v[10] = [0x00000001ffffffff, 0x0000000080000000];
+    initial.registers.v[11] = [0x0000000200000000, 0xffffffff7fffffff];
+    initial.registers.v[16] = [u64::MAX; 2];
     let mut expected = initial.registers.clone();
     let shifted = source.map(|byte| byte.wrapping_shl(3));
     expected.v[0] = limbs(shifted);
@@ -70,6 +78,11 @@ fn simd_shift_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Res
     expected.v[2] = limbs(narrowed);
     expected.v[3] = [0; 2];
     expected.v[5] = [1, 0];
+    expected.v[9] = [0x0000000100000000, 0x000000007fffffff];
+    expected.v[12] = [0x7fffffff, 0];
+    expected.v[13] = [0x07080808, 0];
+    expected.v[14] = [0x07080808; 2];
+    expected.v[15] = [0x000f000f000f000f; 2];
     let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
     targets.dedup();
     for target in targets {
