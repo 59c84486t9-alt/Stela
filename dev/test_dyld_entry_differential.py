@@ -4,6 +4,7 @@ import importlib
 import struct
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from differential import State, state_dict
 
@@ -301,6 +302,70 @@ class PageSizeCommpageGuards(unittest.TestCase):
                       [dict(snapshot, hex=raw[:-1].hex())]]:
             with self.assertRaises(AssertionError):
                 suite.audit_page_size_globals({'memory': {'memory_reads': reads}}, base, kernel, events)
+
+
+class ThreadRegisterGuards(unittest.TestCase):
+    def test_trampoline_preserves_original_text_and_targets_original_functions(self):
+        view = {'text': bytes(range(256)) * 16}
+        base = suite.MACH_FIXTURE_BASES[0]
+        regions = [{'address': base, 'virtual_bytes': 3 * suite.THREAD_FIXTURE_PAGE_BYTES}]
+        for errno in suite.THREAD_ERRNO_VALUES:
+            source, offset, region = suite.thread_errno_source(view, regions, base, errno)
+            self.assertEqual(source[:len(view['text'])], view['text'])
+            self.assertEqual(source[len(view['text']):offset], bytes(offset - len(view['text'])))
+            words = struct.unpack('<3I', source[offset:])
+            for instruction, target in ((0, suite.MACH_INIT_ENTRY), (2, suite.THREAD_ERRNO_ENTRY)):
+                displacement = words[instruction] & ((1 << suite.A64_BRANCH_IMMEDIATE_BITS) - 1)
+                if displacement & (1 << (suite.A64_BRANCH_IMMEDIATE_BITS - 1)):
+                    displacement -= 1 << suite.A64_BRANCH_IMMEDIATE_BITS
+                self.assertEqual(offset + instruction * suite.A64_INSTRUCTION_BYTES
+                                 + displacement * suite.A64_INSTRUCTION_BYTES, target)
+            self.assertEqual((words[1] >> suite.A64_MOVE_IMMEDIATE_SHIFT) & 0xffff, errno)
+            self.assertEqual(region['address'], base + offset)
+            self.assertEqual(region['data'][:len(source) - offset], source[offset:])
+            self.assertEqual(region['initial_protection'], suite.UC_PROT_READ | suite.UC_PROT_EXEC)
+        with self.assertRaises(AssertionError):
+            suite.branch_with_link(0, 1)
+        with self.assertRaises(AssertionError):
+            suite.branch_with_link(0, 1 << (suite.A64_BRANCH_IMMEDIATE_BITS + 1))
+
+    def test_helper_audit_rejects_state_memory_and_descriptor_drift(self):
+        initial = suite.states(all_flags=True)[15]
+        destination = suite.A64_ZERO_REGISTER_INDEX
+        source, base, instruction_pc = b'probe', suite.MACH_FIXTURE_BASES[0], 0x1000
+        regions = [{'address': base, 'virtual_bytes': 16, 'data': bytes(16)}]
+        snapshot = [{'address': base, 'bytes': 16, 'sha256': suite.digest(bytes(16))}]
+        native = {'kind': 'native_block_run', 'abi': suite.THREAD_REGISTER_PAUTH_ABI,
+                  'complete_binary_verified': False, 'source_sha256': suite.digest(source), 'guest_base': base,
+                  'state': state_dict(initial), 'memory': {'memory_before': snapshot, 'memory_after': snapshot},
+                  'thread_context': {'thread_specific_data': 1}, 'outcome': {'thread_register_events': [{
+                      'instruction': {'destination': destination, 'instruction_pc': instruction_pc,
+                                      'next_pc': instruction_pc + suite.A64_INSTRUCTION_BYTES},
+                      'next_pc': instruction_pc + suite.A64_INSTRUCTION_BYTES, 'value': 1}]}}
+        machine = Mock()
+        machine.reg_read.return_value, machine.mem_read.return_value = 1, bytes(16)
+        with patch.object(suite, 'capture_arm', return_value=initial):
+            suite.compare_thread_register_run(native, machine, initial, regions, base, source, destination, instruction_pc)
+            mutations = []
+            for key, value in [('abi', suite.ABI), ('source_sha256', 'other'), ('complete_binary_verified', True)]:
+                changed = copy.deepcopy(native)
+                changed[key] = value
+                mutations.append(changed)
+            changed = copy.deepcopy(native)
+            changed['state']['v'][31][1] ^= 1
+            mutations.append(changed)
+            changed = copy.deepcopy(native)
+            changed['memory']['memory_after'] = []
+            mutations.append(changed)
+            changed = copy.deepcopy(native)
+            changed['thread_context']['thread_specific_data'] = 0
+            mutations.append(changed)
+            changed = copy.deepcopy(native)
+            changed['outcome']['thread_register_events'][0]['instruction']['destination'] = 0
+            mutations.append(changed)
+            for changed in mutations:
+                with self.assertRaises(AssertionError):
+                    suite.compare_thread_register_run(changed, machine, initial, regions, base, source, destination, instruction_pc)
 
 
 if __name__ == '__main__':

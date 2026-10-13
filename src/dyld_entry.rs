@@ -305,7 +305,7 @@ pub fn probe(
         if options.bootstrap_clock {
             stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
         } else {
-            crate::block_profile(context.is_some(), false)
+            crate::block_profile(context.is_some(), false, false)
         },
     );
     if let Some(windows) = bootstrap_code {

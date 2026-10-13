@@ -619,6 +619,23 @@ UINT32_BYTES, UINT64_BYTES = struct.calcsize('<I'), struct.calcsize('<Q')
 UINT32_BITS = UINT32_BYTES * 8
 UINT32_MASK, UINT64_MASK = (1 << 32) - 1, (1 << 64) - 1
 NZCV_CARRY = 1 << 29
+A64_ZERO_REGISTER_INDEX = 31
+THREAD_REGISTER_DESTINATIONS = A64_ZERO_REGISTER_INDEX + 1
+THREAD_REGISTER_ADDRESSES = (0, 1, (1 << UINT32_BITS) + 1, THREAD_VM_MAXIMUM - 1,
+                             THREAD_VM_MAXIMUM, THREAD_VM_MAXIMUM + 1, UINT64_MASK)
+A64_MRS_TPIDRRO_EL0 = 0xd53bd060
+A64_SVC = 0xd4000001
+A64_SVC_IMMEDIATE_SHIFT = 5
+A64_BL = 0x94000000
+A64_BRANCH_IMMEDIATE_BITS = 26
+A64_MOVZ_W0 = 0x52800000
+A64_MOVE_IMMEDIATE_SHIFT = 5
+THREAD_ERRNO_ENTRY, THREAD_ERRNO_END = 0x31fc, 0x3218
+THREAD_ERRNO_MRS_DESTINATION = 8
+THREAD_ERRNO_VALUES = (1, 0x7fff)
+THREAD_REGISTER_BLOCK_BUDGET = 48
+THREAD_FIXTURE_PAGE_BYTES = 4096
+THREAD_REGISTER_PAUTH_ABI = ABI + '-apple-arm64e-software-pauth-thread-v1'
 
 
 class MachBootstrapCase(NamedTuple):
@@ -719,12 +736,12 @@ def audit_page_size_commpage(report, kernel_shift):
     require(page['page_sha256'] == digest(page_size_bytes(kernel_shift)), 'page-size commpage bytes differ')
 
 
-def run_mach_native(cli, directory, base, case):
+def run_mach_native(cli, directory, base, case, block_budget=MACH_BLOCK_BUDGET):
     command = [str(cli), 'run-blocks', str(directory / 'mach-text.bin'), '--guest-base', hex(base),
                '--entry', hex(base + case.entry_offset), '--state', str(directory / 'mach-state.json'),
                '--memory', str(directory / 'mach-memory.json'),
                '--software-pauth-keys', str(directory / 'mach-keys.json'),
-               '--block-budget', str(MACH_BLOCK_BUDGET), '--cache-dir', str(directory / 'mach-cache')]
+               '--block-budget', str(block_budget), '--cache-dir', str(directory / 'mach-cache')]
     if case.thread_operation:
         command.extend(['--thread-services', '--guest-vm-max-address', hex(THREAD_VM_MAXIMUM)])
     else:
@@ -797,7 +814,7 @@ def audit_thread_service(native, base, case):
                     'platform request, completion or TSD transition differs')
 
 
-def replay_mach_original(pac, regions, initial, base, case, events, thread_events=()):
+def replay_mach_original(pac, regions, initial, base, case, events, thread_events=(), trace=False):
     machine = pac.arm_machine(keys=pac.DOMAIN_KEYS)
     for region in regions:
         machine.mem_map(region['address'], region['virtual_bytes'])
@@ -812,6 +829,7 @@ def replay_mach_original(pac, regions, initial, base, case, events, thread_event
             if PAGE_SIZE_BASE <= address < PAGE_SIZE_BASE + PAGE_SIZE_BYTES:
                 page_reads.append({'address': address, 'bytes': size, 'pc': uc.reg_read(arm.UC_ARM64_REG_PC)})
         machine.hook_add(UC_HOOK_MEM_READ, observe_read)
+    if case.kernel_page_shift is not None or trace:
         machine.hook_add(UC_HOOK_CODE, lambda _, pc, size, unused: visited.append(pc))
     initialize_arm(machine, initial)
     machine.reg_write(arm.UC_ARM64_REG_TPIDRRO_EL0, 0)
@@ -897,6 +915,180 @@ def audit_thread_initialization(native, machine, initial, base, visited):
             'original initialization flag was not stored')
 
 
+def write_mach_inputs(directory, regions, initial):
+    memory = []
+    for index, region in enumerate(regions):
+        path = directory / f'mach-region-{index}.bin'
+        path.write_bytes(region['data'])
+        memory.append({'guest_address': region['address'], 'virtual_bytes': region['virtual_bytes'],
+            'initial_file': {'path': path.name, 'bytes': len(region['data']), 'sha256': digest(region['data'])},
+            'readable': True, 'writable': bool(region['initial_protection'] & UC_PROT_WRITE)})
+    (directory / 'mach-state.json').write_text(json.dumps(state_dict(initial)))
+    (directory / 'mach-memory.json').write_text(json.dumps({'regions': memory}))
+
+
+def compare_thread_register_run(native, machine, initial, regions, base, source, destination, instruction_pc):
+    expected = state_dict(capture_arm(machine, initial))
+    before = [{'address': region['address'], 'bytes': region['virtual_bytes'], 'sha256': digest(region['data'])}
+              for region in regions]
+    after = [{'address': region['address'], 'bytes': region['virtual_bytes'],
+              'sha256': digest(bytes(machine.mem_read(region['address'], region['virtual_bytes'])))}
+             for region in regions]
+    value = machine.reg_read(arm.UC_ARM64_REG_TPIDRRO_EL0)
+    next_pc = instruction_pc + A64_INSTRUCTION_BYTES
+    require(native['kind'] == 'native_block_run' and native['abi'] == THREAD_REGISTER_PAUTH_ABI
+            and native['complete_binary_verified'] is False
+            and native['source_sha256'] == digest(source) and native['guest_base'] == base,
+            'thread-register native source or scope differs')
+    require(native['state'] == expected and native['memory']['memory_before'] == before
+            and native['memory']['memory_after'] == after, 'thread-register full CPU state or mapped RAM differs')
+    require(native['thread_context']['thread_specific_data'] == value,
+            'original TPIDRRO_EL0 differs from native context TSD')
+    require(native['outcome'].get('thread_register_events') == [{
+        'instruction': {'destination': destination, 'instruction_pc': instruction_pc, 'next_pc': next_pc},
+        'next_pc': next_pc, 'value': value}], 'thread-register helper event differs')
+    return expected, after
+
+
+def branch_with_link(instruction_offset, target_offset):
+    displacement = target_offset - instruction_offset
+    bound = 1 << (A64_BRANCH_IMMEDIATE_BITS - 1)
+    require(displacement % A64_INSTRUCTION_BYTES == 0
+            and -bound <= displacement // A64_INSTRUCTION_BYTES < bound,
+            'synthetic fixture BL target is not representable')
+    return A64_BL | (displacement // A64_INSTRUCTION_BYTES & ((1 << A64_BRANCH_IMMEDIATE_BITS) - 1))
+
+
+def thread_errno_source(view, regions, base, errno):
+    """Append a declared fixture trampoline; retain every original text byte."""
+    offset = max(region['address'] + region['virtual_bytes'] - base for region in regions)
+    require(offset % THREAD_FIXTURE_PAGE_BYTES == 0 and len(view['text']) <= offset
+            and errno in THREAD_ERRNO_VALUES, 'invalid synthetic errno fixture layout')
+    words = (branch_with_link(offset, MACH_INIT_ENTRY),
+             A64_MOVZ_W0 | errno << A64_MOVE_IMMEDIATE_SHIFT,
+             branch_with_link(offset + 2 * A64_INSTRUCTION_BYTES, THREAD_ERRNO_ENTRY))
+    trampoline = struct.pack('<3I', *words)
+    source = view['text'] + bytes(offset - len(view['text'])) + trampoline
+    region = {'address': base + offset, 'virtual_bytes': THREAD_FIXTURE_PAGE_BYTES,
+              'initial_protection': UC_PROT_READ | UC_PROT_EXEC,
+              'data': trampoline + bytes(THREAD_FIXTURE_PAGE_BYTES - len(trampoline))}
+    return source, offset, region
+
+
+def generated_thread_register_cases(cli, directory, pac):
+    rows, compiler = [], None
+    for destination in range(THREAD_REGISTER_DESTINATIONS):
+        source = struct.pack('<2I', A64_SVC | DARWIN_SVC_IMMEDIATE << A64_SVC_IMMEDIATE_SHIFT,
+                             A64_MRS_TPIDRRO_EL0 | destination)
+        (directory / 'mach-text.bin').write_bytes(source)
+        base = MACH_FIXTURE_BASES[0]
+        regions = [
+            {'address': base, 'virtual_bytes': THREAD_FIXTURE_PAGE_BYTES,
+             'initial_protection': UC_PROT_READ | UC_PROT_EXEC,
+             'data': source + bytes(THREAD_FIXTURE_PAGE_BYTES - len(source))},
+            {'address': MACH_STACK_BASE, 'virtual_bytes': MACH_STACK_BYTES,
+             'initial_protection': UC_PROT_READ | UC_PROT_WRITE, 'data': bytes(MACH_STACK_BYTES)}]
+        for flags in range(16):
+            for address in THREAD_REGISTER_ADDRESSES:
+                initial = State.from_buffer_copy(states(all_flags=True)[flags])
+                initial.sp, initial.x[30] = MACH_STACK_POINTER, VM_STOP
+                initial.x[0], initial.x[3], initial.x[16] = address, THREAD_SET_TSD, THREAD_PLATFORM_SELECTOR
+                case = MachBootstrapCase(0, base + len(source), (), thread_operation='set', tsd_address=address)
+                write_mach_inputs(directory, regions, initial)
+                native = run_mach_native(cli, directory, base, case)
+                machine, _, visited = replay_mach_original(
+                    pac, regions, initial, base, case, (), native['thread_service_events'], trace=True)
+                require(visited == [base, base + A64_INSTRUCTION_BYTES], 'generated ISA probe escaped SVC/MRS')
+                expected, after = compare_thread_register_run(
+                    native, machine, initial, regions, base, source, destination, base + A64_INSTRUCTION_BYTES)
+                require(compiler in (None, native['compiler_source_sha256']), 'thread-register compiler changed')
+                compiler = native['compiler_source_sha256']
+                rows.append({'kind': 'generated_svc_mrs_isa_probe', 'destination': destination,
+                             'incoming_nzcv': initial.nzcv, 'requested_tsd': address, 'state': expected,
+                             'memory_after': after, 'thread_context': native['thread_context'],
+                             'thread_service_events': native['thread_service_events'], 'native_outcome': native['outcome']})
+    return rows, compiler
+
+
+def original_thread_errno_cases(cli, directory, pac, view, image, compiler):
+    original_rows = []
+    for base in MACH_FIXTURE_BASES:
+        for kernel_shift in PAGE_SIZE_KERNEL_SHIFTS:
+            for flags in (0, 15):
+                for errno in THREAD_ERRNO_VALUES:
+                    regions = original_segment_regions(image, base)
+                    source, offset, trampoline_region = thread_errno_source(view, regions, base, errno)
+                    regions.append(trampoline_region)
+                    regions.append({'address': MACH_STACK_BASE, 'virtual_bytes': MACH_STACK_BYTES,
+                                    'initial_protection': UC_PROT_READ | UC_PROT_WRITE, 'data': bytes(MACH_STACK_BYTES)})
+                    (directory / 'mach-text.bin').write_bytes(source)
+                    initial = State.from_buffer_copy(states(all_flags=True)[flags])
+                    initial.sp, initial.x[30] = MACH_STACK_POINTER, VM_STOP
+                    case = MachBootstrapCase(offset, base + len(source), MACH_INIT_REQUESTS,
+                                             kernel_shift, thread_operation='initialize')
+                    write_mach_inputs(directory, regions, initial)
+                    native = run_mach_native(cli, directory, base, case, THREAD_REGISTER_BLOCK_BUDGET)
+                    machine, page_reads, visited = replay_mach_original(
+                        pac, regions, initial, base, case, native['mach_port_events'], native['thread_service_events'])
+                    expected, after = compare_thread_register_run(native, machine, initial, regions, base,
+                        source, THREAD_ERRNO_MRS_DESTINATION, base + THREAD_ERRNO_ENTRY)
+                    errno_pcs = [pc for pc in visited if base + THREAD_ERRNO_ENTRY <= pc < base + THREAD_ERRNO_END]
+                    init_pcs = [pc for pc in visited if base <= pc < base + len(view['text']) and pc not in errno_pcs]
+                    require(len(init_pcs) == MACH_INIT_INSTRUCTION_COUNT and init_pcs[-1] == base + MACH_INIT_RETURN
+                            and errno_pcs == list(range(base + THREAD_ERRNO_ENTRY, base + THREAD_ERRNO_END, A64_INSTRUCTION_BYTES)),
+                            'original initialization RETAB or errno instruction sequence differs')
+                    require(native['state']['x'][:2] == [UINT64_MASK, UINT64_MASK]
+                            and native['state']['sp'] == initial.sp
+                            and int.from_bytes(machine.mem_read(base + MACH_INIT_ERRNO, UINT32_BYTES), 'little') == errno,
+                            'unchanged original errno store, return values or SP differs')
+                    audit_original_page_sizes(machine, page_reads, base, kernel_shift)
+                    audit_page_size_globals(dict(native, memory={'memory_reads': native['memory']['memory_reads'][:1]}),
+                                            base, kernel_shift, native['mach_port_events'])
+                    require(native['compiler_source_sha256'] == compiler, 'original errno compiler differs')
+                    original_rows.append({'kind': 'unchanged_dyld_init_then_errno_with_synthetic_trampoline',
+                        'base': base, 'incoming_nzcv': initial.nzcv, 'errno': errno, 'kernel_page_shift': kernel_shift,
+                        'source_sha256': digest(source), 'synthetic_trampoline_offset': offset,
+                        'synthetic_trampoline_hex': source[offset:].hex(), 'original_pcs': init_pcs + errno_pcs,
+                        'original_instruction_count': len(init_pcs) + len(errno_pcs), 'state': expected,
+                        'memory_after': after, 'thread_context': native['thread_context'],
+                        'thread_service_events': native['thread_service_events'], 'native_outcome': native['outcome']})
+    return original_rows
+
+
+def thread_register_cohort(cli, directory, view, image):
+    """Generated ISA probes and unchanged original errno after full _mach_init."""
+    spec = importlib.util.spec_from_file_location('thread_register_pauth', ROOT / 'dev/pauth-differential.py')
+    pac = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pac)
+    contracts, thread_contracts = page_size_contract_sources(), thread_contract_sources(image)
+    (directory / 'mach-keys.json').write_text(json.dumps(
+        {key: {'low': value[0], 'high': value[1]} for key, value in pac.DOMAIN_KEYS.items()}))
+    source_paths = ('dev/dyld-entry-differential.py', 'dev/pauth-differential.py', 'dev/differential.py',
+                    'src/main.rs', 'crates/stela-compiler/src/block/thread.rs',
+                    'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/thread.rs',
+                    'crates/stela-runtime/src/darwin.rs', 'crates/stela-runtime/src/darwin/platform.rs',
+                    'crates/stela-runtime/src/mach.rs', 'crates/stela-runtime/src/commpage.rs',
+                    'crates/stela-runtime/src/memory.rs', 'crates/stela-runtime/src/lib.rs')
+    hashes = {path: digest((ROOT / path).read_bytes()) for path in source_paths}
+    cli_hash = digest(cli.read_bytes())
+    rows, compiler = generated_thread_register_cases(cli, directory, pac)
+    original_rows = original_thread_errno_cases(cli, directory, pac, view, image, compiler)
+    require(digest(cli.read_bytes()) == cli_hash and all(digest((ROOT / path).read_bytes()) == sha
+            for path, sha in hashes.items()), 'thread-register sources or executable changed')
+    return {'kind': 'arm_tpidrro_vs_shared_native_thread_context', 'passed': True,
+        'full_state_and_mapped_ram_comparisons': len(rows) + len(original_rows),
+        'generated_isa_comparisons': len(rows), 'unchanged_original_init_errno_comparisons': len(original_rows),
+        'generated_isa_cases': rows, 'unchanged_original_cases': original_rows,
+        'guest_state_bytes': ctypes.sizeof(State), 'compiler_source_sha256': compiler,
+        'compiler_executable_sha256': cli_hash, 'shared_sources_sha256': hashes,
+        'container_sha256': CONTAINER_SHA256, 'slice_sha256': SLICE_SHA256,
+        'original_text_sha256': digest(view['text']),
+        'original_errno_window': {'start': THREAD_ERRNO_ENTRY, 'end': THREAD_ERRNO_END,
+                                 'sha256': digest(image[THREAD_ERRNO_ENTRY:THREAD_ERRNO_END])},
+        'page_size_contract_sources': contracts, 'thread_contract_sources': thread_contracts,
+        'limits': 'Generated SVC/MRS ISA probes cover all32 destinations and16 NZCV states with explicit TSD inputs. Separately, a declared synthetic trampoline calls unchanged original _mach_init through RETAB and the unchanged original errno accessor. Original image/stack RAM and784 CPU bytes are compared; TPIDRRO_EL0 is independently observed. Native host results are replayed at original ARM SVC; pinned public-source BSD/platform effects and software PAC keys are modeled, not an executing ARM kernel or Apple hardware identity. Explicit fixture VM maximum is not a discovered macOS27 contract. No complete pthread lifecycle, process startup or application execution is established.'}
+
+
 def mach_bootstrap_cohort(cli, directory, view, image, page_sizes=False, threads=False):
     """Unchanged bootstrap paths; actual host results replayed at original SVC."""
     spec = importlib.util.spec_from_file_location('mach_ports_pauth', ROOT / 'dev/pauth-differential.py')
@@ -929,15 +1121,7 @@ def mach_bootstrap_cohort(cli, directory, view, image, page_sizes=False, threads
                 regions = original_segment_regions(image, base)
                 regions.append({'address': MACH_STACK_BASE, 'virtual_bytes': MACH_STACK_BYTES,
                                 'initial_protection': UC_PROT_READ | UC_PROT_WRITE, 'data': bytes(MACH_STACK_BYTES)})
-                memory = []
-                for index, region in enumerate(regions):
-                    path = directory / f'mach-region-{index}.bin'
-                    path.write_bytes(region['data'])
-                    memory.append({'guest_address': region['address'], 'virtual_bytes': region['virtual_bytes'],
-                        'initial_file': {'path': path.name, 'bytes': len(region['data']), 'sha256': digest(region['data'])},
-                        'readable': True, 'writable': bool(region['initial_protection'] & UC_PROT_WRITE)})
-                (directory / 'mach-state.json').write_text(json.dumps(state_dict(initial)))
-                (directory / 'mach-memory.json').write_text(json.dumps({'regions': memory}))
+                write_mach_inputs(directory, regions, initial)
                 native = run_mach_native(cli, directory, base, case)
                 events = native['mach_port_events']
                 machine, page_reads, visited = replay_mach_original(
@@ -1001,6 +1185,7 @@ def main():
     parser.add_argument('--mach-ports', action='store_true', help='run only original Mach port wrappers and initialization prefix')
     parser.add_argument('--mach-page-sizes', action='store_true', help='verify original Mach/page-size initialization through pending thread_selfid')
     parser.add_argument('--mach-threads', action='store_true', help='verify complete original Mach initialization with owned thread identity and guest TSD')
+    parser.add_argument('--thread-registers', action='store_true', help='verify generated TPIDRRO_EL0 probes and unchanged original errno after Mach initialization')
     parser.add_argument('--self-rebase', action='store_true', help='run only the focused original full self-rebase cohort')
     parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
@@ -1016,12 +1201,14 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
-    require(sum((args.self_rebase,args.mach_ports,args.mach_page_sizes,args.mach_threads))<=1, 'select one focused dyld cohort')
-    if args.self_rebase or args.mach_ports or args.mach_page_sizes or args.mach_threads:
+    require(sum((args.self_rebase,args.mach_ports,args.mach_page_sizes,args.mach_threads,args.thread_registers))<=1, 'select one focused dyld cohort')
+    if args.self_rebase or args.mach_ports or args.mach_page_sizes or args.mach_threads or args.thread_registers:
         with tempfile.TemporaryDirectory(prefix='stela-self-rebase-') as temporary:
-            report = (mach_bootstrap_cohort(cli,Path(temporary),view,image,page_sizes=args.mach_page_sizes,threads=args.mach_threads)
+            report = (thread_register_cohort(cli,Path(temporary),view,image) if args.thread_registers else
+                      mach_bootstrap_cohort(cli,Path(temporary),view,image,page_sizes=args.mach_page_sizes,threads=args.mach_threads)
                       if args.mach_ports or args.mach_page_sizes or args.mach_threads else self_rebase_cohort(cli,Path(temporary),view,image))
-        output = ROOT / ('.stela/dyld-mach-threads-differential-report.json' if args.mach_threads else
+        output = ROOT / ('.stela/dyld-thread-registers-differential-report.json' if args.thread_registers else
+                         '.stela/dyld-mach-threads-differential-report.json' if args.mach_threads else
                          '.stela/dyld-mach-page-sizes-differential-report.json' if args.mach_page_sizes else
                          '.stela/dyld-mach-ports-differential-report.json' if args.mach_ports else '.stela/dyld-self-rebase-differential-report.json')
         snapshot = write_evidence(output,report)

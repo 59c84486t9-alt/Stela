@@ -445,15 +445,30 @@ pub unsafe fn run_services(
             "refusing execution in an unusable guest address space"
         );
         let mut part = unsafe {
-            match (services.pauth, services.clock.as_deref_mut()) {
-                (Some(pauth), Some(clock)) => {
-                    runtime.run_with_clock(state, stop, budget - executed, pauth, clock)?
+            if let Some(thread) = services
+                .thread
+                .as_deref()
+                .filter(|_| runtime.profile().supports_thread_registers())
+            {
+                runtime.run_with_thread(
+                    state,
+                    stop,
+                    budget - executed,
+                    thread,
+                    services.pauth,
+                    services.clock.as_deref_mut(),
+                )?
+            } else {
+                match (services.pauth, services.clock.as_deref_mut()) {
+                    (Some(pauth), Some(clock)) => {
+                        runtime.run_with_clock(state, stop, budget - executed, pauth, clock)?
+                    }
+                    (Some(pauth), None) => {
+                        runtime.run_with_pauth(state, stop, budget - executed, pauth)?
+                    }
+                    (None, None) => runtime.run(state, stop, budget - executed)?,
+                    (None, Some(_)) => anyhow::bail!("clock execution requires a PAC context"),
                 }
-                (Some(pauth), None) => {
-                    runtime.run_with_pauth(state, stop, budget - executed, pauth)?
-                }
-                (None, None) => runtime.run(state, stop, budget - executed)?,
-                (None, Some(_)) => anyhow::bail!("clock execution requires a PAC context"),
             }
         };
         executed += part.blocks_executed;
@@ -472,6 +487,9 @@ pub unsafe fn run_services(
                 .pointer_authentication_events
                 .append(&mut part.pointer_authentication_events);
             total.clock_events.append(&mut part.clock_events);
+            total
+                .thread_register_events
+                .append(&mut part.thread_register_events);
         } else {
             aggregate = Some(part);
         }

@@ -70,6 +70,9 @@ impl Context {
     pub fn address_space(&self) -> u64 {
         self.ports.address_space()
     }
+    pub fn thread_specific_data(&self) -> u64 {
+        self.thread_specific_data
+    }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             profile_id: PROFILE_ID,

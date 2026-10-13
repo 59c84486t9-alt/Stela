@@ -14,6 +14,9 @@ use crate::{
 };
 use serde::Serialize;
 
+mod thread;
+pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
+
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
 /// Same state/return layout, with an explicitly enabled runtime PAC boundary.
@@ -23,6 +26,13 @@ pub const PAUTH_BLOCK_ABI: &str =
 pub const CLOCK_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-v1";
 
+pub const THREAD_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-darwin-arm64-thread-v1";
+pub const PAUTH_THREAD_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-thread-v1";
+pub const CLOCK_THREAD_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-thread-v1";
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockProfile {
@@ -30,6 +40,9 @@ pub enum BlockProfile {
     Ordinary,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
+    DarwinArm64ThreadV1,
+    AppleArm64eSoftwarePauthThreadV1,
+    AppleArm64eSoftwarePauthClockThreadV1,
 }
 
 impl BlockProfile {
@@ -38,18 +51,36 @@ impl BlockProfile {
             Self::Ordinary => BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
+            Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
+            Self::AppleArm64eSoftwarePauthThreadV1 => PAUTH_THREAD_BLOCK_ABI,
+            Self::AppleArm64eSoftwarePauthClockThreadV1 => CLOCK_THREAD_BLOCK_ABI,
         }
     }
 
     pub const fn supports_pointer_authentication(self) -> bool {
         matches!(
             self,
-            Self::AppleArm64eSoftwarePauthV1 | Self::AppleArm64eSoftwarePauthClockV1
+            Self::AppleArm64eSoftwarePauthV1
+                | Self::AppleArm64eSoftwarePauthClockV1
+                | Self::AppleArm64eSoftwarePauthThreadV1
+                | Self::AppleArm64eSoftwarePauthClockThreadV1
         )
     }
 
     pub const fn supports_clock(self) -> bool {
-        matches!(self, Self::AppleArm64eSoftwarePauthClockV1)
+        matches!(
+            self,
+            Self::AppleArm64eSoftwarePauthClockV1 | Self::AppleArm64eSoftwarePauthClockThreadV1
+        )
+    }
+
+    pub const fn supports_thread_registers(self) -> bool {
+        matches!(
+            self,
+            Self::DarwinArm64ThreadV1
+                | Self::AppleArm64eSoftwarePauthThreadV1
+                | Self::AppleArm64eSoftwarePauthClockThreadV1
+        )
     }
 }
 /// Maximum input window; a terminator can consume a shorter prefix.
@@ -66,6 +97,7 @@ pub enum ExitKind {
     Trap = 5,
     PointerAuthentication = 6,
     Clock = 7,
+    ThreadRegister = 8,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -81,6 +113,7 @@ impl TryFrom<u64> for ExitKind {
             5 => Ok(Self::Trap),
             6 => Ok(Self::PointerAuthentication),
             7 => Ok(Self::Clock),
+            8 => Ok(Self::ThreadRegister),
             _ => Err(()),
         }
     }
@@ -425,6 +458,7 @@ pub(crate) enum Terminator {
     Trap(SynchronousTrap),
     PointerAuthentication(PointerAuthentication),
     Clock(ClockInstruction),
+    ThreadRegister(ThreadRegisterInstruction),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -515,6 +549,7 @@ pub struct BlockAnalysis {
     pub trap: Option<SynchronousTrap>,
     pub pointer_authentication: Option<PointerAuthentication>,
     pub clock_instruction: Option<ClockInstruction>,
+    pub thread_register_instruction: Option<ThreadRegisterInstruction>,
 }
 /// Discover boundaries and edges from the exact parser used by both AOT and JIT.
 /// Static call continuations are candidates, not proof that the callee returns.
@@ -534,6 +569,7 @@ pub fn analyze_with_profile(
     let mut trap = None;
     let mut pointer_authentication = None;
     let mut clock_instruction = None;
+    let mut thread_register_instruction = None;
     let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
     match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
         None => add(SuccessorKind::Fallthrough, parsed.next_pc),
@@ -589,6 +625,10 @@ pub fn analyze_with_profile(
             clock_instruction = Some(*value);
             add(SuccessorKind::Fallthrough, value.next_pc);
         }
+        Some(Terminator::ThreadRegister(value)) => {
+            thread_register_instruction = Some(*value);
+            add(SuccessorKind::Fallthrough, value.next_pc);
+        }
         Some(Terminator::Branch(_)) => {
             unreachable!("private parser only stores branch operations as terminators")
         }
@@ -601,6 +641,7 @@ pub fn analyze_with_profile(
         trap,
         pointer_authentication,
         clock_instruction,
+        thread_register_instruction,
     })
 }
 
@@ -651,6 +692,18 @@ fn parse(
                 })?
         {
             terminal = Some((pc, Terminator::Clock(decoded)));
+            break;
+        }
+        if profile.supports_thread_registers()
+            && let Some(decoded) =
+                decode_thread_register_instruction(pc, word).map_err(|error| {
+                    BlockAnalysisError {
+                        pc,
+                        detail: error.0,
+                    }
+                })?
+        {
+            terminal = Some((pc, Terminator::ThreadRegister(decoded)));
             break;
         }
         if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {
@@ -871,10 +924,13 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..8 {
+        for kind in 0..=ExitKind::ThreadRegister as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(8), Err(()));
+        assert_eq!(
+            ExitKind::try_from(ExitKind::ThreadRegister as u64 + 1),
+            Err(())
+        );
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
     }
 

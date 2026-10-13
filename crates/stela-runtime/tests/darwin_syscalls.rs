@@ -727,10 +727,13 @@ fn unsupported_vm_services_and_registered_code_aliases_preserve_pending_state() 
 #[cfg(target_os = "macos")]
 mod native_thread_services {
     use super::*;
+    use stela_compiler::block::BlockProfile;
     use stela_runtime::{
+        clock,
         darwin::{ExecutionServices, ServiceRunOutcome, platform, run_services},
         mach::{self, HostPorts},
         memory::DIRECT_RAM_USER_END,
+        pauth,
         thread::{self as guest_thread, Context, VmMaximum},
     };
 
@@ -743,6 +746,17 @@ mod native_thread_services {
     const UNALIGNED_VM_MAXIMUM: u64 = 0x12345;
     const CURRENT_HOST_THREAD: libc::pthread_t = 0;
     const TLS_SENTINEL_VALUE: u64 = 0x123456789abcdef0;
+    const ADDRESS_SPACE_ID: u64 = 0x44415257494e;
+    const MRS_TPIDRRO_EL0: u32 = 0xd53bd060;
+    const MRS_TPIDR_EL0: u32 = 0xd53bd040;
+    const MSR_TPIDRRO_EL0: u32 = 0xd51bd060;
+    const ZERO_REGISTER: u32 = 31;
+    const LINK_REGISTER: u32 = 30;
+    const READBACK_REGISTER: u32 = 8;
+    const MOV_X7_42: u32 = 0xd2800547;
+    const PREFIX_REGISTER: usize = 7;
+    const PREFIX_VALUE: u64 = 42;
+    const MRS_CNTVCT_EL0_X9: u32 = 0xd53be049;
 
     struct HostTlsSentinel {
         key: libc::pthread_key_t,
@@ -811,7 +825,7 @@ mod native_thread_services {
         budget: usize,
     ) -> Result<ServiceRunOutcome> {
         let mut memory = OwnedMemory::map(Vec::new())?;
-        // SAFETY: every fixture is immutable owned SVC/RET code without loads or
+        // SAFETY: fixtures are immutable owned SVC/MRS/RET code without loads or
         // stores. Services store numeric guest TSD values without dereferencing.
         unsafe {
             run_services(
@@ -826,6 +840,370 @@ mod native_thread_services {
                 },
             )
         }
+    }
+
+    fn thread_register_runtime(cache: &std::path::Path, words: &[u32]) -> Result<BlockRuntime> {
+        let mut runtime = BlockRuntime::new_with_profile(
+            ADDRESS_SPACE_ID,
+            cache.into(),
+            BlockProfile::DarwinArm64ThreadV1,
+        );
+        runtime.register_code(
+            GuestAddress(BASE),
+            words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        )?;
+        Ok(runtime)
+    }
+
+    fn platform_set_state(flags: u32, address: u64) -> ThreadState {
+        let mut state = thread(flags, address);
+        state.registers.x[0] = address;
+        state.registers.x[SELECTOR_REGISTER] = u64::from(platform::PLATFORM_CALL_SELECTOR as u32);
+        state.registers.x[SUBCODE_REGISTER] = u64::from(platform::SET_THREAD_SPECIFIC_DATA);
+        state
+    }
+
+    #[test]
+    fn platform_set_then_thread_register_read_preserves_full_state_and_host_tls() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let identity = host_identity()?;
+        let tls = HostTlsSentinel::new()?;
+        for destination in 0..=ZERO_REGISTER {
+            let mut runtime = thread_register_runtime(
+                cache.path(),
+                &[SVC_DARWIN, MRS_TPIDRRO_EL0 | destination, RET_X30],
+            )?;
+            for maximum in [UNALIGNED_VM_MAXIMUM, DIRECT_RAM_USER_END] {
+                let mut context =
+                    Context::native(runtime.address_space(), VmMaximum::new(maximum)?)?;
+                for flags in 0..NZCV_COMBINATIONS {
+                    for address in [0, 1, maximum - 1, maximum, maximum + 1, u64::MAX] {
+                        let value = if address > maximum { 0 } else { address };
+                        let mut state = platform_set_state(flags, address);
+                        let mut expected = state.clone();
+                        expected.pc = GuestAddress(BASE + 2 * INSTRUCTION_BYTES);
+                        if destination != ZERO_REGISTER {
+                            expected.registers.x[destination as usize] = value;
+                        }
+                        let outcome = run(&mut runtime, &mut state, &mut context, 2)?;
+                        assert_state(&state, &expected);
+                        assert_eq!(outcome.execution.reason, StopReason::BudgetExhausted);
+                        assert_eq!(outcome.execution.blocks_executed, 2);
+                        assert_eq!(outcome.thread_services.len(), 1);
+                        assert!(outcome.thread_services[0].completed());
+                        assert_eq!(outcome.execution.thread_register_events.len(), 1);
+                        let event = &outcome.execution.thread_register_events[0];
+                        assert_eq!(event.instruction.destination, destination as u8);
+                        assert_eq!(
+                            event.instruction.instruction_pc,
+                            GuestAddress(BASE + INSTRUCTION_BYTES)
+                        );
+                        assert_eq!(event.instruction.next_pc, expected.pc);
+                        assert_eq!(event.next_pc, expected.pc);
+                        assert_eq!(event.value, value);
+                        assert_eq!(context.thread_specific_data(), value);
+                        if destination != LINK_REGISTER {
+                            expected.pc = GuestAddress(STOP);
+                            let returned = run(&mut runtime, &mut state, &mut context, 1)?;
+                            assert_state(&state, &expected);
+                            assert_eq!(returned.execution.reason, StopReason::StopAddress);
+                            assert!(returned.execution.thread_register_events.is_empty());
+                        }
+                        tls.assert_unchanged();
+                    }
+                }
+            }
+        }
+        assert_eq!(host_identity()?, identity);
+        Ok(())
+    }
+
+    #[test]
+    fn thread_register_reads_live_context_across_budget_resume_and_disk_cache() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let words = [SVC_DARWIN, MRS_TPIDRRO_EL0 | READBACK_REGISTER, RET_X30];
+        let mut runtime = thread_register_runtime(cache.path(), &words)?;
+        for offset in [0, INSTRUCTION_BYTES, 2 * INSTRUCTION_BYTES] {
+            runtime.prepare(GuestAddress(BASE + offset))?;
+        }
+        let mut context = Context::native(
+            runtime.address_space(),
+            VmMaximum::new(DIRECT_RAM_USER_END)?,
+        )?;
+        let mut state = platform_set_state(15, DIRECT_RAM_USER_END);
+        let initial = state.clone();
+        let zero = run(&mut runtime, &mut state, &mut context, 0)?;
+        assert_eq!(zero.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(zero.execution.blocks_executed, 0);
+        assert!(
+            zero.thread_services.is_empty() && zero.execution.thread_register_events.is_empty()
+        );
+        assert_eq!(context.thread_specific_data(), 0);
+        assert_state(&state, &initial);
+        let set = run(&mut runtime, &mut state, &mut context, 1)?;
+        assert_eq!(set.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(set.thread_services.len(), 1);
+        assert!(set.execution.thread_register_events.is_empty());
+        let mut expected = initial.clone();
+        expected.pc = GuestAddress(BASE + INSTRUCTION_BYTES);
+        assert_state(&state, &expected);
+        let read = run(&mut runtime, &mut state, &mut context, 1)?;
+        assert_eq!(read.execution.reason, StopReason::BudgetExhausted);
+        assert_eq!(read.execution.thread_register_events.len(), 1);
+        expected.pc = GuestAddress(BASE + 2 * INSTRUCTION_BYTES);
+        expected.registers.x[READBACK_REGISTER as usize] = DIRECT_RAM_USER_END;
+        assert_state(&state, &expected);
+        let returned = run(&mut runtime, &mut state, &mut context, 1)?;
+        expected.pc = GuestAddress(STOP);
+        assert_state(&state, &expected);
+        assert_eq!(returned.execution.reason, StopReason::StopAddress);
+        assert_eq!(
+            set.execution.disk_cache_hits
+                + read.execution.disk_cache_hits
+                + returned.execution.disk_cache_hits,
+            3
+        );
+        for value in [1, DIRECT_RAM_USER_END - 1] {
+            state = platform_set_state(15, value);
+            expected = state.clone();
+            expected.pc = GuestAddress(STOP);
+            expected.registers.x[READBACK_REGISTER as usize] = value;
+            let warm = run(&mut runtime, &mut state, &mut context, 3)?;
+            assert_state(&state, &expected);
+            assert_eq!(warm.execution.memory_cache_hits, 3);
+            assert_eq!(warm.execution.thread_register_events[0].value, value);
+        }
+        drop(runtime);
+        let mut fresh = thread_register_runtime(cache.path(), &words)?;
+        state = platform_set_state(15, UNALIGNED_VM_MAXIMUM);
+        expected = state.clone();
+        expected.pc = GuestAddress(STOP);
+        expected.registers.x[READBACK_REGISTER as usize] = UNALIGNED_VM_MAXIMUM;
+        let cached = run(&mut fresh, &mut state, &mut context, 3)?;
+        assert_state(&state, &expected);
+        assert_eq!(cached.execution.disk_cache_hits, 3);
+        assert_eq!(cached.execution.compiled_blocks, 0);
+        assert_eq!(
+            cached.execution.thread_register_events[0].value,
+            UNALIGNED_VM_MAXIMUM
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn thread_register_missing_or_foreign_context_stops_before_register_effects() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        for destination in [READBACK_REGISTER, ZERO_REGISTER] {
+            let mut runtime = thread_register_runtime(
+                cache.path(),
+                &[MOV_X7_42, MRS_TPIDRRO_EL0 | destination, RET_X30],
+            )?;
+            let mut state = thread(15, 1);
+            let before = state.clone();
+            let foreign = Context::native(
+                runtime.address_space() + 1,
+                VmMaximum::new(DIRECT_RAM_USER_END)?,
+            )?;
+            // SAFETY: foreign ownership must fail before the prefix executes.
+            let result = unsafe {
+                runtime.run_with_thread(
+                    &mut state,
+                    Some(GuestAddress(STOP)),
+                    1,
+                    &foreign,
+                    None,
+                    None,
+                )
+            };
+            assert!(result.is_err());
+            assert_state(&state, &before);
+            // SAFETY: owned MOV/MRS/RET accesses no RAM. Missing context must
+            // preserve the executed prefix and leave even an XZR read pending.
+            let missing = unsafe { runtime.run(&mut state, Some(GuestAddress(STOP)), 1)? };
+            let StopReason::ThreadRegisterRequired { instruction } = missing.reason else {
+                bail!("thread register read did not request its owning context");
+            };
+            let mut expected = before;
+            expected.pc = GuestAddress(BASE + INSTRUCTION_BYTES);
+            expected.registers.x[PREFIX_REGISTER] = PREFIX_VALUE;
+            assert_eq!(instruction.destination, destination as u8);
+            assert_eq!(instruction.instruction_pc, expected.pc);
+            assert_eq!(
+                instruction.next_pc,
+                GuestAddress(BASE + 2 * INSTRUCTION_BYTES)
+            );
+            assert_eq!(missing.blocks_executed, 1);
+            assert!(missing.thread_register_events.is_empty());
+            assert_state(&state, &expected);
+            let context = Context::native(
+                runtime.address_space(),
+                VmMaximum::new(DIRECT_RAM_USER_END)?,
+            )?;
+            // SAFETY: read-only context and immutable MRS/RET access no RAM.
+            let resumed = unsafe {
+                runtime.run_with_thread(
+                    &mut state,
+                    Some(GuestAddress(STOP)),
+                    2,
+                    &context,
+                    None,
+                    None,
+                )?
+            };
+            expected.pc = GuestAddress(STOP);
+            if destination != ZERO_REGISTER {
+                expected.registers.x[destination as usize] = 0;
+            }
+            assert_state(&state, &expected);
+            assert_eq!(resumed.reason, StopReason::StopAddress);
+            assert_eq!(resumed.thread_register_events.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thread_register_optional_services_validate_before_prefix_effects() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let foreign = ADDRESS_SPACE_ID + 1;
+        for (profile, pauth_owner, clock_owner) in [
+            (BlockProfile::Ordinary, None, None),
+            (
+                BlockProfile::DarwinArm64ThreadV1,
+                Some(ADDRESS_SPACE_ID),
+                None,
+            ),
+            (
+                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                Some(foreign),
+                None,
+            ),
+            (
+                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                Some(ADDRESS_SPACE_ID),
+                Some(foreign),
+            ),
+            (
+                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                None,
+                Some(ADDRESS_SPACE_ID),
+            ),
+            (
+                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                Some(ADDRESS_SPACE_ID),
+                Some(ADDRESS_SPACE_ID),
+            ),
+        ] {
+            let mut runtime =
+                BlockRuntime::new_with_profile(ADDRESS_SPACE_ID, cache.path().into(), profile);
+            runtime.register_code(
+                GuestAddress(BASE),
+                [MOV_X7_42, MRS_TPIDRRO_EL0 | READBACK_REGISTER, RET_X30]
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect(),
+            )?;
+            let context = Context::native(ADDRESS_SPACE_ID, VmMaximum::new(DIRECT_RAM_USER_END)?)?;
+            let keys = pauth_owner
+                .map(|owner| pauth::Context::new(owner, pauth::Keys::from_ib_words(1, 2)));
+            let mut clock = clock_owner
+                .map(|owner| {
+                    clock::Context::new(
+                        owner,
+                        Box::new(clock::ReplaySource::new(vec![clock::Snapshot {
+                            counter: 100,
+                            sleep_ticks: 10,
+                        }])?),
+                    )
+                })
+                .transpose()?;
+            let page = clock
+                .as_ref()
+                .map(|clock| clock.snapshot_bytes(0, clock::GUEST_BYTES))
+                .transpose()?;
+            let mut state = thread(15, 1);
+            let before = state.clone();
+            // SAFETY: optional profile/ownership validation must reject every
+            // listed combination before immutable memory-free code executes.
+            let result = unsafe {
+                runtime.run_with_thread(
+                    &mut state,
+                    Some(GuestAddress(STOP)),
+                    3,
+                    &context,
+                    keys.as_ref(),
+                    clock.as_mut(),
+                )
+            };
+            assert!(result.is_err());
+            assert_state(&state, &before);
+            if let Some(clock) = clock {
+                assert_eq!(clock.events().len(), 1);
+                assert_eq!(Some(clock.snapshot_bytes(0, clock::GUEST_BYTES)?), page);
+            }
+        }
+        let mut runtime = BlockRuntime::new_with_profile(
+            ADDRESS_SPACE_ID,
+            cache.path().into(),
+            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+        );
+        runtime.register_code(
+            GuestAddress(BASE),
+            [MOV_X7_42, MRS_CNTVCT_EL0_X9, RET_X30]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect(),
+        )?;
+        let context = Context::native(ADDRESS_SPACE_ID, VmMaximum::new(DIRECT_RAM_USER_END)?)?;
+        let keys = pauth::Context::new(ADDRESS_SPACE_ID, pauth::Keys::from_ib_words(1, 2));
+        let mut state = thread(15, 1);
+        let mut expected = state.clone();
+        expected.registers.x[PREFIX_REGISTER] = PREFIX_VALUE;
+        expected.pc = GuestAddress(BASE + INSTRUCTION_BYTES);
+        // SAFETY: a missing optional clock leaves the genuine counter helper
+        // pending after the memory-free prefix, preserving all other state.
+        let result = unsafe {
+            runtime.run_with_thread(
+                &mut state,
+                Some(GuestAddress(STOP)),
+                1,
+                &context,
+                Some(&keys),
+                None,
+            )?
+        };
+        assert!(matches!(result.reason, StopReason::ClockRequired { .. }));
+        assert_state(&state, &expected);
+        assert!(result.clock_events.is_empty() && result.thread_register_events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_thread_register_and_read_only_write_remain_explicit() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        for instruction in [MRS_TPIDR_EL0, MSR_TPIDRRO_EL0] {
+            let mut runtime =
+                thread_register_runtime(cache.path(), &[instruction | READBACK_REGISTER, RET_X30])?;
+            let mut context = Context::native(
+                runtime.address_space(),
+                VmMaximum::new(DIRECT_RAM_USER_END)?,
+            )?;
+            let mut state = thread(15, 1);
+            let before = state.clone();
+            let snapshot = context.snapshot();
+            let outcome = run(&mut runtime, &mut state, &mut context, 2)?;
+            assert!(matches!(
+                outcome.execution.reason,
+                StopReason::Unsupported { .. }
+            ));
+            assert_eq!(outcome.execution.blocks_executed, 0);
+            assert!(
+                outcome.thread_services.is_empty()
+                    && outcome.execution.thread_register_events.is_empty()
+            );
+            assert_eq!(context.snapshot(), snapshot);
+            assert_state(&state, &before);
+        }
+        Ok(())
     }
 
     #[test]

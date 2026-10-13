@@ -132,6 +132,9 @@ enum Command {
         /// Prepare reviewed clock helper boundaries without executing a clock service.
         #[arg(long, requires = "software_pauth")]
         software_clock: bool,
+        /// Prepare guest TPIDRRO_EL0 reads without supplying a thread context.
+        #[arg(long)]
+        thread_registers: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
@@ -316,6 +319,9 @@ enum Command {
         /// Prepare reviewed clock helper boundaries without executing a clock service.
         #[arg(long, requires = "software_pauth")]
         software_clock: bool,
+        /// Prepare guest TPIDRRO_EL0 reads without supplying a thread context.
+        #[arg(long)]
+        thread_registers: bool,
         /// Treat input as raw code registered at this address instead of a Mach-O.
         #[arg(long, value_parser = parse_address)]
         guest_base: Option<u64>,
@@ -534,13 +540,16 @@ struct PauthKeyInput {
 fn block_profile(
     software_pauth: bool,
     software_clock: bool,
+    thread_registers: bool,
 ) -> stela_compiler::block::BlockProfile {
-    if software_clock {
-        stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
-    } else if software_pauth {
-        stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
-    } else {
-        stela_compiler::block::BlockProfile::Ordinary
+    use stela_compiler::block::BlockProfile;
+    match (software_pauth, software_clock, thread_registers) {
+        (_, true, true) => BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+        (_, true, false) => BlockProfile::AppleArm64eSoftwarePauthClockV1,
+        (true, false, true) => BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+        (true, false, false) => BlockProfile::AppleArm64eSoftwarePauthV1,
+        (false, false, true) => BlockProfile::DarwinArm64ThreadV1,
+        (false, false, false) => BlockProfile::Ordinary,
     }
 }
 
@@ -1231,12 +1240,13 @@ fn run() -> Result<()> {
             output_dir,
             software_pauth,
             software_clock,
+            thread_registers,
         } => {
             let source = std::fs::read(&input)?;
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-            let profile = block_profile(software_pauth, software_clock);
+            let profile = block_profile(software_pauth, software_clock, thread_registers);
             let compiled = stela_compiler::block::compile_for_target(
                 window,
                 stela_compiler::GuestAddress(guest_base),
@@ -1345,7 +1355,7 @@ fn run() -> Result<()> {
             let mut runtime = BlockRuntime::new_for_target(
                 ADDRESS_SPACE_ID,
                 cache_dir,
-                block_profile(context.is_some(), clock.is_some()),
+                block_profile(context.is_some(), clock.is_some(), thread_services),
                 cpu_target,
             );
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
@@ -1746,6 +1756,7 @@ fn run() -> Result<()> {
             dynamic_linker,
             software_pauth,
             software_clock,
+            thread_registers,
             guest_base,
             entry,
             function_starts,
@@ -1771,7 +1782,7 @@ fn run() -> Result<()> {
             let mut runtime = BlockRuntime::new_with_profile(
                 0x534f_5245_414f_5401,
                 cache_dir,
-                block_profile(software_pauth, software_clock),
+                block_profile(software_pauth, software_clock, thread_registers),
             );
             let mut regions = Vec::new();
             let mut roots = entry;
@@ -2381,16 +2392,53 @@ mod clock_cli_tests {
             .is_ok()
         );
         assert_eq!(
-            block_profile(true, true),
+            block_profile(true, true, false),
             stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
         );
         assert_eq!(
-            block_profile(true, false),
+            block_profile(true, false, false),
             stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
         );
         assert_eq!(
-            block_profile(false, false),
+            block_profile(false, false, false),
             stela_compiler::block::BlockProfile::Ordinary
+        );
+    }
+
+    #[test]
+    fn thread_register_preparation_flags_select_distinct_profiles_without_context() {
+        use stela_compiler::block::BlockProfile;
+        for args in [
+            vec![
+                "stela",
+                "compile-block",
+                "code",
+                "--output-dir",
+                "out",
+                "--thread-registers",
+            ],
+            vec![
+                "stela",
+                "discover-code",
+                "code",
+                "--output",
+                "out",
+                "--thread-registers",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        assert_eq!(
+            block_profile(false, false, true),
+            BlockProfile::DarwinArm64ThreadV1
+        );
+        assert_eq!(
+            block_profile(true, false, true),
+            BlockProfile::AppleArm64eSoftwarePauthThreadV1
+        );
+        assert_eq!(
+            block_profile(true, true, true),
+            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1
         );
     }
 

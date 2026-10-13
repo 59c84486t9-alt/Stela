@@ -1,7 +1,7 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
-use crate::{Prepared, clock, execution::platform, pauth, prepare_block_for_target};
+use crate::{Prepared, clock, execution::platform, pauth, prepare_block_for_target, thread};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
@@ -17,12 +17,16 @@ use stela_compiler::{
         BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, ClockOperation, DynamicEdge,
         ExitKind, MAX_BLOCK_INSTRUCTIONS, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation, SynchronousTrap,
-        analyze_with_profile, decode_clock_instruction, decode_pointer_authentication, decode_trap,
+        ThreadRegisterInstruction, analyze_with_profile, decode_clock_instruction,
+        decode_pointer_authentication, decode_thread_register_instruction, decode_trap,
     },
 };
 use stela_core::sha256;
 
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
+const INSTRUCTION_BYTES: usize = 4;
+const ZERO_REGISTER_INDEX: u8 = 31;
+const REGISTER_COUNT: u8 = ZERO_REGISTER_INDEX + 1;
 
 #[derive(Debug, Clone)]
 pub struct ThreadState {
@@ -69,6 +73,9 @@ pub enum StopReason {
         instruction: PointerAuthentication,
         poisoned_target: GuestAddress,
     },
+    ThreadRegisterRequired {
+        instruction: ThreadRegisterInstruction,
+    },
     ClockRequired {
         instruction: ClockInstruction,
     },
@@ -95,6 +102,13 @@ pub struct ClockEvent {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ThreadRegisterEvent {
+    pub instruction: ThreadRegisterInstruction,
+    pub next_pc: GuestAddress,
+    pub value: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RunOutcome {
     pub reason: StopReason,
     pub blocks_executed: usize,
@@ -106,6 +120,8 @@ pub struct RunOutcome {
     pub pointer_authentication_events: Vec<PointerAuthenticationEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub clock_events: Vec<ClockEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub thread_register_events: Vec<ThreadRegisterEvent>,
 }
 
 #[derive(Debug)]
@@ -526,7 +542,7 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
-        unsafe { self.run_inner(state, stop_pc, block_budget, None, None) }
+        unsafe { self.run_inner(state, stop_pc, block_budget, None, None, None) }
     }
 
     /// Execute the explicit software PAuth profile with a process-owned key domain.
@@ -551,7 +567,7 @@ impl BlockRuntime {
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
-        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context), None) }
+        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context), None, None) }
     }
 
     /// Execute explicit PAC/clock helpers using caller-owned address-space services.
@@ -582,7 +598,54 @@ impl BlockRuntime {
             clock.address_space() == self.address_space,
             "clock context belongs to another guest address space"
         );
-        unsafe { self.run_inner(state, stop_pc, block_budget, Some(pauth), Some(clock)) }
+        unsafe { self.run_inner(state, stop_pc, block_budget, Some(pauth), Some(clock), None) }
+    }
+
+    /// Execute explicit thread-register helpers from the same context used by
+    /// Darwin thread services. Cached code never embeds the current TSD value.
+    /// Optional PAC/clock services retain their own profile/ownership checks.
+    ///
+    /// # Safety
+    /// Same trusted-code/direct-RAM requirements as [`Self::run`]. The context
+    /// must remain on its owning host thread; this does not alter host TLS.
+    pub unsafe fn run_with_thread(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        thread: &thread::Context,
+        pauth: Option<&pauth::Context>,
+        clock: Option<&mut clock::Context>,
+    ) -> Result<RunOutcome> {
+        ensure!(
+            self.profile.supports_thread_registers(),
+            "thread-register execution requires the explicit thread block profile"
+        );
+        ensure!(
+            thread.address_space() == self.address_space,
+            "thread context belongs to another guest address space"
+        );
+        if let Some(pauth) = pauth {
+            ensure!(
+                self.profile.supports_pointer_authentication(),
+                "PAuth execution requires the explicit software PAuth block profile"
+            );
+            ensure!(
+                pauth.address_space() == self.address_space,
+                "PAuth context belongs to another guest address space"
+            );
+        }
+        if let Some(clock) = clock.as_ref() {
+            ensure!(
+                self.profile.supports_clock() && pauth.is_some(),
+                "clock execution requires the explicit software clock profile and PAC context"
+            );
+            ensure!(
+                clock.address_space() == self.address_space,
+                "clock context belongs to another guest address space"
+            );
+        }
+        unsafe { self.run_inner(state, stop_pc, block_budget, pauth, clock, Some(thread)) }
     }
 
     unsafe fn run_inner(
@@ -592,6 +655,7 @@ impl BlockRuntime {
         block_budget: usize,
         context: Option<&pauth::Context>,
         mut clock_context: Option<&mut clock::Context>,
+        thread_context: Option<&thread::Context>,
     ) -> Result<RunOutcome> {
         platform::ensure_supported()?;
         let mut outcome = RunOutcome {
@@ -603,6 +667,7 @@ impl BlockRuntime {
             last_exit: None,
             pointer_authentication_events: Vec::new(),
             clock_events: Vec::new(),
+            thread_register_events: Vec::new(),
         };
         loop {
             let pc = state.pc;
@@ -708,9 +773,42 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let thread_register_instruction = if exit_kind == ExitKind::ThreadRegister {
+                ensure!(
+                    self.profile.supports_thread_registers(),
+                    "block produced an unrequested thread-register helper exit"
+                );
+                Some(validate_thread_register_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some(instruction) = thread_register_instruction {
+                let Some(thread) = thread_context else {
+                    outcome.reason = StopReason::ThreadRegisterRequired { instruction };
+                    break;
+                };
+                let value = thread.thread_specific_data();
+                // The immutable decoder guarantees 0..=31. XZR discards only
+                // after ownership and the required context have been validated.
+                if instruction.destination != ZERO_REGISTER_INDEX {
+                    state.registers.x[usize::from(instruction.destination)] = value;
+                }
+                state.pc = instruction.next_pc;
+                outcome.thread_register_events.push(ThreadRegisterEvent {
+                    instruction,
+                    next_pc: instruction.next_pc,
+                    value,
+                });
+            }
             if let Some(instruction) = clock_instruction {
                 let Some(clock) = clock_context.as_deref_mut() else {
                     outcome.reason = StopReason::ClockRequired { instruction };
@@ -805,11 +903,14 @@ fn complete_clock(
 ) -> Result<Option<u64>> {
     match instruction.operation {
         ClockOperation::ReadVirtualCounter { destination } => {
-            ensure!(destination < 32, "invalid clock destination register");
+            ensure!(
+                destination < REGISTER_COUNT,
+                "invalid clock destination register"
+            );
             // Sampling and complete commpage publication must succeed before
             // committing the destination. X31 discards the result, not the read.
             let counter = context.read_counter()?;
-            if destination != 31 {
+            if destination != ZERO_REGISTER_INDEX {
                 registers.x[usize::from(destination)] = counter;
             }
             Ok(Some(counter))
@@ -843,32 +944,7 @@ fn validate_clock_exit(
     region_base: u64,
     source: &[u8],
 ) -> Result<ClockInstruction> {
-    ensure!(
-        source_bytes >= 4 && source_bytes.is_multiple_of(4),
-        "invalid clock block extent"
-    );
-    let terminal = entry
-        .0
-        .checked_add(u64::try_from(source_bytes - 4)?)
-        .context("clock terminal address overflow")?;
-    ensure!(
-        exit.0 == terminal,
-        "clock exit differs from consumed terminal instruction"
-    );
-    let offset = usize::try_from(
-        terminal
-            .checked_sub(region_base)
-            .context("clock precedes source region")?,
-    )?;
-    let end = offset
-        .checked_add(4)
-        .context("clock source extent overflow")?;
-    let word = u32::from_le_bytes(
-        source
-            .get(offset..end)
-            .context("clock exceeds immutable source")?
-            .try_into()?,
-    );
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     decode_clock_instruction(exit, word)?
         .context("clock exit does not identify a reviewed instruction")
 }
@@ -887,7 +963,7 @@ fn pauth_modifier(registers: &GuestState, modifier: PointerAuthenticationModifie
         PointerAuthenticationModifier::StackPointer => Ok(registers.sp),
         PointerAuthenticationModifier::Zero => Ok(0),
         PointerAuthenticationModifier::Register(index) => {
-            ensure!(index < 31, "invalid PAC modifier register");
+            ensure!(index < ZERO_REGISTER_INDEX, "invalid PAC modifier register");
             Ok(registers.x[usize::from(index)])
         }
     }
@@ -926,8 +1002,11 @@ fn complete_pauth(
             modifier,
             link,
         } => {
-            ensure!(target < 32, "invalid authenticated branch target register");
-            let pointer = if target == 31 {
+            ensure!(
+                target < REGISTER_COUNT,
+                "invalid authenticated branch target register"
+            );
+            let pointer = if target == ZERO_REGISTER_INDEX {
                 0
             } else {
                 registers.x[usize::from(target)]
@@ -952,8 +1031,11 @@ fn complete_pauth(
             destination,
             modifier,
         } => {
-            ensure!(destination < 32, "invalid PAC destination register");
-            let pointer = if destination == 31 {
+            ensure!(
+                destination < REGISTER_COUNT,
+                "invalid PAC destination register"
+            );
+            let pointer = if destination == ZERO_REGISTER_INDEX {
                 0
             } else {
                 registers.x[usize::from(destination)]
@@ -970,14 +1052,17 @@ fn complete_pauth(
                 (result.pointer, Some(result.authenticated))
             };
             // XZR is discarded only after the operation/service has succeeded.
-            if destination != 31 {
+            if destination != ZERO_REGISTER_INDEX {
                 registers.x[usize::from(destination)] = value;
             }
             Ok((instruction.next_pc, authenticated))
         }
         Strip { data, destination } => {
-            ensure!(destination < 32, "invalid XPAC destination register");
-            let pointer = if destination == 31 {
+            ensure!(
+                destination < REGISTER_COUNT,
+                "invalid XPAC destination register"
+            );
+            let pointer = if destination == ZERO_REGISTER_INDEX {
                 0
             } else {
                 registers.x[usize::from(destination)]
@@ -986,7 +1071,7 @@ fn complete_pauth(
             // needs to exist; the context owns the reviewed address/TBI profile.
             let value =
                 context.strip(if data { pauth::Key::Da } else { pauth::Key::Ia }, pointer)?;
-            if destination != 31 {
+            if destination != ZERO_REGISTER_INDEX {
                 registers.x[usize::from(destination)] = value;
             }
             Ok((instruction.next_pc, None))
@@ -1001,74 +1086,69 @@ fn validate_pauth_exit(
     region_base: u64,
     source: &[u8],
 ) -> Result<PointerAuthentication> {
-    ensure!(
-        source_bytes >= 4 && source_bytes.is_multiple_of(4),
-        "invalid PAuth block extent"
-    );
-    let terminal = entry
-        .0
-        .checked_add(source_bytes as u64 - 4)
-        .context("PAuth terminal address overflow")?;
-    ensure!(
-        exit.0 == terminal,
-        "PAuth exit differs from consumed terminal instruction"
-    );
-    let offset = usize::try_from(
-        terminal
-            .checked_sub(region_base)
-            .context("PAuth precedes source region")?,
-    )?;
-    let end = offset
-        .checked_add(4)
-        .context("PAuth source extent overflow")?;
-    let word = u32::from_le_bytes(
-        source
-            .get(offset..end)
-            .context("PAuth exceeds immutable source")?
-            .try_into()?,
-    );
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     decode_pointer_authentication(exit, word)?
         .context("PAuth exit does not identify a reviewed instruction")
 }
 
+/// Native exit metadata must identify the final immutable source instruction;
+/// descriptors are decoded again instead of trusting artifact-supplied operands.
+fn validate_terminal_word(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<u32> {
+    ensure!(
+        source_bytes >= INSTRUCTION_BYTES && source_bytes.is_multiple_of(INSTRUCTION_BYTES),
+        "invalid native helper block extent"
+    );
+    let terminal = entry
+        .0
+        .checked_add(u64::try_from(source_bytes - INSTRUCTION_BYTES)?)
+        .context("native helper terminal address overflow")?;
+    ensure!(
+        exit.0 == terminal,
+        "native helper exit differs from consumed terminal instruction"
+    );
+    let offset = usize::try_from(
+        terminal
+            .checked_sub(region_base)
+            .context("native helper precedes source region")?,
+    )?;
+    let end = offset
+        .checked_add(INSTRUCTION_BYTES)
+        .context("native helper source extent overflow")?;
+    Ok(u32::from_le_bytes(
+        source
+            .get(offset..end)
+            .context("native helper exceeds immutable source")?
+            .try_into()?,
+    ))
+}
+
+fn validate_thread_register_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<ThreadRegisterInstruction> {
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
+    decode_thread_register_instruction(exit, word)?
+        .context("thread-register exit does not identify a reviewed instruction")
+}
+
 fn validate_trap_exit(
     entry: GuestAddress,
-    returned: GuestAddress,
+    exit: GuestAddress,
     source_bytes: usize,
     region_base: u64,
     source: &[u8],
 ) -> Result<SynchronousTrap> {
-    ensure!(
-        source_bytes >= 4 && source_bytes.is_multiple_of(4),
-        "native trap has an invalid consumed source extent"
-    );
-    let expected = GuestAddress(
-        entry
-            .0
-            .checked_add(u64::try_from(source_bytes - 4)?)
-            .context("native trap instruction address overflow")?,
-    );
-    ensure!(
-        returned == expected,
-        "native trap PC does not identify the consumed terminator"
-    );
-    let offset = usize::try_from(
-        expected
-            .0
-            .checked_sub(region_base)
-            .context("native trap PC precedes its immutable source region")?,
-    )?;
-    let end = offset
-        .checked_add(4)
-        .context("native trap source extent overflow")?;
-    let word = u32::from_le_bytes(
-        source
-            .get(offset..end)
-            .context("native trap terminator exceeds immutable source region")?
-            .try_into()?,
-    );
-    decode_trap(expected, word)?
-        .context("native trap exit does not match an immutable trap instruction")
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
+    decode_trap(exit, word)?.context("trap exit does not identify a reviewed instruction")
 }
 
 fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: usize) -> Result<()> {
@@ -1101,6 +1181,43 @@ fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: us
 #[cfg(test)]
 mod trap_validation_tests {
     use super::*;
+
+    #[test]
+    fn thread_register_exit_requires_exact_consumed_source_descriptor() {
+        const MRS_TPIDRRO_EL0: u32 = 0xd53bd060;
+        const ADD_X0_X0_ONE: u32 = 0x91000400;
+        let base = GuestAddress(0x1000);
+        let terminal = GuestAddress(base.0 + INSTRUCTION_BYTES as u64);
+        for destination in 0..32 {
+            let source: Vec<_> = [ADD_X0_X0_ONE, MRS_TPIDRRO_EL0 | destination]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let instruction =
+                validate_thread_register_exit(base, terminal, source.len(), base.0, &source)
+                    .unwrap();
+            assert_eq!(instruction.destination, destination as u8);
+            for (returned, count, region) in [
+                (base, 8, base.0),
+                (terminal, 0, base.0),
+                (terminal, 6, base.0),
+                (GuestAddress(0x1008), 12, base.0),
+                (terminal, 8, 0x2000),
+            ] {
+                assert!(
+                    validate_thread_register_exit(base, returned, count, region, &source).is_err()
+                );
+            }
+        }
+        assert!(
+            validate_thread_register_exit(base, base, 4, base.0, &ADD_X0_X0_ONE.to_le_bytes())
+                .is_err()
+        );
+        assert!(
+            validate_thread_register_exit(GuestAddress(u64::MAX - 3), GuestAddress(0), 8, 0, &[])
+                .is_err()
+        );
+    }
 
     #[test]
     fn clock_exit_requires_exact_consumed_source_descriptor() {

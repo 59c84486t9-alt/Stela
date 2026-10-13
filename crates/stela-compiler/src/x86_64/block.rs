@@ -77,6 +77,9 @@ pub(crate) fn emit_for_target(
                 // runtime clock service, not a host counter or placeholder.
                 direct_exit(code, request.instruction_pc, ExitKind::Clock);
             }
+            Terminator::ThreadRegister(request) => {
+                direct_exit(code, request.instruction_pc, ExitKind::ThreadRegister);
+            }
             Terminator::PointerAuthentication(request) => {
                 // Return to the checked runtime helper with unchanged guest
                 // state at this instruction. Never embed keys/helper pointers.
