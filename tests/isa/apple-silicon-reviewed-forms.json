@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v13",
+  "registry_version": "apple-silicon-reviewed-forms-v14",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -166,8 +166,8 @@
       "report": ".stela/simd-integer-differential-report.json",
       "kind": "simd_integer_arm_vs_native_x86",
       "required_measurements": {
-        "programs": 336,
-        "three_way_register_state_comparisons": 3360
+        "programs": 952,
+        "three_way_register_state_comparisons": 9520
       }
     }
   },
@@ -13468,6 +13468,688 @@
           "word": "0x7ee28420",
           "expected_mnemonics": [
             "sub"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMEQ_asimdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmeq_advsimd_zero.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e209800",
+      "alias": false,
+      "source_sha256": "f65338d0f5f8af3bea68f8a5b5686e2cd9d5dc89bc5ee342d19e4417301e32f4",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e209820",
+          "expected_mnemonics": [
+            "cmeq"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee09820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMEQ_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmeq_advsimd_reg.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e208c00",
+      "alias": false,
+      "source_sha256": "7e728a17ef5bad6b5b31331245ef96079037e8cc268b92ec0438db4d321e21df",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e228c20",
+          "expected_mnemonics": [
+            "cmeq"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee28c20",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMEQ_asisdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmeq_advsimd_zero.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ee09800",
+      "alias": false,
+      "source_sha256": "f65338d0f5f8af3bea68f8a5b5686e2cd9d5dc89bc5ee342d19e4417301e32f4",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee09820",
+          "expected_mnemonics": [
+            "cmeq"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMEQ_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmeq_advsimd_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee08c00",
+      "alias": false,
+      "source_sha256": "7e728a17ef5bad6b5b31331245ef96079037e8cc268b92ec0438db4d321e21df",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee28c20",
+          "expected_mnemonics": [
+            "cmeq"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMGE_asimdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmge_advsimd_zero.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e208800",
+      "alias": false,
+      "source_sha256": "6d0497820c413bcad3aba7e73ea9bf1cf05516d19666a7861176f0c275ff65b5",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e208820",
+          "expected_mnemonics": [
+            "cmge"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee08820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMGE_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmge_advsimd_reg.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e203c00",
+      "alias": false,
+      "source_sha256": "9e13957d452c9e48d0d69e59f4882666ad1c6276ce79b9e90fba99a9575b0f90",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e223c20",
+          "expected_mnemonics": [
+            "cmge"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee23c20",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMGE_asisdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmge_advsimd_zero.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x7ee08800",
+      "alias": false,
+      "source_sha256": "6d0497820c413bcad3aba7e73ea9bf1cf05516d19666a7861176f0c275ff65b5",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee08820",
+          "expected_mnemonics": [
+            "cmge"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMGE_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmge_advsimd_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee03c00",
+      "alias": false,
+      "source_sha256": "9e13957d452c9e48d0d69e59f4882666ad1c6276ce79b9e90fba99a9575b0f90",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee23c20",
+          "expected_mnemonics": [
+            "cmge"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMGT_asimdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmgt_advsimd_zero.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e208800",
+      "alias": false,
+      "source_sha256": "ce17c65b471f174d32848a483f2cec6aa12fb91e2557f6a10a8c1938e6f52652",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e208820",
+          "expected_mnemonics": [
+            "cmgt"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee08820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMGT_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmgt_advsimd_reg.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e203400",
+      "alias": false,
+      "source_sha256": "c599362d4f265332638ca34c50b65234d14bb3b8075d9a7d53af798467db9f47",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e223420",
+          "expected_mnemonics": [
+            "cmgt"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee23420",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMGT_asisdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmgt_advsimd_zero.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ee08800",
+      "alias": false,
+      "source_sha256": "ce17c65b471f174d32848a483f2cec6aa12fb91e2557f6a10a8c1938e6f52652",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee08820",
+          "expected_mnemonics": [
+            "cmgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMGT_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmgt_advsimd_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee03400",
+      "alias": false,
+      "source_sha256": "c599362d4f265332638ca34c50b65234d14bb3b8075d9a7d53af798467db9f47",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee23420",
+          "expected_mnemonics": [
+            "cmgt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMHI_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmhi_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e203400",
+      "alias": false,
+      "source_sha256": "d25f9d2e92a9b2fd29880ce603659a43ea24322e4993bf119afe4c82a5a9fe0d",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e223420",
+          "expected_mnemonics": [
+            "cmhi"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee23420",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMHI_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmhi_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee03400",
+      "alias": false,
+      "source_sha256": "d25f9d2e92a9b2fd29880ce603659a43ea24322e4993bf119afe4c82a5a9fe0d",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee23420",
+          "expected_mnemonics": [
+            "cmhi"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMHS_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmhs_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e203c00",
+      "alias": false,
+      "source_sha256": "3979daa34ee40468099c25cec1fb3859b019762cfe4e975e8855946dbeffb448",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e223c20",
+          "expected_mnemonics": [
+            "cmhs"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee23c20",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMHS_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmhs_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee03c00",
+      "alias": false,
+      "source_sha256": "3979daa34ee40468099c25cec1fb3859b019762cfe4e975e8855946dbeffb448",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee23c20",
+          "expected_mnemonics": [
+            "cmhs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMLE_asimdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmle_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e209800",
+      "alias": false,
+      "source_sha256": "49879b9829efc94df2c09aef497c0f61fa3f045bce7032ee29c372eedb515d29",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e209820",
+          "expected_mnemonics": [
+            "cmle"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2ee09820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMLE_asisdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmle_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x7ee09800",
+      "alias": false,
+      "source_sha256": "49879b9829efc94df2c09aef497c0f61fa3f045bce7032ee29c372eedb515d29",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee09820",
+          "expected_mnemonics": [
+            "cmle"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMLT_asimdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmlt_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e20a800",
+      "alias": false,
+      "source_sha256": "c76018f6f78c420de6a1d88ad35e126928aadfe8287c97a0a4d9b8539db86196",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e20a820",
+          "expected_mnemonics": [
+            "cmlt"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee0a820",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMLT_asisdmisc_Z",
+      "category": "fp_simd",
+      "source_file": "cmlt_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ee0a800",
+      "alias": false,
+      "source_sha256": "c76018f6f78c420de6a1d88ad35e126928aadfe8287c97a0a4d9b8539db86196",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee0a820",
+          "expected_mnemonics": [
+            "cmlt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CMTST_asimdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmtst_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e208c00",
+      "alias": false,
+      "source_sha256": "0a245bc9dfa1af879dd235f11adc4af6bd7700bed4746ac265129a7e1af6c025",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e228c20",
+          "expected_mnemonics": [
+            "cmtst"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0ee28c20",
+          "reason": "unsupported ARM64 semantics"
+        }
+      ]
+    },
+    {
+      "id": "CMTST_asisdsame_only",
+      "category": "fp_simd",
+      "source_file": "cmtst_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee08c00",
+      "alias": false,
+      "source_sha256": "0a245bc9dfa1af879dd235f11adc4af6bd7700bed4746ac265129a7e1af6c025",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "scope": "FP/AdvSIMD enabled. Every allocated integer lane size and vector/scalar arrangement, all overlaps and V31 data; per-lane all-ones/zero result masks, scalar/Q=0 upper-half clearing; NZCV/FPCR/FPSR preserved.",
+      "review": "Reviewed against Arm 2026-06 fixed bits and signed/unsigned/zero comparison semantics; original ARM, independent lane math and baseline SSE2 full-state checks include qword high-half equality and unsigned low-half ordering.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs"
+      ],
+      "evidence_groups": [
+        "simd_integer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee28c20",
+          "expected_mnemonics": [
+            "cmtst"
           ]
         }
       ]

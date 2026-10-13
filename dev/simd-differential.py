@@ -235,7 +235,7 @@ def compile_batch(cli, directory, functions, index, block=False):
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -617,10 +617,17 @@ def integer_programs():
             configurations.append((name,(0x5ee08400 if name=='add' else 0x7ee08400 if name=='sub'
                                          else 0x5ee0b800 if name=='abs' else 0x7ee0b800),8,8))
         else: configurations.extend((name,base|(q<<30),8<<q,1) for q in (0,1))
+    compares={'cmeq':0x2e208c00,'cmgt':0x0e203400,'cmge':0x0e203c00,'cmhi':0x2e203400,
+              'cmhs':0x2e203c00,'cmtst':0x0e208c00,'cmeq0':0x0e209800,'cmgt0':0x0e208800,
+              'cmge0':0x2e208800,'cmlt0':0x0e20a800,'cmle0':0x2e209800}
+    for name,base in compares.items():
+        configurations.extend((name,base|(q<<30)|(size<<22),8<<q,1<<size)
+            for q in (0,1) for size in range(4) if size!=3 or q)
+        configurations.append((name,base|0x50c00000,8,8))
     programs=[]
     for name,base,width,lane in configurations:
         def operation(d,n,m):
-            unary=name in ('abs','neg')
+            unary=name in ('abs','neg') or name.endswith('0')
             return {'kind':'integer','name':name,'width':width,'lane':lane,'d':d,'n':n,'m':m,
                     'word':base|(n<<5)|d|(0 if unary else m<<16)}
         for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,30),(0,31,31),(31,0,31)):
@@ -643,7 +650,14 @@ def integer_mathematical(operations,initial):
             for offset in range(0,width*8,bits):
                 left,right=(v>>offset&lane_mask for v in (a,b))
                 signed=left-(1<<bits) if left&(1<<(bits-1)) else left
-                result=left+right if name=='add' else left-right if name=='sub' else abs(signed) if name=='abs' else -signed
+                if name.startswith('cm'):
+                    if name.endswith('0'): right=0
+                    signed_right=right-(1<<bits) if right&(1<<(bits-1)) else right
+                    condition={'cmeq':left==right,'cmgt':signed>signed_right,'cmge':signed>=signed_right,
+                               'cmhi':left>right,'cmhs':left>=right,'cmlt':signed<0,'cmle':signed<=0,
+                               'cmtst':bool(left&right)}[name.rstrip('0')]
+                    result=lane_mask if condition else 0
+                else: result=left+right if name=='add' else left-right if name=='sub' else abs(signed) if name=='abs' else -signed
                 value|=(result&lane_mask)<<offset
         vectors[d]=value # Q=0/scalar writes clear every upper vector bit.
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
@@ -665,6 +679,7 @@ def execute_integer_batches(batches):
                         seed_extended_state(initial,pattern*16+flags)
                         if pattern<4:
                             values=(0,(1<<bits)-1,1<<(bits-1),(1<<(bits-1))-1,1)
+                            if bits==64: values+=(0x80000000,0x7fffffff,0xffffffff00000000,0xffffffff80000000,0xffffffff7fffffff,0xffffffff)
                             for register in range(32):
                                 value=sum(values[(register+i+pattern)%len(values)]<<(i*bits) for i in range(128//bits))
                                 initial.v[register][:]=[value&MASK,value>>64]

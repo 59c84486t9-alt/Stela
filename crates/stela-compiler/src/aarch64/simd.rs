@@ -20,7 +20,27 @@ pub enum IntegerOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Equal,
+    Greater,
+    GreaterEqual,
+    Higher,
+    HigherEqual,
+    LessZero,
+    LessEqualZero,
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Compare {
+        operation: Comparison,
+        destination: u8,
+        left: u8,
+        right: Option<u8>,
+        bytes: u8,
+        lane_bytes: u8,
+    },
     Integer {
         operation: IntegerOperation,
         destination: u8,
@@ -61,6 +81,45 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    let scalar = word & (1 << 28) != 0;
+    let normalized = word & !(1 << 28);
+    let comparison = match normalized & 0xbf20fc00 {
+        0x2e208c00 => Some(Comparison::Equal),
+        0x0e203400 => Some(Comparison::Greater),
+        0x0e203c00 => Some(Comparison::GreaterEqual),
+        0x2e203400 => Some(Comparison::Higher),
+        0x2e203c00 => Some(Comparison::HigherEqual),
+        0x0e208c00 => Some(Comparison::Test),
+        _ => None,
+    };
+    let compare_zero = match normalized & 0xbf3ffc00 {
+        0x0e209800 => Some(Comparison::Equal),
+        0x0e208800 => Some(Comparison::Greater),
+        0x2e208800 => Some(Comparison::GreaterEqual),
+        0x0e20a800 => Some(Comparison::LessZero),
+        0x2e209800 => Some(Comparison::LessEqualZero),
+        _ => None,
+    };
+    if let Some(operation) = comparison.or(compare_zero) {
+        let q = word & (1 << 30) != 0;
+        let size = (word >> 22) & 3;
+        // Other scalar sizes/Q values share space with scalar FP encodings;
+        // they are outside this integer comparison class, not vector compares.
+        if scalar && (!q || size != 3) {
+            return None;
+        }
+        if !scalar && !q && size == 3 {
+            return Some(Err(()));
+        }
+        return Some(Ok(Operand::Compare {
+            operation,
+            destination: (word & 31) as u8,
+            left: ((word >> 5) & 31) as u8,
+            right: comparison.map(|_| ((word >> 16) & 31) as u8),
+            bytes: if scalar || !q { 8 } else { 16 },
+            lane_bytes: 1 << size,
+        }));
+    }
     use IntegerOperation::*;
     let logical = match word & 0xbfe0fc00 {
         0x0e201c00 => Some(And),
@@ -245,6 +304,52 @@ mod tests {
             for size in 0..3 {
                 let word = (base & !(3 << 22)) | (size << 22);
                 assert!(!matches!(decode(word), Some(Ok(Operand::Integer { .. }))));
+            }
+        }
+    }
+
+    #[test]
+    fn comparisons_distinguish_zero_operands_and_reserved_scalar_vector_sizes() {
+        for (base, zero) in [
+            (0x2e208c00, false),
+            (0x0e203400, false),
+            (0x0e203c00, false),
+            (0x2e203400, false),
+            (0x2e203c00, false),
+            (0x0e208c00, false),
+            (0x0e209800, true),
+            (0x0e208800, true),
+            (0x2e208800, true),
+            (0x0e20a800, true),
+            (0x2e209800, true),
+        ] {
+            let registers = (31 << 5) | 31 | if zero { 0 } else { 31 << 16 };
+            for scalar in 0..2 {
+                for q in 0..2 {
+                    for size in 0..4 {
+                        let word = base | (scalar << 28) | (q << 30) | (size << 22) | registers;
+                        if scalar != 0 && (q == 0 || size != 3) {
+                            assert!(!matches!(decode(word), Some(Ok(Operand::Compare { .. }))));
+                        } else if scalar == 0 && q == 0 && size == 3 {
+                            assert_eq!(decode(word), Some(Err(())));
+                        } else if let Some(Ok(Operand::Compare {
+                            destination,
+                            left,
+                            right,
+                            bytes,
+                            lane_bytes,
+                            ..
+                        })) = decode(word)
+                        {
+                            assert_eq!((destination, left), (31, 31));
+                            assert_eq!(right, if zero { None } else { Some(31) });
+                            assert_eq!(lane_bytes, 1 << size);
+                            assert_eq!(bytes, if scalar != 0 { 8 } else { 8 << q });
+                        } else {
+                            panic!("comparison decoded as another instruction class");
+                        }
+                    }
+                }
             }
         }
     }

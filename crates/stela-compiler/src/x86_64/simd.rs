@@ -1,7 +1,7 @@
 //! Baseline SSE2 data movement. Original Arm bytes are never host instructions.
 //! Ordinary private RAM only: no 128-bit atomicity or guest fault delivery claim.
 use super::{memory_address, memory_writeback};
-use crate::aarch64::simd::{IntegerOperation, Operand};
+use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 
 fn vector_offset(vector: u8) -> u32 {
     264 + u32::from(vector) * 16
@@ -32,6 +32,78 @@ fn subtract_opcode(lane_bytes: u8) -> u8 {
     }
 }
 
+fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8) {
+    packed(code, 0x70, destination, source);
+    code.push(control);
+}
+
+fn unsigned_bias(code: &mut Vec<u8>, lane_bytes: u8) {
+    let mask: u64 = match lane_bytes {
+        1 => 0x8080808080808080,
+        2 => 0x8000800080008000,
+        4 | 8 => 0x8000000080000000,
+        _ => unreachable!("reviewed comparison lane"),
+    };
+    code.extend([0x48, 0xb9]);
+    code.extend(mask.to_le_bytes());
+    code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]); // movq xmm4,rcx
+    packed(code, 0x6c, 4, 4);
+    packed(code, 0xef, 0, 4);
+    packed(code, 0xef, 1, 4);
+}
+
+fn equal(code: &mut Vec<u8>, lane_bytes: u8) {
+    packed(
+        code,
+        match lane_bytes {
+            1 => 0x74,
+            2 => 0x75,
+            4 | 8 => 0x76,
+            _ => unreachable!("reviewed comparison lane"),
+        },
+        0,
+        1,
+    );
+    if lane_bytes == 8 {
+        shuffle(code, 2, 0, 0xb1); // adjacent dword equality masks must both hold
+        packed(code, 0xdb, 0, 2);
+    }
+}
+
+fn greater(code: &mut Vec<u8>, lane_bytes: u8, unsigned: bool) {
+    if unsigned {
+        unsigned_bias(code, lane_bytes);
+    }
+    if lane_bytes != 8 {
+        packed(
+            code,
+            match lane_bytes {
+                1 => 0x64,
+                2 => 0x65,
+                4 => 0x66,
+                _ => unreachable!("reviewed comparison lane"),
+            },
+            0,
+            1,
+        );
+        return;
+    }
+    // Compare high dwords first; equal high halves use unsigned low ordering.
+    packed(code, 0x6f, 2, 0);
+    packed(code, 0x66, 2, 1);
+    shuffle(code, 2, 2, 0xf5);
+    packed(code, 0x6f, 3, 0);
+    packed(code, 0x76, 3, 1);
+    shuffle(code, 3, 3, 0xf5);
+    if !unsigned {
+        unsigned_bias(code, 8);
+    }
+    packed(code, 0x66, 0, 1);
+    shuffle(code, 0, 0, 0xa0);
+    packed(code, 0xdb, 0, 3);
+    packed(code, 0xeb, 0, 2);
+}
+
 /// Transfer S/D/Q at [RAX+displacement], using XMM0/XMM1. Scalar loads
 /// zero the rest of the 128-bit host value; no widened guest access is emitted.
 fn wide_memory(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement: u8) {
@@ -54,6 +126,42 @@ fn wide_memory(code: &mut Vec<u8>, load: bool, bytes: u8, xmm: u8, displacement:
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     match *operand {
+        Operand::Compare {
+            operation,
+            destination,
+            left,
+            right,
+            bytes,
+            lane_bytes,
+        } => {
+            use Comparison::*;
+            let reverse = matches!(operation, GreaterEqual | HigherEqual | LessZero);
+            let left_xmm = u8::from(reverse);
+            let right_xmm = u8::from(!reverse);
+            read_vector(code, left, left_xmm);
+            if let Some(right) = right {
+                read_vector(code, right, right_xmm);
+            } else {
+                packed(code, 0xef, right_xmm, right_xmm);
+            }
+            match operation {
+                Equal => equal(code, lane_bytes),
+                Test => {
+                    packed(code, 0xdb, 0, 1);
+                    packed(code, 0xef, 1, 1);
+                    equal(code, lane_bytes);
+                }
+                _ => greater(code, lane_bytes, matches!(operation, Higher | HigherEqual)),
+            }
+            if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
+                packed(code, 0x76, 1, 1);
+                packed(code, 0xef, 0, 1);
+            }
+            if bytes == 8 {
+                code.extend([0xf3, 0x0f, 0x7e, 0xc0]);
+            }
+            commit(code, destination, 0);
+        }
         Operand::Integer {
             operation,
             destination,
