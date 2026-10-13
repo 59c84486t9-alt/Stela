@@ -822,7 +822,10 @@ fn write_new_report(output: &std::path::Path, report: &mut serde_json::Value) ->
 fn run() -> Result<()> {
     match Cli::parse().command {
         Command::CpuInfo => {
-            use stela_compiler::{TargetCpu, x86_64::isa::SimdOpcode};
+            use stela_compiler::{
+                TargetCpu,
+                x86_64::isa::{ShiftOpcode, SimdOpcode},
+            };
             let opcodes: Vec<_> = SimdOpcode::ALL
                 .iter()
                 .map(|opcode| {
@@ -834,12 +837,22 @@ fn run() -> Result<()> {
                     })
                 })
                 .collect();
+            let shifts: Vec<_> = ShiftOpcode::ALL
+                .iter()
+                .map(|opcode| {
+                    serde_json::json!({
+                        "mnemonic":opcode.mnemonic(), "opcode_bytes":[0x66,0x0f,opcode.opcode()],
+                        "modrm_group":opcode.group(), "minimum_target":TargetCpu::Baseline.id(),
+                    })
+                })
+                .collect();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "detected_target": TargetCpu::detect().id(),
                     "baseline": TargetCpu::Baseline.id(),
                     "simd_opcodes": opcodes,
+                    "simd_immediate_shifts": shifts,
                     "scope": "Named legacy SIMD output forms; scalar encoding recipes remain in x86_64 modules. Catalog membership is not input ISA coverage.",
                 }))?
             );

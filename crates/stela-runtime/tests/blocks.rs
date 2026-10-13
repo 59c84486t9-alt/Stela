@@ -34,6 +34,67 @@ fn mov(destination: u32, source: u32) -> u32 {
 }
 
 #[test]
+fn simd_shift_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Result<()> {
+    use stela_compiler::{TargetCpu, block::BlockProfile};
+    let cache = tempfile::tempdir()?;
+    let program = words(&[
+        0x4f0b5420, // SHL V0.16B,V1.16B,#3
+        0x6f09a402, // USHLL2 V2.8H,V0.16B,#1
+        0x4f0f8c42, // RSHRN2 V2.16B,V2.8H,#1: alias, preserve low half
+        0x5f402483, // SRSHR D3,D4,#64
+        0x7f4024c5, // URSHR D5,D6,#64
+        0x6f404507, // SRI V7.2D,V8.2D,#64: preserve both old lanes
+        RET,
+    ]);
+    let mut initial = state(BASE, 19);
+    initial.registers.nzcv = 0xf0000000;
+    initial.registers.fpcr = 0x03c00000;
+    initial.registers.fpsr = 0x0800001f;
+    let source: [u8; 16] = std::array::from_fn(|i| (i * 17 + 3) as u8);
+    let limbs = |bytes: [u8; 16]| {
+        let value = u128::from_le_bytes(bytes);
+        [value as u64, (value >> 64) as u64]
+    };
+    initial.registers.v[1] = limbs(source);
+    initial.registers.v[4] = [u64::MAX, 0x12345678];
+    initial.registers.v[6] = [u64::MAX, 0x87654321];
+    initial.registers.v[7] = [0x0123456789abcdef, 0xfedcba9876543210];
+    let mut expected = initial.registers.clone();
+    let shifted = source.map(|byte| byte.wrapping_shl(3));
+    expected.v[0] = limbs(shifted);
+    let mut narrowed = [0; 16];
+    for i in 0..4 {
+        narrowed[i * 2..i * 2 + 2].copy_from_slice(&(u16::from(shifted[8 + i]) * 2).to_le_bytes());
+    }
+    narrowed[8..].copy_from_slice(&shifted[8..]);
+    expected.v[2] = limbs(narrowed);
+    expected.v[3] = [0; 2];
+    expected.v[5] = [1, 0];
+    let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
+    targets.dedup();
+    for target in targets {
+        for disk in [false, true] {
+            let mut runtime = BlockRuntime::new_for_target(
+                802,
+                cache.path().into(),
+                BlockProfile::Ordinary,
+                target,
+            );
+            runtime.register_code(GuestAddress(BASE), program.clone())?;
+            let mut thread = initial.clone();
+            // SAFETY: owned, finite register-only code; no guest RAM accesses.
+            let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+            assert_eq!(result.reason, StopReason::StopAddress);
+            assert_eq!(thread.pc, GuestAddress(STOP));
+            assert_eq!(thread.registers, expected);
+            assert_eq!(result.compiled_blocks, usize::from(!disk));
+            assert_eq!(result.disk_cache_hits, usize::from(disk));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn nested_direct_and_indirect_calls_preserve_architectural_link_registers() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let mut runtime = BlockRuntime::new(17, cache.path().to_path_buf());

@@ -43,6 +43,8 @@ catalog! {
     UnpackLowByte => ("punpcklbw", Baseline, [0x66,0x0f,0x60]),
     UnpackLowWord => ("punpcklwd", Baseline, [0x66,0x0f,0x61]),
     UnpackLowDword => ("punpckldq", Baseline, [0x66,0x0f,0x62]),
+    PackUnsignedWordToByte => ("packuswb", Baseline, [0x66,0x0f,0x67]),
+    PackSignedDwordToWord => ("packssdw", Baseline, [0x66,0x0f,0x6b]),
     MoveGprQword => ("movq", Baseline, [0x66,0x48,0x0f,0x6e]),
     MoveAligned => ("movdqa", Baseline, [0x66,0x0f,0x6f]),
     ShuffleDword => ("pshufd", Baseline, [0x66,0x0f,0x70]),
@@ -50,6 +52,65 @@ catalog! {
     StoreUnaligned => ("movdqu", Baseline, [0xf3,0x0f,0x7f]),
     MoveQword => ("movq", Baseline, [0xf3,0x0f,0x7e]),
     ByteShuffle => ("pshufb", Ssse3, [0x66,0x0f,0x38,0x00]),
+}
+
+/// Packed immediate shifts use an opcode group, rather than a source ModRM field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShiftOpcode {
+    LeftWord,
+    LeftDword,
+    LeftQword,
+    RightWord,
+    RightDword,
+    RightQword,
+    ArithmeticWord,
+    ArithmeticDword,
+    RightBytes,
+}
+impl ShiftOpcode {
+    pub const ALL: &'static [Self] = &[
+        Self::LeftWord,
+        Self::LeftDword,
+        Self::LeftQword,
+        Self::RightWord,
+        Self::RightDword,
+        Self::RightQword,
+        Self::ArithmeticWord,
+        Self::ArithmeticDword,
+        Self::RightBytes,
+    ];
+    pub fn mnemonic(self) -> &'static str {
+        self.facts().0
+    }
+    pub fn opcode(self) -> u8 {
+        self.facts().1
+    }
+    pub fn group(self) -> u8 {
+        self.facts().2
+    }
+    fn facts(self) -> (&'static str, u8, u8) {
+        match self {
+            Self::LeftWord => ("psllw", 0x71, 6),
+            Self::LeftDword => ("pslld", 0x72, 6),
+            Self::LeftQword => ("psllq", 0x73, 6),
+            Self::RightWord => ("psrlw", 0x71, 2),
+            Self::RightDword => ("psrld", 0x72, 2),
+            Self::RightQword => ("psrlq", 0x73, 2),
+            Self::ArithmeticWord => ("psraw", 0x71, 4),
+            Self::ArithmeticDword => ("psrad", 0x72, 4),
+            Self::RightBytes => ("psrldq", 0x73, 3),
+        }
+    }
+    pub(crate) fn emit(self, code: &mut Vec<u8>, register: u8, amount: u8) {
+        assert!(register < 8, "legacy SIMD register needs REX encoding");
+        code.extend([
+            0x66,
+            0x0f,
+            self.opcode(),
+            0xc0 | (self.group() << 3) | register,
+            amount,
+        ]);
+    }
 }
 impl SimdOpcode {
     pub(crate) fn append(self, code: &mut Vec<u8>, target: TargetCpu) {

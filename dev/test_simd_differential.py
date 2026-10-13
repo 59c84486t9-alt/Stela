@@ -12,6 +12,22 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_shift_cohort_covers_all_26_forms_and_full_width_rounding_boundaries(self):
+        registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
+        forms=[f for f in registry['forms'] if 'simd_shifts' in f.get('evidence_groups',[])]
+        operations=[o for p in suite.shift_programs() for o in p['operations']]
+        self.assertEqual(len(forms),26)
+        for form in forms:
+            matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
+            self.assertTrue(matches,form['id'])
+            self.assertEqual({o['d'] for o in matches},set(range(32)))
+        initial=State()
+        initial.v[1][:]=[suite.MASK,suite.MASK]
+        base={'d':0,'n':1,'lane':8,'output_lane':8,'bytes':8,'amount':64,'upper':False}
+        self.assertEqual(suite.shift_mathematical([{**base,'name':'urshr'}],initial)['v'][0],[1,0])
+        self.assertEqual(suite.shift_mathematical([{**base,'name':'srshr'}],initial)['v'][0],[0,0])
+        self.assertEqual(suite.shift_mathematical([{**base,'name':'sshr'}],initial)['v'][0],[suite.MASK,0])
+
     def test_rearrangement_cohort_covers_all_27_canonical_forms_and_both_widths(self):
         registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
         forms=[f for f in registry['forms'] if 'simd_rearrange' in f.get('evidence_groups',[])]

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v15",
+  "registry_version": "apple-silicon-reviewed-forms-v16",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -181,6 +181,22 @@
         "programs": 3157,
         "three_way_register_state_comparisons": 35826,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 35826
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_shifts": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-shifts-differential-report.json",
+      "kind": "simd_shifts_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 9600,
+        "three_way_register_state_comparisons": 96000,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 96000
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -15141,6 +15157,968 @@
           ]
         }
       ]
+    },
+    {
+      "id": "RSHRN_asimdshf_N",
+      "instruction_id": "RSHRN_advsimd",
+      "mnemonic": "RSHRN",
+      "category": "fp_simd",
+      "source_file": "rshrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f008c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "ab547d8a32104a15e0e1f55bba3568b304cc512f6456eafe5f705559880329b6",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f8c20",
+          "expected_mnemonics": [
+            "rshrn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHL_asimdshf_R",
+      "instruction_id": "SHL_advsimd",
+      "mnemonic": "SHL",
+      "category": "fp_simd",
+      "source_file": "shl_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f005400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "43cd63a1b1e3926d2fcc1159ecb47709c05d54576d196925ba9d56c9a4b45e46",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f085420",
+          "expected_mnemonics": [
+            "shl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHL_asisdshf_R",
+      "instruction_id": "SHL_advsimd",
+      "mnemonic": "SHL",
+      "category": "fp_simd",
+      "source_file": "shl_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x5f405400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "43cd63a1b1e3926d2fcc1159ecb47709c05d54576d196925ba9d56c9a4b45e46",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f405420",
+          "expected_mnemonics": [
+            "shl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SHRN_asimdshf_N",
+      "instruction_id": "SHRN_advsimd",
+      "mnemonic": "SHRN",
+      "category": "fp_simd",
+      "source_file": "shrn_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f008400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "77c7fd07422ec7b34b74d940cecb5d92d4c7eae41f5bb5136b6c1b8f17aee17d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f8420",
+          "expected_mnemonics": [
+            "shrn"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SLI_asimdshf_R",
+      "instruction_id": "SLI_advsimd",
+      "mnemonic": "SLI",
+      "category": "fp_simd",
+      "source_file": "sli_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f005400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "240b5170d4d9ee0e47c5fb1c6171aba975f81cca7cff7a9bade58a896b13e21d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f085420",
+          "expected_mnemonics": [
+            "sli"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SLI_asisdshf_R",
+      "instruction_id": "SLI_advsimd",
+      "mnemonic": "SLI",
+      "category": "fp_simd",
+      "source_file": "sli_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f405400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "240b5170d4d9ee0e47c5fb1c6171aba975f81cca7cff7a9bade58a896b13e21d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f405420",
+          "expected_mnemonics": [
+            "sli"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRI_asimdshf_R",
+      "instruction_id": "SRI_advsimd",
+      "mnemonic": "SRI",
+      "category": "fp_simd",
+      "source_file": "sri_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f004400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "dacc40d00acdc5c2614e9a533421e5cbd3de9d8c8540d4e0e31e1dabad7832b7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f4420",
+          "expected_mnemonics": [
+            "sri"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRI_asisdshf_R",
+      "instruction_id": "SRI_advsimd",
+      "mnemonic": "SRI",
+      "category": "fp_simd",
+      "source_file": "sri_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f404400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "dacc40d00acdc5c2614e9a533421e5cbd3de9d8c8540d4e0e31e1dabad7832b7",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f7f4420",
+          "expected_mnemonics": [
+            "sri"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSHR_asimdshf_R",
+      "instruction_id": "SRSHR_advsimd",
+      "mnemonic": "SRSHR",
+      "category": "fp_simd",
+      "source_file": "srshr_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f002400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "985c128b13092b8594fc65484c24f034db75dcba5b8a7651a22ff523ca919301",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f2420",
+          "expected_mnemonics": [
+            "srshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSHR_asisdshf_R",
+      "instruction_id": "SRSHR_advsimd",
+      "mnemonic": "SRSHR",
+      "category": "fp_simd",
+      "source_file": "srshr_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x5f402400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "985c128b13092b8594fc65484c24f034db75dcba5b8a7651a22ff523ca919301",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f7f2420",
+          "expected_mnemonics": [
+            "srshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSRA_asimdshf_R",
+      "instruction_id": "SRSRA_advsimd",
+      "mnemonic": "SRSRA",
+      "category": "fp_simd",
+      "source_file": "srsra_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f003400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "24551de199379ad91232b6ebe6348961a8488463bb8399b40a0cae8b9eefbd80",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f3420",
+          "expected_mnemonics": [
+            "srsra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSRA_asisdshf_R",
+      "instruction_id": "SRSRA_advsimd",
+      "mnemonic": "SRSRA",
+      "category": "fp_simd",
+      "source_file": "srsra_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x5f403400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "24551de199379ad91232b6ebe6348961a8488463bb8399b40a0cae8b9eefbd80",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f7f3420",
+          "expected_mnemonics": [
+            "srsra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSHLL_asimdshf_L",
+      "instruction_id": "SSHLL_advsimd",
+      "mnemonic": "SSHLL",
+      "category": "fp_simd",
+      "source_file": "sshll_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f00a400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "7f82d3bda58deedcf4c361ebf3fca35ce9e1801b17c662f2b77e08fbe50dfd23",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f08a420",
+          "expected_mnemonics": [
+            "sshll"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSHR_asimdshf_R",
+      "instruction_id": "SSHR_advsimd",
+      "mnemonic": "SSHR",
+      "category": "fp_simd",
+      "source_file": "sshr_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a0f0b34364b4800e65a7e79981179ced710140e82f80f3a819fc3e581df3d4cc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f0420",
+          "expected_mnemonics": [
+            "sshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSHR_asisdshf_R",
+      "instruction_id": "SSHR_advsimd",
+      "mnemonic": "SSHR",
+      "category": "fp_simd",
+      "source_file": "sshr_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x5f400400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a0f0b34364b4800e65a7e79981179ced710140e82f80f3a819fc3e581df3d4cc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f7f0420",
+          "expected_mnemonics": [
+            "sshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSRA_asimdshf_R",
+      "instruction_id": "SSRA_advsimd",
+      "mnemonic": "SSRA",
+      "category": "fp_simd",
+      "source_file": "ssra_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f001400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3170ede95ffd5aed0e5a3143317471e06911de8e9192101b3430da984bbd159d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f0f1420",
+          "expected_mnemonics": [
+            "ssra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSRA_asisdshf_R",
+      "instruction_id": "SSRA_advsimd",
+      "mnemonic": "SSRA",
+      "category": "fp_simd",
+      "source_file": "ssra_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x5f401400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3170ede95ffd5aed0e5a3143317471e06911de8e9192101b3430da984bbd159d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f7f1420",
+          "expected_mnemonics": [
+            "ssra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSHR_asimdshf_R",
+      "instruction_id": "URSHR_advsimd",
+      "mnemonic": "URSHR",
+      "category": "fp_simd",
+      "source_file": "urshr_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f002400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8f95617a67688e762a616c81665cb16f7c0d1395c8444cc8d642f4147bdeea53",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f2420",
+          "expected_mnemonics": [
+            "urshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSHR_asisdshf_R",
+      "instruction_id": "URSHR_advsimd",
+      "mnemonic": "URSHR",
+      "category": "fp_simd",
+      "source_file": "urshr_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f402400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8f95617a67688e762a616c81665cb16f7c0d1395c8444cc8d642f4147bdeea53",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f7f2420",
+          "expected_mnemonics": [
+            "urshr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSRA_asimdshf_R",
+      "instruction_id": "URSRA_advsimd",
+      "mnemonic": "URSRA",
+      "category": "fp_simd",
+      "source_file": "ursra_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f003400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e99991cf55bc334127cf2670ba93c5ed411009ee46c816ea2c18c16e57d3cc0e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f3420",
+          "expected_mnemonics": [
+            "ursra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSRA_asisdshf_R",
+      "instruction_id": "URSRA_advsimd",
+      "mnemonic": "URSRA",
+      "category": "fp_simd",
+      "source_file": "ursra_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f403400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "e99991cf55bc334127cf2670ba93c5ed411009ee46c816ea2c18c16e57d3cc0e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f7f3420",
+          "expected_mnemonics": [
+            "ursra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USHLL_asimdshf_L",
+      "instruction_id": "USHLL_advsimd",
+      "mnemonic": "USHLL",
+      "category": "fp_simd",
+      "source_file": "ushll_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f00a400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "77a42d0a252e84b0bbbe192ef5905d78eeebd5f3a3735f827994b8f3c56f3efe",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f08a420",
+          "expected_mnemonics": [
+            "ushll"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USHR_asimdshf_R",
+      "instruction_id": "USHR_advsimd",
+      "mnemonic": "USHR",
+      "category": "fp_simd",
+      "source_file": "ushr_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9e93ab744540db8b22fe2632db0c8a8efaae605bd66b837d67489f1cbab7d95a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f0420",
+          "expected_mnemonics": [
+            "ushr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USHR_asisdshf_R",
+      "instruction_id": "USHR_advsimd",
+      "mnemonic": "USHR",
+      "category": "fp_simd",
+      "source_file": "ushr_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f400400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "9e93ab744540db8b22fe2632db0c8a8efaae605bd66b837d67489f1cbab7d95a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f7f0420",
+          "expected_mnemonics": [
+            "ushr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USRA_asimdshf_R",
+      "instruction_id": "USRA_advsimd",
+      "mnemonic": "USRA",
+      "category": "fp_simd",
+      "source_file": "usra_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f001400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "dd971dfd467e9f7c1fca86ce395e4a7806baa9d2a9a2c75584e435b11a07dcb1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f0f1420",
+          "expected_mnemonics": [
+            "usra"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USRA_asisdshf_R",
+      "instruction_id": "USRA_advsimd",
+      "mnemonic": "USRA",
+      "category": "fp_simd",
+      "source_file": "usra_advsimd.xml",
+      "encoding_mask": "0xffc0fc00",
+      "encoding_value": "0x7f401400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "dd971dfd467e9f7c1fca86ce395e4a7806baa9d2a9a2c75584e435b11a07dcb1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. Every allocated scalar D/vector width, immediate lane size and shift count; V31 and overlapping source/destination. Right shift by full lane width, integer rounding without overflow, modular accumulation and insertion preserve masks. Narrowing truncation and lower/upper-half writes, signed/unsigned widening source-half selection. Scalar/Q=0 upper clearing. Guest NZCV/FPCR/FPSR and RAM unchanged. No saturation/QC, disabled-FP exceptions, SME streaming or full application claim.",
+      "review": "Reviewed pinned Arm A64 2026-06 decode/operation facts. All legal immediates and boundary/alias chains pass original ARM vs independent arbitrary-precision lane math vs baseline SSE2 full-state checks. A mixed shift chain also executes the shared block runtime through cold and disk caches with guest RET.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "simd_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f7f1420",
+          "expected_mnemonics": [
+            "usra"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -15164,6 +16142,8 @@
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
+    "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+    "crates/stela-compiler/src/x86_64/simd/shifts.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

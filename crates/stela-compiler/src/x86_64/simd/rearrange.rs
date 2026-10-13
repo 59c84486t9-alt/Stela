@@ -6,7 +6,7 @@ use crate::{
     aarch64::simd::rearrange::{LaneSource, Operand},
 };
 
-fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
+pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.
     for (register, limb) in [(xmm, &bytes[..8]), (7, &bytes[8..])] {
         code.extend([0x48, 0xb9]); // movabs rcx,imm64

@@ -237,7 +237,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -388,7 +388,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange') else execute_batches(batches, pipe)})
+        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange','shifts') else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -724,6 +724,70 @@ def rearrange_mathematical(operations,initial):
     return {**state_dict(initial),'x':gprs,'v':[list(struct.unpack('<2Q',bytes(v))) for v in vectors]}
 
 
+def shift_programs():
+    # Encodings are independently constructed from the reviewed source fields.
+    ordinary={'shl':0x0f005400,'sli':0x2f005400,'sri':0x2f004400,
+              'sshr':0x0f000400,'ushr':0x2f000400,'srshr':0x0f002400,'urshr':0x2f002400,
+              'ssra':0x0f001400,'usra':0x2f001400,'srsra':0x0f003400,'ursra':0x2f003400}
+    configurations=[]
+    for name,base in ordinary.items():
+        for scalar in (False,True):
+            for q in ((1,) if scalar else (0,1)):
+                for lane in ((8,) if scalar else (1,2,4,8)):
+                    if not q and lane==8: continue
+                    bits=lane*8;left=name in ('shl','sli')
+                    for amount in range(0 if left else 1,bits if left else bits+1):
+                        immediate=bits+amount if left else bits*2-amount
+                        configurations.append({'name':name,'base':base|(q<<30)|(int(scalar)<<28)|(immediate<<16),
+                            'lane':lane,'output_lane':lane,'bytes':8 if scalar else 8<<q,'amount':amount,
+                            'scalar':scalar,'upper':False,'boundary':amount in (0 if left else 1,bits//2,bits-1 if left else bits)})
+    for name,base in [('shrn',0x0f008400),('rshrn',0x0f008c00),('sshll',0x0f00a400),('ushll',0x2f00a400)]:
+        narrow=name in ('shrn','rshrn')
+        for upper in (False,True):
+            for encoded_lane in (1,2,4):
+                bits=encoded_lane*8
+                for amount in range(1 if narrow else 0,bits+1 if narrow else bits):
+                    immediate=bits*2-amount if narrow else bits+amount
+                    configurations.append({'name':name,'base':base|(int(upper)<<30)|(immediate<<16),
+                        'lane':encoded_lane*2 if narrow else encoded_lane,'output_lane':encoded_lane if narrow else encoded_lane*2,
+                        'bytes':8 if narrow else 16,'amount':amount,'scalar':False,'upper':upper,
+                        'boundary':amount in (1 if narrow else 0,bits//2,bits if narrow else bits-1)})
+    programs=[]
+    for config in configurations:
+        def operation(d,n):
+            return {**config,'kind':'shift','d':d,'n':n,'word':config['base']|(n<<5)|d}
+        for d,n in ((0,1),(31,31),(31,0)):
+            programs.append({'operations':[operation(d,n)]})
+        if config['boundary']:
+            programs.append({'operations':[operation(d,(d+7)%32) for d in range(32)]})
+    return programs
+
+
+def shift_mathematical(operations,initial):
+    vectors=[int.from_bytes(struct.pack('<2Q',*v),'little') for v in initial.v]
+    for op in operations:
+        name,d,n,lane,out_lane,width,amount=(op[k] for k in ('name','d','n','lane','output_lane','bytes','amount'))
+        source,old=vectors[n],vectors[d];result=0
+        in_bits,out_bits=lane*8,out_lane*8
+        if name in ('sshll','ushll') and op['upper']: source>>=64
+        for index in range(width//out_lane):
+            value=source>>(index*in_bits)&((1<<in_bits)-1)
+            previous=old>>(index*out_bits)&((1<<out_bits)-1)
+            signed=name in ('sshr','srshr','ssra','srsra','sshll')
+            if signed and value&(1<<(in_bits-1)): value-=1<<in_bits
+            if name in ('shl','sli','sshll','ushll'): shifted=value<<amount
+            else:
+                round_bias=1<<(amount-1) if name in ('srshr','urshr','srsra','ursra','rshrn') else 0
+                shifted=(value+round_bias)>>amount
+            if name in ('ssra','usra','srsra','ursra'): shifted+=previous
+            elif name=='sli': shifted|=previous&((1<<amount)-1)
+            elif name=='sri': shifted|=previous&~((1<<(out_bits-amount))-1)
+            result|=(shifted&((1<<out_bits)-1))<<(index*out_bits)
+        if name in ('shrn','rshrn') and op['upper']: result=(old&MASK)|(result<<64)
+        vectors[d]=result
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
+
+
 def integer_mathematical(operations,initial):
     vectors=[lo|(hi<<64) for lo,hi in initial.v]
     for op in operations:
@@ -770,6 +834,9 @@ def execute_register_batches(batches):
                         seed_extended_state(initial,pattern*16+flags)
                         if pattern<4:
                             values=(0,(1<<bits)-1,1<<(bits-1),(1<<(bits-1))-1,1)
+                            if batch.get('cohort')=='shifts':
+                                midpoint=1<<max(0,operations[0]['amount']-1)
+                                values+=tuple(v&((1<<bits)-1) for v in (midpoint-1,midpoint,midpoint+1,-midpoint-1,-midpoint,-midpoint+1))
                             if bits==64: values+=(0x80000000,0x7fffffff,0xffffffff00000000,0xffffffff80000000,0xffffffff7fffffff,0xffffffff)
                             for register in range(32):
                                 value=sum(values[(register+i+pattern)%len(values)]<<(i*bits) for i in range(128//bits))
@@ -784,7 +851,7 @@ def execute_register_batches(batches):
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
                         assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
                         original=state_dict(capture_arm(machine,initial))
-                        mathematical=(rearrange_mathematical if rearrange else integer_mathematical)(operations,initial)
+                        mathematical={'integer':integer_mathematical,'rearrange':rearrange_mathematical,'shifts':shift_mathematical}[batch['cohort']](operations,initial)
                         actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
                         if mathematical!=original or original!=actual:
                             raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
@@ -795,11 +862,11 @@ def execute_register_batches(batches):
 
 
 def run_register_cohort(cli, focus):
-    functions=rearrange_programs() if focus=='rearrange' else integer_programs();started=time.monotonic()
+    functions={'integer':integer_programs,'rearrange':rearrange_programs,'shifts':shift_programs}[focus]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
     info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
     selections=[('baseline','x86_64-baseline')]
-    if info['detected_target']!='x86_64-baseline': selections.append(('native',info['detected_target']))
+    if focus!='shifts' and info['detected_target']!='x86_64-baseline': selections.append(('native',info['detected_target']))
     profiles={}
     with tempfile.TemporaryDirectory(prefix='stela-simd-integer-') as temporary:
         for index,(selection,target_id) in enumerate(selections):
@@ -816,9 +883,10 @@ def run_register_cohort(cli, focus):
                 if '+ssse3' in target_id: expected.update(('pabsb','pabsw','pabsd'))
                 if '+sse4.1' in target_id: expected.add('pcmpeqq')
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
-            elif '+ssse3' in target_id: expected.add('pshufb')
+            elif focus=='rearrange' and '+ssse3' in target_id: expected.add('pshufb')
             assert set(used)==expected,(target_id,used,expected)
-            profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used}
+            profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used,
+                'packed_shifts_used':sorted({o['mnemonic'] for o in info['simd_immediate_shifts']} & mnemonics.keys())}
     assert digest(cli.read_bytes())==cli_hash and digest(Path(__file__).read_bytes())==harness_hash
     baseline=profiles['baseline']
     report={'kind':f'simd_{focus}_arm_vs_native_x86','passed':True,
@@ -836,7 +904,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['integer','rearrange'], help='Only the focused SIMD register implementation cohort')
+    parser.add_argument('--focus', choices=['integer','rearrange','shifts'], help='Only the focused SIMD register implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)

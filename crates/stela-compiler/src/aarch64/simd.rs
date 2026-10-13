@@ -3,6 +3,7 @@
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
 pub mod rearrange;
+pub mod shifts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerOperation {
@@ -34,6 +35,7 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Shift(shifts::Operand),
     Rearrange(rearrange::Operand),
     Compare {
         operation: Comparison,
@@ -83,6 +85,9 @@ pub enum Operand {
 /// FP arithmetic, other MOVI forms, register offsets and structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = shifts::decode(word) {
+        return Some(decoded.map(Operand::Shift));
+    }
     if let Some(decoded) = rearrange::decode(word) {
         return Some(decoded.map(Operand::Rearrange));
     }
