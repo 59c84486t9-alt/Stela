@@ -5,6 +5,7 @@ pub mod darwin;
 pub mod dispatch;
 pub mod execution;
 pub mod memory;
+pub mod process;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
