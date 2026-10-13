@@ -121,6 +121,9 @@ enum Command {
         /// Emit explicit software PAuth helper boundaries; preparation needs no keys.
         #[arg(long)]
         software_pauth: bool,
+        /// Prepare reviewed clock helper boundaries without executing a clock service.
+        #[arg(long, requires = "software_pauth")]
+        software_clock: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     RunBlocks {
@@ -140,6 +143,9 @@ enum Command {
         /// Opt into software IB/SP authentication with explicit {low,high} test keys.
         #[arg(long)]
         software_pauth_ib_key: Option<PathBuf>,
+        /// Explicit finite replay for one reviewed virtual-counter read.
+        #[arg(long, requires = "software_pauth_ib_key")]
+        clock_snapshot: Option<PathBuf>,
     },
     /// Probe trusted executable entry code; dyld/process setup remains unresolved.
     ProbeImageEntry {
@@ -165,7 +171,7 @@ enum Command {
         #[arg(long, value_parser = ["arm64", "arm64e"])]
         architecture: Option<String>,
     },
-    /// Probe only dyld's reviewed five-instruction startup prefix with owned arguments.
+    /// Probe a reviewed original-dyld startup prefix with owned arguments.
     ProbeDyldEntry {
         input: PathBuf,
         #[arg(long)]
@@ -183,9 +189,15 @@ enum Command {
         stack_bytes: u64,
         #[arg(long, default_value = ".stela/cache/blocks-v1")]
         cache_dir: PathBuf,
-        /// Also execute the original PACIBSP, then stop before its following instruction.
+        /// Opt into software IB/SP authentication; alone, stop after the first PACIBSP.
         #[arg(long)]
         software_pauth_ib_key: Option<PathBuf>,
+        /// Run the reviewed clock bootstrap through mach_continuous_time's return.
+        #[arg(long, requires = "software_pauth_ib_key")]
+        bootstrap_clock: bool,
+        /// Explicit replay {counter,sleep_ticks}; otherwise use the validated Darwin host clock.
+        #[arg(long, requires = "bootstrap_clock")]
+        clock_snapshot: Option<PathBuf>,
     },
     /// Inspect kernel collection images using collection-relative offsets.
     FilesetManifest {
@@ -262,6 +274,9 @@ enum Command {
         /// Prepare software PAuth helper boundaries without executing or supplying keys.
         #[arg(long)]
         software_pauth: bool,
+        /// Prepare reviewed clock helper boundaries without executing a clock service.
+        #[arg(long, requires = "software_pauth")]
+        software_clock: bool,
         /// Treat input as raw code registered at this address instead of a Mach-O.
         #[arg(long, value_parser = parse_address)]
         guest_base: Option<u64>,
@@ -455,8 +470,13 @@ struct PauthKeyInput {
     high: u64,
 }
 
-fn block_profile(software_pauth: bool) -> stela_compiler::block::BlockProfile {
-    if software_pauth {
+fn block_profile(
+    software_pauth: bool,
+    software_clock: bool,
+) -> stela_compiler::block::BlockProfile {
+    if software_clock {
+        stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+    } else if software_pauth {
         stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
     } else {
         stela_compiler::block::BlockProfile::Ordinary
@@ -479,6 +499,30 @@ fn pauth_context(
         address_space,
         stela_runtime::pauth::Keys::from_ib_words(keys.low, keys.high),
     ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClockSnapshotInput {
+    counter: u64,
+    sleep_ticks: u64,
+}
+
+fn clock_snapshot(path: &std::path::Path) -> Result<stela_runtime::clock::Snapshot> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    File::open(path)?.take(4097).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 4096,
+        "clock snapshot input exceeds 4096 bytes"
+    );
+    let input: ClockSnapshotInput = serde_json::from_slice(&bytes)?;
+    let snapshot = stela_runtime::clock::Snapshot {
+        counter: input.counter,
+        sleep_ticks: input.sleep_ticks,
+    };
+    snapshot.awake_ticks()?;
+    Ok(snapshot)
 }
 
 fn register_json(state: &stela_compiler::GuestState) -> serde_json::Value {
@@ -901,12 +945,13 @@ fn run() -> Result<()> {
             guest_base,
             output_dir,
             software_pauth,
+            software_clock,
         } => {
             let source = std::fs::read(&input)?;
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-            let profile = block_profile(software_pauth);
+            let profile = block_profile(software_pauth, software_clock);
             let compiled = stela_compiler::block::compile_with_profile(
                 window,
                 stela_compiler::GuestAddress(guest_base),
@@ -937,6 +982,7 @@ fn run() -> Result<()> {
             block_budget,
             cache_dir,
             software_pauth_ib_key,
+            clock_snapshot: clock_snapshot_path,
         } => {
             use stela_runtime::blocks::{BlockRuntime, ThreadState};
             ensure!(
@@ -970,13 +1016,38 @@ fn run() -> Result<()> {
                 .as_deref()
                 .map(|path| pauth_context(path, 1))
                 .transpose()?;
-            let mut runtime =
-                BlockRuntime::new_with_profile(1, cache_dir, block_profile(context.is_some()));
+            let mut clock = clock_snapshot_path
+                .as_deref()
+                .map(|path| -> Result<_> {
+                    let snapshot = clock_snapshot(path)?;
+                    stela_runtime::clock::Context::new(
+                        1,
+                        Box::new(stela_runtime::clock::ReplaySource::new(vec![
+                            snapshot, snapshot,
+                        ])?),
+                    )
+                })
+                .transpose()?;
+            let mut runtime = BlockRuntime::new_with_profile(
+                1,
+                cache_dir,
+                block_profile(context.is_some(), clock.is_some()),
+            );
             runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
             // SAFETY: This explicit research command accepts trusted guest code
             // and caller-provided direct native RAM addresses under its documented ABI.
             let outcome = unsafe {
-                if let Some(context) = &context {
+                if let Some(clock) = &mut clock {
+                    runtime.run_with_clock(
+                        &mut thread,
+                        stop_pc.map(stela_compiler::GuestAddress),
+                        block_budget,
+                        context
+                            .as_ref()
+                            .context("clock replay requires software PAC context")?,
+                        clock,
+                    )?
+                } else if let Some(context) = &context {
                     runtime.run_with_pauth(
                         &mut thread,
                         stop_pc.map(stela_compiler::GuestAddress),
@@ -997,6 +1068,10 @@ fn run() -> Result<()> {
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
                 "outcome":outcome,"abi":runtime.profile().abi(),
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
+                "clock":clock.as_ref().map(|clock| serde_json::json!({
+                    "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
+                    "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region()
+                })),
                 "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "complete_binary_verified":false}))?
@@ -1101,6 +1176,8 @@ fn run() -> Result<()> {
             stack_bytes,
             cache_dir,
             software_pauth_ib_key,
+            bootstrap_clock,
+            clock_snapshot: clock_snapshot_path,
         } => {
             let arguments = arguments
                 .map(|path| -> Result<_> { Ok(serde_json::from_slice(&std::fs::read(path)?)?) })
@@ -1117,6 +1194,11 @@ fn run() -> Result<()> {
                     stack_bytes,
                     cache_dir,
                     software_pauth_ib_key,
+                    bootstrap_clock,
+                    clock_snapshot: clock_snapshot_path
+                        .as_deref()
+                        .map(clock_snapshot)
+                        .transpose()?,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1293,6 +1375,7 @@ fn run() -> Result<()> {
             architecture,
             dynamic_linker,
             software_pauth,
+            software_clock,
             guest_base,
             entry,
             function_starts,
@@ -1318,7 +1401,7 @@ fn run() -> Result<()> {
             let mut runtime = BlockRuntime::new_with_profile(
                 0x534f_5245_414f_5401,
                 cache_dir,
-                block_profile(software_pauth),
+                block_profile(software_pauth, software_clock),
             );
             let mut regions = Vec::new();
             let mut roots = entry;
@@ -1717,5 +1800,152 @@ mod register_state_tests {
         ] {
             assert!(serde_json::from_value::<RegisterInput>(value).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod clock_cli_tests {
+    use super::*;
+
+    #[test]
+    fn clock_flags_require_their_explicit_parent_profiles() {
+        for args in [
+            vec![
+                "stela",
+                "run-blocks",
+                "code",
+                "--clock-snapshot",
+                "clock.json",
+            ],
+            vec![
+                "stela",
+                "probe-dyld-entry",
+                "dyld",
+                "--executable",
+                "app",
+                "--bootstrap-clock",
+            ],
+            vec![
+                "stela",
+                "probe-dyld-entry",
+                "dyld",
+                "--executable",
+                "app",
+                "--clock-snapshot",
+                "clock.json",
+            ],
+            vec![
+                "stela",
+                "compile-block",
+                "code",
+                "--output-dir",
+                "out",
+                "--software-clock",
+            ],
+            vec![
+                "stela",
+                "discover-code",
+                "code",
+                "--output",
+                "out",
+                "--software-clock",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "probe-dyld-entry",
+                "dyld",
+                "--executable",
+                "app",
+                "--software-pauth-ib-key",
+                "key.json",
+                "--bootstrap-clock",
+                "--clock-snapshot",
+                "clock.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "compile-block",
+                "code",
+                "--output-dir",
+                "out",
+                "--software-pauth",
+                "--software-clock"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "discover-code",
+                "code",
+                "--output",
+                "out",
+                "--software-pauth",
+                "--software-clock"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "run-blocks",
+                "code",
+                "--software-pauth-ib-key",
+                "key.json",
+                "--clock-snapshot",
+                "clock.json"
+            ])
+            .is_ok()
+        );
+        assert_eq!(
+            block_profile(true, true),
+            stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+        );
+        assert_eq!(
+            block_profile(true, false),
+            stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
+        );
+        assert_eq!(
+            block_profile(false, false),
+            stela_compiler::block::BlockProfile::Ordinary
+        );
+    }
+
+    #[test]
+    fn snapshot_input_is_strict_bounded_and_validated() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("clock.json");
+        for input in [
+            r#"{"counter":10,"sleep_ticks":11}"#,
+            r#"{"counter":-1,"sleep_ticks":0}"#,
+            r#"{"counter":10}"#,
+            r#"{"counter":10,"sleep_ticks":0,"frequency":1}"#,
+            r#"{"counter":10,"counter":11,"sleep_ticks":0}"#,
+        ] {
+            std::fs::write(&path, input)?;
+            assert!(clock_snapshot(&path).is_err());
+        }
+        let valid = r#"{"counter":130,"sleep_ticks":40}"#;
+        let mut boundary = valid.to_owned();
+        boundary.extend(std::iter::repeat_n(' ', 4096 - valid.len()));
+        std::fs::write(&path, &boundary)?;
+        assert_eq!(
+            clock_snapshot(&path)?,
+            stela_runtime::clock::Snapshot {
+                counter: 130,
+                sleep_ticks: 40
+            }
+        );
+        boundary.push(' ');
+        std::fs::write(&path, boundary)?;
+        assert!(clock_snapshot(&path).is_err());
+        Ok(())
     }
 }

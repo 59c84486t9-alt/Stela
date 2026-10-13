@@ -1,6 +1,6 @@
 //! A bounded original-dyld startup probe, not an application launcher.
-//! Only the reviewed register-only prefix and optionally its first software PAC
-//! operation run. Main/dyld segments and argument memory stay owned together.
+//! Reviewed startup prefixes or the original first continuous-clock call run.
+//! Main/dyld, stack and read-only clock mappings stay owned together.
 use crate::macho::{load_plan, mapped_image};
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{GuestAddress, GuestState};
@@ -18,6 +18,8 @@ pub struct Options {
     pub stack_bytes: u64,
     pub cache_dir: PathBuf,
     pub software_pauth_ib_key: Option<PathBuf>,
+    pub bootstrap_clock: bool,
+    pub clock_snapshot: Option<stela_runtime::clock::Snapshot>,
 }
 
 fn instruction(data: &[u8], plan: &load_plan::LoadPlan, address: u64) -> Result<u32> {
@@ -68,6 +70,51 @@ fn startup_target(words: [u32; 5], entry: u64) -> Result<u64> {
         .checked_add(16)
         .context("startup branch PC overflow")?;
     u64::try_from(i128::from(branch_pc) + i128::from(delta)).context("startup target overflow")
+}
+
+// These exact original windows bound the unsafe direct-RAM execution contract.
+// Untaken hardware alternatives remain present, rather than patched instructions.
+fn bootstrap_windows(
+    data: &[u8],
+    plan: &load_plan::LoadPlan,
+    slide: u64,
+) -> Result<Vec<(GuestAddress, Vec<u8>)>> {
+    let mut windows = Vec::new();
+    for (start, end, hash) in [
+        (
+            0x4bf0,
+            0x4c04,
+            "28a76a1793776afe7c4aefb7b618ff81ef3922b3d58470c2f8f0239c6f455887",
+        ),
+        (
+            0x30460,
+            0x304a4,
+            "bfa00f791dd5da3aac56955400b591ba3b11fe39e06621c8c5be3c7d60792a98",
+        ),
+        (
+            0x8054c,
+            0x805f4,
+            "c3c909752d8df026484a96c6ad9dd008cce36a4286f5ea75715ff94cf184e785",
+        ),
+    ] {
+        let mut bytes = Vec::new();
+        for pc in (start..end).step_by(4) {
+            bytes.extend(instruction(data, plan, pc)?.to_le_bytes());
+        }
+        ensure!(
+            stela_core::sha256(&bytes) == hash,
+            "unreviewed dyld clock bootstrap window at {start:#x}"
+        );
+        windows.push((
+            GuestAddress(
+                start
+                    .checked_add(slide)
+                    .context("bootstrap slide overflow")?,
+            ),
+            bytes,
+        ));
+    }
+    Ok(windows)
 }
 
 pub fn probe(
@@ -124,7 +171,33 @@ pub fn probe(
         .as_deref()
         .map(|path| crate::pauth_context(path, 0x534f524544594c44))
         .transpose()?;
-    let stop = if context.is_some() {
+    ensure!(
+        !options.bootstrap_clock || context.is_some(),
+        "clock bootstrap requires explicit software PAC key"
+    );
+    ensure!(
+        options.bootstrap_clock || options.clock_snapshot.is_none(),
+        "clock replay requires clock bootstrap"
+    );
+    let bootstrap_code = if options.bootstrap_clock {
+        ensure!(
+            dyld.thread.pc == 0x4bf0 && target == 0x30460 && dyld.thread.x[3] == 0,
+            "clock bootstrap requires reviewed entry and zero initial timestamp register"
+        );
+        Some(bootstrap_windows(
+            dyld_bytes,
+            &dyld.image,
+            options.dyld_slide,
+        )?)
+    } else {
+        None
+    };
+    let stop = if options.bootstrap_clock {
+        options
+            .dyld_slide
+            .checked_add(0x304a4)
+            .context("clock return slide overflow")?
+    } else if context.is_some() {
         target_pc
             .checked_add(4)
             .context("dyld PAC continuation overflow")?
@@ -149,6 +222,15 @@ pub fn probe(
         executable.as_os_str().as_encoded_bytes(),
         args,
     )?;
+    if options.bootstrap_clock {
+        ensure!(
+            arguments
+                .aligned_sp
+                .checked_sub(0x6c0)
+                .is_some_and(|bottom| bottom >= options.stack_base),
+            "dyld clock bootstrap requires 1728 bytes of working stack"
+        );
+    }
     // No fixups are applied. Original dyld's self-rebase/cache handoff must be
     // reviewed before executing beyond the whitelisted startup instructions.
     let mut main_mapping =
@@ -173,13 +255,65 @@ pub fn probe(
         memory.read_snapshot(options.image_base, 32)? == main_bytes[..32],
         "mapped main header differs"
     );
+    let stack_before = if options.bootstrap_clock {
+        Some(memory.read_snapshot(options.stack_base, usize::try_from(options.stack_bytes)?)?)
+    } else {
+        None
+    };
+    let image_before = if options.bootstrap_clock {
+        memory
+            .regions()
+            .iter()
+            .filter(|r| r.readable)
+            .map(|r| {
+                Ok((
+                    r.guest_address,
+                    r.virtual_bytes,
+                    stela_core::sha256(
+                        &memory
+                            .read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    let mut clock = if options.bootstrap_clock {
+        Some(if let Some(snapshot) = options.clock_snapshot {
+            stela_runtime::clock::Context::new(
+                0x534f524544594c44,
+                Box::new(stela_runtime::clock::ReplaySource::new(vec![
+                    snapshot, snapshot,
+                ])?),
+            )?
+        } else {
+            stela_runtime::clock::Context::native(0x534f524544594c44)?
+        })
+    } else {
+        None
+    };
+    let clock_before = clock
+        .as_ref()
+        .map(|c| c.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES))
+        .transpose()?;
     let mut runtime = BlockRuntime::new_with_profile(
         0x534f524544594c44,
         options.cache_dir,
-        crate::block_profile(context.is_some()),
+        if options.bootstrap_clock {
+            stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+        } else {
+            crate::block_profile(context.is_some(), false)
+        },
     );
-    for (address, bytes) in dyld_mapping.code {
-        runtime.register_code(GuestAddress(address), bytes)?;
+    if let Some(windows) = bootstrap_code {
+        for (address, bytes) in windows {
+            runtime.register_code(address, bytes)?;
+        }
+    } else {
+        for (address, bytes) in dyld_mapping.code {
+            runtime.register_code(GuestAddress(address), bytes)?;
+        }
     }
     let mut thread = ThreadState {
         pc: GuestAddress(entry),
@@ -191,11 +325,20 @@ pub fn probe(
         },
     };
     let initial = crate::register_json(&thread.registers);
-    // SAFETY: exact whitelist permits only register changes/direct exit, plus
-    // the optional validated software PACIBSP helper. Explicit stop precedes
-    // every other target instruction. Owned mappings remain live throughout.
+    // SAFETY: hash-reviewed original windows, fixed clock selectors and zero X3
+    // bound the executed path to register operations, checked private-stack
+    // stores/loads, RO clock loads and validated PAC/clock helpers. Stop precedes
+    // all unreviewed continuation code. Every mapping remains exclusively owned.
     let outcome = unsafe {
-        if let Some(context) = &context {
+        if let Some(clock) = &mut clock {
+            runtime.run_with_clock(
+                &mut thread,
+                Some(GuestAddress(stop)),
+                32,
+                context.as_ref().context("missing software PAC context")?,
+                clock,
+            )?
+        } else if let Some(context) = &context {
             runtime.run_with_pauth(&mut thread, Some(GuestAddress(stop)), 3, context)?
         } else {
             runtime.run(&mut thread, Some(GuestAddress(stop)), 2)?
@@ -203,7 +346,8 @@ pub fn probe(
     };
     ensure!(
         outcome.reason == StopReason::StopAddress
-            && outcome.blocks_executed == (if context.is_some() { 2 } else { 1 })
+            && (options.bootstrap_clock
+                || outcome.blocks_executed == (if context.is_some() { 2 } else { 1 }))
             && thread.pc.0 == stop,
         "dyld startup did not stop after the reviewed instructions"
     );
@@ -227,7 +371,21 @@ pub fn probe(
         Ok(analysis) => serde_json::json!({"supported":true,"analysis":analysis}),
         Err(error) => serde_json::json!({"supported":false,"detail":error.to_string()}),
     };
-    Ok(serde_json::json!({
+    let memory_effects = image_before.iter().map(|(address, bytes, initial)| {
+        Ok(serde_json::json!({"address":address,"bytes":bytes,"initial_sha256":initial,
+            "final_sha256":stela_core::sha256(&memory.read_snapshot(*address, usize::try_from(*bytes)?)?)}))
+    }).collect::<Result<Vec<_>>>()?;
+    let clock_report = clock.as_ref().map(|c| -> Result<serde_json::Value> {
+        Ok(serde_json::json!({"profile_id":c.profile_id(),"source_id":c.source_id(),"frequency":c.frequency(),
+            "region":c.region(),"events":c.events(),"snapshot":c.snapshot(),
+            "page_before_hex":hex::encode(clock_before.as_ref().context("missing initial clock page")?),
+            "page_after_hex":hex::encode(c.snapshot_bytes(0,stela_runtime::clock::GUEST_BYTES)?)}))
+    }).transpose()?;
+    let stack_after = stack_before
+        .as_ref()
+        .map(|_| memory.read_snapshot(options.stack_base, usize::try_from(options.stack_bytes)?))
+        .transpose()?;
+    let mut report = serde_json::json!({
         "schema_version":1,"kind":"original_dyld_startup_prefix_probe",
         "dyld":{"path":dyld_path,"container_sha256":stela_core::sha256(&dyld_data),"slice_offset":dyld_offset,"plan":dyld,"slide":options.dyld_slide},
         "main":{"path":executable,"container_sha256":stela_core::sha256(&main_data),"slice_offset":main_offset,"plan":main,"load_base":options.image_base},
@@ -238,6 +396,7 @@ pub fn probe(
         "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
         "pauth_instruction_executed":context.is_some(),"abi":runtime.profile().abi(),
         "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
+
         "initial_state":initial,"state":crate::register_json(&thread.registers),"pc":thread.pc.0,
         "outcome":outcome,"target_instruction":"PACIBSP","target_analysis":target_analysis,
         "target_analysis_profile":"ordinary","selected_profile_target_analysis":selected_profile_target_analysis,
@@ -246,7 +405,22 @@ pub fn probe(
         "probe_source_sha256":stela_core::sha256(include_bytes!("dyld_entry.rs")),
         "process_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/process.rs")),
         "unresolved_requirements":["remaining PAC operations and authenticated fixups","dyld self-rebase and shared-cache handoff","initializers, TLS and guest process services","full original application execution"]
-    }))
+    });
+    let fields = serde_json::json!({
+        "bootstrap_clock":options.bootstrap_clock,"clock":clock_report,"memory_effects":memory_effects,
+        "stack_before_hex":stack_before.as_ref().map(hex::encode),"stack_after_hex":stack_after.as_ref().map(hex::encode),
+        "clock_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/clock.rs")),
+    });
+    report
+        .as_object_mut()
+        .context("probe report must be object")?
+        .extend(
+            fields
+                .as_object()
+                .context("clock report must be object")?
+                .clone(),
+        );
+    Ok(report)
 }
 
 #[cfg(test)]
