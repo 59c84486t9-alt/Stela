@@ -2170,7 +2170,7 @@
     },
     {
       "report": ".stela/arithmetic-differential-report.json",
-      "report_sha256": "2adf34d137a7c0440a461da70f38a2c671e73699aab5965918aef2e2cfb6e268"
+      "report_sha256": "482f6a7904cc78386ccae7397d20143ea3e6c7699b0a8d7d58b83d6f937a50f6"
     },
     {
       "report": ".stela/conditional-select-differential-report.json",
@@ -2178,7 +2178,7 @@
     },
     {
       "report": ".stela/arithmetic-differential-report.json",
-      "report_sha256": "2adf34d137a7c0440a461da70f38a2c671e73699aab5965918aef2e2cfb6e268"
+      "report_sha256": "482f6a7904cc78386ccae7397d20143ea3e6c7699b0a8d7d58b83d6f937a50f6"
     },
     {
       "report": ".stela/differential-report.json",
@@ -2229,6 +2229,8 @@
       "report_sha256": "52614bedc56c908335898b808f8fb2a1f1abf02c0a1a00129539125f2775ab4b"
     }
   ],
+  "assessment_basis": "current_native_differential_evidence",
+  "last_verified_checkpoint": null,
   "forms": [
     {"id":"ABS_32_dp_1src","instruction_id":"ABS","mnemonic":"ABS","category":"base_integer_system","source_file":"abs.xml","encoding_mask":"0xfffffc00","encoding_value":"0x5ac02000","features":[{"feature":"FEAT_CSSC","name":"v8Ap9"}],"status":"unsupported","profiles":[]},
     {"id":"ABS_64_dp_1src","instruction_id":"ABS","mnemonic":"ABS","category":"base_integer_system","source_file":"abs.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac02000","features":[{"feature":"FEAT_CSSC","name":"v8Ap9"}],"status":"unsupported","profiles":[]},

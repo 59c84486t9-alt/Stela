@@ -41,6 +41,33 @@ def fixtures():
 
 
 class IsaProgressTests(unittest.TestCase):
+    def test_implementation_refresh_preserves_archived_verification_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'apple-silicon.json'
+            self.assertIsNone(progress.previous_checkpoint(path, root))
+            report = {'kind': 'apple_silicon_translation_progress',
+                      'native_differential_evidence': {'scalar': {}},
+                      'compiler_source_sha256': COMPILER, 'measured_at_utc': '2026-10-13',
+                      'apple_codegen_candidates': {'summary': {'union': {'implemented': 292, 'total': 3119}}}}
+            def save():
+                data = json.dumps(report).encode()
+                path.write_bytes(data)
+                archive = root / '.stela/evidence' / path.stem
+                archive.mkdir(parents=True, exist_ok=True)
+                (archive / (hashlib.sha256(data).hexdigest() + '.json')).write_bytes(data)
+            path.write_text(json.dumps(report))
+            with self.assertRaises(ValueError):
+                progress.previous_checkpoint(path, root)
+            save()
+            checkpoint = progress.previous_checkpoint(path, root)
+            self.assertEqual(checkpoint['implemented'], 292)
+            report.update(implementation_only=True, last_verified_checkpoint=checkpoint,
+                          compiler_source_sha256='d' * 64, native_differential_evidence={})
+            report['apple_codegen_candidates']['summary']['union']['implemented'] = 310
+            save()
+            self.assertEqual(progress.previous_checkpoint(path, root), checkpoint)
+
     def test_documented_checklist_uses_complete_pinned_facts_not_observed_subset(self):
         path = progress.ROOT / 'tests/isa/a64-documented-checklist.json'
         catalog = json.loads(path.read_bytes())
@@ -104,6 +131,13 @@ class IsaProgressTests(unittest.TestCase):
         self.assertIn('Full hardware membership, M6 and Apple-private additions remain open', text)
         self.assertNotIn('4,332', text)
         self.assertIn('reviewed execution profiles', text)
+        report['implementation_only'] = True
+        text = progress.markdown(report)
+        self.assertIn('Last full instruction-verification checkpoint | Pending', text)
+        self.assertIn('implementation and emission smoke checks', text)
+        report['last_verified_checkpoint'] = {'implemented': 292, 'total': 3119,
+                                              'compiler_source_sha256': 'd' * 64}
+        self.assertIn('292 / 3,119; compiler `dddddddddddd`', progress.markdown(report))
 
     def test_reviewed_counts_never_manufacture_completion_denominator(self):
         registry = fixtures()

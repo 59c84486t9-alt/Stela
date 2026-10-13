@@ -295,13 +295,20 @@ def markdown(report):
     if 'apple_codegen_candidates' in report:
         row = report['apple_codegen_candidates']['summary']['union']
         apple = report['apple_specific_extensions']
+        checkpoint = report.get('last_verified_checkpoint')
+        checkpoint_row, basis = '', ''
+        if report.get('implementation_only'):
+            checkpoint_text = (f"{checkpoint['implemented']:,} / {checkpoint['total']:,}; compiler `{checkpoint['compiler_source_sha256'][:12]}`"
+                               if checkpoint else 'Pending')
+            checkpoint_row = f'| Last full instruction-verification checkpoint | {checkpoint_text} |\n'
+            basis = 'Current counts reflect reviewed implementation and emission smoke checks. Full regression verification is deferred to integration checkpoints. '
         return ('| Measurement | Current evidence |\n| --- | --- |\n'
                 f"| Apple M1–M5 candidate forms implemented | **{row['implemented']:,} / {row['total']:,} ({row['implementation_percentage']:.2f}%)** |\n"
                 f"| Candidate forms partially implemented | {row['partial']:,} |\n"
-                f"| Candidate forms unimplemented | {row['unsupported']:,} |\n"
+                f"| Candidate forms unimplemented | {row['unsupported']:,} |\n" + checkpoint_row +
                 f"| Apple-specific extension groups | {apple['implemented']} implemented / {apple['tracked']} tracked; inventory open |\n"
                 f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n\n"
-                f"Pinned LLVM Apple CPU models mapped to Arm **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. "
+                f"Pinned LLVM Apple CPU models mapped to Arm **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. " + basis +
                 'Canonical encoding forms count once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
                 'This candidate inventory includes streaming SVE through SME, without general non-streaming SVE. '
                 'Full hardware membership, M6 and Apple-private additions remain open; reviewed-profile instruction coverage does not establish complete CPU, application or macOS compatibility.\n\n'
@@ -385,6 +392,27 @@ def update_readme(path, fragment):
     write_markdown(path, updated)
 
 
+def previous_checkpoint(path, root=ROOT):
+    """Smoke-only updates preserve an archived verified baseline without advancing it."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    previous = json.loads(data)
+    digest = hashlib.sha256(data).hexdigest()
+    archived = root / '.stela/evidence' / path.stem / (digest + '.json')
+    if not archived.exists() or archived.read_bytes() != data:
+        raise ValueError('Previous checkpoint is not bound to its evidence archive')
+    if previous.get('implementation_only'):
+        return previous.get('last_verified_checkpoint')
+    if previous.get('kind') != 'apple_silicon_translation_progress' or not previous.get('native_differential_evidence'):
+        return None
+    row = previous['apple_codegen_candidates']['summary']['union']
+    return {'implemented': row['implemented'], 'total': row['total'],
+            'compiler_source_sha256': previous['compiler_source_sha256'],
+            'measured_at_utc': previous['measured_at_utc'], 'report_sha256': digest}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
@@ -396,7 +424,10 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
     parser.add_argument('--update-readme', action='store_true')
+    parser.add_argument('--implementation-only', action='store_true',
+                        help='Refresh implementation/emission counts while retaining the full verification checkpoint')
     args = parser.parse_args()
+    checkpoint = previous_checkpoint(args.output) if args.implementation_only else None
     registry_data = args.registry.read_bytes()
     registry = json.loads(registry_data)
     rows = validate_registry(registry)
@@ -429,13 +460,21 @@ def main():
         service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory, mode='service')
         if block_compiler != compiler or service_compiler != compiler:
             raise ValueError('Leaf and block compiler identities differ')
-    evidence, sources = validate_evidence(registry, rows, compiler)
-    block_evidence, block_sources = validate_evidence(block_registry, block_rows, compiler,
-                                                      executable_hash=executable_hash)
-    service_evidence, service_sources = validate_evidence(service_registry, service_rows, compiler, executable_hash=executable_hash)
+    if args.implementation_only:
+        evidence, block_evidence, service_evidence = {}, {}, {}
+        sources, block_sources, service_sources = [
+            {path: sha256(ROOT / path) for row in group.values() for path in row['compiler_sources']}
+            for group in (rows, block_rows, service_rows)]
+    else:
+        evidence, sources = validate_evidence(registry, rows, compiler)
+        block_evidence, block_sources = validate_evidence(block_registry, block_rows, compiler,
+                                                          executable_hash=executable_hash)
+        service_evidence, service_sources = validate_evidence(service_registry, service_rows, compiler, executable_hash=executable_hash)
     assessed, documented_summary = a64_checklist.assess(catalog, [registry, block_registry, service_registry])
     apple_summary = apple_isa.assess(apple_profiles, assessed)
     assessed['compiler_source_sha256'] = compiler
+    assessed['assessment_basis'] = 'reviewed_implementation_and_emission_smoke' if args.implementation_only else 'current_native_differential_evidence'
+    assessed['last_verified_checkpoint'] = checkpoint
     assessed['evidence_reports'] = [{k: row[k] for k in ('report', 'report_sha256')}
                                    for group in (evidence, block_evidence, service_evidence) for row in group.values()]
     fingerprint_sources = validate_current_compiler(registry, compiler)
@@ -449,6 +488,7 @@ def main():
             or validate_current_compiler(block_registry, compiler) != fingerprint_sources):
         raise ValueError('Compiler/registry changed during measurement')
     report = {'schema_version': 2, 'kind': 'apple_silicon_translation_progress',
+              'implementation_only': args.implementation_only, 'last_verified_checkpoint': checkpoint,
               'measured_at_utc': datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'),
               'registry_version': registry['registry_version'], 'target_profile': registry['target_profile'],
               'instruction_sources': registry['instruction_sources'],

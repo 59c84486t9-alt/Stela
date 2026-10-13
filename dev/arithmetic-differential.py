@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Three-way carry and extended-register arithmetic; complete architectural state."""
 import hashlib
+import ctypes
 import json
 import multiprocessing
 from pathlib import Path
@@ -11,12 +12,13 @@ import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import state_dict as complete_state
-from differential import compiler_cli, ROOT, State, arithmetic, native, reference, states
+from differential import compiler_cli, ROOT, State, arithmetic, executable, initialize_arm, capture_arm, states
 from evidence import write_evidence
 
 RET = 0xd65f03c0
 MASK = (1 << 64) - 1
 LEGACY_CARRY_CORPUS = '5cea082d8e1f903412a26c0fc364f6508686c0f7488880531215721f92de74ab'
+STATE_CORPUS = '5a6a330a0a666d818f34bf90be5ef8bbe09f40e9322d0a46b3b9913b61574dae'
 
 
 def encoding(width, subtract, flags, destination, left, right):
@@ -214,6 +216,38 @@ def boundary_pairs(width):
             (0xaaaaaaaaaaaaaaaa & mask, 0x5555555555555555 & mask)]
 
 
+def reusable_reference(code):
+    """One unchanged straight-line program, fully reset before each observation."""
+    from differential import BASE
+    from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
+    words = struct.unpack('<' + 'I' * (len(code) // 4), code)
+    if words[-1] != RET or RET in words[:-1] or len(code) > 4096:
+        raise ValueError('Reusable arithmetic oracle requires one final RET')
+    machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    machine.mem_map(BASE, 4096)
+    machine.mem_write(BASE, code)
+    returned = False
+
+    def boundary(machine, address, size, _):
+        nonlocal returned
+        if address == BASE + len(code) - 4:
+            returned = True
+            machine.emu_stop()
+
+    machine.hook_add(UC_HOOK_CODE, boundary)
+
+    def run(initial):
+        nonlocal returned
+        returned = False
+        initialize_arm(machine, initial)
+        machine.emu_start(BASE, BASE + len(code), count=10000)
+        if not returned:
+            raise AssertionError('Arithmetic reference did not reach its RET')
+        return complete_state(capture_arm(machine, initial))
+
+    return run
+
+
 def execute_cases(compiled):
     comparisons = 0
     counts = {'carry': {'programs': 0, 'comparisons': 0}, 'extended': {'programs': 0, 'comparisons': 0}}
@@ -231,35 +265,40 @@ def execute_cases(compiled):
             source_sign = 1 << (min(8 << (case['option'] & 3), bits) - 1)
             pairs = [(0, (1 << bits) - 1), ((1 << bits) - 1, source_sign),
                      (1 << (bits - 1), source_sign - 1), ((1 << (bits - 1)) - 1, source_sign + 1)]
-        for pair in pairs:
-            for initial in initial_states:
-                state = State.from_buffer_copy(initial)
-                if pair is not None:
-                    if family == 'extended':
-                        initialize_extended_inputs(case, state, pair)
-                    else:
-                    # Poison upper halves in W32 fixtures; the operands truncate
-                    # and the destination must clear those bits, including aliases.
-                        poison = 0xdeadc0de00000000 if case['width'] == 0 else 0
-                        inputs = (zip((case['left'], case['right']), pair) if case['kind'] == 'boundaries' else
-                                  [(limb, pair[0]) for limb in range(4)] +
-                                  [(limb + 4, pair[1]) for limb in range(4)])
-                        for register, value in inputs:
-                            if register != 31:
-                                state.x[register] = value | poison
-                state.reserved = 0x5a17c0de
-                corpus.update(code); corpus.update(bytes(state))
-                expected_math = mathematical_reference(case['words'], state)
-                expected_arm = reference(code, state)
-                actual = native(case['native'], state)
-                if expected_math != expected_arm or expected_arm != actual:
-                    raise AssertionError(json.dumps({**{k: v for k, v in case.items() if k != 'native'},
-                                                     'initial': list(state.x), 'incoming_nzcv': state.nzcv,
-                                                     'mathematical': expected_math, 'arm': expected_arm,
-                                                     'native': actual}, indent=2))
-                comparisons += 1
-                counts[family]['comparisons'] += 1
+        original = reusable_reference(code)
+        with executable(case['native']) as address:
+            function = ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)
+            for pair in pairs:
+                for initial in initial_states:
+                    state = State.from_buffer_copy(initial)
+                    if pair is not None:
+                        if family == 'extended':
+                            initialize_extended_inputs(case, state, pair)
+                        else:
+                            # Dirty W upper halves retain the original carry cohort.
+                            poison = 0xdeadc0de00000000 if case['width'] == 0 else 0
+                            inputs = (zip((case['left'], case['right']), pair) if case['kind'] == 'boundaries' else
+                                      [(limb, pair[0]) for limb in range(4)] +
+                                      [(limb + 4, pair[1]) for limb in range(4)])
+                            for register, value in inputs:
+                                if register != 31:
+                                    state.x[register] = value | poison
+                    state.reserved = 0x5a17c0de
+                    corpus.update(code); corpus.update(bytes(state))
+                    expected_math = mathematical_reference(case['words'], state)
+                    expected_arm = original(state)
+                    actual_state = State.from_buffer_copy(state)
+                    function(ctypes.byref(actual_state))
+                    actual = complete_state(actual_state)
+                    if expected_math != expected_arm or expected_arm != actual:
+                        raise AssertionError(json.dumps({**{k: v for k, v in case.items() if k != 'native'},
+                                                         'initial': list(state.x), 'incoming_nzcv': state.nzcv,
+                                                         'mathematical': expected_math, 'arm': expected_arm,
+                                                         'native': actual}, indent=2))
+                    comparisons += 1
+                    counts[family]['comparisons'] += 1
     assert counts['carry'] == {'programs': 368, 'comparisons': 28928}
+    assert corpus.hexdigest() == STATE_CORPUS, 'Verification context reuse must preserve every input'
     return {'programs': len(compiled), 'three_way_register_state_comparisons': comparisons,
             'groups': counts, 'state_corpus_sha256': corpus.hexdigest(),
             'carry_three_way_register_state_comparisons': counts['carry']['comparisons'],
