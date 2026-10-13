@@ -152,5 +152,41 @@ class DyldEntryGuards(unittest.TestCase):
             suite.audit_arguments(changed, Path('/m'), arguments)
 
 
+class DataVmGuards(unittest.TestCase):
+    def test_callback_model_preserves_unrelated_state_and_thunk_argument_effects(self):
+        initial = State.from_buffer_copy(suite.states(all_flags=True)[15])
+        before = bytes(initial)
+        segment = {'flags':16,'preferred':0xc0000,'virtual_bytes':16384}
+        expected = suite.vm_callback_expected(initial,segment,0x40000000000)
+        self.assertEqual((expected.x[0],expected.x[1],expected.x[2],expected.x[3],expected.x[16]),(0,0,1,1,74))
+        self.assertEqual(expected.nzcv, initial.nzcv & ~(1<<29))
+        self.assertEqual(bytes(expected)[248:256],bytes(initial)[248:256])
+        self.assertEqual(bytes(expected)[264:],bytes(initial)[264:])
+        self.assertEqual(bytes(initial),before)
+        segment['flags']=4
+        unchanged=suite.vm_callback_expected(initial,segment,0x40000000000)
+        wanted=State.from_buffer_copy(initial);wanted.x[8]=4
+        self.assertEqual(bytes(unchanged),bytes(wanted))
+
+    def test_vm_receipt_rejects_state_permissions_missing_ram_and_alias_region(self):
+        state=State();data=bytes(16384)
+        memory=[{'guest_address':suite.VM_META,'virtual_bytes':16384,'initial_bytes':list(data),'readable':True,'writable':False}]
+        receipt=[{'address':suite.VM_META,'bytes':16384,'sha256':suite.digest(data)}]
+        report={'kind':'native_block_run','abi':suite.ABI,'source_sha256':'source','data_vm_profile':suite.VM_PROFILE,
+                'complete_binary_verified':False,'state':state_dict(state),'pc':suite.VM_STOP,
+                'outcome':{'reason':{'kind':'stop_address'},'blocks_executed':2},'data_vm_events':[],
+                'memory':{'memory_before':receipt,'memory_after':receipt,'memory_regions':[dict(memory[0],executable=False)],
+                'memory_reads':[{'address':suite.VM_META,'bytes':16384,'hex':data.hex()}]}}
+        suite.validate_vm_native(report,state,'source',memory,False)
+        mutations=[]
+        for field in ('memory_before','memory_after','memory_reads','memory_regions'):
+            changed=copy.deepcopy(report);changed['memory'][field]=[];mutations.append(changed)
+        changed=copy.deepcopy(report);changed['memory']['memory_regions'][0]['writable']=True;mutations.append(changed)
+        changed=copy.deepcopy(report);changed['memory']['memory_regions'][0]['guest_address']+=16384;mutations.append(changed)
+        changed=copy.deepcopy(report);changed['state']['v'][31][1]=1;mutations.append(changed)
+        for changed in mutations:
+            with self.assertRaises(AssertionError):suite.validate_vm_native(changed,state,'source',memory,False)
+
+
 if __name__ == '__main__':
     unittest.main()

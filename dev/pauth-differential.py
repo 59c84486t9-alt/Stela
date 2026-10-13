@@ -472,7 +472,7 @@ def original_bootstrap(view, main_bytes, main_base, slide, stack_base, stack_byt
     for name, data, base in [('dyld', image, slide), ('main', main_bytes, main_base)]:
         for region in dyld_suite.original_segment_regions(data, base):
             assert region['address'] % 4096 == 0 and region['virtual_bytes'] % 4096 == 0
-            protection = region['initial_protection'] & (~2 if region['flags'] & 16 else MASK)
+            protection = region['initial_protection']
             machine.mem_map(region['address'], region['virtual_bytes'])
             machine.mem_write(region['address'], region['data'])
             machine.mem_protect(region['address'], region['virtual_bytes'], protection)

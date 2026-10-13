@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
+from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC
 from unicorn import arm64_const as arm
 
 from differential import ROOT, State, states, state_dict, initialize_arm, capture_arm, seed_extended_state
@@ -289,6 +289,16 @@ def audit_arguments(report, path, arguments):
                 and matches[0]['executable'] is False, 'owned stack/guard permissions differ')
 
 
+def audit_raw_permissions(report, dyld_image, main_image):
+    require(report.get('mapping_phase') == 'kernel_loaded_unfixed', 'dyld probe mapping phase differs')
+    for image, base in [(dyld_image, report['dyld']['slide']), (main_image, report['main']['load_base'])]:
+        for region in original_segment_regions(image, base):
+            matches = [r for r in report['mapped_regions'] if r['guest_address'] == region['address'] and r['virtual_bytes'] == region['virtual_bytes']]
+            prot = region['initial_protection']
+            require(len(matches) == 1 and (matches[0]['readable'], matches[0]['writable'], matches[0]['executable']) ==
+                    (bool(prot & 1), bool(prot & 2), bool(prot & 4)), 'raw image initial protections differ or SG_READ_ONLY sealed early')
+
+
 def audit_process_input(report, view, executable, arguments, compiler):
     image = executable.read_bytes()
     require(image[:4] == b'\xcf\xfa\xed\xfe', 'integrated verifier currently requires a thin acquired main executable')
@@ -307,6 +317,8 @@ def audit_process_input(report, view, executable, arguments, compiler):
     require(dyld['container_sha256'] == CONTAINER_SHA256 and dyld['slice_offset'] == SLICE_OFFSET
             and dyld['plan']['image']['slice_sha256'] == SLICE_SHA256 and dyld['plan']['image']['file_type'] == 7,
             'dyld input/plan identity differs')
+    _, raw_dyld = classic_slice(DEFAULT_DYLD.read_bytes())
+    audit_raw_permissions(report, raw_dyld, image)
     raw = view['thread_command']
     thread = dyld['plan']['thread']
     require(thread['raw_command_hex'] == raw.hex() and thread['raw_command_sha256'] == digest(raw)
@@ -347,11 +359,126 @@ def audit_integrated(report, view, executable, arguments, compiler):
     return {'original': state_dict(original), 'expected': state_dict(expected), 'native': report}
 
 
+VM_ENTRY, VM_THUNK, VM_STUB, VM_RETURN = 0x341c8, 0x30160, 0x6074, 0x609c
+VM_META, VM_STOP = 0x90000000000, 0xdead0000
+VM_PROFILE = 'darwin-arm64-va47-page16k-data-mprotect-v1'
+
+
+def vm_callback_expected(initial, segment, base):
+    expected = State.from_buffer_copy(initial)
+    if segment['flags'] & 16:
+        expected.x[0], expected.x[1], expected.x[2], expected.x[3] = 0, 0, 1, 1
+        expected.x[8], expected.x[9], expected.x[16] = base, segment['preferred'], 74
+        expected.nzcv &= ~(1 << 29)
+    else:
+        expected.x[8] = segment['flags'] & 255
+    return expected
+
+
+def original_vm_callback(view, initial, segment, base, metadata):
+    machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    machine.mem_map(base, (len(view['text']) + 4095) & ~4095)
+    machine.mem_write(base, view['text'])
+    machine.mem_protect(base, (len(view['text']) + 4095) & ~4095, UC_PROT_READ | UC_PROT_EXEC)
+    machine.mem_map(VM_META, 16384); machine.mem_write(VM_META, metadata); machine.mem_protect(VM_META, 16384, UC_PROT_READ)
+    target = base + segment['preferred']
+    data = segment['data']
+    active = bool(segment['flags'] & 16)
+    if active:
+        require(segment['initial_protection'] == 3 and segment['maximum_protection'] == 3, 'reviewed data protection contract differs')
+        machine.mem_map(target, segment['virtual_bytes'], UC_PROT_READ | UC_PROT_WRITE); machine.mem_write(target, data)
+    machine.reg_write(arm.UC_ARM64_REG_PSTATE, initial.nzcv)  # EL0; kernel return is modeled below.
+    initialize_arm(machine, initial)
+    visited, calls = [], []
+    machine.hook_add(UC_HOOK_CODE, lambda _,pc,size,unused: visited.append(pc))
+    def svc(uc, number, unused):
+        require(number == 2 and uc.reg_read(arm.UC_ARM64_REG_PC) == base + VM_STUB + 8, 'unexpected original exception boundary')
+        args = [uc.reg_read(arm.UC_ARM64_REG_X0 + i) for i in range(3)]
+        require(args == [target, segment['virtual_bytes'], 1] and uc.reg_read(arm.UC_ARM64_REG_X16) == 74, 'original mprotect arguments differ')
+        uc.mem_protect(target, segment['virtual_bytes'], UC_PROT_READ)
+        uc.reg_write(arm.UC_ARM64_REG_X0, 0); uc.reg_write(arm.UC_ARM64_REG_X1, 0)
+        uc.reg_write(arm.UC_ARM64_REG_NZCV, uc.reg_read(arm.UC_ARM64_REG_NZCV) & ~(1 << 29))
+        calls.append(args)
+    machine.hook_add(UC_HOOK_INTR, svc)
+    machine.emu_start(base + VM_ENTRY, VM_STOP, count=32)
+    require(machine.reg_read(arm.UC_ARM64_REG_PC) == VM_STOP, 'original callback did not return')
+    require(len(visited) == (17 if active else 3) and len(calls) == int(active), 'original callback path differs')
+    require(bytes(machine.mem_read(VM_META, 16384)) == metadata, 'original metadata changed')
+    if active:
+        require(bytes(machine.mem_read(target, len(data))) == data, 'original target bytes changed')
+        require(any(a == target and b + 1 == target + len(data) and rights == UC_PROT_READ for a,b,rights in machine.mem_regions()), 'original target protection differs')
+    return capture_arm(machine, initial), visited, calls
+
+
+def validate_vm_native(report, expected, source_hash, memory, active):
+    require(report['kind'] == 'native_block_run' and report['abi'] == ABI and report['source_sha256'] == source_hash
+            and report['data_vm_profile'] == VM_PROFILE and report['complete_binary_verified'] is False, 'VM probe identity/scope differs')
+    require(report['state'] == state_dict(expected) and report['pc'] == VM_STOP, 'VM callback full state differs')
+    outcome = report['outcome']
+    require(outcome['reason'] == {'kind':'stop_address'} and outcome['blocks_executed'] == (6 if active else 2), 'VM callback dispatch differs')
+    before = [{'address':r['guest_address'],'bytes':r['virtual_bytes'],'sha256':digest(bytes(r['initial_bytes']))} for r in sorted(memory,key=lambda r:r['guest_address'])]
+    proof = report['memory']
+    require(proof['memory_before'] == before and proof['memory_after'] == before, 'VM callback RAM hashes differ')
+    require(proof['memory_reads'] == [{'address':VM_META,'bytes':16384,'hex':bytes(next(r for r in memory if r['guest_address']==VM_META)['initial_bytes']).hex()}], 'VM metadata readback differs')
+    require(len(proof['memory_regions']) == len(memory) and {(r['guest_address'],r['virtual_bytes']) for r in proof['memory_regions']} ==
+            {(r['guest_address'],r['virtual_bytes']) for r in memory}, 'VM region coverage incomplete')
+    for region in proof['memory_regions']:
+        require(region['readable'] is True and region['writable'] is False and region['executable'] is False, 'VM final owned protections differ')
+    events = report['data_vm_events']
+    require(len(events) == int(active), 'VM service count differs')
+    if active:
+        target = next(r for r in memory if r['guest_address'] != VM_META)
+        event = events[0]
+        require(event['request'] == {'number':74,'indirect':False,'arguments':[target['guest_address'],target['virtual_bytes'],1],
+                'prototype':{'argument_count':3,'return_type':'int'}} and event['completion'] == {'kind':'success','values':[0,0]}
+                and event['declined'] is None, 'VM service arguments/completion differ')
+
+
+def data_vm_cohort(cli, directory, view, image):
+    rows, seen, svc_count = [], set(), 0
+    source, state_path, memory_path = directory/'vm-text.arm64', directory/'vm-state.json', directory/'vm-memory.json'
+    source.write_bytes(view['text'])
+    templates = states(all_flags=True)
+    for base in (0x40000000000,0x40000004000):
+        for segment in original_segment_regions(image, 0):
+            active = bool(segment['flags'] & 16)
+            for flags in range(16):
+                initial = State.from_buffer_copy(templates[flags]);seed_extended_state(initial, base + flags + segment['preferred'])
+                initial.nzcv = flags << 28; initial.x[0] = VM_META; initial.x[1] = VM_META + 0x80; initial.x[30] = VM_STOP
+                metadata = bytearray(b'\xa5' * 16384)
+                struct.pack_into('<Q',metadata,0x20,base)
+                struct.pack_into('<QQ',metadata,0x90,segment['preferred'],segment['virtual_bytes'])
+                metadata[0xa8] = segment['flags'] & 255
+                expected = vm_callback_expected(initial,segment,base)
+                original, visited, calls = original_vm_callback(view,initial,segment,base,bytes(metadata))
+                require(bytes(original) == bytes(expected), 'original callback differs from independent full-state model')
+                memory = [{'guest_address':VM_META,'virtual_bytes':16384,'initial_bytes':list(metadata),'readable':True,'writable':False}]
+                if active:
+                    memory.append({'guest_address':base+segment['preferred'],'virtual_bytes':segment['virtual_bytes'],
+                        'initial_bytes':list(segment['data']),'readable':True,'writable':True})
+                state_path.write_text(json.dumps(state_dict(initial)));memory_path.write_text(json.dumps({'regions':memory}))
+                report = json.loads(subprocess.check_output([str(cli),'run-blocks',str(source),'--guest-base',hex(base),'--entry',hex(base+VM_ENTRY),
+                    '--stop-pc',hex(VM_STOP),'--state',str(state_path),'--memory',str(memory_path),'--data-vm-services',
+                    '--read-memory',f'{hex(VM_META)}:16384','--block-budget','8','--cache-dir',str(directory/'vm-cache')],timeout=30))
+                validate_vm_native(report,expected,digest(view['text']),memory,active)
+                roots = [base+p for p in ([VM_ENTRY,0x341d4,VM_THUNK,VM_STUB,VM_STUB+8,VM_RETURN] if active else [VM_ENTRY,0x341d0])]
+                cold = sum(pc not in seen for pc in roots)
+                require(report['outcome']['compiled_blocks'] == cold and report['outcome']['disk_cache_hits'] == len(roots)-cold, 'VM cold/disk reuse differs')
+                seen.update(roots);svc_count += len(calls)
+                rows.append({'base':base,'segment':segment['name'],'flags':flags,'original_instruction_pcs':visited,
+                    'initial':state_dict(initial),'original':state_dict(original),'expected':state_dict(expected),'native':report})
+    require(len(rows) == 224 and svc_count == 32 and len(seen) == 14, 'VM cohort coverage differs')
+    return {'profile':VM_PROFILE,'full_state_ram_comparisons':len(rows),'original_mprotect_calls':svc_count,'cold_blocks':len(seen),
+            'fresh_runtime_disk_hits':sum(r['native']['outcome']['disk_cache_hits'] for r in rows),'cases':rows,
+            'limits':'Unchanged original callback/thunk/syscall wrapper execute through genuine SVC, with modeled reviewed kernel result and Unicorn protection change. Native invokes owned host mprotect. No original privileged kernel, ProcessConfig, full self-rebase, TLS/error wrapper or complete process claim.'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dyld', type=Path, default=DEFAULT_DYLD)
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/dyld-entry-differential-report.json')
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
     args = parser.parse_args()
     require(args.dyld.stat().st_size <= MAX_INPUT, 'dyld file exceeds research bound')
@@ -365,9 +492,12 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
-    sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'src/dyld_entry.rs', ROOT / 'crates/stela-runtime/src/process.rs']
+    sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'src/dyld_entry.rs', ROOT / 'crates/stela-runtime/src/process.rs',
+               ROOT / 'src/macho/mapped_image.rs', ROOT / 'crates/stela-runtime/src/memory.rs', ROOT / 'crates/stela-runtime/src/darwin.rs',
+               ROOT / 'crates/stela-runtime/src/blocks.rs', ROOT / 'src/main.rs']
     source_hashes = {str(path.relative_to(ROOT)): digest(path.read_bytes()) for path in sources}
     rows, integrated, compiler = [], [], None
+    vm = None
     templates = states(all_flags=True)
     with tempfile.TemporaryDirectory(prefix='stela-dyld-entry-') as temporary:
         directory = Path(temporary)
@@ -413,6 +543,8 @@ def main():
                 require(outcome['compiled_blocks'] == int(index == 0) and outcome['disk_cache_hits'] == int(index != 0),
                         'integrated AOT/new-loader cache path differs')
             require(input_hash == digest(executable.read_bytes()), 'integrated main source changed')
+        if args.data_vm:
+            vm = data_vm_cohort(cli,directory,view,image)
     require(digest(args.dyld.read_bytes()) == CONTAINER_SHA256 and digest(cli.read_bytes()) == cli_hash
             and all(digest((ROOT / path).read_bytes()) == value for path, value in source_hashes.items()), 'input/compiler/harness changed during proof')
     report = {'kind': 'original_dyld_entry_arm_vs_shared_native', 'passed': True, 'build': '26A434',
@@ -425,7 +557,7 @@ def main():
               'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
               'harness_source_sha256': source_hashes[str(Path(__file__).relative_to(ROOT))],
               'shared_sources_sha256': source_hashes, 'cache_receipts': cached, 'cases': rows,
-              'integrated_argument_probes': integrated,
+              'integrated_argument_probes': integrated,'data_vm':vm,
               'limits': 'Unchanged original five-instruction entry prefix only, two16KiBplacements, aligned/rawSP8mod16 and all16NZCV. Standalone numeric SP values are not dereferenced. Full784Bstandalone state includes nonzero V/FP. Optional integrated cases audit installed argument arrays, guardedstack and raw image mappings at two additional placements, but execute the same register-only prefix with zero initialV/FP. Runtime rejects original PACIBSP before execution; integrated cases stop explicitly and analyze it separately. No PAC semantics, dyld initialization, original chained fixups, Mach services, process launch or complete binary verification.'}
     snapshot = write_evidence(args.output, report)
     print(json.dumps({'passed': True, 'comparisons': len(rows), 'report': str(args.output), 'snapshot': str(snapshot)}, indent=2))
