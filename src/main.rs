@@ -558,12 +558,68 @@ struct RawMemoryInput {
 struct RawMemoryRegionInput {
     guest_address: u64,
     virtual_bytes: u64,
-    #[serde(default)]
-    initial_bytes: Vec<u8>,
+    initial_bytes: Option<Vec<u8>>,
+    initial_file: Option<RawMemoryFileInput>,
     readable: bool,
     writable: bool,
     maximum_readable: Option<bool>,
     maximum_writable: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemoryFileInput {
+    path: PathBuf,
+    #[serde(default)]
+    offset: u64,
+    bytes: u64,
+    sha256: String,
+}
+
+fn raw_initial_bytes(
+    region: &RawMemoryRegionInput,
+    directory: &std::path::Path,
+) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    ensure!(
+        region.initial_bytes.is_none() || region.initial_file.is_none(),
+        "raw memory must select inline bytes or a file, not both"
+    );
+    if let Some(source) = &region.initial_file {
+        ensure!(
+            source.bytes <= region.virtual_bytes
+                && source.bytes <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+            "raw memory file bytes exceed region or input bound"
+        );
+        let end = source
+            .offset
+            .checked_add(source.bytes)
+            .context("raw memory file extent overflow")?;
+        let mut file = File::open(directory.join(&source.path))?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "raw memory source must be an ordinary file"
+        );
+        ensure!(
+            end <= file.metadata()?.len(),
+            "raw memory file extent exceeds source"
+        );
+        let mut bytes = vec![0; usize::try_from(source.bytes)?];
+        file.seek(SeekFrom::Start(source.offset))?;
+        file.read_exact(&mut bytes)?;
+        ensure!(
+            stela_core::sha256(&bytes) == source.sha256,
+            "raw memory file hash differs"
+        );
+        Ok(bytes)
+    } else {
+        let bytes = region.initial_bytes.clone().unwrap_or_default();
+        ensure!(
+            bytes.len() as u64 <= region.virtual_bytes,
+            "raw initial bytes exceed region"
+        );
+        Ok(bytes)
+    }
 }
 fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::OwnedMemory> {
     use std::io::Read;
@@ -585,7 +641,19 @@ fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::O
     );
     let mut limits = Vec::new();
     let mut specs = Vec::new();
+    let mut total = 0u64;
     for r in input.regions {
+        total = total
+            .checked_add(r.virtual_bytes)
+            .context("raw memory extent overflow")?;
+        ensure!(
+            total <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+            "raw memory exceeds input bound"
+        );
+        let initial_bytes = raw_initial_bytes(
+            &r,
+            path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+        )?;
         if r.maximum_readable.is_some() || r.maximum_writable.is_some() {
             limits.push(stela_runtime::memory::DataProtectionLimit {
                 guest_address: r.guest_address,
@@ -596,7 +664,7 @@ fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::O
         specs.push(stela_runtime::memory::MemoryRegionSpec {
             guest_address: r.guest_address,
             virtual_bytes: r.virtual_bytes,
-            initial_bytes: r.initial_bytes,
+            initial_bytes,
             readable: r.readable,
             writable: r.writable,
             executable: false,
@@ -2059,6 +2127,31 @@ mod clock_cli_tests {
         }
         std::fs::write(&memory, vec![b' '; 4 * 1024 * 1024 + 1])?;
         assert!(raw_memory(Some(&memory)).is_err());
+        let payload = folder.path().join("payload.bin");
+        std::fs::write(&payload, [9, 8, 7, 6, 5, 4])?;
+        let region = serde_json::json!({"guest_address":0,"virtual_bytes":4096,
+            "readable":true,"writable":false,
+            "initial_file":{"path":"payload.bin","offset":2,"bytes":3,
+                "sha256":stela_core::sha256(&[7,6,5])}});
+        let parsed: RawMemoryRegionInput = serde_json::from_value(region.clone())?;
+        assert_eq!(raw_initial_bytes(&parsed, folder.path())?, [7, 6, 5]);
+        for change in [
+            serde_json::json!({"offset":5}),
+            serde_json::json!({"offset":u64::MAX}),
+            serde_json::json!({"bytes":4097}),
+            serde_json::json!({"sha256":"wrong"}),
+            serde_json::json!({"path":"missing.bin"}),
+        ] {
+            let mut invalid = region.clone();
+            for (key, value) in change.as_object().unwrap() {
+                invalid["initial_file"][key] = value.clone();
+            }
+            let parsed = serde_json::from_value(invalid)?;
+            assert!(raw_initial_bytes(&parsed, folder.path()).is_err());
+        }
+        let mut conflicting = region;
+        conflicting["initial_bytes"] = serde_json::json!([]);
+        assert!(raw_initial_bytes(&serde_json::from_value(conflicting)?, folder.path()).is_err());
         Ok(())
     }
 
