@@ -237,7 +237,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -388,7 +388,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_integer_batches(batches) if batches[0].get('cohort')=='integer' else execute_batches(batches, pipe)})
+        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in ('integer','rearrange') else execute_batches(batches, pipe)})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -639,6 +639,91 @@ def integer_programs():
     return programs
 
 
+def rearrange_programs():
+    configurations=[]
+    for name,base in [('dupg',0x0e000c00),('dupv',0x0e000400),('dups',0x5e000400),
+                      ('insg',0x4e001c00),('insv',0x6e000400),('smov',0x0e002c00),('umov',0x0e003c00)]:
+        for q in ((1,) if name in ('dups','insg','insv') else (0,1)):
+            for imm5 in range(1,32):
+                if not imm5&15: continue
+                lane=(imm5&-imm5);size=lane.bit_length()-1
+                if name.startswith('dup') and name!='dups' and not q and size==3: continue
+                if name=='smov' and size>=2+q: continue
+                if name=='umov' and ((q==1)!=(size==3)): continue
+                indices={0,15,(imm5>>(size+1))*lane,lane-1} if name=='insv' else {0}
+                for imm4 in sorted(indices):
+                    configurations.append({'name':name,'base':base|(q<<30)|(imm5<<16)|(imm4<<11),
+                        'lane':lane,'bytes':8<<q,'index':imm5>>(size+1),'source_index':imm4>>size})
+    for q in (0,1):
+        for offset in range(8<<q):
+            configurations.append({'name':'ext','base':0x2e000000|(q<<30)|(offset<<11),'lane':1,'bytes':8<<q,'offset':offset})
+        for name,base,container in [('rev16',0x0e201800,2),('rev32',0x2e200800,4),('rev64',0x0e200800,8)]:
+            for size in range(container.bit_length()-1):
+                configurations.append({'name':name,'base':base|(q<<30)|(size<<22),'lane':1<<size,'bytes':8<<q,'container':container})
+        for name,base in [('zip1',0x0e003800),('zip2',0x0e007800),('uzp1',0x0e001800),('uzp2',0x0e005800),('trn1',0x0e002800),('trn2',0x0e006800)]:
+            for size in range(4):
+                if size==3 and not q: continue
+                configurations.append({'name':name,'base':base|(q<<30)|(size<<22),'lane':1<<size,'bytes':8<<q})
+        for preserve in (0,1):
+            for regs in range(1,5):
+                configurations.append({'name':'tbx' if preserve else 'tbl','base':0x0e000000|(q<<30)|(preserve<<12)|((regs-1)<<13),'lane':1,'bytes':8<<q,'registers':regs})
+    programs=[]
+    for config in configurations:
+        def operation(d,n,m):
+            # Only EXT/ZIP/UZP/TRN/TBL/TBX have a second vector field.
+            binary=config['name'] in ('ext','tbl','tbx') or config['name'].startswith(('zip','uzp','trn'))
+            return {**config,'kind':'rearrange','d':d,'n':n,'m':m,
+                    'word':config['base']|(n<<5)|d|(m<<16 if binary else 0)}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31),(0,31,31),(31,29,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def rearrange_mathematical(operations,initial):
+    vectors=[list(struct.pack('<2Q',*v)) for v in initial.v]
+    gprs=list(initial.x)
+    for op in operations:
+        name,d,n,m,lane,width=(op[k] for k in ('name','d','n','m','lane','bytes'))
+        a,b,old=vectors[n][:],vectors[m][:],vectors[d][:]
+        if name in ('dupg','dupv','dups','insg','insv','smov','umov'):
+            index=op['index'];source_index=op['source_index'] if name=='insv' else index
+            element=list((0 if n==31 else gprs[n]).to_bytes(8,'little')[:lane]) if name in ('dupg','insg') else a[source_index*lane:(source_index+1)*lane]
+            if name in ('smov','umov'):
+                value=int.from_bytes(bytes(element),'little',signed=name=='smov')
+                if d!=31: gprs[d]=value&((1<<(64 if width==16 else 32))-1)
+                continue
+            if name.startswith('ins'):
+                result=old;result[index*lane:(index+1)*lane]=element
+            else:
+                active=lane if name=='dups' else width
+                result=element*(active//lane)+[0]*(16-active)
+        elif name=='ext': result=(a[:width]+b[:width])[op['offset']:op['offset']+width]+[0]*(16-width)
+        elif name.startswith('rev'):
+            container=op['container'];result=[]
+            for start in range(0,width,container):
+                elements=[a[i:i+lane] for i in range(start,start+container,lane)]
+                result+=sum(reversed(elements),[])
+            result+=[0]*(16-width)
+        elif name.startswith(('zip','uzp','trn')):
+            left=[a[i:i+lane] for i in range(0,width,lane)]
+            right=[b[i:i+lane] for i in range(0,width,lane)]
+            part=int(name[-1])-1
+            if name.startswith('zip'):
+                half=len(left)//2
+                pairs=zip(left[part*half:(part+1)*half],right[part*half:(part+1)*half])
+                elements=[e for pair in pairs for e in pair]
+            elif name.startswith('uzp'): elements=(left+right)[part::2]
+            else: elements=[e for pair in zip(left[part::2],right[part::2]) for e in pair]
+            result=sum(elements,[])+[0]*(16-width)
+        else:
+            table=sum((vectors[(n+i)%32][:] for i in range(op['registers'])),[])
+            result=[table[index] if index<len(table) else old[i] if name=='tbx' else 0 for i,index in enumerate(b[:width])]+[0]*(16-width)
+        assert len(result)==16
+        vectors[d]=result
+    return {**state_dict(initial),'x':gprs,'v':[list(struct.unpack('<2Q',bytes(v))) for v in vectors]}
+
+
 def integer_mathematical(operations,initial):
     vectors=[lo|(hi<<64) for lo,hi in initial.v]
     for op in operations:
@@ -666,8 +751,9 @@ def integer_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
-def execute_integer_batches(batches):
+def execute_register_batches(batches):
     corpus,comparisons=hashlib.sha256(),0
+    templates=states(all_flags=True)
     for batch in batches:
         machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
         machine.mem_map(BASE,(len(batch['source'])+4095)&~4095);machine.mem_write(BASE,batch['source'])
@@ -675,9 +761,11 @@ def execute_integer_batches(batches):
             for function,entry,offset in zip(batch['functions'],batch['entries'],batch['offsets']):
                 native=ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+offset)
                 operations=function['operations'];lane=operations[0]['lane'];bits=lane*8
+                rearrange=batch.get('cohort')=='rearrange'
+                table=rearrange and operations[0]['name'] in ('tbl','tbx')
                 for flags in (0,15):
-                    for pattern in range(5):
-                        initial=State.from_buffer_copy(states(all_flags=True)[flags]);initial.nzcv=flags<<28
+                    for pattern in range(256//operations[0]['bytes'] if table else 5):
+                        initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
                         initial.reserved=0x51ad1234
                         seed_extended_state(initial,pattern*16+flags)
                         if pattern<4:
@@ -686,12 +774,17 @@ def execute_integer_batches(batches):
                             for register in range(32):
                                 value=sum(values[(register+i+pattern)%len(values)]<<(i*bits) for i in range(128//bits))
                                 initial.v[register][:]=[value&MASK,value>>64]
+                        if table:
+                            # The output lanes collectively cover every unsigned index 0..255, including all table edges.
+                            for op in operations:
+                                indices=bytes((pattern*op['bytes']+i)%256 for i in range(16))
+                                initial.v[op['m']][:]=struct.unpack('<2Q',indices)
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
                         assert machine.reg_read(arm.UC_ARM64_REG_PC)==end
                         original=state_dict(capture_arm(machine,initial))
-                        mathematical=integer_mathematical(operations,initial)
+                        mathematical=(rearrange_mathematical if rearrange else integer_mathematical)(operations,initial)
                         actual=State.from_buffer_copy(initial);native(ctypes.byref(actual));actual=state_dict(actual)
                         if mathematical!=original or original!=actual:
                             raise AssertionError(json.dumps({'operations':operations,'initial':state_dict(initial),
@@ -701,8 +794,8 @@ def execute_integer_batches(batches):
     return {'three_way_register_state_comparisons':comparisons,'state_corpus_sha256':corpus.hexdigest()}
 
 
-def run_integer_cohort(cli):
-    functions=integer_programs();started=time.monotonic()
+def run_register_cohort(cli, focus):
+    functions=rearrange_programs() if focus=='rearrange' else integer_programs();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
     info=json.loads(subprocess.check_output([str(cli),'cpu-info']))
     selections=[('baseline','x86_64-baseline')]
@@ -711,21 +804,24 @@ def run_integer_cohort(cli):
     with tempfile.TemporaryDirectory(prefix='stela-simd-integer-') as temporary:
         for index,(selection,target_id) in enumerate(selections):
             batch=compile_batch(cli,Path(temporary),functions,index,cpu_target=selection,target_id=target_id)
-            batch['cohort']='integer'
+            batch['cohort']=focus
             result=bounded_cases([batch])
             decoded=list(Cs(CS_ARCH_X86,CS_MODE_64).disasm(batch['native'],0))
             assert sum(i.size for i in decoded)==len(batch['native'])
             mnemonics=Counter(i.mnemonic for i in decoded)
             optional={o['mnemonic'] for o in info['simd_opcodes'] if o['minimum_target']!='x86_64-baseline'}
             used=sorted(optional & mnemonics.keys())
-            expected={'pabsb','pabsw','pabsd'} if '+ssse3' in target_id else set()
-            if '+sse4.1' in target_id: expected.add('pcmpeqq')
-            if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            expected=set()
+            if focus=='integer':
+                if '+ssse3' in target_id: expected.update(('pabsb','pabsw','pabsd'))
+                if '+sse4.1' in target_id: expected.add('pcmpeqq')
+                if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            elif '+ssse3' in target_id: expected.add('pshufb')
             assert set(used)==expected,(target_id,used,expected)
             profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used}
     assert digest(cli.read_bytes())==cli_hash and digest(Path(__file__).read_bytes())==harness_hash
     baseline=profiles['baseline']
-    report={'kind':'simd_integer_arm_vs_native_x86','passed':True,
+    report={'kind':f'simd_{focus}_arm_vs_native_x86','passed':True,
         'three_way_register_state_comparisons':baseline['three_way_register_state_comparisons'],
         'state_corpus_sha256':baseline['state_corpus_sha256'],'programs':len(functions),
         'compiler_source_sha256':batch['compiler'],'compiler_executable_sha256':cli_hash,
@@ -733,20 +829,20 @@ def run_integer_cohort(cli):
         'corpus_sha256':digest(batch['source']),'compilation':baseline['compilation'],'cpu_profiles':profiles,
         'total_profile_comparisons':sum(p['three_way_register_state_comparisons'] for p in profiles.values()),
         'verification_wall_seconds':time.monotonic()-started,
-        'limits':'Focused non-saturating integer/logical SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
-    write_evidence(ROOT/'.stela/simd-integer-differential-report.json',report)
+        'limits':f'Focused {focus} SIMD semantics with FP/AdvSIMD enabled; no FP arithmetic, traps, disabled-feature behavior or application-performance claim. Leaf RET is harness-owned.'}
+    write_evidence(ROOT/f'.stela/simd-{focus}-differential-report.json',report)
     print(json.dumps(report,indent=2))
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=['integer'], help='Only the focused SIMD integer implementation cohort')
+    parser.add_argument('--focus', choices=['integer','rearrange'], help='Only the focused SIMD register implementation cohort')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     if arguments.focus:
-        run_integer_cohort(cli)
+        run_register_cohort(cli, arguments.focus)
         return
     cli_hash = digest(cli.read_bytes())
     source_paths = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'dev/memory-faults.py', ROOT / 'dev/native-memory-faults.c']

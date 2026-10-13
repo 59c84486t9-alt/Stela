@@ -1,6 +1,7 @@
 """Independent encoding/coverage and SIMD byte-oracle regression checks."""
 import ctypes
 import importlib
+import json
 import struct
 import unittest
 
@@ -11,6 +12,33 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_rearrangement_cohort_covers_all_27_canonical_forms_and_both_widths(self):
+        registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
+        forms=[f for f in registry['forms'] if 'simd_rearrange' in f.get('evidence_groups',[])]
+        operations=[o for p in suite.rearrange_programs() for o in p['operations']]
+        self.assertEqual(len(forms),27)
+        for form in forms:
+            matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
+            self.assertTrue(matches,form['id'])
+            self.assertEqual({o['d'] for o in matches},set(range(32)))
+        for name in ('tbl','tbx'):
+            tables=[o for o in operations if o['name']==name]
+            self.assertEqual({o['registers'] for o in tables},{1,2,3,4})
+            self.assertEqual({o['bytes'] for o in tables},{8,16})
+            self.assertTrue(any(o['n']==31 and o['d']==o['m'] for o in tables))
+
+    def test_lane_oracle_has_independent_signed_width_zero_and_preserved_lane_rules(self):
+        initial=State()
+        initial.v[31][:]=[0x80,0xffffffffffffffff]
+        operation={'name':'smov','d':0,'n':31,'m':0,'lane':1,'bytes':8,'index':0}
+        observed=suite.rearrange_mathematical([operation],initial)
+        self.assertEqual(observed['x'][0],0xffffff80) # signed W write still clears X high half
+        operation['bytes']=16
+        self.assertEqual(suite.rearrange_mathematical([operation],initial)['x'][0],0xffffffffffffff80)
+        ins={'name':'insg','d':31,'n':31,'m':0,'lane':1,'bytes':16,'index':7}
+        observed=suite.rearrange_mathematical([ins],initial)
+        self.assertEqual(observed['v'][31],[0x80,0xffffffffffffffff])
+
     def test_known_original_words_decode_to_expected_reviewed_operands(self):
         self.assertEqual(suite.memory_encoding(8, True, 0, 8, 1504, 'unsigned'), 0xfd42f100)
         self.assertEqual(suite.memory_encoding(16, True, 0, 29, -88, 'unscaled'), 0x3cda83a0)

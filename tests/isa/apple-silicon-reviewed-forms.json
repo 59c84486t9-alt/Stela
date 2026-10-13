@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v14",
+  "registry_version": "apple-silicon-reviewed-forms-v15",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -169,6 +169,22 @@
         "programs": 952,
         "three_way_register_state_comparisons": 9520
       }
+    },
+    "simd_rearrange": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-rearrange-differential-report.json",
+      "kind": "simd_rearrange_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 3157,
+        "three_way_register_state_comparisons": 35826,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 35826
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -14153,6 +14169,978 @@
           ]
         }
       ]
+    },
+    {
+      "id": "DUP_asimdins_DR_r",
+      "instruction_id": "DUP_advsimd_gen",
+      "mnemonic": "DUP",
+      "category": "fp_simd",
+      "source_file": "dup_advsimd_gen.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e000c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "75b9fd2c3506c63707cf242252ec66d466c0d29e547c7e8bb86bbcce225d4799",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e010c20",
+          "expected_mnemonics": [
+            "dup"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "DUP_asimdins_DV_v",
+      "instruction_id": "DUP_advsimd_elt",
+      "mnemonic": "DUP",
+      "category": "fp_simd",
+      "source_file": "dup_advsimd_elt.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "fe609c4dd48f50426e833eca462c3b71ef66aabb0127ee93ed2b7aa5a08669da",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e010420",
+          "expected_mnemonics": [
+            "dup"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "DUP_asisdone_only",
+      "instruction_id": "DUP_advsimd_elt",
+      "mnemonic": "DUP",
+      "category": "fp_simd",
+      "source_file": "dup_advsimd_elt.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "fe609c4dd48f50426e833eca462c3b71ef66aabb0127ee93ed2b7aa5a08669da",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e010420",
+          "expected_mnemonics": [
+            "mov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EXT_asimdext_only",
+      "instruction_id": "EXT_advsimd",
+      "mnemonic": "EXT",
+      "category": "fp_simd",
+      "source_file": "ext_advsimd.xml",
+      "encoding_mask": "0xbfe08400",
+      "encoding_value": "0x2e000000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "6a16a5191dc2341e0c83d8c75dc172b334782c639e6a3e0831d6f8630d98267e",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e020020",
+          "expected_mnemonics": [
+            "ext"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "INS_asimdins_IR_r",
+      "instruction_id": "INS_advsimd_gen",
+      "mnemonic": "INS",
+      "category": "fp_simd",
+      "source_file": "ins_advsimd_gen.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4e001c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "690d780676f7fc26ef46c33f1859dc962ef8db3849af853ac7ef7f1eab1520b2",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4e011c20",
+          "expected_mnemonics": [
+            "mov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "INS_asimdins_IV_v",
+      "instruction_id": "INS_advsimd_elt",
+      "mnemonic": "INS",
+      "category": "fp_simd",
+      "source_file": "ins_advsimd_elt.xml",
+      "encoding_mask": "0xffe08400",
+      "encoding_value": "0x6e000400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4ffbd67aa57206c676c9d3ab8bb00aeeac687b8dde781e3c87f586235731dbde",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6e010420",
+          "expected_mnemonics": [
+            "mov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "REV16_asimdmisc_R",
+      "instruction_id": "REV16_advsimd",
+      "mnemonic": "REV16",
+      "category": "fp_simd",
+      "source_file": "rev16_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e201800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "27846aaf7957d6b01ed47bc4c91f0dd9f79a0283f0aff5baa95a1b9a1327a66a",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e201820",
+          "expected_mnemonics": [
+            "rev16"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "REV32_asimdmisc_R",
+      "instruction_id": "REV32_advsimd",
+      "mnemonic": "REV32",
+      "category": "fp_simd",
+      "source_file": "rev32_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x2e200800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "3998ec66a178fcea49f8059b1a194abd7d2414d3f2ede786e2232cd9e26f1d59",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e200820",
+          "expected_mnemonics": [
+            "rev32"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "REV64_asimdmisc_R",
+      "instruction_id": "REV64_advsimd",
+      "mnemonic": "REV64",
+      "category": "fp_simd",
+      "source_file": "rev64_advsimd.xml",
+      "encoding_mask": "0xbf3ffc00",
+      "encoding_value": "0x0e200800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0014283d7c289fad8e3997252bc9297c8703f1ec86d8c7742eab52ec933b0c46",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e200820",
+          "expected_mnemonics": [
+            "rev64"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMOV_asimdins_W_w",
+      "instruction_id": "SMOV_advsimd",
+      "mnemonic": "SMOV",
+      "category": "fp_simd",
+      "source_file": "smov_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x0e002c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f8d3f56e5812118f2d504287d07f3599c82763ec71f73a4cfcc8a6ae6749718c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e012c20",
+          "expected_mnemonics": [
+            "smov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SMOV_asimdins_X_x",
+      "instruction_id": "SMOV_advsimd",
+      "mnemonic": "SMOV",
+      "category": "fp_simd",
+      "source_file": "smov_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4e002c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f8d3f56e5812118f2d504287d07f3599c82763ec71f73a4cfcc8a6ae6749718c",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4e012c20",
+          "expected_mnemonics": [
+            "smov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBL_asimdtbl_L1_1",
+      "instruction_id": "TBL_advsimd",
+      "mnemonic": "TBL",
+      "category": "fp_simd",
+      "source_file": "tbl_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e000000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "74f0217a0d1e6919528de28fae39eeefa5fbf3b6496f21e49e4e379cc105af82",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e020020",
+          "expected_mnemonics": [
+            "tbl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBL_asimdtbl_L2_2",
+      "instruction_id": "TBL_advsimd",
+      "mnemonic": "TBL",
+      "category": "fp_simd",
+      "source_file": "tbl_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e002000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "74f0217a0d1e6919528de28fae39eeefa5fbf3b6496f21e49e4e379cc105af82",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e022020",
+          "expected_mnemonics": [
+            "tbl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBL_asimdtbl_L3_3",
+      "instruction_id": "TBL_advsimd",
+      "mnemonic": "TBL",
+      "category": "fp_simd",
+      "source_file": "tbl_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e004000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "74f0217a0d1e6919528de28fae39eeefa5fbf3b6496f21e49e4e379cc105af82",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e024020",
+          "expected_mnemonics": [
+            "tbl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBL_asimdtbl_L4_4",
+      "instruction_id": "TBL_advsimd",
+      "mnemonic": "TBL",
+      "category": "fp_simd",
+      "source_file": "tbl_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e006000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "74f0217a0d1e6919528de28fae39eeefa5fbf3b6496f21e49e4e379cc105af82",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e026020",
+          "expected_mnemonics": [
+            "tbl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBX_asimdtbl_L1_1",
+      "instruction_id": "TBX_advsimd",
+      "mnemonic": "TBX",
+      "category": "fp_simd",
+      "source_file": "tbx_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e001000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "51e48f94d1e47e3ad0397b8656c0e316adf00fd90c66eeccba7ecfd92649802d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e021020",
+          "expected_mnemonics": [
+            "tbx"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBX_asimdtbl_L2_2",
+      "instruction_id": "TBX_advsimd",
+      "mnemonic": "TBX",
+      "category": "fp_simd",
+      "source_file": "tbx_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e003000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "51e48f94d1e47e3ad0397b8656c0e316adf00fd90c66eeccba7ecfd92649802d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e023020",
+          "expected_mnemonics": [
+            "tbx"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBX_asimdtbl_L3_3",
+      "instruction_id": "TBX_advsimd",
+      "mnemonic": "TBX",
+      "category": "fp_simd",
+      "source_file": "tbx_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e005000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "51e48f94d1e47e3ad0397b8656c0e316adf00fd90c66eeccba7ecfd92649802d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e025020",
+          "expected_mnemonics": [
+            "tbx"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TBX_asimdtbl_L4_4",
+      "instruction_id": "TBX_advsimd",
+      "mnemonic": "TBX",
+      "category": "fp_simd",
+      "source_file": "tbx_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e007000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "51e48f94d1e47e3ad0397b8656c0e316adf00fd90c66eeccba7ecfd92649802d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e027020",
+          "expected_mnemonics": [
+            "tbx"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TRN1_asimdperm_only",
+      "instruction_id": "TRN1_advsimd",
+      "mnemonic": "TRN1",
+      "category": "fp_simd",
+      "source_file": "trn1_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e002800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4d3936888dad992880ff44e8792c1b057914596ec021a24d212c5473933c193f",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e022820",
+          "expected_mnemonics": [
+            "trn1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TRN2_asimdperm_only",
+      "instruction_id": "TRN2_advsimd",
+      "mnemonic": "TRN2",
+      "category": "fp_simd",
+      "source_file": "trn2_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e006800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f9507a953b553b19cf3af317c529cf528c802bc7ffbd43b76faf8fbd5daa2455",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e026820",
+          "expected_mnemonics": [
+            "trn2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMOV_asimdins_W_w",
+      "instruction_id": "UMOV_advsimd",
+      "mnemonic": "UMOV",
+      "category": "fp_simd",
+      "source_file": "umov_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x0e003c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "68feee509104caab09f19a9e20457d61502de6703454205570b2bcc5620b4777",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e013c20",
+          "expected_mnemonics": [
+            "umov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UMOV_asimdins_X_x",
+      "instruction_id": "UMOV_advsimd",
+      "mnemonic": "UMOV",
+      "category": "fp_simd",
+      "source_file": "umov_advsimd.xml",
+      "encoding_mask": "0xffeffc00",
+      "encoding_value": "0x4e083c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "68feee509104caab09f19a9e20457d61502de6703454205570b2bcc5620b4777",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4e083c20",
+          "expected_mnemonics": [
+            "mov"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UZP1_asimdperm_only",
+      "instruction_id": "UZP1_advsimd",
+      "mnemonic": "UZP1",
+      "category": "fp_simd",
+      "source_file": "uzp1_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e001800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "871e04f0e3b0f3f4ff095b24b99c52ebdcf4d62a5350da3ccb23dd67b5538845",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e021820",
+          "expected_mnemonics": [
+            "uzp1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UZP2_asimdperm_only",
+      "instruction_id": "UZP2_advsimd",
+      "mnemonic": "UZP2",
+      "category": "fp_simd",
+      "source_file": "uzp2_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e005800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0343a315d711496003ae66f5b45261650b3b786d56c9443f8e7d2f7a12f82009",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e025820",
+          "expected_mnemonics": [
+            "uzp2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ZIP1_asimdperm_only",
+      "instruction_id": "ZIP1_advsimd",
+      "mnemonic": "ZIP1",
+      "category": "fp_simd",
+      "source_file": "zip1_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e003800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a92d434658972da6e4771d914226e8dde4c6ab11f887517b1795b65b64ecc032",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e023820",
+          "expected_mnemonics": [
+            "zip1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ZIP2_asimdperm_only",
+      "instruction_id": "ZIP2_advsimd",
+      "mnemonic": "ZIP2",
+      "category": "fp_simd",
+      "source_file": "zip2_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e007800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "df473bb54a2a98112eca7202b6087d5a1d0e689658460949eed6fbcdce058f55",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim.",
+      "review": "Pinned Arm A64 2026-06 encoding/decode/operation review; focused original ARM vs independent byte/lane math vs native x86 full-state comparison on baseline and checked SSSE3 paths.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+        "crates/stela-compiler/src/x86_64/simd/rearrange.rs"
+      ],
+      "evidence_groups": [
+        "simd_rearrange"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e027820",
+          "expected_mnemonics": [
+            "zip2"
+          ]
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -14174,6 +15162,8 @@
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
+    "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
+    "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ]

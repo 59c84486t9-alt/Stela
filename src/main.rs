@@ -830,7 +830,7 @@ fn run() -> Result<()> {
                         "mnemonic": opcode.mnemonic(), "opcode_bytes": opcode.encoding(),
                         "minimum_target": opcode.requires().id(),
                         "available_on_host": opcode.requires().supported(),
-                        "lowering_enabled": *opcode != SimdOpcode::ByteShuffle,
+                        "lowering_enabled": true,
                     })
                 })
                 .collect();
