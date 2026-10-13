@@ -1,15 +1,16 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
-use crate::{Prepared, execution::platform, pauth, prepare_block_with_profile};
+use crate::{Prepared, clock, execution::platform, pauth, prepare_block_with_profile};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
     block::{
-        BlockAnalysis, BlockExit, BlockProfile, DynamicEdge, ExitKind, MAX_BLOCK_INSTRUCTIONS,
-        PointerAuthentication, PointerAuthenticationOperation, SynchronousTrap,
-        analyze_with_profile, decode_pointer_authentication, decode_trap,
+        BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, ClockOperation, DynamicEdge,
+        ExitKind, MAX_BLOCK_INSTRUCTIONS, PointerAuthentication, PointerAuthenticationOperation,
+        SynchronousTrap, analyze_with_profile, decode_clock_instruction,
+        decode_pointer_authentication, decode_trap,
     },
 };
 use stela_core::sha256;
@@ -59,6 +60,13 @@ pub enum StopReason {
         instruction: PointerAuthentication,
         poisoned_target: GuestAddress,
     },
+    ClockRequired {
+        instruction: ClockInstruction,
+    },
+    ClockUnavailable {
+        instruction: ClockInstruction,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +75,14 @@ pub struct PointerAuthenticationEvent {
     pub next_pc: GuestAddress,
     /// Signing has no authentication result; AUT/RET report the actual check.
     pub authenticated: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClockEvent {
+    pub instruction: ClockInstruction,
+    pub next_pc: GuestAddress,
+    /// ISB does not consume a clock sample. MRS XZR still reads/publishes one.
+    pub counter: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +95,8 @@ pub struct RunOutcome {
     pub last_exit: Option<(u64, u64)>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pointer_authentication_events: Vec<PointerAuthenticationEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clock_events: Vec<ClockEvent>,
 }
 
 #[derive(Debug)]
@@ -460,7 +478,7 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
-        unsafe { self.run_inner(state, stop_pc, block_budget, None) }
+        unsafe { self.run_inner(state, stop_pc, block_budget, None, None) }
     }
 
     /// Execute the explicit software PAuth profile with a process-owned key domain.
@@ -478,14 +496,45 @@ impl BlockRuntime {
         context: &pauth::Context,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile == BlockProfile::AppleArm64eSoftwarePauthV1,
+            self.profile.supports_pointer_authentication(),
             "PAuth execution requires the explicit software PAuth block profile"
         );
         ensure!(
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
-        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context)) }
+        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context), None) }
+    }
+
+    /// Execute explicit PAC/clock helpers using caller-owned address-space services.
+    /// The clock owns its read-only commpage and publishes only at helper boundaries.
+    ///
+    /// # Safety
+    /// Same trusted-code/direct-RAM requirements as [`Self::run`]. No concurrent
+    /// translated execution may access the clock page during publication. The
+    /// profile models ISB with host instruction serialization for immutable guest
+    /// code, not arbitrary privilege/context/cache-maintenance changes.
+    pub unsafe fn run_with_clock(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        pauth: &pauth::Context,
+        clock: &mut clock::Context,
+    ) -> Result<RunOutcome> {
+        ensure!(
+            self.profile.supports_clock(),
+            "clock execution requires the explicit software clock block profile"
+        );
+        ensure!(
+            pauth.address_space() == self.address_space,
+            "PAuth context belongs to another guest address space"
+        );
+        ensure!(
+            clock.address_space() == self.address_space,
+            "clock context belongs to another guest address space"
+        );
+        unsafe { self.run_inner(state, stop_pc, block_budget, Some(pauth), Some(clock)) }
     }
 
     unsafe fn run_inner(
@@ -494,6 +543,7 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
         context: Option<&pauth::Context>,
+        mut clock_context: Option<&mut clock::Context>,
     ) -> Result<RunOutcome> {
         platform::ensure_supported()?;
         let mut outcome = RunOutcome {
@@ -504,18 +554,19 @@ impl BlockRuntime {
             memory_cache_hits: 0,
             last_exit: None,
             pointer_authentication_events: Vec::new(),
+            clock_events: Vec::new(),
         };
         loop {
             let pc = state.pc;
             // A zero budget requests no instruction fetch or execution.
-            if self.profile == BlockProfile::AppleArm64eSoftwarePauthV1 && block_budget == 0 {
+            if self.profile.supports_pointer_authentication() && block_budget == 0 {
                 break;
             }
             // Instruction TBI is disabled in the fixed VA47 software profile.
             // This also prevents a resumed poisoned RETAB target from becoming
             // executable through a registered snapshot or matching stop sentinel.
             let extension = pc.0 >> 47;
-            if self.profile == BlockProfile::AppleArm64eSoftwarePauthV1
+            if self.profile.supports_pointer_authentication()
                 && extension != 0
                 && extension != u64::MAX >> 47
             {
@@ -581,7 +632,7 @@ impl BlockRuntime {
             };
             let pointer_authentication = if exit_kind == ExitKind::PointerAuthentication {
                 ensure!(
-                    self.profile == BlockProfile::AppleArm64eSoftwarePauthV1,
+                    self.profile.supports_pointer_authentication(),
                     "ordinary block produced an unrequested PAuth helper exit"
                 );
                 Some(validate_pauth_exit(
@@ -594,9 +645,46 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let clock_instruction = if exit_kind == ExitKind::Clock {
+                ensure!(
+                    self.profile.supports_clock(),
+                    "block produced an unrequested clock helper exit"
+                );
+                Some(validate_clock_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some(instruction) = clock_instruction {
+                let Some(clock) = clock_context.as_deref_mut() else {
+                    outcome.reason = StopReason::ClockRequired { instruction };
+                    break;
+                };
+                let counter = match complete_clock(clock, &instruction, &mut state.registers) {
+                    Ok(counter) => counter,
+                    Err(error) => {
+                        outcome.reason = StopReason::ClockUnavailable {
+                            instruction,
+                            detail: error.to_string(),
+                        };
+                        break;
+                    }
+                };
+                state.pc = instruction.next_pc;
+                outcome.clock_events.push(ClockEvent {
+                    instruction,
+                    next_pc: instruction.next_pc,
+                    counter,
+                });
+            }
             if let Some(instruction) = pointer_authentication {
                 let Some(context) = context else {
                     outcome.reason = StopReason::PointerAuthenticationRequired { instruction };
@@ -647,6 +735,81 @@ impl BlockRuntime {
     pub fn loaded_manifest(&self, pc: GuestAddress) -> Option<&crate::Manifest> {
         self.loaded.get(&pc.0).map(|block| &block.prepared.manifest)
     }
+}
+
+fn complete_clock(
+    context: &mut clock::Context,
+    instruction: &ClockInstruction,
+    registers: &mut GuestState,
+) -> Result<Option<u64>> {
+    match instruction.operation {
+        ClockOperation::ReadVirtualCounter { destination } => {
+            ensure!(destination < 32, "invalid clock destination register");
+            // Sampling and complete commpage publication must succeed before
+            // committing the destination. X31 discards the result, not the read.
+            let counter = context.read_counter()?;
+            if destination != 31 {
+                registers.x[usize::from(destination)] = counter;
+            }
+            Ok(Some(counter))
+        }
+        ClockOperation::InstructionSynchronization => {
+            serialize_instruction_execution()?;
+            Ok(None)
+        }
+    }
+}
+
+fn serialize_instruction_execution() -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::sync::atomic::{Ordering, compiler_fence};
+        compiler_fence(Ordering::SeqCst);
+        // CPUID is available on the x86-64 baseline. Leaf0 is a genuine
+        // serializing instruction; the intrinsic owns its host scratch outputs.
+        let _ = std::arch::x86_64::__cpuid(0);
+        compiler_fence(Ordering::SeqCst);
+        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    anyhow::bail!("instruction synchronization requires the x86-64 runtime")
+}
+
+fn validate_clock_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<ClockInstruction> {
+    ensure!(
+        source_bytes >= 4 && source_bytes.is_multiple_of(4),
+        "invalid clock block extent"
+    );
+    let terminal = entry
+        .0
+        .checked_add(u64::try_from(source_bytes - 4)?)
+        .context("clock terminal address overflow")?;
+    ensure!(
+        exit.0 == terminal,
+        "clock exit differs from consumed terminal instruction"
+    );
+    let offset = usize::try_from(
+        terminal
+            .checked_sub(region_base)
+            .context("clock precedes source region")?,
+    )?;
+    let end = offset
+        .checked_add(4)
+        .context("clock source extent overflow")?;
+    let word = u32::from_le_bytes(
+        source
+            .get(offset..end)
+            .context("clock exceeds immutable source")?
+            .try_into()?,
+    );
+    decode_clock_instruction(exit, word)?
+        .context("clock exit does not identify a reviewed instruction")
 }
 
 fn complete_pauth(
@@ -782,6 +945,32 @@ mod trap_validation_tests {
     use super::*;
 
     #[test]
+    fn clock_exit_requires_exact_consumed_source_descriptor() {
+        let base = GuestAddress(0x1000);
+        let terminal = GuestAddress(0x1004);
+        for word in [0xd5033fdf_u32, 0xd53be049, 0xd53be05f] {
+            let source: Vec<_> = [0x91000400u32, word]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            assert_eq!(
+                validate_clock_exit(base, terminal, 8, base.0, &source).unwrap(),
+                decode_clock_instruction(terminal, word).unwrap().unwrap()
+            );
+            for (returned, count, region) in [
+                (base, 8, base.0),
+                (terminal, 0, base.0),
+                (terminal, 6, base.0),
+                (GuestAddress(0x1008), 12, base.0),
+                (terminal, 8, 0x2000),
+            ] {
+                assert!(validate_clock_exit(base, returned, count, region, &source).is_err());
+            }
+        }
+        assert!(validate_clock_exit(base, base, 4, base.0, &0xd503237fu32.to_le_bytes()).is_err());
+    }
+
+    #[test]
     fn pauth_exit_requires_the_exact_consumed_immutable_helper_instruction() {
         let base = GuestAddress(0x1000);
         let terminal = GuestAddress(0x1004);
@@ -829,5 +1018,209 @@ mod trap_validation_tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         assert!(validate_trap_exit(base, terminal, 8, base.0, &ordinary).is_err());
+    }
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod clock_dispatch_tests {
+    use super::*;
+    use crate::clock::{ReplaySource, Snapshot};
+
+    const BASE: GuestAddress = GuestAddress(0x1000);
+    const STOP: GuestAddress = GuestAddress(0x1400);
+    const PROFILE: BlockProfile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+
+    fn runtime(path: &std::path::Path, words: &[u32]) -> Result<BlockRuntime> {
+        let mut runtime = BlockRuntime::new_with_profile(1, path.to_path_buf(), PROFILE);
+        runtime.register_code(
+            BASE,
+            words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        )?;
+        Ok(runtime)
+    }
+    fn keys(address_space: u64) -> pauth::Context {
+        pauth::Context::new(address_space, pauth::Keys::from_ib_words(1, 2))
+    }
+    fn initial_thread(flags: u32) -> ThreadState {
+        let mut registers = GuestState {
+            x: std::array::from_fn(|i| 0x0123456789abcdefu64.rotate_left(i as u32)),
+            sp: 0x2000,
+            nzcv: flags << 28,
+            reserved: 0xa5c39e71,
+            v: std::array::from_fn(|i| {
+                [
+                    0x123456789abcdef0u64.rotate_left(i as u32),
+                    0xfedcba9876543210u64.rotate_right(i as u32),
+                ]
+            }),
+            fpcr: 0x03c00000,
+            fpsr: 0x0800001f,
+        };
+        registers.x[30] = STOP.0;
+        ThreadState {
+            registers,
+            pc: BASE,
+        }
+    }
+
+    #[test]
+    fn all_counter_destinations_preserve_full_state_and_share_preparation_cache() -> Result<()> {
+        let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
+        let samples = (0..=512)
+            .map(|i| Snapshot {
+                counter: 1000 + i,
+                sleep_ticks: 100,
+            })
+            .collect();
+        let mut clock = clock::Context::new(1, Box::new(ReplaySource::new(samples)?))?;
+        let keys = keys(1);
+        let cache = tempfile::tempdir()?;
+        for destination in 0..32 {
+            let mut vm = runtime(cache.path(), &[0xd2800547, 0xd53be040 | destination])?;
+            let prepared = vm.prepare(BASE)?;
+            assert!(!prepared.prepared.cache_hit);
+            for flags in 0..16 {
+                let mut state = initial_thread(flags);
+                let mut expected = state.registers.clone();
+                expected.x[7] = 42;
+                let counter = 1001 + u64::from(destination * 16 + flags);
+                if destination != 31 {
+                    expected.x[destination as usize] = counter;
+                }
+                // SAFETY: register prefix and checked service only, no guest RAM accesses.
+                let result = unsafe {
+                    vm.run_with_clock(
+                        &mut state,
+                        Some(GuestAddress(BASE.0 + 8)),
+                        1,
+                        &keys,
+                        &mut clock,
+                    )?
+                };
+                assert_eq!(state.registers, expected);
+                assert_eq!(state.pc, GuestAddress(BASE.0 + 8));
+                assert_eq!(result.reason, StopReason::StopAddress);
+                assert_eq!(result.blocks_executed, 1);
+                assert_eq!(result.compiled_blocks, 0);
+                assert_eq!(result.disk_cache_hits, usize::from(flags == 0));
+                assert_eq!(result.clock_events.len(), 1);
+                assert_eq!(result.clock_events[0].counter, Some(counter));
+                assert_eq!(
+                    result.clock_events[0].instruction.operation,
+                    ClockOperation::ReadVirtualCounter {
+                        destination: destination as u8
+                    }
+                );
+            }
+        }
+        assert_eq!(clock.events().len(), 513);
+        Ok(())
+    }
+
+    #[test]
+    fn isb_serializes_without_sampling_and_counter_xzr_discards_only_destination() -> Result<()> {
+        let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
+        let mut clock = clock::Context::new(
+            1,
+            Box::new(ReplaySource::new(vec![
+                Snapshot {
+                    counter: 100,
+                    sleep_ticks: 10,
+                },
+                Snapshot {
+                    counter: 150,
+                    sleep_ticks: 20,
+                },
+            ])?),
+        )?;
+        let cache = tempfile::tempdir()?;
+        let mut vm = runtime(cache.path(), &[0xd5033fdf, 0xd53be05f, 0xd65f03c0])?;
+        let mut state = initial_thread(15);
+        let before = state.registers.clone();
+        let result = unsafe { vm.run_with_clock(&mut state, Some(STOP), 3, &keys(1), &mut clock)? };
+        assert_eq!(result.reason, StopReason::StopAddress);
+        assert_eq!(result.blocks_executed, 3);
+        assert_eq!(state.registers, before);
+        assert_eq!(result.clock_events.len(), 2);
+        assert_eq!(result.clock_events[0].counter, None);
+        assert_eq!(result.clock_events[1].counter, Some(150));
+        assert_eq!(clock.events().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_clock_preserves_destination_page_and_exact_resume_after_prefix() -> Result<()> {
+        let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
+        let mut clock = clock::Context::new(
+            1,
+            Box::new(ReplaySource::new(vec![Snapshot {
+                counter: 100,
+                sleep_ticks: 10,
+            }])?),
+        )?;
+        let page = clock.snapshot_bytes(0, clock::GUEST_BYTES)?;
+        let cache = tempfile::tempdir()?;
+        let mut vm = runtime(cache.path(), &[0x91000400, 0xd53be048])?;
+        let mut state = initial_thread(5);
+        let mut expected = state.registers.clone();
+        expected.x[0] = expected.x[0].wrapping_add(1);
+        for _ in 0..2 {
+            let result = unsafe {
+                vm.run_with_clock(
+                    &mut state,
+                    Some(GuestAddress(BASE.0 + 8)),
+                    1,
+                    &keys(1),
+                    &mut clock,
+                )?
+            };
+            assert!(matches!(result.reason, StopReason::ClockUnavailable { .. }));
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, GuestAddress(BASE.0 + 4));
+            assert_eq!(result.last_exit, Some((BASE.0 + 4, ExitKind::Clock as u64)));
+            assert!(result.clock_events.is_empty());
+            assert_eq!(clock.snapshot_bytes(0, clock::GUEST_BYTES)?, page);
+            assert_eq!(clock.events().len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_clock_and_foreign_services_decline_without_helper_effects() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut vm = runtime(cache.path(), &[0x91000400, 0xd5033fdf])?;
+        let mut state = initial_thread(7);
+        let mut expected = state.registers.clone();
+        expected.x[0] = expected.x[0].wrapping_add(1);
+        let result = unsafe { vm.run_with_pauth(&mut state, None, 1, &keys(1))? };
+        assert!(matches!(result.reason, StopReason::ClockRequired { .. }));
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, GuestAddress(BASE.0 + 4));
+        assert!(result.clock_events.is_empty());
+        let _lock = clock::TEST_CONTEXT_LOCK.lock().unwrap();
+        for address_space in [1, 2] {
+            let mut clock = clock::Context::new(
+                address_space,
+                Box::new(ReplaySource::new(vec![Snapshot {
+                    counter: 100,
+                    sleep_ticks: 10,
+                }])?),
+            )?;
+            let empty = tempfile::tempdir()?;
+            let mut vm = runtime(empty.path(), &[0xd53be048])?;
+            let mut state = initial_thread(0);
+            let before = state.registers.clone();
+            let pauth = keys(if address_space == 1 { 2 } else { 1 });
+            assert!(unsafe { vm.run_with_clock(&mut state, None, 1, &pauth, &mut clock) }.is_err());
+            assert_eq!(state.pc, BASE);
+            assert_eq!(state.registers, before);
+            assert_eq!(clock.events().len(), 1);
+            assert_eq!(std::fs::read_dir(empty.path())?.count(), 0);
+        }
+        Ok(())
     }
 }

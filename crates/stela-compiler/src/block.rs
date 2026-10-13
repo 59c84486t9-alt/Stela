@@ -20,6 +20,8 @@ pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
 /// This identifies software-profile helper requests, not Apple signature identity.
 pub const PAUTH_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1";
+pub const CLOCK_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-v1";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +29,7 @@ pub enum BlockProfile {
     #[default]
     Ordinary,
     AppleArm64eSoftwarePauthV1,
+    AppleArm64eSoftwarePauthClockV1,
 }
 
 impl BlockProfile {
@@ -34,7 +37,19 @@ impl BlockProfile {
         match self {
             Self::Ordinary => BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
+            Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
         }
+    }
+
+    pub const fn supports_pointer_authentication(self) -> bool {
+        matches!(
+            self,
+            Self::AppleArm64eSoftwarePauthV1 | Self::AppleArm64eSoftwarePauthClockV1
+        )
+    }
+
+    pub const fn supports_clock(self) -> bool {
+        matches!(self, Self::AppleArm64eSoftwarePauthClockV1)
     }
 }
 /// Maximum input window; a terminator can consume a shorter prefix.
@@ -50,6 +65,7 @@ pub enum ExitKind {
     Return = 4,
     Trap = 5,
     PointerAuthentication = 6,
+    Clock = 7,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -64,9 +80,54 @@ impl TryFrom<u64> for ExitKind {
             4 => Ok(Self::Return),
             5 => Ok(Self::Trap),
             6 => Ok(Self::PointerAuthentication),
+            7 => Ok(Self::Clock),
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClockOperation {
+    ReadVirtualCounter { destination: u8 },
+    InstructionSynchronization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClockInstruction {
+    pub operation: ClockOperation,
+    pub instruction_pc: GuestAddress,
+    pub next_pc: GuestAddress,
+}
+
+/// Only reviewed ISB SY and MRS CNTVCT_EL0, with X31 denoting the discard
+/// destination. Other counter/control registers and barrier options decline.
+/// Completion requires an explicit virtual-clock/synchronization service.
+pub fn decode_clock_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<ClockInstruction>, CompileError> {
+    if !pc.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "clock instruction PC must be aligned to 4 bytes".into(),
+        ));
+    }
+    let operation = if word == 0xd5033fdf {
+        ClockOperation::InstructionSynchronization
+    } else if word & 0xffffffe0 == 0xd53be040 {
+        ClockOperation::ReadVirtualCounter {
+            destination: (word & 31) as u8,
+        }
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(ClockInstruction {
+        operation,
+        instruction_pc: pc,
+        next_pc: GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
+            CompileError("clock continuation PC overflows guest address range".into())
+        })?),
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -182,6 +243,7 @@ pub(crate) enum Terminator {
     Register { source: Register, kind: ExitKind },
     Trap(SynchronousTrap),
     PointerAuthentication(PointerAuthentication),
+    Clock(ClockInstruction),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -271,6 +333,7 @@ pub struct BlockAnalysis {
     pub dynamic_edge: Option<DynamicEdge>,
     pub trap: Option<SynchronousTrap>,
     pub pointer_authentication: Option<PointerAuthentication>,
+    pub clock_instruction: Option<ClockInstruction>,
 }
 /// Discover boundaries and edges from the exact parser used by both AOT and JIT.
 /// Static call continuations are candidates, not proof that the callee returns.
@@ -289,6 +352,7 @@ pub fn analyze_with_profile(
     let mut dynamic_edge = None;
     let mut trap = None;
     let mut pointer_authentication = None;
+    let mut clock_instruction = None;
     let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
     match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
         None => add(SuccessorKind::Fallthrough, parsed.next_pc),
@@ -345,6 +409,10 @@ pub fn analyze_with_profile(
                 }
             }
         }
+        Some(Terminator::Clock(value)) => {
+            clock_instruction = Some(*value);
+            add(SuccessorKind::Fallthrough, value.next_pc);
+        }
         Some(Terminator::Branch(_)) => {
             unreachable!("private parser only stores branch operations as terminators")
         }
@@ -356,6 +424,7 @@ pub fn analyze_with_profile(
         dynamic_edge,
         trap,
         pointer_authentication,
+        clock_instruction,
     })
 }
 
@@ -388,7 +457,7 @@ fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
-        if profile == BlockProfile::AppleArm64eSoftwarePauthV1
+        if profile.supports_pointer_authentication()
             && let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -396,6 +465,16 @@ fn parse(
                 })?
         {
             terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
+            break;
+        }
+        if profile.supports_clock()
+            && let Some(decoded) =
+                decode_clock_instruction(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
+        {
+            terminal = Some((pc, Terminator::Clock(decoded)));
             break;
         }
         if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {
@@ -607,11 +686,156 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..7 {
+        for kind in 0..8 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(7), Err(()));
+        assert_eq!(ExitKind::try_from(8), Err(()));
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
+    }
+
+    #[test]
+    fn clock_decode_accepts_all_counter_destinations_and_only_exact_controls() {
+        let pc = GuestAddress(0x1000);
+        for destination in 0..32 {
+            assert_eq!(
+                decode_clock_instruction(pc, 0xd53be040 | destination).unwrap(),
+                Some(ClockInstruction {
+                    operation: ClockOperation::ReadVirtualCounter {
+                        destination: destination as u8
+                    },
+                    instruction_pc: pc,
+                    next_pc: GuestAddress(pc.0 + 4),
+                })
+            );
+        }
+        assert_eq!(
+            decode_clock_instruction(pc, 0xd5033fdf).unwrap(),
+            Some(ClockInstruction {
+                operation: ClockOperation::InstructionSynchronization,
+                instruction_pc: pc,
+                next_pc: GuestAddress(pc.0 + 4),
+            })
+        );
+        for bit in 5..32 {
+            assert!(
+                decode_clock_instruction(pc, 0xd53be040 ^ (1 << bit))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for bit in 0..32 {
+            assert!(
+                decode_clock_instruction(pc, 0xd5033fdf ^ (1 << bit))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // CNTFRQ/CNTPCT/CNTVCTSS, MSR and other barrier options are not claimed.
+        for word in [0xd53be000, 0xd53be020, 0xd53be0c0, 0xd51be040, 0xd5033bdf] {
+            assert!(decode_clock_instruction(pc, word).unwrap().is_none());
+        }
+        for word in [0xd53be040, 0xd5033fdf] {
+            assert!(decode_clock_instruction(GuestAddress(pc.0 + 1), word).is_err());
+            assert!(decode_clock_instruction(GuestAddress(u64::MAX - 3), word).is_err());
+        }
+    }
+
+    #[test]
+    fn clock_profile_boundaries_share_analysis_and_do_not_widen_old_profiles() {
+        let base = GuestAddress(0x4000);
+        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        for word in [0xd5033fdf, 0xd53be040, 0xd53be05f] {
+            let source = bytes(&[0xd2800020, word, 0]);
+            for previous in [
+                BlockProfile::Ordinary,
+                BlockProfile::AppleArm64eSoftwarePauthV1,
+            ] {
+                assert_eq!(
+                    analyze_with_profile(&source, base, previous)
+                        .unwrap_err()
+                        .pc,
+                    GuestAddress(base.0 + 4)
+                );
+                assert!(compile_with_profile(&source, base, previous).is_err());
+                assert!(source_bytes_with_profile(&source, base, previous).is_err());
+            }
+            let analysis = analyze_with_profile(&source, base, profile).unwrap();
+            let compiled = compile_with_profile(&source, base, profile).unwrap();
+            assert_eq!(analysis.source_bytes, 8);
+            assert_eq!(compiled.source_bytes, 8);
+            assert_eq!(
+                source_bytes_with_profile(&source, base, profile).unwrap(),
+                8
+            );
+            let request = analysis.clock_instruction.unwrap();
+            assert_eq!(request.instruction_pc, GuestAddress(base.0 + 4));
+            assert_eq!(
+                analysis.static_successors,
+                [StaticSuccessor {
+                    kind: SuccessorKind::Fallthrough,
+                    target: request.next_pc
+                }]
+            );
+            assert!(
+                analysis.dynamic_edge.is_none()
+                    && analysis.trap.is_none()
+                    && analysis.pointer_authentication.is_none()
+            );
+            assert_eq!(
+                compiled
+                    .native
+                    .source_map
+                    .iter()
+                    .map(|(pc, _)| *pc)
+                    .collect::<Vec<_>>(),
+                [base, request.instruction_pc]
+            );
+        }
+        for word in [0xd503237f, 0xd50323ff, 0xd65f0fff] {
+            let source = bytes(&[word, 0]);
+            assert_eq!(
+                analyze_with_profile(&source, base, profile).unwrap(),
+                analyze_with_profile(&source, base, BlockProfile::AppleArm64eSoftwarePauthV1)
+                    .unwrap()
+            );
+        }
+        assert!(profile.supports_pointer_authentication() && profile.supports_clock());
+        assert!(!BlockProfile::Ordinary.supports_pointer_authentication());
+        assert!(!BlockProfile::AppleArm64eSoftwarePauthV1.supports_clock());
+    }
+
+    #[test]
+    fn clock_boundary_respects_window_limit_and_does_not_skip_prior_unknown_words() {
+        let base = GuestAddress(0x1000);
+        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        let first = analyze_with_profile(&bytes(&[0xd53be05f, 0]), base, profile).unwrap();
+        assert_eq!(first.source_bytes, 4);
+        assert_eq!(
+            first.clock_instruction.unwrap().operation,
+            ClockOperation::ReadVirtualCounter { destination: 31 }
+        );
+        let mut last = [0xd503201f; MAX_BLOCK_INSTRUCTIONS];
+        last[MAX_BLOCK_INSTRUCTIONS - 1] = 0xd5033fdf;
+        let analysis = analyze_with_profile(&bytes(&last), base, profile).unwrap();
+        assert_eq!(analysis.source_bytes, MAX_BLOCK_INSTRUCTIONS * 4);
+        assert_eq!(
+            analysis.clock_instruction.unwrap().instruction_pc,
+            GuestAddress(base.0 + (MAX_BLOCK_INSTRUCTIONS as u64 - 1) * 4)
+        );
+        assert!(
+            compile_with_profile(
+                &bytes(&[0xd53be040; MAX_BLOCK_INSTRUCTIONS + 1]),
+                base,
+                profile
+            )
+            .is_err()
+        );
+        assert_eq!(
+            analyze_with_profile(&bytes(&[0xd503201f, 0, 0xd53be040]), base, profile)
+                .unwrap_err()
+                .pc,
+            GuestAddress(base.0 + 4)
+        );
     }
 
     #[test]

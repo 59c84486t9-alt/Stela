@@ -1,6 +1,7 @@
 //! Persistent AOT storage and serialized native leaf/basic-block execution.
 //! Full application launch, platform ABI and Mach-O linking remain future work.
 pub mod blocks;
+pub mod clock;
 pub mod darwin;
 pub mod dispatch;
 pub mod execution;
@@ -215,6 +216,59 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect()
+    }
+    #[test]
+    fn clock_profile_cache_isolated_from_both_previous_profiles_and_exact_operands() -> Result<()> {
+        use stela_compiler::block::BlockProfile;
+        let root = tempfile::tempdir()?;
+        let base = GuestAddress(0x1000);
+        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        let ordinary_source = source(42);
+        let mut keys = std::collections::BTreeSet::new();
+        for selected in [
+            BlockProfile::Ordinary,
+            BlockProfile::AppleArm64eSoftwarePauthV1,
+            profile,
+        ] {
+            let block = prepare_block_with_profile(&ordinary_source, base, root.path(), selected)?;
+            assert_eq!(block.prepared.manifest.identity.abi, selected.abi());
+            assert!(keys.insert(block.prepared.key));
+        }
+        let input: Vec<u8> = [0xd2800020_u32, 0xd53be040, 0]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        for previous in [
+            BlockProfile::Ordinary,
+            BlockProfile::AppleArm64eSoftwarePauthV1,
+        ] {
+            assert!(prepare_block_with_profile(&input, base, root.path(), previous).is_err());
+        }
+        let first = prepare_block_with_profile(&input, base, root.path(), profile)?;
+        assert_eq!(first.source_bytes, 8);
+        assert!(!first.prepared.cache_hit);
+        let mut changed = input.clone();
+        changed[8..].copy_from_slice(&0xffffffff_u32.to_le_bytes());
+        let reused = prepare_block_with_profile(&changed, base, root.path(), profile)?;
+        assert!(reused.prepared.cache_hit);
+        assert_eq!(first.prepared.key, reused.prepared.key);
+        changed[4..8].copy_from_slice(&0xd53be05f_u32.to_le_bytes());
+        assert_ne!(
+            first.prepared.key,
+            prepare_block_with_profile(&changed, base, root.path(), profile)?
+                .prepared
+                .key
+        );
+        changed[4..8].copy_from_slice(&0xd5033fdf_u32.to_le_bytes());
+        assert_ne!(
+            first.prepared.key,
+            prepare_block_with_profile(&changed, base, root.path(), profile)?
+                .prepared
+                .key
+        );
+        // Shared preparation has no runtime clock, host time query or RX mapping.
+        assert!(first.prepared.directory.join("native.bin").is_file());
+        Ok(())
     }
     #[test]
     fn pac_profile_cache_identity_is_explicit_and_reuses_only_consumed_prefix() -> Result<()> {

@@ -444,6 +444,181 @@ impl Drop for OwnedMemory {
     }
 }
 
+/// Runtime-published data with a permanently read-only, non-executable guest
+/// view and an unexposed writable alias. Publication and translated accesses
+/// must be serialized by the caller; this is not a concurrent kernel seqlock.
+pub struct PublishedReadOnlyRegion {
+    region: MemoryRegion,
+    guest_mapping: Option<std::ptr::NonNull<libc::c_void>>,
+    publisher_mapping: std::ptr::NonNull<libc::c_void>,
+    _backing: File,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for PublishedReadOnlyRegion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublishedReadOnlyRegion")
+            .field("region", &self.region)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PublishedReadOnlyRegion {
+    /// Create a private unlinked backing object; no external file descriptor,
+    /// writable guest address or Rust reference into either mapping escapes.
+    pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
+        use std::io::Write;
+        ensure!(
+            cfg!(all(
+                target_arch = "x86_64",
+                any(target_os = "linux", target_os = "macos")
+            )),
+            "published guest mappings require an x86-64 Linux or macOS host"
+        );
+        let page = host_page_size()? as u64;
+        ensure!(
+            !initial.is_empty() && initial.len() <= 65536,
+            "published read-only region requires 1..65536 bytes"
+        );
+        let bytes = page_rounded(initial.len() as u64, page)?;
+        ensure!(
+            guest_base.is_multiple_of(page)
+                && guest_base >= page
+                && guest_base
+                    .checked_add(bytes)
+                    .is_some_and(|end| end <= USER_ADDRESS_END),
+            "published region requires an aligned lower-user guest range"
+        );
+        let mut backing = tempfile::tempfile()?;
+        backing.set_len(bytes)?;
+        backing.write_all(initial)?;
+        // Reserve the guest view first so the kernel-chosen alias cannot take
+        // the requested guest address. Neither call may replace host memory.
+        let requested = guest_base as usize as *mut libc::c_void;
+        let flags = libc::MAP_SHARED;
+        #[cfg(target_os = "linux")]
+        let flags = flags | libc::MAP_FIXED_NOREPLACE;
+        // SAFETY: the live backing covers the extent; exact placement is checked.
+        let guest = unsafe {
+            libc::mmap(
+                requested,
+                bytes as usize,
+                libc::PROT_READ,
+                flags,
+                backing.as_raw_fd(),
+                0,
+            )
+        };
+        if guest == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("cannot map published guest view");
+        }
+        if guest != requested {
+            // SAFETY: release only this newly substituted allocation.
+            unsafe { libc::munmap(guest, bytes as usize) };
+            bail!("published guest address {guest_base:#x} is unavailable");
+        }
+        // SAFETY: the kernel chooses a separate new mapping of the owned backing.
+        let publisher = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                backing.as_raw_fd(),
+                0,
+            )
+        };
+        if publisher == libc::MAP_FAILED {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: rollback only the guest view created above.
+            unsafe { libc::munmap(guest, bytes as usize) };
+            return Err(error).context("cannot map runtime publication alias");
+        }
+        let Some(publisher_mapping) = std::ptr::NonNull::new(publisher) else {
+            // SAFETY: rollback both allocations created above.
+            unsafe {
+                libc::munmap(publisher, bytes as usize);
+                libc::munmap(guest, bytes as usize);
+            }
+            bail!("null publication mapping is unsupported");
+        };
+        Ok(Self {
+            region: MemoryRegion {
+                guest_address: guest_base,
+                virtual_bytes: initial.len() as u64,
+                mapped_bytes: bytes,
+                initial_bytes: initial.len(),
+                readable: true,
+                writable: false,
+                executable: false,
+            },
+            guest_mapping: std::ptr::NonNull::new(guest),
+            publisher_mapping,
+            _backing: backing,
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    pub fn region(&self) -> &MemoryRegion {
+        &self.region
+    }
+
+    fn extent(&self, offset: usize, bytes: usize) -> Result<()> {
+        ensure!(
+            offset
+                .checked_add(bytes)
+                .is_some_and(|end| end <= self.region.virtual_bytes as usize),
+            "published region access exceeds logical bytes"
+        );
+        Ok(())
+    }
+
+    pub fn read_snapshot(&self, offset: usize, bytes: usize) -> Result<Vec<u8>> {
+        self.extent(offset, bytes)?;
+        let mut result = vec![0; bytes];
+        // SAFETY: live RO mapping, bounded copy, independent owned destination;
+        // publication cannot run concurrently through this non-Send/Sync owner.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (self.region.guest_address as usize as *const u8).add(offset),
+                result.as_mut_ptr(),
+                bytes,
+            )
+        };
+        Ok(result)
+    }
+
+    pub fn publish(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
+        self.extent(offset, bytes.len())?;
+        // SAFETY: private live RW alias and fully checked extent. No guest code
+        // may execute concurrently, and safe APIs expose no mapping references.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.publisher_mapping.as_ptr().cast::<u8>().add(offset),
+                bytes.len(),
+            )
+        };
+        Ok(())
+    }
+}
+
+impl Drop for PublishedReadOnlyRegion {
+    fn drop(&mut self) {
+        // SAFETY: both allocations were created and retained exclusively here.
+        unsafe {
+            if let Some(guest) = self.guest_mapping {
+                libc::munmap(guest.as_ptr(), self.region.mapped_bytes as usize);
+            }
+            libc::munmap(
+                self.publisher_mapping.as_ptr(),
+                self.region.mapped_bytes as usize,
+            );
+        }
+    }
+}
+
 #[cfg(all(
     test,
     target_arch = "x86_64",
@@ -532,6 +707,35 @@ mod tests {
             }
         }
         panic!("cannot allocate test file mapping after 32 attempts");
+    }
+
+    #[test]
+    fn publication_preserves_guest_permissions_and_logical_bounds() {
+        let page = host_page_size().unwrap();
+        let mut published = (0..32)
+            .find_map(|_| PublishedReadOnlyRegion::map(candidate(page), &[7; 13]).ok())
+            .unwrap();
+        let address = published.region().guest_address;
+        let alias = published.publisher_mapping.as_ptr() as usize as u64;
+        assert_eq!(os_protection(address), libc::PROT_READ);
+        assert_eq!(os_protection(alias), libc::PROT_READ | libc::PROT_WRITE);
+        published.publish(4, &[1, 2, 3]).unwrap();
+        assert_eq!(
+            published.read_snapshot(0, 13).unwrap(),
+            [7, 7, 7, 7, 1, 2, 3, 7, 7, 7, 7, 7, 7]
+        );
+        assert!(published.publish(13, &[1]).is_err());
+        assert!(published.read_snapshot(usize::MAX, 2).is_err());
+        assert_eq!(os_protection(address), libc::PROT_READ);
+        assert_eq!(os_protection(alias), libc::PROT_READ | libc::PROT_WRITE);
+        assert!(PublishedReadOnlyRegion::map(address, &[9; 13]).is_err());
+        assert_eq!(published.read_snapshot(4, 3).unwrap(), [1, 2, 3]);
+        drop(published);
+        // A parallel test can claim the released address immediately.
+        let reused = (0..32)
+            .find_map(|_| PublishedReadOnlyRegion::map(candidate(page), &[8; 13]).ok())
+            .unwrap();
+        assert_eq!(reused.read_snapshot(0, 13).unwrap(), [8; 13]);
     }
 
     #[test]

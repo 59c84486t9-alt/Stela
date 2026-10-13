@@ -57,6 +57,11 @@ pub(crate) fn emit(
     if let Some((pc, terminal)) = terminal {
         block.source_map.push((*pc, code.len()));
         match terminal {
+            Terminator::Clock(request) => {
+                // MRS results and ISB synchronization belong to the explicit
+                // runtime clock service, not a host counter or placeholder.
+                direct_exit(code, request.instruction_pc, ExitKind::Clock);
+            }
             Terminator::PointerAuthentication(request) => {
                 // Return to the checked runtime helper with unchanged guest
                 // state at this instruction. Never embed keys/helper pointers.
@@ -140,6 +145,35 @@ pub(crate) fn emit(
 mod tests {
     use super::*;
     use crate::block::{SynchronousTrap, TrapKind};
+
+    #[test]
+    fn clock_exit_requests_runtime_service_without_counter_or_guest_writes() {
+        use crate::block::{ClockInstruction, ClockOperation};
+        for operation in [
+            ClockOperation::InstructionSynchronization,
+            ClockOperation::ReadVirtualCounter { destination: 0 },
+            ClockOperation::ReadVirtualCounter { destination: 31 },
+        ] {
+            let pc = GuestAddress(0x123456789000);
+            let request = ClockInstruction {
+                operation,
+                instruction_pc: pc,
+                next_pc: GuestAddress(pc.0 + 4),
+            };
+            let native = emit(
+                &[],
+                Some(&(pc, Terminator::Clock(request))),
+                request.next_pc,
+            );
+            let mut expected = vec![0x48, 0xb8];
+            expected.extend(pc.0.to_le_bytes());
+            expected.extend([0xba, 7, 0, 0, 0, 0xc3]);
+            // No RDTSC, host helper address, guessed counter, destination write
+            // or placeholder ISB: only the checked runtime service may complete.
+            assert_eq!(native.x86_64_code, expected);
+            assert_eq!(native.source_map, [(pc, 0)]);
+        }
+    }
 
     #[test]
     fn pac_helper_exit_has_no_guest_writes_or_embedded_service_address() {
