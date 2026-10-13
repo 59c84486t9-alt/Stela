@@ -1,4 +1,4 @@
-//! Checked decoding of unauthenticated Apple chained rebases and binds.
+//! Checked decoding of Apple chained rebases and binds, with explicit PAC metadata.
 //!
 //! Layout/stride facts: Apple's include/mach-o/fixup-chains.h. Validation and
 //! address interpretation: common/MachOAnalyzer.cpp, mach_o/ChainedFixups.cpp
@@ -30,6 +30,10 @@ pub struct DecodedFixups {
     pub rebases: Vec<RebaseFixup>,
     pub imports: Vec<Import>,
     pub binds: Vec<BindFixup>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authenticated_rebases: Vec<AuthenticatedRebaseFixup>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authenticated_binds: Vec<AuthenticatedBindFixup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -54,9 +58,115 @@ pub struct BindFixup {
     pub addend: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Authentication {
+    pub key: stela_runtime::pauth::Key,
+    pub diversity: u16,
+    pub address_diversity: bool,
+}
+impl Authentication {
+    pub fn modifier(self, slot: u64) -> u64 {
+        if self.address_diversity {
+            (slot & 0x0000_ffff_ffff_ffff) | (u64::from(self.diversity) << 48)
+        } else {
+            u64::from(self.diversity)
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthenticatedRebaseFixup {
+    pub segment_index: usize,
+    pub file_offset: u64,
+    pub guest_address: u64,
+    pub raw: u64,
+    pub target: u64,
+    pub pointer_format: u16,
+    pub authentication: Authentication,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthenticatedBindFixup {
+    pub segment_index: usize,
+    pub file_offset: u64,
+    pub guest_address: u64,
+    pub raw: u64,
+    pub pointer_format: u16,
+    pub import_index: u32,
+    pub addend: i64,
+    pub authentication: Authentication,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct SignedRebaseFixup {
+    pub fixup: AuthenticatedRebaseFixup,
+    pub modifier: u64,
+    pub value: u64,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct SignedFixupPlan {
+    pub preferred_base: u64,
+    pub load_base: u64,
+    pub pointer_formats: Vec<u16>,
+    pub rebases: Vec<RebaseFixup>,
+    pub authenticated_rebases: Vec<SignedRebaseFixup>,
+    pub address_space: u64,
+    pub pauth_profile: &'static str,
+}
+impl DecodedFixups {
+    /// Plan all rebase values under one explicit process key domain. This does
+    /// not write an image, resolve binds, or replace original dyld's self-rebase.
+    pub fn sign_rebases(
+        &self,
+        context: &stela_runtime::pauth::Context,
+    ) -> Result<SignedFixupPlan> {
+        ensure!(
+            self.binds.is_empty() && self.authenticated_binds.is_empty(),
+            "authenticated rebase planning requires explicit bind resolution first"
+        );
+        let authenticated_rebases = self
+            .authenticated_rebases
+            .iter()
+            .map(|fixup| {
+                ensure!(
+                    fixup.target < (1 << 47),
+                    "authenticated rebase target exceeds lower-user VA47 profile"
+                );
+                let modifier = fixup.authentication.modifier(fixup.guest_address);
+                // dyld's pointer-metadata helper preserves null before selecting
+                // a key; the architectural PAC instruction itself signs null.
+                let value = if fixup.target == 0 {
+                    0
+                } else {
+                    context.sign(fixup.authentication.key, fixup.target, modifier)?
+                };
+                Ok(SignedRebaseFixup {
+                    fixup: fixup.clone(),
+                    modifier,
+                    value,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SignedFixupPlan {
+            preferred_base: self.preferred_base,
+            load_base: self.load_base,
+            pointer_formats: self.pointer_formats.clone(),
+            rebases: self.rebases.clone(),
+            authenticated_rebases,
+            address_space: context.address_space(),
+            pauth_profile: context.profile_id(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pointer {
     Rebase(u64),
+    AuthenticatedRebase {
+        target: u64,
+        authentication: Authentication,
+    },
+    AuthenticatedBind {
+        import_index: u32,
+        authentication: Authentication,
+    },
     Bind {
         import_index: u32,
         inline_addend: i64,
@@ -241,6 +351,7 @@ fn decode_pointer(
     imports: u32,
     preferred: u64,
     loaded: u64,
+    allow_authentication: bool,
 ) -> Result<(Pointer, u64)> {
     let arm64e = matches!(format, 1 | 9 | 12);
     let (target, high, next) = if arm64e {
@@ -259,10 +370,36 @@ fn decode_pointer(
                 "chained-fixup ARM64E bind ordinal {ordinal} exceeds imports count {imports}"
             );
         }
-        ensure!(
-            !auth,
-            "unsupported authenticated chained-fixup pointer (format {format}); PAC representation/signing is required"
-        );
+        if auth {
+            ensure!(
+                allow_authentication,
+                "unsupported authenticated chained-fixup pointer (format {format}); explicit PAC decoding/signing is required"
+            );
+            let authentication = Authentication {
+                key: match (raw >> 49) & 3 {
+                    0 => stela_runtime::pauth::Key::Ia,
+                    1 => stela_runtime::pauth::Key::Ib,
+                    2 => stela_runtime::pauth::Key::Da,
+                    _ => stela_runtime::pauth::Key::Db,
+                },
+                diversity: ((raw >> 32) & 0xffff) as u16,
+                address_diversity: raw & (1 << 48) != 0,
+            };
+            let pointer = if bind {
+                Pointer::AuthenticatedBind {
+                    import_index: (raw & (if format == 12 { 0xffffff } else { 0xffff })) as u32,
+                    authentication,
+                }
+            } else {
+                Pointer::AuthenticatedRebase {
+                    target: loaded
+                        .checked_add(raw & 0xffff_ffff)
+                        .context("authenticated rebase target overflows address range")?,
+                    authentication,
+                }
+            };
+            return Ok((pointer, ((raw >> 51) & 0x7ff) * 8));
+        }
         if bind {
             let ordinal_mask = if format == 12 { 0xffffff } else { 0xffff };
             let encoded = ((raw >> 32) & 0x7ffff) as i64;
@@ -356,6 +493,25 @@ pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> 
 /// import and inline values with checked i64 arithmetic. High8 address bits are
 /// retained; this does not authorize dereferencing tagged/noncanonical addresses.
 pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFixups> {
+    decode_impl(data, image, load_base, false)
+}
+
+/// Decode authenticated records as metadata; never strip signatures or invent
+/// signing keys. Authenticated rebases use image-relative 32-bit targets in all
+/// admitted ARM64E formats, including the otherwise absolute format1.
+pub fn decode_authenticated(
+    data: &[u8],
+    image: &LoadPlan,
+    load_base: u64,
+) -> Result<DecodedFixups> {
+    decode_impl(data, image, load_base, true)
+}
+fn decode_impl(
+    data: &[u8],
+    image: &LoadPlan,
+    load_base: u64,
+    allow_authentication: bool,
+) -> Result<DecodedFixups> {
     ensure!(
         image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_core::sha256(data),
         "chained-fixup image identity differs from load plan"
@@ -377,6 +533,8 @@ pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFi
         rebases: vec![],
         imports: vec![],
         binds: vec![],
+        authenticated_rebases: vec![],
+        authenticated_binds: vec![],
     };
     let payloads: Vec<_> = image
         .payloads
@@ -614,11 +772,15 @@ pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFi
                     "chained-fixup guest slots",
                 )?;
                 ensure!(
-                    result.rebases.len() + result.binds.len() < MAX_FIXUPS,
+                    result.rebases.len()
+                        + result.binds.len()
+                        + result.authenticated_rebases.len()
+                        + result.authenticated_binds.len()
+                        < MAX_FIXUPS,
                     "chained-fixup pointer count exceeds planner limit"
                 );
                 let raw = u64_at(data, usize::try_from(file_offset)?)?;
-                let (pointer, next) = decode_pointer(raw, format, imports_count, preferred_base, load_base)
+                let (pointer, next) = decode_pointer(raw, format, imports_count, preferred_base, load_base, allow_authentication)
                     .with_context(|| format!("chained-fixup segment {segment_index} page {page_index} slot {guest_address:#x}"))?;
                 match pointer {
                     Pointer::Rebase(value) => result.rebases.push(RebaseFixup {
@@ -628,6 +790,31 @@ pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFi
                         raw,
                         value,
                         pointer_format: format,
+                    }),
+                    Pointer::AuthenticatedRebase {
+                        target,
+                        authentication,
+                    } => result.authenticated_rebases.push(AuthenticatedRebaseFixup {
+                        segment_index,
+                        file_offset,
+                        guest_address,
+                        raw,
+                        target,
+                        pointer_format: format,
+                        authentication,
+                    }),
+                    Pointer::AuthenticatedBind {
+                        import_index,
+                        authentication,
+                    } => result.authenticated_binds.push(AuthenticatedBindFixup {
+                        segment_index,
+                        file_offset,
+                        guest_address,
+                        raw,
+                        pointer_format: format,
+                        import_index,
+                        addend: result.imports[import_index as usize].addend,
+                        authentication,
                     }),
                     Pointer::Bind {
                         import_index,
@@ -674,10 +861,10 @@ mod tests {
         preferred: u64,
         loaded: u64,
     ) -> Result<(u64, u64)> {
-        let (decoded, next) = decode_pointer(raw, format, imports, preferred, loaded)?;
+        let (decoded, next) = decode_pointer(raw, format, imports, preferred, loaded, false)?;
         match decoded {
             Pointer::Rebase(value) => Ok((value, next)),
-            Pointer::Bind { .. } => bail!("test expected a rebase"),
+            _ => bail!("test expected an unauthenticated rebase"),
         }
     }
 
@@ -1264,6 +1451,168 @@ mod tests {
         let (mut data, mut image) = fixture(6);
         imports(&mut data, &mut image, 1, 0, &[0xff, 0]);
         assert!(format!("{:#}", decode(&data, &image, BASE).unwrap_err()).contains("non-UTF-8"));
+    }
+
+    fn auth_raw(
+        _format: u16,
+        target_or_ordinal: u32,
+        bind: bool,
+        key: u64,
+        diversity: u16,
+        address_diversity: bool,
+        next: u64,
+    ) -> u64 {
+        (1 << 63)
+            | (u64::from(bind) << 62)
+            | u64::from(target_or_ordinal)
+            | (u64::from(diversity) << 32)
+            | (u64::from(address_diversity) << 48)
+            | (key << 49)
+            | (next << 51)
+    }
+    #[test]
+    fn authenticated_rebases_preserve_all_metadata_and_always_use_image_relative_targets() {
+        use stela_runtime::pauth::Key;
+        for format in [1, 9, 12] {
+            for (key, domain) in [(0, Key::Ia), (1, Key::Ib), (2, Key::Da), (3, Key::Db)] {
+                for diversity in [0, 0x1234, u16::MAX] {
+                    for address_diversity in [false, true] {
+                        let (mut data, mut image) = fixture(format);
+                        let raw = auth_raw(
+                            format,
+                            u32::MAX,
+                            false,
+                            key,
+                            diversity,
+                            address_diversity,
+                            0,
+                        );
+                        put64(&mut data, SLOT, raw);
+                        refresh(&data, &mut image);
+                        assert!(error(&data, &image).contains("unsupported authenticated"));
+                        let decoded = decode_authenticated(&data, &image, BASE + 0x100000).unwrap();
+                        assert!(
+                            decoded.rebases.is_empty()
+                                && decoded.binds.is_empty()
+                                && decoded.authenticated_binds.is_empty()
+                        );
+                        assert_eq!(
+                            decoded.authenticated_rebases,
+                            [AuthenticatedRebaseFixup {
+                                segment_index: 1,
+                                file_offset: SLOT as u64,
+                                guest_address: BASE + 0x104028,
+                                raw,
+                                target: BASE + 0x100000 + u64::from(u32::MAX),
+                                pointer_format: format,
+                                authentication: Authentication {
+                                    key: domain,
+                                    diversity,
+                                    address_diversity
+                                },
+                            }]
+                        );
+                    }
+                }
+            }
+            let (mut data, mut image) = fixture(format);
+            put64(&mut data, SLOT, auth_raw(format, 1, false, 0, 0, false, 0));
+            refresh(&data, &mut image);
+            assert!(decode_authenticated(&data, &image, u64::MAX).is_err());
+        }
+    }
+    #[test]
+    fn authenticated_binds_keep_table_addends_reserved_bits_and_ordinal_checks() {
+        for format in [1, 9, 12] {
+            let (mut data, mut image) = fixture(format);
+            imports(&mut data, &mut image, 2, 0, b"_fixture\0");
+            put32(&mut data, PAYLOAD + 72, (-7i32) as u32);
+            let raw = auth_raw(format, 0, true, 2, 0xffff, true, 0);
+            put64(&mut data, SLOT, raw);
+            refresh(&data, &mut image);
+            let decoded = decode_authenticated(&data, &image, BASE).unwrap();
+            assert!(
+                decoded.rebases.is_empty()
+                    && decoded.authenticated_rebases.is_empty()
+                    && decoded.binds.is_empty()
+            );
+            assert_eq!(decoded.authenticated_binds[0].addend, -7);
+            assert_eq!(
+                decoded.authenticated_binds[0].authentication.key,
+                stela_runtime::pauth::Key::Da
+            );
+            assert_eq!(
+                decoded.authenticated_binds[0].authentication.diversity,
+                u16::MAX
+            );
+            let context = stela_runtime::pauth::Context::new(
+                1,
+                stela_runtime::pauth::Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]),
+            );
+            assert!(decoded.sign_rebases(&context).is_err());
+            for changed in [raw | 1, raw | (1 << if format == 12 { 24 } else { 16 })] {
+                put64(&mut data, SLOT, changed);
+                refresh(&data, &mut image);
+                assert!(decode_authenticated(&data, &image, BASE).is_err());
+            }
+        }
+    }
+    #[test]
+    fn mixed_authenticated_chain_is_complete_and_signing_never_strips_or_invents_keys() {
+        use stela_runtime::pauth::{Context, Keys};
+        let (mut data, mut image) = fixture(12);
+        put64(&mut data, SLOT, raw(12, 0x4120, 0, 1));
+        put64(
+            &mut data,
+            SLOT + 8,
+            auth_raw(12, 0x4130, false, 0, 0x1234, true, 1),
+        );
+        put64(
+            &mut data,
+            SLOT + 16,
+            auth_raw(12, 0x4140, false, 2, 0, false, 0),
+        );
+        refresh(&data, &mut image);
+        let decoded = decode_authenticated(&data, &image, BASE).unwrap();
+        assert_eq!(decoded.rebases.len(), 1);
+        assert_eq!(decoded.authenticated_rebases.len(), 2);
+        let ib_only = Context::new(7, Keys::from_ib_words(1, 2));
+        assert!(decoded.sign_rebases(&ib_only).is_err());
+        let full = Context::new(7, Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]));
+        let signed = decoded.sign_rebases(&full).unwrap();
+        assert_eq!(signed.rebases.len(), 1);
+        assert_eq!(signed.address_space, 7);
+        assert_eq!(signed.authenticated_rebases[0].modifier, 0x1234000100004030);
+        for record in &signed.authenticated_rebases {
+            let result = full
+                .authenticate(
+                    record.fixup.authentication.key,
+                    record.value,
+                    record.modifier,
+                )
+                .unwrap();
+            assert!(result.authenticated);
+            assert_eq!(result.pointer, record.fixup.target);
+        }
+        // Null handling belongs to dyld's helper, not the PAC instruction.
+        let mut null = decoded.clone();
+        null.rebases.clear();
+        null.authenticated_rebases.truncate(1);
+        null.authenticated_rebases[0].target = 0;
+        assert_eq!(
+            null.sign_rebases(&ib_only).unwrap().authenticated_rebases[0].value,
+            0
+        );
+        assert_ne!(full.sign(stela_runtime::pauth::Key::Ia, 0, 0).unwrap(), 0);
+        assert_eq!(
+            Authentication {
+                key: stela_runtime::pauth::Key::Ia,
+                diversity: 0x4321,
+                address_diversity: true
+            }
+            .modifier(0xeeee123456789abc),
+            0x4321123456789abc
+        );
     }
 
     #[test]

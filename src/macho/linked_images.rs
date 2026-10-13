@@ -429,6 +429,8 @@ mod tests {
                 unresolved_requirements: vec![],
             },
             fixups: DecodedFixups {
+                authenticated_rebases: vec![],
+                authenticated_binds: vec![],
                 preferred_base: 0,
                 load_base: 0,
                 pointer_formats: vec![6],

@@ -110,6 +110,9 @@ enum Command {
         architecture: Option<String>,
         #[arg(long, value_parser = parse_address)]
         image_base: Option<u64>,
+        /// Plan authenticated rebases under explicit IA/IB/DA/DB process keys.
+        #[arg(long)]
+        software_pauth_keys: Option<PathBuf>,
     },
     /// Compile one native block with explicit guest-address exits.
     CompileBlock {
@@ -126,6 +129,7 @@ enum Command {
         software_clock: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
+    #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
     RunBlocks {
         input: PathBuf,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
@@ -143,8 +147,16 @@ enum Command {
         /// Opt into software IB/SP authentication with explicit {low,high} test keys.
         #[arg(long)]
         software_pauth_ib_key: Option<PathBuf>,
+        /// Explicit IA/IB/DA/DB low/high key pairs for the software ARM profile.
+        #[arg(long)]
+        software_pauth_keys: Option<PathBuf>,
+        /// Owned data mappings for trusted raw-code execution.
+        #[arg(long)]
+        memory: Option<PathBuf>,
+        #[arg(long, requires = "memory", value_parser = parse_memory_query)]
+        read_memory: Vec<MemoryQuery>,
         /// Explicit finite replay for one reviewed virtual-counter read.
-        #[arg(long, requires = "software_pauth_ib_key")]
+        #[arg(long, requires = "software_pauth_context")]
         clock_snapshot: Option<PathBuf>,
     },
     /// Probe trusted executable entry code; dyld/process setup remains unresolved.
@@ -503,6 +515,93 @@ fn pauth_context(
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PauthKeysInput {
+    ia: PauthKeyInput,
+    ib: PauthKeyInput,
+    da: PauthKeyInput,
+    db: PauthKeyInput,
+}
+
+fn pauth_all_keys_context(
+    path: &std::path::Path,
+    address_space: u64,
+) -> Result<stela_runtime::pauth::Context> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    File::open(path)?.take(4097).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 4096,
+        "software PAuth keys input exceeds 4096 bytes"
+    );
+    let keys: PauthKeysInput = serde_json::from_slice(&bytes)?;
+    Ok(stela_runtime::pauth::Context::new(
+        address_space,
+        stela_runtime::pauth::Keys::from_words(
+            [keys.ia.low, keys.ia.high],
+            [keys.ib.low, keys.ib.high],
+            [keys.da.low, keys.da.high],
+            [keys.db.low, keys.db.high],
+        ),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemoryInput {
+    regions: Vec<RawMemoryRegionInput>,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemoryRegionInput {
+    guest_address: u64,
+    virtual_bytes: u64,
+    #[serde(default)]
+    initial_bytes: Vec<u8>,
+    readable: bool,
+    writable: bool,
+}
+fn raw_memory(path: Option<&std::path::Path>) -> Result<stela_runtime::memory::OwnedMemory> {
+    use std::io::Read;
+    let Some(path) = path else {
+        return stela_runtime::memory::OwnedMemory::map(vec![]);
+    };
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 4 * 1024 * 1024,
+        "raw memory input exceeds 4 MiB"
+    );
+    let input: RawMemoryInput = serde_json::from_slice(&bytes)?;
+    ensure!(
+        input.regions.len() <= 1024,
+        "raw memory region count exceeds 1024"
+    );
+    stela_runtime::memory::OwnedMemory::map(
+        input
+            .regions
+            .into_iter()
+            .map(|r| stela_runtime::memory::MemoryRegionSpec {
+                guest_address: r.guest_address,
+                virtual_bytes: r.virtual_bytes,
+                initial_bytes: r.initial_bytes,
+                readable: r.readable,
+                writable: r.writable,
+                executable: false,
+            })
+            .collect(),
+    )
+}
+fn memory_hashes(memory: &stela_runtime::memory::OwnedMemory) -> Result<Vec<serde_json::Value>> {
+    memory.regions().iter().filter(|r| r.readable).map(|r| Ok(serde_json::json!({
+        "address":r.guest_address,"bytes":r.virtual_bytes,
+        "sha256":stela_core::sha256(&memory.read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?),
+    }))).collect()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClockSnapshotInput {
     counter: u64,
     sleep_ticks: u64,
@@ -810,10 +909,21 @@ fn run() -> Result<()> {
             input,
             architecture,
             image_base,
+            software_pauth_keys,
         } => {
             let data = std::fs::read(&input)?;
             let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
-            let plan = macho::load_plan::plan(bytes)?;
+            let file_type = u32::from_le_bytes(
+                bytes
+                    .get(12..16)
+                    .context("truncated Mach header")?
+                    .try_into()?,
+            );
+            let plan = match file_type {
+                6 => macho::load_plan::plan_library(bytes)?,
+                7 => macho::load_plan::plan_dynamic_linker(bytes)?.image,
+                _ => macho::load_plan::plan(bytes)?,
+            };
             let preferred = plan
                 .segments
                 .iter()
@@ -821,13 +931,26 @@ fn run() -> Result<()> {
                 .context("missing preferred image base")?
                 .guest
                 .address;
-            let fixups =
-                macho::chained_fixups::plan(bytes, &plan, image_base.unwrap_or(preferred))?;
+            let load_base = image_base.unwrap_or(preferred);
+            let (fixups, decoded_fixups) = if let Some(path) = software_pauth_keys.as_deref() {
+                let context = pauth_all_keys_context(path, 1)?;
+                let decoded = macho::chained_fixups::decode_authenticated(bytes, &plan, load_base)?;
+                (
+                    serde_json::to_value(decoded.sign_rebases(&context)?)?,
+                    Some(decoded),
+                )
+            } else {
+                (
+                    serde_json::to_value(macho::chained_fixups::plan(bytes, &plan, load_base)?)?,
+                    None,
+                )
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "kind":"chained_fixup_plan","container_sha256":stela_core::sha256(&data),
-                    "slice_offset":slice_offset,"plan":plan,"fixups":fixups,"complete_binary_verified":false
+                    "slice_offset":slice_offset,"plan":plan,"fixups":fixups,"decoded_fixups":decoded_fixups,
+                    "fixups_applied":false,"native_executed":false,"complete_binary_verified":false
                 }))?
             );
         }
@@ -982,6 +1105,9 @@ fn run() -> Result<()> {
             block_budget,
             cache_dir,
             software_pauth_ib_key,
+            software_pauth_keys,
+            memory: memory_path,
+            read_memory,
             clock_snapshot: clock_snapshot_path,
         } => {
             use stela_runtime::blocks::{BlockRuntime, ThreadState};
@@ -1012,10 +1138,25 @@ fn run() -> Result<()> {
             };
             let source = std::fs::read(input)?;
             let source_hash = stela_core::sha256(&source);
-            let context = software_pauth_ib_key
-                .as_deref()
-                .map(|path| pauth_context(path, 1))
-                .transpose()?;
+            let context = if let Some(path) = software_pauth_keys.as_deref() {
+                Some(pauth_all_keys_context(path, 1)?)
+            } else {
+                software_pauth_ib_key
+                    .as_deref()
+                    .map(|path| pauth_context(path, 1))
+                    .transpose()?
+            };
+            let memory = raw_memory(memory_path.as_deref())?;
+            let memory_before = memory_hashes(&memory)?;
+            let snapshot_total = read_memory.iter().try_fold(0usize, |total, q| {
+                total
+                    .checked_add(q.bytes)
+                    .context("memory snapshot overflow")
+            })?;
+            ensure!(
+                snapshot_total <= 1024 * 1024,
+                "memory snapshots exceed 1 MiB"
+            );
             let mut clock = clock_snapshot_path
                 .as_deref()
                 .map(|path| -> Result<_> {
@@ -1062,11 +1203,17 @@ fn run() -> Result<()> {
                     )?
                 }
             };
+            let memory_after = memory_hashes(&memory)?;
+            let memory_reads = read_memory.iter().map(|q| -> Result<_> { Ok(serde_json::json!({
+                "address":q.address,"bytes":q.bytes,"hex":hex::encode(memory.read_snapshot(q.address,q.bytes)?)
+            })) }).collect::<Result<Vec<_>>>()?;
+            let memory_report = serde_json::json!({"memory_regions":memory.regions(),"memory_before":memory_before,
+                "memory_after":memory_after,"memory_reads":memory_reads});
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
-                "outcome":outcome,"abi":runtime.profile().abi(),
+                "outcome":outcome,"abi":runtime.profile().abi(),"memory":memory_report,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock.as_ref().map(|clock| serde_json::json!({
                     "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
@@ -1806,6 +1953,85 @@ mod register_state_tests {
 #[cfg(test)]
 mod clock_cli_tests {
     use super::*;
+
+    #[test]
+    fn full_pauth_keys_and_owned_memory_cli_inputs_are_explicit_and_strict() -> Result<()> {
+        let folder = tempfile::tempdir()?;
+        let path = folder.path().join("keys.json");
+        let valid = r#"{"ia":{"low":1,"high":2},"ib":{"low":3,"high":4},"da":{"low":5,"high":6},"db":{"low":7,"high":8}}"#;
+        std::fs::write(&path, valid)?;
+        let context = pauth_all_keys_context(&path, 92)?;
+        assert_eq!(context.address_space(), 92);
+        for key in [
+            stela_runtime::pauth::Key::Ia,
+            stela_runtime::pauth::Key::Ib,
+            stela_runtime::pauth::Key::Da,
+            stela_runtime::pauth::Key::Db,
+        ] {
+            assert!(context.has_key(key));
+        }
+        for invalid in [
+            r#"{"low":1,"high":2}"#,
+            r#"{"ia":{"low":1,"high":2},"ib":{"low":3,"high":4},"da":{"low":5,"high":6}}"#,
+        ] {
+            std::fs::write(&path, invalid)?;
+            assert!(pauth_all_keys_context(&path, 92).is_err());
+        }
+        let mut padded = valid.to_owned();
+        padded.push_str(&" ".repeat(4096 - valid.len()));
+        std::fs::write(&path, &padded)?;
+        assert!(pauth_all_keys_context(&path, 92).is_ok());
+        padded.push(' ');
+        std::fs::write(&path, padded)?;
+        assert!(pauth_all_keys_context(&path, 92).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "run-blocks",
+                "code.arm64",
+                "--software-pauth-keys",
+                "keys.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "run-blocks",
+                "code.arm64",
+                "--software-pauth-keys",
+                "keys.json",
+                "--software-pauth-ib-key",
+                "ib.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "stela",
+                "run-blocks",
+                "code.arm64",
+                "--software-pauth-keys",
+                "keys.json",
+                "--clock-snapshot",
+                "clock.json"
+            ])
+            .is_ok()
+        );
+        let memory = folder.path().join("memory.json");
+        std::fs::write(&memory, r#"{"regions":[]}"#)?;
+        assert!(raw_memory(Some(&memory))?.regions().is_empty());
+        for invalid in [
+            r#"{"regions":[],"extra":1}"#,
+            r#"{"regions":[{"guest_address":0,"virtual_bytes":4096,"initial_bytes":[],"readable":true,"writable":false,"executable":true}]}"#,
+        ] {
+            std::fs::write(&memory, invalid)?;
+            assert!(raw_memory(Some(&memory)).is_err());
+        }
+        std::fs::write(&memory, vec![b' '; 4 * 1024 * 1024 + 1])?;
+        assert!(raw_memory(Some(&memory)).is_err());
+        Ok(())
+    }
 
     #[test]
     fn clock_flags_require_their_explicit_parent_profiles() {
