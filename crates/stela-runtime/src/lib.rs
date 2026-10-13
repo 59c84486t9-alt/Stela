@@ -2,6 +2,7 @@
 //! Full application launch, platform ABI and Mach-O linking remain future work.
 pub mod blocks;
 pub mod clock;
+pub mod commpage;
 pub mod darwin;
 pub mod dispatch;
 pub mod execution;

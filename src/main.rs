@@ -167,6 +167,9 @@ enum Command {
         /// Own host Mach bootstrap rights behind guest port names (macOS only).
         #[arg(long)]
         mach_port_services: bool,
+        /// Map the modern ARM page-size commpage; arm64 user pages stay 16 KiB.
+        #[arg(long, value_parser = parse_arm_kernel_page_shift)]
+        arm_commpage_kernel_page_shift: Option<stela_runtime::commpage::KernelPageSize>,
         #[arg(long, requires = "memory", value_parser = parse_memory_query)]
         read_memory: Vec<MemoryQuery>,
         /// Explicit finite replay for one reviewed virtual-counter read.
@@ -461,6 +464,17 @@ fn parse_library(value: &str) -> Result<LibraryInput, String> {
         path: path.into(),
         base: parse_address(base)?,
     })
+}
+
+fn parse_arm_kernel_page_shift(
+    value: &str,
+) -> Result<stela_runtime::commpage::KernelPageSize, String> {
+    use stela_runtime::commpage::KernelPageSize;
+    match value {
+        "12" => Ok(KernelPageSize::FourKiB),
+        "14" => Ok(KernelPageSize::SixteenKiB),
+        _ => Err("ARM kernel page shift must be 12 or 14; arm64 user shift is 14".into()),
+    }
 }
 
 fn parse_cpu_target(value: &str) -> Result<stela_compiler::TargetCpu, String> {
@@ -1249,6 +1263,7 @@ fn run() -> Result<()> {
             memory: memory_path,
             data_vm_services,
             mach_port_services,
+            arm_commpage_kernel_page_shift,
             read_memory,
             clock_snapshot: clock_snapshot_path,
         } => {
@@ -1290,6 +1305,9 @@ fn run() -> Result<()> {
             };
             let mut memory = raw_memory(memory_path.as_deref())?;
             let memory_before = memory_hashes(&memory)?;
+            let commpage = arm_commpage_kernel_page_shift
+                .map(|kernel| stela_runtime::commpage::Context::new(1, kernel))
+                .transpose()?;
             let snapshot_total = read_memory.iter().try_fold(0usize, |total, q| {
                 total
                     .checked_add(q.bytes)
@@ -1380,6 +1398,11 @@ fn run() -> Result<()> {
                 "outcome":outcome,"abi":runtime.profile().abi(),"target_cpu":runtime.target_cpu().id(),"memory":memory_report,
                 "mach_port_profile":mach_port_services.then_some(stela_runtime::mach::HOST_PORT_PROFILE),
                 "mach_port_events":mach_port_events,"mach_port_rights":mach_ports.as_ref().map(|ports| ports.rights()),
+                "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
+                    "profile_id":page.profile_id(),"address_space":page.address_space(),
+                    "region":page.region(),"supported_fields":page.supported_fields(),
+                    "page_sha256":stela_core::sha256(&page.snapshot_bytes()?)
+                })) }).transpose()?,
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock.as_ref().map(|clock| serde_json::json!({

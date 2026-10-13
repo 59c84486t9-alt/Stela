@@ -14,9 +14,10 @@ from pathlib import Path
 import struct
 import subprocess
 import tempfile
+from typing import NamedTuple
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC
+from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_PROT_READ, UC_PROT_WRITE, UC_PROT_EXEC
 from unicorn import arm64_const as arm
 
 from differential import ROOT, State, states, state_dict, initialize_arm, capture_arm, seed_extended_state
@@ -569,80 +570,254 @@ def self_rebase_cohort(cli, directory, view, image):
         'limits':'Unchanged complete self-rebase startup path entered at original basic block with explicit live inputs, original raw mappings and software PAuth1 keys. All chained writes execute in original code. This does not execute earlier time/kdebug startup, following libc/Mach/TLS initialization, full ProcessConfig, application launch, Apple hardware PAC or macOS boot.'}
 
 
-def mach_ports_cohort(cli, directory, view, image):
+PAGE_SIZE_BASE = 0xfffff4000
+PAGE_SIZE_USER_SHIFT = 14
+PAGE_SIZE_KERNEL_SHIFTS = (12, 14)
+PAGE_SIZE_BYTES = 1 << PAGE_SIZE_USER_SHIFT
+PAGE_SIZE_USER_OFFSET, PAGE_SIZE_KERNEL_OFFSET = 0x25, 0x37
+PAGE_SIZE_ADDRESS_SPACE = 1
+PAGE_SIZE_PROFILE = 'darwin-arm64-page-sizes-v1'
+PAGE_SIZE_XNU_COMMIT = 'f6217f891ac0bb64f3d375211650a4c1ff8ca1ea'
+PAGE_SIZE_SOURCES = (
+    ('osfmk/arm/cpu_capabilities.h', 'clock-osfmk-arm-cpu_capabilities.h',
+     'aae447c1418078d8b97d40f52aa05605dbf166f23a3a77ee5d6519f943fa3f7e'),
+    ('osfmk/arm/commpage/commpage.c', 'clock-osfmk-arm-commpage-commpage.c',
+     '37f9980f3e207bb3e738e43223c98e24a7c65fa51c108a997d2bd0f3faf683e7'))
+
+# These addresses describe only the immutable original research fixture.
+MACH_INIT_ENTRY, MACH_INIT_PORTS_END = 0x4c0c, 0x4c38
+MACH_INIT_PAGE_SIZES_END, MACH_INIT_THREAD_SELFID_SVC = 0x4cb8, 0x4d40
+MACH_INIT_KERNEL_SHIFT_LOAD, MACH_INIT_USER_SHIFT_LOAD = 0x4c54, 0x4c70
+MACH_REPLY_PORT, MACH_THREAD_SELF, MACH_TASK_SELF, MACH_HOST_SELF = 26, 27, 28, 29
+MACH_PORT_WRAPPERS = ((0x1634, MACH_REPLY_PORT), (0x1640, MACH_THREAD_SELF),
+                      (0x164c, MACH_TASK_SELF), (0x1658, MACH_HOST_SELF))
+MACH_INIT_REQUESTS = (MACH_TASK_SELF, MACH_REPLY_PORT)
+MACH_INIT_TASK_SELF, MACH_INIT_REPLY_PORT = 0xd3720, 0xd3758
+MACH_INIT_KERNEL_SHIFT, MACH_INIT_USER_SHIFT = 0xd3778, 0xd3738
+MACH_INIT_USER_SIZE, MACH_INIT_USER_MASK = 0xd3728, 0xd3730
+MACH_INIT_GLOBALS_BYTES = 96
+MACH_FIXTURE_BASES = (0x40000000000, 0x40000004000)
+MACH_STACK_BASE, MACH_STACK_BYTES = 0x90000000000, 65536
+MACH_STACK_POINTER = MACH_STACK_BASE + 0xf000
+MACH_BLOCK_BUDGET, MACH_ORIGINAL_INSTRUCTION_BUDGET = 32, 128
+DARWIN_THREAD_SELFID, DARWIN_SVC_IMMEDIATE = 372, 0x80
+A64_INSTRUCTION_BYTES, UNICORN_SVC_INTERRUPT = 4, 2
+UINT32_BYTES, UINT64_BYTES = struct.calcsize('<I'), struct.calcsize('<Q')
+UINT32_MASK, UINT64_MASK = (1 << 32) - 1, (1 << 64) - 1
+
+
+class MachPortCase(NamedTuple):
+    entry_offset: int
+    stop_pc: int
+    request_numbers: tuple[int, ...]
+    kernel_page_shift: int | None = None
+    pending_thread_selfid: bool = False
+
+
+def mach_port_cases(base, page_sizes):
+    if page_sizes:
+        # 0x4cb8 is a dispatch entry following BL at 0x4c9c; the BL itself
+        # is inside a translated block and cannot serve as a stop address.
+        return [MachPortCase(MACH_INIT_ENTRY, base + boundary, MACH_INIT_REQUESTS,
+                             kernel_shift, boundary == MACH_INIT_THREAD_SELFID_SVC)
+                for kernel_shift in PAGE_SIZE_KERNEL_SHIFTS
+                for boundary in (MACH_INIT_PAGE_SIZES_END, MACH_INIT_THREAD_SELFID_SVC)]
+    return [MachPortCase(entry, VM_STOP, (number,)) for entry, number in MACH_PORT_WRAPPERS] + [
+        MachPortCase(MACH_INIT_ENTRY, base + MACH_INIT_PORTS_END, MACH_INIT_REQUESTS)]
+
+
+def page_size_bytes(kernel_shift):
+    require(kernel_shift in PAGE_SIZE_KERNEL_SHIFTS, 'unsupported ARM kernel page shift')
+    page = bytearray(PAGE_SIZE_BYTES)
+    page[PAGE_SIZE_USER_OFFSET] = PAGE_SIZE_USER_SHIFT
+    page[PAGE_SIZE_KERNEL_OFFSET] = kernel_shift
+    return bytes(page)
+
+
+def page_size_contract_sources():
+    contracts = []
+    for path, local, sha in PAGE_SIZE_SOURCES:
+        require(digest((ROOT / '.stela/research/dyld-bootstrap' / local).read_bytes()) == sha,
+                'pinned XNU commpage contract source differs')
+        contracts.append({'url': f'https://github.com/apple-oss-distributions/xnu/blob/{PAGE_SIZE_XNU_COMMIT}/{path}',
+                          'sha256': sha})
+    return contracts
+
+
+def audit_page_size_commpage(report, kernel_shift):
+    page = report['page_size_commpage']
+    require(page['profile_id'] == PAGE_SIZE_PROFILE and page['address_space'] == PAGE_SIZE_ADDRESS_SPACE,
+            'page-size commpage profile/owner differs')
+    region = page['region']
+    require((region['guest_address'], region['virtual_bytes'], region['readable'],
+             region['writable'], region['executable']) == (PAGE_SIZE_BASE, PAGE_SIZE_BYTES, True, False, False),
+            'page-size commpage extent or permissions differ')
+    require(page['supported_fields'] == [
+        {'address': PAGE_SIZE_BASE + PAGE_SIZE_USER_OFFSET, 'bytes': 1, 'value': PAGE_SIZE_USER_SHIFT},
+        {'address': PAGE_SIZE_BASE + PAGE_SIZE_KERNEL_OFFSET, 'bytes': 1, 'value': kernel_shift}],
+        'page-size field contract differs')
+    require(page['page_sha256'] == digest(page_size_bytes(kernel_shift)), 'page-size commpage bytes differ')
+
+
+def run_mach_native(cli, directory, base, case):
+    command = [str(cli), 'run-blocks', str(directory / 'mach-text.bin'), '--guest-base', hex(base),
+               '--entry', hex(base + case.entry_offset), '--state', str(directory / 'mach-state.json'),
+               '--memory', str(directory / 'mach-memory.json'),
+               '--software-pauth-keys', str(directory / 'mach-keys.json'), '--mach-port-services',
+               '--block-budget', str(MACH_BLOCK_BUDGET), '--cache-dir', str(directory / 'mach-cache')]
+    if not case.pending_thread_selfid:
+        command.extend(['--stop-pc', hex(case.stop_pc)])
+    if case.kernel_page_shift is not None:
+        command.extend(['--arm-commpage-kernel-page-shift', str(case.kernel_page_shift),
+                        '--read-memory', f'{base + MACH_INIT_TASK_SELF:#x}:{MACH_INIT_GLOBALS_BYTES}'])
+    native = json.loads(subprocess.check_output(command, timeout=15))
+    reason = ({'kind': 'synchronous_trap', 'trap': {'kind': 'supervisor_call',
+               'immediate': DARWIN_SVC_IMMEDIATE, 'instruction_pc': case.stop_pc,
+               'exception_return_pc': case.stop_pc + A64_INSTRUCTION_BYTES}}
+              if case.pending_thread_selfid else {'kind': 'stop_address'})
+    require(native['outcome']['reason'] == reason and native['pc'] == case.stop_pc,
+            f'native Mach fixture missed original continuation/return: {native["outcome"]["reason"]}, PC={native["pc"]:#x}')
+    if case.kernel_page_shift is not None:
+        audit_page_size_commpage(native, case.kernel_page_shift)
+    if case.pending_thread_selfid:
+        require(native['state']['x'][16] == DARWIN_THREAD_SELFID, 'unknown BSD request was not preserved pending')
+    require(native['mach_port_profile'] == 'darwin-host-owned-mach-ports-v1' and native['data_vm_profile'] is None,
+            'Mach service profile changed or implicitly enabled data VM')
+    events = native['mach_port_events']
+    require(tuple(event['request']['number'] for event in events) == case.request_numbers
+            and all(event['result'] > 0 and event['declined'] is None for event in events),
+            'original Mach requests did not obtain actual host-backed guest rights')
+    require(len(native['mach_port_rights']) == len(case.request_numbers), 'Mach owned rights count differs')
+    return native
+
+
+def replay_mach_original(pac, regions, initial, base, case, events):
+    machine = pac.arm_machine(keys=pac.DOMAIN_KEYS)
+    for region in regions:
+        machine.mem_map(region['address'], region['virtual_bytes'])
+        machine.mem_write(region['address'], region['data'])
+        machine.mem_protect(region['address'], region['virtual_bytes'], region['initial_protection'])
+    page_reads, visited = [], []
+    if case.kernel_page_shift is not None:
+        machine.mem_map(PAGE_SIZE_BASE, PAGE_SIZE_BYTES)
+        machine.mem_write(PAGE_SIZE_BASE, page_size_bytes(case.kernel_page_shift))
+        machine.mem_protect(PAGE_SIZE_BASE, PAGE_SIZE_BYTES, UC_PROT_READ)
+        def observe_read(uc, access, address, size, value, unused):
+            if PAGE_SIZE_BASE <= address < PAGE_SIZE_BASE + PAGE_SIZE_BYTES:
+                page_reads.append({'address': address, 'bytes': size, 'pc': uc.reg_read(arm.UC_ARM64_REG_PC)})
+        machine.hook_add(UC_HOOK_MEM_READ, observe_read)
+        machine.hook_add(UC_HOOK_CODE, lambda _, pc, size, unused: visited.append(pc))
+    initialize_arm(machine, initial)
+    replay, observed = iter(events), []
+    def svc(uc, number, unused):
+        event = next(replay)
+        observed.append(event)
+        require(number == UNICORN_SVC_INTERRUPT
+                and uc.reg_read(arm.UC_ARM64_REG_PC) == event['trap']['exception_return_pc'],
+                'original SVC return PC differs')
+        require(uc.reg_read(arm.UC_ARM64_REG_X16) & UINT32_MASK == -event['request']['number'] & UINT32_MASK,
+                'original Mach selector differs')
+        # Pinned XNU arm_set_mach_syscall_ret assigns signed int to X0;
+        # X1/NZCV and other saved registers are preserved.
+        uc.reg_write(arm.UC_ARM64_REG_X0, event['result'] & UINT64_MASK)
+    machine.hook_add(UC_HOOK_INTR, svc)
+    machine.emu_start(base + case.entry_offset, case.stop_pc, count=MACH_ORIGINAL_INSTRUCTION_BUDGET)
+    require(machine.reg_read(arm.UC_ARM64_REG_PC) == case.stop_pc and len(observed) == len(events),
+            'original Mach path differs')
+    return machine, page_reads, len(visited)
+
+
+def audit_page_size_globals(native, base, kernel_shift, events):
+    wanted = {MACH_INIT_TASK_SELF: (UINT32_BYTES, events[0]['result']),
+              MACH_INIT_REPLY_PORT: (UINT32_BYTES, events[1]['result']),
+              MACH_INIT_KERNEL_SHIFT: (UINT32_BYTES, kernel_shift),
+              MACH_INIT_USER_SHIFT: (UINT32_BYTES, PAGE_SIZE_USER_SHIFT),
+              MACH_INIT_USER_SIZE: (UINT64_BYTES, PAGE_SIZE_BYTES),
+              MACH_INIT_USER_MASK: (UINT64_BYTES, PAGE_SIZE_BYTES - 1)}
+    reads = native['memory']['memory_reads']
+    require(len(reads) == 1, 'expected one page-size globals snapshot')
+    raw = bytes.fromhex(reads[0]['hex'])
+    require(reads[0]['address'] == base + MACH_INIT_TASK_SELF and len(raw) == MACH_INIT_GLOBALS_BYTES,
+            'page-size globals snapshot extent differs')
+    for address, (size, value) in wanted.items():
+        offset = address - MACH_INIT_TASK_SELF
+        require(int.from_bytes(raw[offset:offset + size], 'little') == value,
+                f'original page-size or port global {address:#x} differs from independent ABI model')
+
+
+def audit_original_page_sizes(machine, page_reads, base, kernel_shift):
+    require(page_reads == [
+        {'address': PAGE_SIZE_BASE + PAGE_SIZE_KERNEL_OFFSET, 'bytes': 1, 'pc': base + MACH_INIT_KERNEL_SHIFT_LOAD},
+        {'address': PAGE_SIZE_BASE + PAGE_SIZE_USER_OFFSET, 'bytes': 1, 'pc': base + MACH_INIT_USER_SHIFT_LOAD}],
+        'original code read undeclared commpage fields')
+    require(bytes(machine.mem_read(PAGE_SIZE_BASE, PAGE_SIZE_BYTES)) == page_size_bytes(kernel_shift),
+            'original commpage changed')
+
+
+def mach_ports_cohort(cli, directory, view, image, page_sizes=False):
     """Original wrappers and initialization prefix; host results replayed at SVC."""
     spec = importlib.util.spec_from_file_location('mach_ports_pauth', ROOT / 'dev/pauth-differential.py')
-    pac = importlib.util.module_from_spec(spec); spec.loader.exec_module(pac)
-    source, state_path, memory_path = directory/'mach-text.bin', directory/'mach-state.json', directory/'mach-memory.json'
-    source.write_bytes(view['text'])
-    keys_path = directory/'mach-keys.json'
-    keys_path.write_text(json.dumps({key:{'low':v[0],'high':v[1]} for key,v in pac.DOMAIN_KEYS.items()}))
-    source_paths = ('dev/dyld-entry-differential.py','dev/pauth-differential.py','dev/differential.py',
-                    'src/main.rs','crates/stela-runtime/src/mach.rs','crates/stela-runtime/src/darwin.rs')
-    hashes = {path:digest((ROOT/path).read_bytes()) for path in source_paths}
+    pac = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pac)
+    contracts = page_size_contract_sources() if page_sizes else []
+    (directory / 'mach-text.bin').write_bytes(view['text'])
+    (directory / 'mach-keys.json').write_text(json.dumps(
+        {key: {'low': value[0], 'high': value[1]} for key, value in pac.DOMAIN_KEYS.items()}))
+    source_paths = ('dev/dyld-entry-differential.py', 'dev/pauth-differential.py', 'dev/differential.py',
+                    'src/main.rs', 'crates/stela-runtime/src/mach.rs', 'crates/stela-runtime/src/darwin.rs',
+                    'crates/stela-runtime/src/commpage.rs', 'crates/stela-runtime/src/memory.rs',
+                    'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/blocks.rs')
+    hashes = {path: digest((ROOT / path).read_bytes()) for path in source_paths}
     cli_hash, rows, compiler = digest(cli.read_bytes()), [], None
-    for base in (0x40000000000,0x40000004000):
-        for flags in (0,15):
-            for entry,stop,numbers in [(0x1634,VM_STOP,[26]),(0x1640,VM_STOP,[27]),
-                                       (0x164c,VM_STOP,[28]),(0x1658,VM_STOP,[29]),
-                                       (0x4c0c,base+0x4c38,[28,26])]:
-                initial = State.from_buffer_copy(states(all_flags=True)[flags]); initial.nzcv=flags<<28
-                initial.sp,initial.x[30] = 0x9000000f000,VM_STOP
-                regions = original_segment_regions(image,base)
-                regions.append({'address':0x90000000000,'virtual_bytes':65536,'initial_protection':3,'data':bytes(65536)})
-                memory=[]
-                for index,r in enumerate(regions):
-                    path=directory/f'mach-region-{index}.bin';path.write_bytes(r['data'])
-                    memory.append({'guest_address':r['address'],'virtual_bytes':r['virtual_bytes'],
-                        'initial_file':{'path':path.name,'bytes':len(r['data']),'sha256':digest(r['data'])},
-                        'readable':True,'writable':bool(r['initial_protection']&2)})
-                state_path.write_text(json.dumps(state_dict(initial)));memory_path.write_text(json.dumps({'regions':memory}))
-                native=json.loads(subprocess.check_output([str(cli),'run-blocks',str(source),'--guest-base',hex(base),
-                    '--entry',hex(base+entry),'--stop-pc',hex(stop),'--state',str(state_path),'--memory',str(memory_path),
-                    '--software-pauth-keys',str(keys_path),'--mach-port-services','--block-budget','32',
-                    '--cache-dir',str(directory/'mach-cache')],timeout=15))
-                require(native['outcome']['reason']=={'kind':'stop_address'} and native['pc']==stop,
-                        'native Mach fixture missed original continuation/return')
-                require(native['mach_port_profile']=='darwin-host-owned-mach-ports-v1' and native['data_vm_profile'] is None,
-                        'Mach service profile changed or implicitly enabled data VM')
-                events=native['mach_port_events']
-                require([e['request']['number'] for e in events]==numbers and all(e['result']>0 and e['declined'] is None for e in events),
-                        'original Mach requests did not obtain actual host-backed guest rights')
-                require(len(native['mach_port_rights'])==len(numbers), 'Mach owned rights count differs')
-                machine=pac.arm_machine(keys=pac.DOMAIN_KEYS)
-                for r in regions:
-                    machine.mem_map(r['address'],r['virtual_bytes']);machine.mem_write(r['address'],r['data'])
-                    machine.mem_protect(r['address'],r['virtual_bytes'],r['initial_protection'])
-                initialize_arm(machine,initial)
-                replay=iter(events);observed=[]
-                def svc(uc,number,unused):
-                    event=next(replay); observed.append(event)
-                    require(number==2 and uc.reg_read(arm.UC_ARM64_REG_PC)==event['trap']['exception_return_pc'],
-                            'original SVC return PC differs')
-                    require((uc.reg_read(arm.UC_ARM64_REG_X16)&0xffffffff)==(-event['request']['number'])&0xffffffff,
-                            'original Mach selector differs')
-                    # Pinned XNU arm_set_mach_syscall_ret assigns signed int to X0;
-                    # X1/NZCV and other saved registers are preserved.
-                    uc.reg_write(arm.UC_ARM64_REG_X0,event['result']&((1<<64)-1))
-                machine.hook_add(UC_HOOK_INTR,svc)
-                machine.emu_start(base+entry,stop,count=128)
-                require(machine.reg_read(arm.UC_ARM64_REG_PC)==stop and len(observed)==len(events), 'original Mach path differs')
-                expected=state_dict(capture_arm(machine,initial))
-                after=[{'address':r['address'],'bytes':r['virtual_bytes'],
-                        'sha256':digest(bytes(machine.mem_read(r['address'],r['virtual_bytes'])))} for r in regions]
-                require(native['state']==expected and native['memory']['memory_after']==after,
+    for base in MACH_FIXTURE_BASES:
+        for flags in (0, 15):
+            for case in mach_port_cases(base, page_sizes):
+                initial = State.from_buffer_copy(states(all_flags=True)[flags])
+                initial.nzcv = flags << 28
+                initial.sp, initial.x[30] = MACH_STACK_POINTER, VM_STOP
+                regions = original_segment_regions(image, base)
+                regions.append({'address': MACH_STACK_BASE, 'virtual_bytes': MACH_STACK_BYTES,
+                                'initial_protection': UC_PROT_READ | UC_PROT_WRITE, 'data': bytes(MACH_STACK_BYTES)})
+                memory = []
+                for index, region in enumerate(regions):
+                    path = directory / f'mach-region-{index}.bin'
+                    path.write_bytes(region['data'])
+                    memory.append({'guest_address': region['address'], 'virtual_bytes': region['virtual_bytes'],
+                        'initial_file': {'path': path.name, 'bytes': len(region['data']), 'sha256': digest(region['data'])},
+                        'readable': True, 'writable': bool(region['initial_protection'] & UC_PROT_WRITE)})
+                (directory / 'mach-state.json').write_text(json.dumps(state_dict(initial)))
+                (directory / 'mach-memory.json').write_text(json.dumps({'regions': memory}))
+                native = run_mach_native(cli, directory, base, case)
+                events = native['mach_port_events']
+                machine, page_reads, instruction_count = replay_mach_original(pac, regions, initial, base, case, events)
+                expected = state_dict(capture_arm(machine, initial))
+                after = [{'address': region['address'], 'bytes': region['virtual_bytes'],
+                          'sha256': digest(bytes(machine.mem_read(region['address'], region['virtual_bytes'])))}
+                         for region in regions]
+                require(native['state'] == expected and native['memory']['memory_after'] == after,
                         'native original-wrapper/prefix CPU state or full RAM differs')
-                require(compiler in (None,native['compiler_source_sha256']), 'Mach cohort compiler changed')
-                compiler=native['compiler_source_sha256']
-                rows.append({'base':base,'entry_offset':entry,'incoming_nzcv':initial.nzcv,'state':expected,
-                             'events':events,'rights':native['mach_port_rights'],'memory_after':after})
-    require(digest(cli.read_bytes())==cli_hash and all(digest((ROOT/p).read_bytes())==h for p,h in hashes.items()),
-            'Mach cohort sources or executable changed')
-    return {'kind':'original_dyld_mach_ports_arm_vs_shared_native','passed':True,
-        'full_state_and_mapped_ram_comparisons':len(rows),'cases':rows,'compiler_source_sha256':compiler,
-        'compiler_executable_sha256':cli_hash,'shared_sources_sha256':hashes,
-        'container_sha256':CONTAINER_SHA256,'slice_sha256':SLICE_SHA256,
-        'limits':'Original Mach wrappers and initialization prefix execute unchanged. Actual host-backed guest port results are replayed at original ARM SVC using public XNU return rules; the ARM kernel itself is not executed. Full IPC, Mach messages, commpage initialization, TLS and process startup remain unsupported.'}
+                if page_sizes:
+                    audit_original_page_sizes(machine, page_reads, base, case.kernel_page_shift)
+                    audit_page_size_globals(native, base, case.kernel_page_shift, events)
+                require(compiler in (None, native['compiler_source_sha256']), 'Mach cohort compiler changed')
+                compiler = native['compiler_source_sha256']
+                rows.append({'base': base, 'entry_offset': case.entry_offset, 'incoming_nzcv': initial.nzcv,
+                             'state': expected, 'events': events, 'rights': native['mach_port_rights'],
+                             'memory_after': after, 'kernel_page_shift': case.kernel_page_shift,
+                             'stop_pc': case.stop_pc, 'pending_thread_selfid': case.pending_thread_selfid,
+                             'page_size_commpage': native['page_size_commpage'], 'original_commpage_reads': page_reads,
+                             'original_instruction_count': instruction_count if page_sizes else None,
+                             'native_outcome': native['outcome']})
+    require(digest(cli.read_bytes()) == cli_hash and all(digest((ROOT / path).read_bytes()) == sha
+            for path, sha in hashes.items()), 'Mach cohort sources or executable changed')
+    return {'kind': ('original_dyld_mach_page_sizes_arm_vs_shared_native' if page_sizes else
+                     'original_dyld_mach_ports_arm_vs_shared_native'), 'passed': True,
+        'full_state_and_mapped_ram_comparisons': len(rows), 'cases': rows, 'compiler_source_sha256': compiler,
+        'compiler_executable_sha256': cli_hash, 'shared_sources_sha256': hashes,
+        'page_size_contract_sources': contracts,
+        'container_sha256': CONTAINER_SHA256, 'slice_sha256': SLICE_SHA256,
+        'limits': 'Original Mach wrappers and initialization prefixes execute unchanged. Actual host-backed guest port results are replayed at original ARM SVC using public XNU return rules; the ARM kernel itself is not executed. Page-size mode verifies only the two modern RO fields and preserves BSD thread_selfid as a precise pending SVC. Legacy page-size fields, other commpage fields, full IPC, Mach messages, TLS and process startup remain unsupported.'}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -650,6 +825,7 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/dyld-entry-differential-report.json')
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--mach-ports', action='store_true', help='run only original Mach port wrappers and initialization prefix')
+    parser.add_argument('--mach-page-sizes', action='store_true', help='verify original Mach/page-size initialization through pending thread_selfid')
     parser.add_argument('--self-rebase', action='store_true', help='run only the focused original full self-rebase cohort')
     parser.add_argument('--data-vm', action='store_true', help='verify original segment lockdown callback and owned mprotect service')
     parser.add_argument('--executable', type=Path, action='append', default=[], help='Also verify installed argument-table probe for this thin main image')
@@ -665,11 +841,13 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     cli_hash = digest(cli.read_bytes())
-    require(not (args.self_rebase and args.mach_ports), 'select one focused dyld cohort')
-    if args.self_rebase or args.mach_ports:
+    require(sum((args.self_rebase,args.mach_ports,args.mach_page_sizes))<=1, 'select one focused dyld cohort')
+    if args.self_rebase or args.mach_ports or args.mach_page_sizes:
         with tempfile.TemporaryDirectory(prefix='stela-self-rebase-') as temporary:
-            report = (mach_ports_cohort if args.mach_ports else self_rebase_cohort)(cli,Path(temporary),view,image)
-        output = ROOT / ('.stela/dyld-mach-ports-differential-report.json' if args.mach_ports else '.stela/dyld-self-rebase-differential-report.json')
+            report = (mach_ports_cohort(cli,Path(temporary),view,image,page_sizes=args.mach_page_sizes)
+                      if args.mach_ports or args.mach_page_sizes else self_rebase_cohort(cli,Path(temporary),view,image))
+        output = ROOT / ('.stela/dyld-mach-page-sizes-differential-report.json' if args.mach_page_sizes else
+                         '.stela/dyld-mach-ports-differential-report.json' if args.mach_ports else '.stela/dyld-self-rebase-differential-report.json')
         snapshot = write_evidence(output,report)
         print(json.dumps({'passed':True,'report':str(output),'snapshot':str(snapshot)}))
         return

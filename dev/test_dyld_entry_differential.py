@@ -188,5 +188,76 @@ class DataVmGuards(unittest.TestCase):
             with self.assertRaises(AssertionError):suite.validate_vm_native(changed,state,'source',memory,False)
 
 
+class PageSizeCommpageGuards(unittest.TestCase):
+    def test_arm64_user_size_stays_16k_for_both_kernel_profiles(self):
+        for kernel in suite.PAGE_SIZE_KERNEL_SHIFTS:
+            page = suite.page_size_bytes(kernel)
+            self.assertEqual((len(page), page[suite.PAGE_SIZE_USER_OFFSET], page[suite.PAGE_SIZE_KERNEL_OFFSET]),
+                             (suite.PAGE_SIZE_BYTES, suite.PAGE_SIZE_USER_SHIFT, kernel))
+            self.assertEqual(sum(value != 0 for value in page), 2)
+        for kernel in (0, 13, 16):
+            with self.assertRaises(AssertionError):
+                suite.page_size_bytes(kernel)
+
+    def test_receipt_rejects_wrong_fields_permissions_owner_or_bytes(self):
+        kernel = suite.PAGE_SIZE_KERNEL_SHIFTS[0]
+        page = {'profile_id': suite.PAGE_SIZE_PROFILE, 'address_space': suite.PAGE_SIZE_ADDRESS_SPACE,
+                'region': {'guest_address': suite.PAGE_SIZE_BASE, 'virtual_bytes': suite.PAGE_SIZE_BYTES,
+                           'readable': True, 'writable': False, 'executable': False},
+                'supported_fields': [
+                    {'address': suite.PAGE_SIZE_BASE + suite.PAGE_SIZE_USER_OFFSET,
+                     'bytes': 1, 'value': suite.PAGE_SIZE_USER_SHIFT},
+                    {'address': suite.PAGE_SIZE_BASE + suite.PAGE_SIZE_KERNEL_OFFSET, 'bytes': 1, 'value': kernel}],
+                'page_sha256': suite.digest(suite.page_size_bytes(kernel))}
+        suite.audit_page_size_commpage({'page_size_commpage': page}, kernel)
+        mutations = []
+        for key, value in [('profile_id', 'other'), ('address_space', suite.PAGE_SIZE_ADDRESS_SPACE + 1),
+                           ('page_sha256', 'other')]:
+            changed = copy.deepcopy(page)
+            changed[key] = value
+            mutations.append(changed)
+        for key, value in [('guest_address', suite.PAGE_SIZE_BASE + suite.PAGE_SIZE_BYTES),
+                           ('virtual_bytes', suite.PAGE_SIZE_BYTES // 2), ('writable', True),
+                           ('readable', False), ('executable', True)]:
+            changed = copy.deepcopy(page)
+            changed['region'][key] = value
+            mutations.append(changed)
+        for key, value in [('address', suite.PAGE_SIZE_BASE + suite.PAGE_SIZE_USER_OFFSET - 1),
+                           ('bytes', 2), ('value', kernel)]:
+            changed = copy.deepcopy(page)
+            changed['supported_fields'][0][key] = value
+            mutations.append(changed)
+        for changed in mutations:
+            with self.assertRaises(AssertionError):
+                suite.audit_page_size_commpage({'page_size_commpage': changed}, kernel)
+
+    def test_independent_global_audit_rejects_each_wrong_value_and_snapshot_extent(self):
+        base, kernel = suite.MACH_FIXTURE_BASES[0], suite.PAGE_SIZE_KERNEL_SHIFTS[0]
+        events = [{'result': 101}, {'result': 102}]
+        raw = bytearray(suite.MACH_INIT_GLOBALS_BYTES)
+        fields = [(suite.MACH_INIT_TASK_SELF, '<I', events[0]['result']),
+                  (suite.MACH_INIT_REPLY_PORT, '<I', events[1]['result']),
+                  (suite.MACH_INIT_KERNEL_SHIFT, '<I', kernel),
+                  (suite.MACH_INIT_USER_SHIFT, '<I', suite.PAGE_SIZE_USER_SHIFT),
+                  (suite.MACH_INIT_USER_SIZE, '<Q', suite.PAGE_SIZE_BYTES),
+                  (suite.MACH_INIT_USER_MASK, '<Q', suite.PAGE_SIZE_BYTES - 1)]
+        for address, encoding, value in fields:
+            struct.pack_into(encoding, raw, address - suite.MACH_INIT_TASK_SELF, value)
+        snapshot = {'address': base + suite.MACH_INIT_TASK_SELF, 'hex': raw.hex()}
+        native = {'memory': {'memory_reads': [snapshot]}}
+        suite.audit_page_size_globals(native, base, kernel, events)
+        for address, _, _ in fields:
+            corrupted = bytearray(raw)
+            corrupted[address - suite.MACH_INIT_TASK_SELF] ^= 1
+            changed = copy.deepcopy(native)
+            changed['memory']['memory_reads'][0]['hex'] = corrupted.hex()
+            with self.assertRaises(AssertionError):
+                suite.audit_page_size_globals(changed, base, kernel, events)
+        for reads in [[], [snapshot, snapshot], [dict(snapshot, address=snapshot['address'] + 1)],
+                      [dict(snapshot, hex=raw[:-1].hex())]]:
+            with self.assertRaises(AssertionError):
+                suite.audit_page_size_globals({'memory': {'memory_reads': reads}}, base, kernel, events)
+
+
 if __name__ == '__main__':
     unittest.main()
