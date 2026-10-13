@@ -73,9 +73,12 @@ catalog! {
     PackUnsignedDwordToWord => ("packusdw", Sse41, [0x66,0x0f,0x38,0x2b]),
     ByteSignMask => ("pmovmskb", Baseline, [0x66,0x0f,0xd7]),
     MultiplyLowWord => ("pmullw", Baseline, [0x66,0x0f,0xd5]),
+    MultiplyHighSignedWord => ("pmulhw", Baseline, [0x66,0x0f,0xe5]),
+    MultiplyHighRoundedScaledWord => ("pmulhrsw", Ssse3, [0x66,0x0f,0x38,0x0b]),
     MultiplyUnsignedDword => ("pmuludq", Baseline, [0x66,0x0f,0xf4]),
     MultiplyLowDword => ("pmulld", Sse41, [0x66,0x0f,0x38,0x40]),
     MultiplySignedDword => ("pmuldq", Sse41, [0x66,0x0f,0x38,0x28]),
+    CarrylessMultiplyQword => ("pclmulqdq", Pclmulqdq, [0x66,0x0f,0x3a,0x44]),
     AverageByte => ("pavgb", Baseline, [0x66,0x0f,0xe0]),
     AverageWord => ("pavgw", Baseline, [0x66,0x0f,0xe3]),
     MultiplyAddWords => ("pmaddwd", Baseline, [0x66,0x0f,0xf5]),
@@ -152,8 +155,8 @@ impl ShiftOpcode {
 impl SimdOpcode {
     pub(crate) fn append(self, code: &mut Vec<u8>, target: TargetCpu) {
         assert!(
-            target >= self.requires(),
-            "selected CPU tier cannot emit {}",
+            target.supports(self.requires()),
+            "selected CPU requirements cannot emit {}",
             self.mnemonic()
         );
         code.extend(self.encoding());

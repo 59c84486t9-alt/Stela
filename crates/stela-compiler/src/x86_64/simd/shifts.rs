@@ -1,6 +1,6 @@
-//! SSE2 non-saturating packed shifts, including byte/qword emulation and width
+//! SSE2 packed immediate and native per-lane register shifts, including width
 //! changes. Host flags/MXCSR are never substituted for guest NZCV/FP status.
-use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
+use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle, vector_offset};
 use crate::{
     aarch64::simd::shifts::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
@@ -172,8 +172,48 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         amount,
         bytes,
     } = *operand;
+    match kind {
+        Kind::Register {
+            signed,
+            round,
+            saturating,
+            counts,
+        } => {
+            register_shift(
+                code,
+                operand,
+                Some(counts),
+                signed,
+                !signed,
+                round,
+                saturating,
+            );
+            return;
+        }
+        Kind::SaturatingImmediate {
+            signed_source,
+            unsigned_result,
+        } => {
+            if bytes > lane_bytes {
+                saturating_immediate_vector(code, operand, signed_source, unsigned_result);
+                return;
+            }
+            register_shift(
+                code,
+                operand,
+                None,
+                signed_source,
+                unsigned_result,
+                false,
+                true,
+            );
+            return;
+        }
+        _ => {}
+    }
     read_vector(code, source, 0);
     match kind {
+        Kind::Register { .. } | Kind::SaturatingImmediate { .. } => unreachable!(),
         Kind::Narrow { round, upper } => {
             narrow(code, lane_bytes, amount, round, upper, destination);
             return;
@@ -216,4 +256,263 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
         packed(code, Host::MoveQword, 0, 0);
     }
     commit(code, destination, 0);
+}
+
+/// Constant counts permit packed SSE2 shifts. XMM3 stages the wrapped result,
+/// XMM6 the original source, and XMM4 the complete per-lane saturation mask.
+fn saturating_immediate_vector(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    signed_source: bool,
+    unsigned_result: bool,
+) {
+    let lane = operand.lane_bytes;
+    read_vector(code, operand.source, 0);
+    packed(code, Host::MoveAligned, 6, 0);
+    logical_shift(code, 0, lane, operand.amount, true);
+    packed(code, Host::MoveAligned, 3, 0);
+    right_shift(code, 0, lane, operand.amount, !unsigned_result);
+    packed(code, Host::MoveAligned, 1, 6);
+    super::equal(code, lane, crate::TargetCpu::Baseline);
+    packed(code, Host::EqualDword, 4, 4);
+    packed(code, Host::Xor, 4, 0); // reverse-shift mismatch means lost bits
+    if signed_source {
+        super::saturating::sign_mask(code, 5, 6, lane);
+        if unsigned_result {
+            // A negative original source must clamp to zero even when shifting
+            // by zero leaves its raw bits unchanged (including qword lanes).
+            packed(code, Host::Or, 4, 5);
+            packed(code, Host::EqualDword, 1, 1);
+            packed(code, Host::Xor, 5, 1); // positive bound=MAX, negative bound=0
+        } else {
+            lane_mask(code, 1, lane, (1u64 << (lane * 8 - 1)) - 1);
+            packed(code, Host::Xor, 5, 1); // MAX for positive, MIN for negative
+        }
+    } else {
+        packed(code, Host::EqualDword, 5, 5); // unsigned MAX
+    }
+    packed(code, Host::Xor, 5, 3);
+    packed(code, Host::And, 5, 4);
+    packed(code, Host::Xor, 3, 5);
+    super::saturating::publish_qc(code, operand.bytes);
+    if operand.bytes == 8 {
+        packed(code, Host::MoveQword, 3, 3);
+    }
+    commit(code, operand.destination, 3);
+}
+
+/// Local near branches avoid assuming that every lane recipe fits in rel8.
+#[derive(Clone, Copy)]
+enum LaneBranch {
+    Always,
+    Nonnegative,
+    Equal,
+    Above,
+    AboveOrEqual,
+}
+fn lane_branch(code: &mut Vec<u8>, condition: LaneBranch) -> usize {
+    match condition {
+        LaneBranch::Always => code.push(0xe9),
+        LaneBranch::Nonnegative => code.extend([0x0f, 0x89]),
+        LaneBranch::Equal => code.extend([0x0f, 0x84]),
+        LaneBranch::Above => code.extend([0x0f, 0x87]),
+        LaneBranch::AboveOrEqual => code.extend([0x0f, 0x83]),
+    }
+    let patch = code.len();
+    code.extend([0; 4]);
+    patch
+}
+fn resolve_lane_branch(code: &mut [u8], patch: usize) {
+    let relative = i32::try_from(code.len() - patch - 4).expect("lane recipe rel32");
+    code[patch..patch + 4].copy_from_slice(&relative.to_le_bytes());
+}
+#[derive(Clone, Copy)]
+enum LaneShift {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+impl LaneShift {
+    /// RAX or R10, count CL, baseline 64-bit shift group.
+    fn count(self, code: &mut Vec<u8>, r10: bool) {
+        let group = match self {
+            Self::Left => 4,
+            Self::LogicalRight => 5,
+            Self::ArithmeticRight => 7,
+        };
+        code.extend([
+            if r10 { 0x49 } else { 0x48 },
+            0xd3,
+            0xc0 | (group << 3) | if r10 { 2 } else { 0 },
+        ]);
+    }
+}
+fn normalize_lane(code: &mut Vec<u8>, bits: u8, signed: bool) {
+    if bits < 64 {
+        code.extend([0x48, 0xc1, 0xe0, 64 - bits]); // shl rax,64-width
+        code.extend([0x48, 0xc1, if signed { 0xf8 } else { 0xe8 }, 64 - bits]);
+    }
+}
+fn load_shift_lane(code: &mut Vec<u8>, operand: &Operand, byte: u8, signed: bool) {
+    match (operand.lane_bytes, signed) {
+        (1, false) => code.extend([0x0f, 0xb6, 0x87]),
+        (1, true) => code.extend([0x48, 0x0f, 0xbe, 0x87]),
+        (2, false) => code.extend([0x0f, 0xb7, 0x87]),
+        (2, true) => code.extend([0x48, 0x0f, 0xbf, 0x87]),
+        (4, false) => code.extend([0x8b, 0x87]),
+        (4, true) => code.extend([0x48, 0x63, 0x87]),
+        (8, _) => code.extend([0x48, 0x8b, 0x87]),
+        _ => unreachable!("allocated shift lane"),
+    }
+    code.extend((vector_offset(operand.source) + u32::from(byte)).to_le_bytes());
+}
+fn load_bound(code: &mut Vec<u8>, bound: u64) {
+    code.extend([0x48, 0xb8]); // movabs rax,bound
+    code.extend(bound.to_le_bytes());
+}
+/// Count CL is 1..128. Rounding adds CF from the final discarded bit rather
+/// than adding a potentially overflowing bias to the original qword.
+fn register_right(code: &mut Vec<u8>, signed: bool, round: bool) {
+    code.extend([0x83, 0xf9, 64]); // cmp ecx,64
+    let large = lane_branch(code, LaneBranch::AboveOrEqual);
+    if signed {
+        LaneShift::ArithmeticRight
+    } else {
+        LaneShift::LogicalRight
+    }
+    .count(code, false);
+    if round {
+        code.extend([0x48, 0x83, 0xd0, 0]);
+    } // adc rax,0
+    let done = lane_branch(code, LaneBranch::Always);
+    resolve_lane_branch(code, large);
+    if signed && !round {
+        code.extend([0x48, 0xc1, 0xf8, 63]); // sign fill
+    } else if !signed && round {
+        // At exactly 64 the rounded result is the source top bit. Above 64
+        // every unsigned 64-bit value rounds to zero.
+        let beyond = lane_branch(code, LaneBranch::Above);
+        code.extend([0x48, 0xc1, 0xe8, 63]);
+        let end = lane_branch(code, LaneBranch::Always);
+        resolve_lane_branch(code, beyond);
+        code.extend([0x31, 0xc0]);
+        resolve_lane_branch(code, end);
+    } else {
+        code.extend([0x31, 0xc0]);
+    }
+    resolve_lane_branch(code, done);
+}
+fn register_left(
+    code: &mut Vec<u8>,
+    bits: u8,
+    signed_source: bool,
+    unsigned_result: bool,
+    saturating: bool,
+) {
+    let mut finished = Vec::new();
+    let mut negative_mixed = None;
+    if saturating {
+        code.extend([0x48, 0x89, 0xc2]);
+    } // rdx=original
+    if signed_source && unsigned_result {
+        code.extend([0x48, 0x85, 0xc0]);
+        let nonnegative = lane_branch(code, LaneBranch::Nonnegative);
+        negative_mixed = Some(lane_branch(code, LaneBranch::Always));
+        resolve_lane_branch(code, nonnegative);
+    }
+    code.extend([0x83, 0xf9, bits]); // cmp ecx,width
+    let large = lane_branch(code, LaneBranch::AboveOrEqual);
+    LaneShift::Left.count(code, false);
+    if saturating {
+        normalize_lane(code, bits, !unsigned_result);
+        code.extend([0x49, 0x89, 0xc2]); // mov r10,rax
+        if unsigned_result {
+            LaneShift::LogicalRight
+        } else {
+            LaneShift::ArithmeticRight
+        }
+        .count(code, true);
+        code.extend([0x49, 0x39, 0xd2]); // cmp r10,rdx
+        finished.push(lane_branch(code, LaneBranch::Equal));
+        let clamp = lane_branch(code, LaneBranch::Always);
+        resolve_lane_branch(code, large);
+        code.extend([0x48, 0x85, 0xc0]); // zero never saturates, even huge counts
+        finished.push(lane_branch(code, LaneBranch::Equal));
+        resolve_lane_branch(code, clamp);
+        if let Some(patch) = negative_mixed {
+            resolve_lane_branch(code, patch);
+        }
+        let maximum = if unsigned_result {
+            u64::MAX >> (64 - bits)
+        } else {
+            (1u64 << (bits - 1)) - 1
+        };
+        load_bound(code, maximum);
+        if signed_source {
+            code.extend([0x48, 0x85, 0xd2]); // original sign
+            let positive = lane_branch(code, LaneBranch::Nonnegative);
+            load_bound(
+                code,
+                if unsigned_result {
+                    0
+                } else {
+                    0u64.wrapping_sub(1u64 << (bits - 1))
+                },
+            );
+            resolve_lane_branch(code, positive);
+        }
+        code.extend([0x81, 0x8f]); // or dword [rdi+fpsr],QC: sticky, other bits preserved
+        code.extend((std::mem::offset_of!(crate::GuestState, fpsr) as u32).to_le_bytes());
+        code.extend(crate::aarch64::simd::saturating::FPSR_QC.to_le_bytes());
+    } else {
+        finished.push(lane_branch(code, LaneBranch::Always));
+        resolve_lane_branch(code, large);
+        code.extend([0x31, 0xc0]);
+    }
+    for patch in finished {
+        resolve_lane_branch(code, patch);
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn register_shift(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    counts: Option<u8>,
+    signed_source: bool,
+    unsigned_result: bool,
+    round: bool,
+    saturating: bool,
+) {
+    // R8/R9 hold staged result halves. Guest sources remain unchanged until both
+    // have been consumed, including d=n=m and scalar inactive-lane poisoning.
+    code.extend([0x45, 0x31, 0xc0, 0x45, 0x31, 0xc9]);
+    let bits = operand.lane_bytes * 8;
+    for byte in (0..operand.bytes).step_by(usize::from(operand.lane_bytes)) {
+        load_shift_lane(code, operand, byte, signed_source);
+        if let Some(counts) = counts {
+            code.extend([0x0f, 0xbe, 0x8f]); // movsx ecx,byte [rdi+count lane]
+            code.extend((vector_offset(counts) + u32::from(byte)).to_le_bytes());
+            code.extend([0x85, 0xc9]);
+            let left = lane_branch(code, LaneBranch::Nonnegative);
+            code.extend([0xf7, 0xd9]); // neg ecx (signed byte -128 becomes +128)
+            register_right(code, signed_source, round);
+            let merged = lane_branch(code, LaneBranch::Always);
+            resolve_lane_branch(code, left);
+            register_left(code, bits, signed_source, unsigned_result, saturating);
+            resolve_lane_branch(code, merged);
+        } else {
+            code.push(0xb9); // mov ecx,imm32
+            code.extend(u32::from(operand.amount).to_le_bytes());
+            register_left(code, bits, signed_source, unsigned_result, true);
+        }
+        normalize_lane(code, bits, false);
+        if byte % 8 != 0 {
+            code.extend([0x48, 0xc1, 0xe0, byte % 8 * 8]);
+        }
+        code.extend([0x49, 0x09, if byte < 8 { 0xc0 } else { 0xc1 }]); // or r8/r9,rax
+    }
+    code.extend([0x4c, 0x89, 0x87]); // commit both staged halves
+    code.extend(vector_offset(operand.destination).to_le_bytes());
+    code.extend([0x4c, 0x89, 0x8f]);
+    code.extend((vector_offset(operand.destination) + 8).to_le_bytes());
 }

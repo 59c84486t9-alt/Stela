@@ -1,7 +1,17 @@
-//! Non-saturating AdvSIMD immediate shifts: Arm A64 2026-06 shift XML facts.
+//! AdvSIMD shifts: Arm A64 2026-06 immediate/register shift XML facts.
 //! The semantic operation distinguishes same-width, narrowing and widening lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Register {
+        signed: bool,
+        round: bool,
+        saturating: bool,
+        counts: u8,
+    },
+    SaturatingImmediate {
+        signed_source: bool,
+        unsigned_result: bool,
+    },
     Left {
         insert: bool,
     },
@@ -36,6 +46,18 @@ pub struct Operand {
 const SCALAR: u32 = 1 << 28;
 const Q: u32 = 1 << 30;
 const IMMEDIATE_SHIFT_MASK: u32 = 0xbf80fc00;
+const REGISTER_SHIFT_MASK: u32 = 0xbf20fc00;
+const REGISTER_SHIFT_SIGNED: u32 = 0x0e204400;
+const REGISTER_SHIFT_UNSIGNED: u32 = 0x2e204400;
+const REGISTER_ROUND_SIGNED: u32 = 0x0e205400;
+const REGISTER_ROUND_UNSIGNED: u32 = 0x2e205400;
+const REGISTER_SATURATING_SIGNED: u32 = 0x0e204c00;
+const REGISTER_SATURATING_UNSIGNED: u32 = 0x2e204c00;
+const REGISTER_SATURATING_ROUND_SIGNED: u32 = 0x0e205c00;
+const REGISTER_SATURATING_ROUND_UNSIGNED: u32 = 0x2e205c00;
+const SATURATING_LEFT_SIGNED: u32 = 0x0f007400;
+const SATURATING_LEFT_UNSIGNED: u32 = 0x2f007400;
+const SATURATING_LEFT_SIGNED_TO_UNSIGNED: u32 = 0x2f006400;
 const SHIFT_LEFT: u32 = 0x0f005400;
 const SHIFT_LEFT_INSERT: u32 = 0x2f005400;
 const SHIFT_RIGHT_INSERT: u32 = 0x2f004400;
@@ -56,8 +78,17 @@ const SHIFT_WIDEN_UNSIGNED: u32 = 0x2f00a400;
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let scalar = word & SCALAR != 0;
     let q = word & Q != 0;
+    if let Some(result) = decode_register(word, scalar, q) {
+        return Some(result);
+    }
     let opcode = (word & !SCALAR) & IMMEDIATE_SHIFT_MASK;
     let kind = match opcode {
+        SATURATING_LEFT_SIGNED | SATURATING_LEFT_UNSIGNED | SATURATING_LEFT_SIGNED_TO_UNSIGNED => {
+            Kind::SaturatingImmediate {
+                signed_source: opcode != SATURATING_LEFT_UNSIGNED,
+                unsigned_result: opcode != SATURATING_LEFT_SIGNED,
+            }
+        }
         SHIFT_LEFT | SHIFT_LEFT_INSERT => Kind::Left {
             insert: opcode == SHIFT_LEFT_INSERT,
         },
@@ -93,14 +124,17 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let size = 7 - immh.leading_zeros() as u8;
     let lane_bytes = 1 << size;
     let changes_width = matches!(kind, Kind::Narrow { .. } | Kind::Widen { .. });
-    if (scalar && (!q || lane_bytes != 8))
+    if (scalar && (!q || (lane_bytes != 8 && !matches!(kind, Kind::SaturatingImmediate { .. }))))
         || (changes_width && lane_bytes == 8)
         || (!scalar && !changes_width && !q && lane_bytes == 8)
     {
         return Some(Err(()));
     }
     let bits = lane_bytes * 8;
-    let amount = if matches!(kind, Kind::Left { .. } | Kind::Widen { .. }) {
+    let amount = if matches!(
+        kind,
+        Kind::Left { .. } | Kind::Widen { .. } | Kind::SaturatingImmediate { .. }
+    ) {
         immediate - bits
     } else {
         (u16::from(bits) * 2 - u16::from(immediate)) as u8
@@ -111,7 +145,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         source: ((word >> 5) & 31) as u8,
         lane_bytes,
         amount,
-        bytes: if changes_width || (!scalar && q) {
+        bytes: if scalar {
+            lane_bytes
+        } else if changes_width || q {
             16
         } else {
             8
@@ -119,9 +155,140 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
+fn decode_register(word: u32, scalar: bool, q: bool) -> Option<Result<Operand, ()>> {
+    let opcode = (word & !SCALAR) & REGISTER_SHIFT_MASK;
+    if ![
+        REGISTER_SHIFT_SIGNED,
+        REGISTER_SHIFT_UNSIGNED,
+        REGISTER_ROUND_SIGNED,
+        REGISTER_ROUND_UNSIGNED,
+        REGISTER_SATURATING_SIGNED,
+        REGISTER_SATURATING_UNSIGNED,
+        REGISTER_SATURATING_ROUND_SIGNED,
+        REGISTER_SATURATING_ROUND_UNSIGNED,
+    ]
+    .contains(&opcode)
+    {
+        return None;
+    }
+    let saturating = word & (1 << 11) != 0;
+    let lane_bytes = 1 << ((word >> 22) & 3);
+    if (scalar && (!q || (!saturating && lane_bytes != 8))) || (!scalar && !q && lane_bytes == 8) {
+        return Some(Err(()));
+    }
+    Some(Ok(Operand {
+        kind: Kind::Register {
+            signed: word & (1 << 29) == 0,
+            round: word & (1 << 12) != 0,
+            saturating,
+            counts: ((word >> 16) & 31) as u8,
+        },
+        destination: (word & 31) as u8,
+        source: ((word >> 5) & 31) as u8,
+        lane_bytes,
+        amount: 0,
+        bytes: if scalar { lane_bytes } else { 8 << u8::from(q) },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn register_allocations_keep_counts_and_scalar_saturation_widths() {
+        for opcode in [
+            REGISTER_SHIFT_SIGNED,
+            REGISTER_SHIFT_UNSIGNED,
+            REGISTER_ROUND_SIGNED,
+            REGISTER_ROUND_UNSIGNED,
+            REGISTER_SATURATING_SIGNED,
+            REGISTER_SATURATING_UNSIGNED,
+            REGISTER_SATURATING_ROUND_SIGNED,
+            REGISTER_SATURATING_ROUND_UNSIGNED,
+        ] {
+            for size in 0..4 {
+                for scalar in [false, true] {
+                    for q in [false, true] {
+                        let word = opcode
+                            | (size << 22)
+                            | (31 << 16)
+                            | (29 << 5)
+                            | 30
+                            | if scalar { SCALAR } else { 0 }
+                            | if q { Q } else { 0 };
+                        let saturating = opcode & (1 << 11) != 0;
+                        let valid = if scalar {
+                            q && (saturating || size == 3)
+                        } else {
+                            q || size != 3
+                        };
+                        let result = decode(word).expect("shift family must be recognized");
+                        assert_eq!(result.is_ok(), valid, "{word:08x}");
+                        if let Ok(op) = result {
+                            assert_eq!(op.lane_bytes, 1 << size);
+                            assert_eq!(
+                                op.bytes,
+                                if scalar {
+                                    1 << size
+                                } else if q {
+                                    16
+                                } else {
+                                    8
+                                }
+                            );
+                            assert_eq!((op.destination, op.source), (30, 29));
+                            assert_eq!(
+                                op.kind,
+                                Kind::Register {
+                                    signed: opcode & (1 << 29) == 0,
+                                    round: opcode & (1 << 12) != 0,
+                                    saturating,
+                                    counts: 31
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn saturating_immediate_all_counts_allocate_scalar_b_h_s_d() {
+        for opcode in [
+            SATURATING_LEFT_SIGNED,
+            SATURATING_LEFT_UNSIGNED,
+            SATURATING_LEFT_SIGNED_TO_UNSIGNED,
+        ] {
+            for size in 0..4 {
+                let bits = 8 << size;
+                for amount in 0..bits {
+                    for scalar in [false, true] {
+                        for q in [false, true] {
+                            let word = opcode
+                                | ((bits + amount) << 16)
+                                | if scalar { SCALAR } else { 0 }
+                                | if q { Q } else { 0 };
+                            let result = decode(word).expect("saturating shift family");
+                            assert_eq!(result.is_ok(), if scalar { q } else { q || size != 3 });
+                            if let Ok(op) = result {
+                                assert_eq!(u32::from(op.amount), amount);
+                                assert_eq!(
+                                    u32::from(op.bytes),
+                                    if scalar {
+                                        1 << size
+                                    } else if q {
+                                        16
+                                    } else {
+                                        8
+                                    }
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn every_immediate_has_exact_size_count_and_reserved_width() {
         for immediate in 0..128 {

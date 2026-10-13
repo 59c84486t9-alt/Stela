@@ -165,6 +165,102 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
 }
 
 #[test]
+fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code() -> Result<()> {
+    use stela_compiler::aarch64::simd::saturating::FPSR_QC;
+    use stela_compiler::{TargetCpu, block::BlockProfile};
+    let cache = tempfile::tempdir()?;
+    let program = words(&[
+        0x4e224420, // SSHL V0.16B,V1.16B,V2.16B: signed low-byte counts
+        0x7ee55483, // URSHL D3,D4,D5: rounded unsigned full-width right shift
+        0x5e284ce6, // SQSHL B6,B7,B8: saturating scalar MIN, clear upper bits
+        0x6e6b5d49, // UQRSHL V9.8H,V10.8H,V11.8H: ignore upper count bits
+        0x7f4065ac, // SQSHLU D12,D13,#0: negative source saturates even at zero
+        0x6eb0b5ee, // SQRDMULH V14.4S,V15.4S,V16.4S: MIN*MIN and signed ties
+        0x4eb39251, // SQDMLAL2 V17.2D,V18.4S,V19.4S: saturate product first
+        0x5f5f72b4, // SQDMLSL S20,H21,V15.H[1]: selected MIN*MIN, upper clearing
+        0x6e399f17, // PMUL V23.16B,V24.16B,V25.16B: low polynomial products
+        0x4efce37a, // PMULL2 V26.1Q,V27.2D,V28.2D: full high-half polynomial
+        0x6e3f4fdd, // UQSHL V29.16B,V30.16B,V31.16B: zero retains earlier QC
+        RET,
+    ]);
+    let limbs = |bytes: [u8; 16]| {
+        let value = u128::from_le_bytes(bytes);
+        [value as u64, (value >> 64) as u64]
+    };
+    let mut initial = state(BASE, 19);
+    initial.registers.nzcv = 0xa0000000;
+    initial.registers.fpcr = 0x03c00000;
+    initial.registers.fpsr = 0x1f;
+    initial.registers.v[1] = limbs([
+        0, 1, 0x80, 0xff, 0x7f, 0x80, 3, 2, 0x55, 0xaa, 0x80, 0x7f, 0x42, 0xff, 1, 0x80,
+    ]);
+    initial.registers.v[2] = limbs([
+        0, 1, 0xff, 0xf8, 8, 0x80, 0x7f, 0xfe, 0xfe, 0xff, 0xf9, 0xf9, 2, 0, 0xf8, 0xf7,
+    ]);
+    initial.registers.v[4] = [u64::MAX; 2];
+    initial.registers.v[5] = [0x123456789abcdec0, u64::MAX]; // low byte -64
+    initial.registers.v[7] = [0x80, u64::MAX];
+    initial.registers.v[8] = [1, u64::MAX];
+    initial.registers.v[10] = [u64::MAX; 2];
+    initial.registers.v[11] = [0x55f055f055f055f0; 2]; // low byte -16 in each H
+    initial.registers.v[13] = [u64::MAX; 2];
+    initial.registers.v[15] = [0x8000000080000000, 0x0000000100000001];
+    initial.registers.v[16] = [0x7fffffff80000000, 0xc000000040000000];
+    initial.registers.v[17] = [u64::MAX, 1 << 63];
+    initial.registers.v[18] = [0, 0x7fffffff80000000];
+    initial.registers.v[19] = [0, 0x7fffffff80000000];
+    initial.registers.v[20] = [0, u64::MAX];
+    initial.registers.v[21] = [0x8000, u64::MAX];
+    initial.registers.v[24] = [0x8383838383838383; 2];
+    initial.registers.v[25] = [0x7d7d7d7d7d7d7d7d; 2];
+    initial.registers.v[27] = [u64::MAX, 0x8000000000000001];
+    initial.registers.v[28] = [u64::MAX, 3];
+    initial.registers.v[31] = [0x7f7f7f7f7f7f7f7f; 2];
+    let mut expected = initial.registers.clone();
+    expected.v[0] = [0x0000ff00ffc00200, 0xff00ff0800ffd515];
+    expected.v[3] = [1, 0];
+    expected.v[6] = [0x80, 0];
+    expected.v[9] = [0x0001000100010001; 2];
+    expected.v[12] = [0, 0];
+    expected.v[14] = [0x800000017fffffff, 1];
+    // First: sat(2*MIN32*MIN32) + (-1); second: 2*MAX32^2 + MIN64.
+    expected.v[17] = [0x7ffffffffffffffe, (-8589934590i64) as u64];
+    expected.v[20] = [0x80000001, 0];
+    expected.v[23] = [0x0707070707070707; 2];
+    expected.v[26] = [0x8000000000000003, 1];
+    expected.v[29] = [0, 0];
+    expected.fpsr |= FPSR_QC;
+    let mut targets = vec![TargetCpu::Baseline, TargetCpu::detect()];
+    if TargetCpu::Pclmulqdq.supported() {
+        targets.push(TargetCpu::Pclmulqdq);
+    }
+    targets.dedup();
+    for target in targets {
+        for (phase, disk) in [false, true, true].into_iter().enumerate() {
+            let mut runtime = BlockRuntime::new_for_target(
+                803,
+                cache.path().into(),
+                BlockProfile::Ordinary,
+                target,
+            );
+            runtime.register_code(GuestAddress(BASE), program.clone())?;
+            let mut thread = initial.clone();
+            if phase == 2 {
+                thread.registers.fpsr |= FPSR_QC;
+            }
+            // SAFETY: finite owned register-only code with an explicit guest return.
+            let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+            assert_eq!(result.reason, StopReason::StopAddress);
+            assert_eq!(thread.pc, GuestAddress(STOP));
+            assert_eq!(thread.registers, expected);
+            assert_eq!(result.compiled_blocks, usize::from(!disk));
+            assert_eq!(result.disk_cache_hits, usize::from(disk));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn nested_direct_and_indirect_calls_preserve_architectural_link_registers() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let mut runtime = BlockRuntime::new(17, cache.path().to_path_buf());

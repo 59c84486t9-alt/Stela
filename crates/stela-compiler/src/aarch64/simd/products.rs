@@ -1,4 +1,4 @@
-//! Arm A64 2026-06 non-saturating SIMD products and widened integer arithmetic.
+//! Arm A64 2026-06 SIMD products and widened integer arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accumulate {
     None,
@@ -7,6 +7,14 @@ pub enum Accumulate {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Polynomial {
+        widen: bool,
+    },
+    Doubling {
+        high: bool,
+        rounding: bool,
+        accumulate: Accumulate,
+    },
     Product {
         signed: bool,
         widen: bool,
@@ -27,7 +35,9 @@ impl Kind {
     pub fn widened(self) -> bool {
         matches!(
             self,
-            Self::Arithmetic { .. }
+            Self::Polynomial { widen: true }
+                | Self::Doubling { high: false, .. }
+                | Self::Arithmetic { .. }
                 | Self::Product { widen: true, .. }
                 | Self::Difference { widen: true, .. }
         )
@@ -42,6 +52,7 @@ pub struct Operand {
     pub lane_bytes: u8,
     pub bytes: u8,
     pub upper: bool,
+    pub index: Option<u8>,
 }
 macro_rules! encodings {
     ($($name:ident => ($value:expr, $kind:expr)),+ $(,)?) => {
@@ -85,6 +96,9 @@ encodings! {
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = decode_special(word) {
+        return Some(decoded);
+    }
     let opcode = word & 0xbf20fc00;
     let (_, kind) = Encoding::ALL
         .iter()
@@ -104,12 +118,193 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         lane_bytes: 1 << size,
         bytes: if widen || q { 16 } else { 8 },
         upper: widen && q,
+        index: None,
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum PolynomialEncoding {
+    Multiply,
+    MultiplyLong,
+}
+impl PolynomialEncoding {
+    fn opcode(self) -> u32 {
+        match self {
+            Self::Multiply => 0x2e209c00,
+            Self::MultiplyLong => 0x0e20e000,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DoublingEncoding {
+    MulHigh,
+    RoundMulHigh,
+    MulLong,
+    AddLong,
+    SubLong,
+}
+impl DoublingEncoding {
+    const ALL: &'static [Self] = &[
+        Self::MulHigh,
+        Self::RoundMulHigh,
+        Self::MulLong,
+        Self::AddLong,
+        Self::SubLong,
+    ];
+    fn facts(self) -> (u32, u32, Kind) {
+        let (register, indexed, high, rounding, accumulate) = match self {
+            Self::MulHigh => (0x0e20b400, 0x0f00c000, true, false, NoAccumulate),
+            Self::RoundMulHigh => (0x2e20b400, 0x0f00d000, true, true, NoAccumulate),
+            Self::MulLong => (0x0e20d000, 0x0f00b000, false, false, NoAccumulate),
+            Self::AddLong => (0x0e209000, 0x0f003000, false, false, Add),
+            Self::SubLong => (0x0e20b000, 0x0f007000, false, false, Subtract),
+        };
+        (
+            register,
+            indexed,
+            Kind::Doubling {
+                high,
+                rounding,
+                accumulate,
+            },
+        )
+    }
+}
+#[allow(clippy::result_unit_err)]
+fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
+    let scalar = word & (1 << 28) != 0;
+    let q = word & (1 << 30) != 0;
+    let normalized = word & !(1 << 28);
+    let size = (word >> 22) & 3;
+    let mut index = None;
+    let mut right = ((word >> 16) & 31) as u8;
+    let kind =
+        if !scalar && word & 0xbf20fc00 == PolynomialEncoding::Multiply.opcode() {
+            if size != 0 {
+                return Some(Err(()));
+            }
+            Kind::Polynomial { widen: false }
+        } else if !scalar && word & 0xbf20fc00 == PolynomialEncoding::MultiplyLong.opcode() {
+            if size != 0 && size != 3 {
+                return Some(Err(()));
+            }
+            Kind::Polynomial { widen: true }
+        } else {
+            let (_, indexed, kind) = DoublingEncoding::ALL.iter().map(|e| e.facts()).find(
+                |(register, indexed, _)| {
+                    normalized & 0xbf20fc00 == *register || normalized & 0xbf00f400 == *indexed
+                },
+            )?;
+            if !matches!(size, 1 | 2) || scalar && !q {
+                return Some(Err(()));
+            }
+            if normalized & 0xbf00f400 == indexed {
+                let h = ((word >> 11) & 1) as u8;
+                let l = ((word >> 21) & 1) as u8;
+                let m = ((word >> 20) & 1) as u8;
+                if size == 1 {
+                    right &= 15;
+                    index = Some((h << 2) | (l << 1) | m);
+                } else {
+                    index = Some((h << 1) | l);
+                }
+            }
+            kind
+        };
+    let lane = 1 << size;
+    let widen = kind.widened();
+    Some(Ok(Operand {
+        kind,
+        destination: (word & 31) as u8,
+        left: ((word >> 5) & 31) as u8,
+        right,
+        lane_bytes: lane,
+        bytes: if scalar {
+            if widen { lane * 2 } else { lane }
+        } else if widen || q {
+            16
+        } else {
+            8
+        },
+        upper: widen && q && !scalar,
+        index,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn doubling_encodings_validate_scalar_width_and_index_register_roles() {
+        for encoding in DoublingEncoding::ALL {
+            let (register, indexed, kind) = encoding.facts();
+            for scalar in [false, true] {
+                for q in [false, true] {
+                    for size in 0..4 {
+                        for element in [false, true] {
+                            let base = if element { indexed } else { register };
+                            let word = base
+                                | (u32::from(scalar) << 28)
+                                | (u32::from(q) << 30)
+                                | (size << 22)
+                                | (31 << 16)
+                                | (1 << 11)
+                                | (31 << 5)
+                                | 31;
+                            // H is allocated only in indexed forms.
+                            let word = if element { word } else { word & !(1 << 11) };
+                            let decoded = decode(word).unwrap();
+                            if !matches!(size, 1 | 2) || scalar && !q {
+                                assert!(decoded.is_err());
+                                continue;
+                            }
+                            let operand = decoded.unwrap();
+                            assert_eq!(operand.kind, kind);
+                            assert_eq!(operand.right, if element && size == 1 { 15 } else { 31 });
+                            assert_eq!(
+                                operand.index,
+                                if element {
+                                    Some(if size == 1 { 5 } else { 2 })
+                                } else {
+                                    None
+                                }
+                            );
+                            assert_eq!(operand.upper, kind.widened() && q && !scalar);
+                            assert_eq!(
+                                operand.bytes,
+                                if scalar {
+                                    (1 << size) * if kind.widened() { 2 } else { 1 }
+                                } else if kind.widened() || q {
+                                    16
+                                } else {
+                                    8
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_encoding_widths_are_explicit() {
+        for q in 0..2 {
+            for size in 0..4 {
+                for (base, valid) in [
+                    (0x2e209c00, size == 0),
+                    (0x0e20e000, size == 0 || size == 3),
+                ] {
+                    assert_eq!(
+                        decode(base | (q << 30) | (size << 22)).unwrap().is_ok(),
+                        valid
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_named_form_validates_lanes_source_half_and_vector_roles() {
         for encoding in Encoding::ALL {
@@ -133,7 +328,13 @@ mod tests {
                 }
             }
         }
-        assert!(decode(0x2e209c00).is_none()); // PMUL is a separate polynomial form
+        assert!(matches!(
+            decode(0x2e209c00),
+            Some(Ok(Operand {
+                kind: Kind::Polynomial { widen: false },
+                ..
+            }))
+        ));
         assert!(decode(0x5e209c00).is_none()); // these are vector forms only
     }
 }

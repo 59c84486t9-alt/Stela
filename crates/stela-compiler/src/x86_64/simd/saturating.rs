@@ -28,7 +28,7 @@ fn arithmetic(lane: u8, sub: bool) -> Host {
         _ => unreachable!("reviewed lane width"),
     }
 }
-fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, lane: u8) {
+pub(super) fn sign_mask(code: &mut Vec<u8>, destination: u8, source: u8, lane: u8) {
     if lane == 1 {
         packed(code, Host::Xor, destination, destination);
         packed(code, Host::GreaterByte, destination, source);
@@ -62,7 +62,7 @@ fn clamp_result(code: &mut Vec<u8>) {
     packed(code, Host::Xor, 2, 5);
     packed(code, Host::MoveAligned, 0, 2);
 }
-fn add_sub(code: &mut Vec<u8>, lane: u8, signed: bool, sub: bool) {
+pub(super) fn add_sub(code: &mut Vec<u8>, lane: u8, signed: bool, sub: bool) {
     packed(code, Host::MoveAligned, 2, 0);
     packed(code, arithmetic(lane, sub), 2, 1);
     if lane <= 2 {
@@ -230,7 +230,7 @@ fn narrow(
         _ => unreachable!("allocated narrowing width"),
     }
 }
-fn publish_qc(code: &mut Vec<u8>, active_bytes: u8) {
+pub(super) fn publish_qc(code: &mut Vec<u8>, active_bytes: u8) {
     Host::ByteSignMask.register(code, 1, 4, TargetCpu::Baseline); // pmovmskb ecx,xmm4
     code.extend([0x81, 0xe1]); // AND ECX, active byte mask: inactive lanes cannot set QC
     code.extend(((1u32 << active_bytes) - 1).to_le_bytes());

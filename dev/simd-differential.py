@@ -25,8 +25,10 @@ import tempfile
 import time
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_ARCH_X86, CS_MODE_64
-from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, UC_ERR_FETCH_UNMAPPED
+from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_ARCH_X86, UC_MODE_ARM, UC_MODE_64, UC_HOOK_CODE, UC_ERR_FETCH_UNMAPPED
 from unicorn import arm64_const as arm
+from unicorn import x86_const as intel
+from unicorn import __version__ as unicorn_version
 from differential import (ROOT, BASE, MASK, State, states, executable, initialize_arm,
                           capture_arm, state_dict, seed_extended_state, parse_fault_record, move)
 from evidence import write_evidence
@@ -238,7 +240,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -252,7 +254,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
                 raise AssertionError('Independent mini-function has no exact host RET boundary')
     return {'functions': functions, 'source': source, 'native': native, 'entries': entries,
             'offsets': [offsets[entry] for entry in entries], 'block': block,
-            'compiler': manifest['compiler_source_sha256'],
+            'compiler': manifest['compiler_source_sha256'],'manifest':manifest,'instruction_offsets':offsets,
             'receipt': {'functions': len(functions), 'source_bytes': len(source), 'source_sha256': digest(source),
                         'native_bytes': len(native), 'native_sha256': digest(native),
                         'source_map_sha256': digest(json.dumps(manifest['source_map']).encode()), 'block': block,
@@ -789,6 +791,101 @@ def shift_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
+def register_shift_programs():
+    bases={'sshl':0x0e204400,'ushl':0x2e204400,'srshl':0x0e205400,'urshl':0x2e205400,
+           'sqshl':0x0e204c00,'uqshl':0x2e204c00,'sqrshl':0x0e205c00,'uqrshl':0x2e205c00}
+    configurations=[]
+    for name,base in bases.items():
+        saturating='q' in name
+        for scalar in (False,True):
+            for q in ((1,) if scalar else (0,1)):
+                for size in (range(4) if saturating or not scalar else (3,)):
+                    if not q and size==3: continue
+                    configurations.append({'name':name,'base':base|(q<<30)|(int(scalar)<<28)|(size<<22),
+                        'lane':1<<size,'bytes':1<<size if scalar else 8<<q,'scalar':scalar,
+                        'signed':name.startswith('s'),'unsigned_result':name.startswith('u'),
+                        'round':'r' in name,'saturating':saturating,'immediate':False})
+    for name,base in [('sqshl',0x0f007400),('uqshl',0x2f007400),('sqshlu',0x2f006400)]:
+        for scalar in (False,True):
+            for q in ((1,) if scalar else (0,1)):
+                for size in range(4):
+                    if not q and size==3: continue
+                    bits=8<<size
+                    for amount in sorted({0,1,bits//2,bits-1}):
+                        configurations.append({'name':name,'base':base|(q<<30)|(int(scalar)<<28)|((bits+amount)<<16),
+                            'lane':1<<size,'bytes':1<<size if scalar else 8<<q,'scalar':scalar,
+                            'signed':name!='uqshl','unsigned_result':name!='sqshl','round':False,
+                            'saturating':True,'immediate':True,'amount':amount})
+    programs=[]
+    for config in configurations:
+        def operation(d,n,m):
+            return {**config,'kind':'register_shift','d':d,'n':n,'m':m,
+                    'word':config['base']|(n<<5)|d|(0 if config['immediate'] else m<<16)}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(0,1,1),(31,31,31),(31,29,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def register_shift_counts(bits):
+    return sorted({-128,-127,-65,-64,-63,-bits-1,-bits,1-bits,-2,-1,0,1,2,bits-1,bits,bits+1,63,64,65,126,127})
+
+
+def register_shift_pattern_count(operations):
+    return 8 if operations[0]['immediate'] else len(register_shift_counts(operations[0]['lane']*8))+2
+
+
+def register_shift_seed(initial,operations,pattern,flags):
+    op=operations[0];lane=op['lane'];bits=lane*8;mask=(1<<bits)-1
+    values=(0,1,-1,1<<(bits-1),(1<<(bits-1))-1,-2,2,(1<<(bits-1))+1)
+    for register in range(32):
+        value=sum((values[(register+index+pattern)%len(values)]&mask)<<(index*bits) for index in range(128//bits))
+        initial.v[register][:]=[value&MASK,value>>64]
+    counts=register_shift_counts(bits)
+    if not op['immediate']:
+        for operation in operations:
+            value=0
+            for index in range(128//bits):
+                count=counts[(pattern+index)%len(counts)]
+                # Deliberately unrelated high count bits; only the signed low byte counts.
+                poison=(0xa5c37e19d2b48000^(operation['m']<<8)^(index<<16))&mask&~255
+                value|=(poison|(count&255))<<(index*bits)
+            initial.v[operation['m']][:]=[value&MASK,value>>64]
+    if pattern==register_shift_pattern_count(operations)-2:
+        # Active source zero cannot saturate even at a huge positive count;
+        # inactive MIN lanes must never publish QC.
+        for operation in operations:
+            if operation['n']==operation['m'] and not op['immediate']: continue
+            value=sum((1<<(bits-1))<<(index*bits) for index in range(op['bytes']//lane,128//bits))
+            initial.v[operation['n']][:]=[value&MASK,value>>64]
+            if not op['immediate']:
+                count_value=sum((127 if index<op['bytes']//lane else 1)<<(index*bits) for index in range(128//bits))
+                initial.v[operation['m']][:]=[count_value&MASK,count_value>>64]
+    initial.fpsr=(initial.fpsr&~(1<<27))|((1<<27) if flags else 0)
+
+
+def register_shift_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v];fpsr=initial.fpsr
+    for op in operations:
+        bits=op['lane']*8;mask=(1<<bits)-1;source,counts=vectors[op['n']],vectors[op['m']];result=0
+        for index in range(op['bytes']//op['lane']):
+            value=(source>>(index*bits))&mask
+            if op['signed'] and value&(1<<(bits-1)): value-=1<<bits
+            count=op['amount'] if op['immediate'] else (counts>>(index*bits))&255
+            if not op['immediate'] and count>=128: count-=256
+            # Arbitrary precision math independently models the unclamped shift;
+            # ShiftSat only reduces counts that already have identical outcomes.
+            shifted=value<<count if count>=0 else (value+((1<<(-count-1)) if op['round'] else 0))>>-count
+            if op['saturating']:
+                low,high=(0,mask) if op['unsigned_result'] else (-(1<<(bits-1)),(1<<(bits-1))-1)
+                bounded=max(low,min(high,shifted))
+                if bounded!=shifted: fpsr|=1<<27
+                shifted=bounded
+            result|=(shifted&mask)<<(index*bits)
+        vectors[op['d']]=result
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors],'fpsr':fpsr}
+
+
 def reduction_programs():
     configurations=[]
     bases={'smin':0x0e206c00,'smax':0x0e206400,'umin':0x2e206c00,'umax':0x2e206400,
@@ -1117,13 +1214,105 @@ def integer_mathematical(operations,initial):
     return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors]}
 
 
+def doubling_product_programs():
+    configurations=[]
+    bases={'sqdmulh':(0x0e20b400,0x0f00c000),'sqrdmulh':(0x2e20b400,0x0f00d000),
+        'sqdmull':(0x0e20d000,0x0f00b000),'sqdmlal':(0x0e209000,0x0f003000),'sqdmlsl':(0x0e20b000,0x0f007000)}
+    for name,(register,indexed) in bases.items():
+        high=name.endswith('h')
+        for scalar in (False,True):
+            for element in (False,True):
+                for q in ((1,) if scalar else (0,1)):
+                    for size in (1,2):
+                        lane=1<<size
+                        for index in (range(16//lane) if element else (None,)):
+                            base=(indexed if element else register)|(int(scalar)<<28)|(q<<30)|(size<<22)
+                            if element:
+                                base|=((index>> (2 if size==1 else 1))<<11)|(((index>>1) if size==1 else index)&1)<<21
+                                if size==1: base|=(index&1)<<20
+                            configurations.append({'name':name,'base':base,'lane':lane,'output_lane':lane if high else lane*2,
+                                'bytes':(lane if high else lane*2) if scalar else 8<<q if high else 16,
+                                'upper':not high and not scalar and bool(q),'index':index})
+    for name,base,sizes in [('pmul',0x2e209c00,(0,)),('pmull',0x0e20e000,(0,3))]:
+        for q in (0,1):
+            for size in sizes:
+                lane=1<<size
+                configurations.append({'name':name,'base':base|(q<<30)|(size<<22),'lane':lane,
+                    'output_lane':lane if name=='pmul' else lane*2,'bytes':8<<q if name=='pmul' else 16,
+                    'upper':name=='pmull' and bool(q),'index':None})
+    programs=[]
+    for config in configurations:
+        def operation(d,n,m):
+            if config['index'] is not None and config['lane']==2: m&=15
+            return {**config,'kind':'doubling_product','d':d,'n':n,'m':m,'word':config['base']|(m<<16)|(n<<5)|d}
+        for d,n,m in ((0,1,2),(1,1,2),(2,1,2),(31,31,31),(0,31,31),(31,29,31)):
+            programs.append({'operations':[operation(d,n,m)]})
+        programs.append({'operations':[operation(d,(d+5)%32,(d+13)%32) for d in range(32)]})
+    return programs
+
+
+def doubling_product_mathematical(operations,initial):
+    vectors=[lo|(hi<<64) for lo,hi in initial.v];fpsr=initial.fpsr
+    for op in operations:
+        name,d,n,m,lane,out_lane,width=(op[k] for k in ('name','d','n','m','lane','output_lane','bytes'))
+        bits,out_bits=lane*8,out_lane*8;a,b,old=vectors[n],vectors[m],vectors[d]
+        if op['upper']: a>>=64
+        if op['upper'] and op['index'] is None: b>>=64
+        def signed(value,width): return value-(1<<width) if value&(1<<(width-1)) else value
+        def clamp(value,width):
+            nonlocal fpsr
+            result=min((1<<(width-1))-1,max(-(1<<(width-1)),value))
+            if result!=value: fpsr|=1<<27
+            return result
+        result=0
+        for i in range(width//out_lane):
+            left=a>>(i*bits)&((1<<bits)-1)
+            right=b>>((op['index'] if op['index'] is not None else i)*bits)&((1<<bits)-1)
+            if name.startswith('p'):
+                value=0
+                for bit in range(bits):
+                    if right&(1<<bit): value^=left<<bit
+            else:
+                value=2*signed(left,bits)*signed(right,bits)
+                if name.endswith('h'):
+                    if name=='sqrdmulh': value+=1<<(bits-1)
+                    value=clamp(value>>bits,bits)
+                else:
+                    value=clamp(value,out_bits)
+                    if name in ('sqdmlal','sqdmlsl'):
+                        previous=signed(old>>(i*out_bits)&((1<<out_bits)-1),out_bits)
+                        value=clamp(previous+(-value if name=='sqdmlsl' else value),out_bits)
+            result|=(value&((1<<out_bits)-1))<<(i*out_bits)
+        vectors[d]=result
+    return {**state_dict(initial),'v':[[v&MASK,v>>64] for v in vectors],'fpsr':fpsr}
+
+
+def seed_doubling_products(initial,operations,pattern,flags):
+    bits=operations[0]['lane']*8;mask=(1<<bits)-1;minimum=1<<(bits-1)
+    values=(0,1,mask,minimum,minimum-1,minimum+1,mask-1,1<<(bits-2),(1<<(bits-2))+1)
+    for register in range(32):
+        if pattern<7:
+            lanes=[values[(pattern+register+i)%len(values)] for i in range(128//bits)]
+        elif pattern==7: lanes=[minimum]*(128//bits) # MIN*MIN and stage-one saturation
+        elif pattern==8:
+            op=operations[0];active=op['bytes'] if op['name'].endswith('h') or op['name']=='pmul' else op['bytes']//2
+            start=64 if op['upper'] else 0
+            lanes=[0 if start<=i*bits<start+active*8 else minimum for i in range(128//bits)]
+        else: continue # random independent original full-width state
+        value=sum(v<<(i*bits) for i,v in enumerate(lanes));initial.v[register][:]=[value&MASK,value>>64]
+    initial.fpsr=(initial.fpsr&~(1<<27))|((1<<27) if flags else 0)
+
+
+
 REGISTER_COHORTS={
     'integer':(integer_programs,integer_mathematical),
     'rearrange':(rearrange_programs,rearrange_mathematical),
     'shifts':(shift_programs,shift_mathematical),
+    'register_shifts':(register_shift_programs,register_shift_mathematical),
     'reductions':(reduction_programs,reduction_mathematical),
     'saturating':(saturating_programs,saturating_mathematical),
     'products':(product_programs,product_mathematical),
+    'doubling_products':(doubling_product_programs,doubling_product_mathematical),
     'halving':(halving_programs,halving_mathematical),
     'immediates':(immediate_programs,immediate_mathematical),
 }
@@ -1131,6 +1320,7 @@ REGISTER_COHORTS={
 
 def execute_register_batches(batches):
     corpus,comparisons=hashlib.sha256(),0
+    dynamic=[]
     templates=states(all_flags=True)
     for batch in batches:
         machine=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
@@ -1150,6 +1340,8 @@ def execute_register_batches(batches):
                 halving=batch.get('cohort')=='halving'
                 immediates=batch.get('cohort')=='immediates'
                 patterns=(2 if operations[0]['kind']=='constant' else 8) if immediates else 9 if halving else 7 if saturation or products else 256//operations[0]['bytes'] if table or bit_bytes else bits+3 if leading else 5
+                if batch.get('cohort')=='doubling_products': patterns=10
+                if batch.get('cohort')=='register_shifts': patterns=register_shift_pattern_count(operations)
                 for flags in (0,15):
                     for pattern in range(patterns):
                         initial=State.from_buffer_copy(templates[flags]);initial.nzcv=flags<<28
@@ -1234,6 +1426,8 @@ def execute_register_batches(batches):
                                     full=sum(payload<<(i*bits) for i in range(128//bits))
                                     initial.v[register][:]=[full&MASK,full>>64]
                                     if register<31: initial.x[register]=(payload|((0xdeadbeefdeadbeef<<bits)&MASK))&MASK
+                        if batch.get('cohort')=='doubling_products': seed_doubling_products(initial,operations,pattern,flags)
+                        if batch.get('cohort')=='register_shifts': register_shift_seed(initial,operations,pattern,flags)
                         initialize_arm(machine,initial)
                         end=BASE+(entry+len(operations))*4
                         machine.emu_start(BASE+entry*4,end,count=len(operations)+1)
@@ -1246,7 +1440,184 @@ def execute_register_batches(batches):
                                 'math':mathematical,'arm':original,'native':actual}))
                         corpus.update(struct.pack('<'+'I'*len(operations),*(op['word'] for op in operations)))
                         corpus.update(bytes(initial));comparisons+=1
-    return {'three_way_register_state_comparisons':comparisons,'state_corpus_sha256':corpus.hexdigest()}
+        dynamic.append(count_representative_native_paths(batch))
+    return {'three_way_register_state_comparisons':comparisons,'state_corpus_sha256':corpus.hexdigest(),
+        'dynamic_x86_trace':dynamic}
+
+
+def native_mnemonic(mnemonic):
+    # Capstone names immediate operand-half selections as PCLMUL aliases.
+    aliases={'pclmullqlqdq','pclmulhqlqdq','pclmullqhqdq','pclmulhqhqdq'}
+    return 'pclmulqdq' if mnemonic in aliases else mnemonic
+
+
+def decode_native_stream(native):
+    decoded=list(Cs(CS_ARCH_X86,CS_MODE_64).disasm(native,0))
+    position=0
+    for instruction in decoded:
+        if instruction.address!=position or instruction.size<=0:
+            raise AssertionError('Native disassembly has a gap or invalid instruction size')
+        position+=instruction.size
+    if position!=len(native) or not decoded:
+        raise AssertionError('Native disassembly did not consume the complete binary')
+    return decoded
+
+
+def native_operation_shape(operation):
+    keys=('name','lane','output_lane','bytes','scalar','index','upper','immediate','amount')
+    shape={key:operation[key] for key in keys if key in operation}
+    if operation.get('kind')=='register_shift' and not operation.get('immediate'):
+        shape['counts']='signed_low_byte_per_lane'
+    return shape
+
+
+def native_binary_accounting(batch,decoded=None):
+    decoded=decode_native_stream(batch['native']) if decoded is None else decoded
+    boundaries={instruction.address:index for index,instruction in enumerate(decoded)}
+    boundaries[len(batch['native'])]=len(decoded)
+    offsets=batch['instruction_offsets'];guest_operations=0;body_bytes=0;body_instructions=0
+    shapes={};ret_instructions=0
+    if len(offsets)!=sum(len(f['operations'])+1 for f in batch['functions']):
+        raise AssertionError('Native accounting needs one source-map boundary per guest operation and RET')
+    for function,entry in zip(batch['functions'],batch['entries']):
+        operations=function['operations'];guest_operations+=len(operations)
+        for index in range(len(operations)):
+            start,end=offsets[entry+index],offsets[entry+index+1]
+            if start not in boundaries or end not in boundaries or end<=start:
+                raise AssertionError('Source map splits a native instruction or reverses an operation')
+            body_bytes+=end-start;body_instructions+=boundaries[end]-boundaries[start]
+        ret_offset=offsets[entry+len(operations)]
+        if ret_offset not in boundaries or decoded[boundaries[ret_offset]].mnemonic!='ret':
+            raise AssertionError('Native accounting found no exact harness RET')
+        ret_instructions+=1
+        if len(operations)==1:
+            shape=native_operation_shape(operations[0]);key=json.dumps(shape,sort_keys=True)
+            start,end=offsets[entry],ret_offset
+            size,count=end-start,boundaries[end]-boundaries[start]
+            if key not in shapes:
+                shapes[key]={'shape':shape,'functions':0,'native_bytes_min':size,'native_bytes_max':size,
+                    'native_instructions_min':count,'native_instructions_max':count}
+            row=shapes[key];row['functions']+=1
+            for field,value in [('native_bytes',size),('native_instructions',count)]:
+                row[field+'_min']=min(row[field+'_min'],value);row[field+'_max']=max(row[field+'_max'],value)
+    if body_instructions+ret_instructions!=len(decoded) or body_bytes+ret_instructions!=len(batch['native']):
+        raise AssertionError('Native accounting did not partition guest bodies and one-byte leaf RETs')
+    return {'native_sha256':digest(batch['native']),'source_sha256':digest(batch['source']),
+        'static_native_bytes_including_ret':len(batch['native']),
+        'static_native_instructions_including_ret':len(decoded),
+        'harness_ret_instructions':ret_instructions,'harness_ret_bytes':ret_instructions,
+        'guest_operations_excluding_ret':guest_operations,'guest_operation_source_bytes':guest_operations*4,
+        'static_body_native_bytes':body_bytes,'static_body_native_instructions':body_instructions,
+        'body_native_instructions_per_guest_operation':body_instructions/guest_operations,
+        'body_native_bytes_per_guest_operation':body_bytes/guest_operations,
+        'body_native_to_guest_byte_expansion':body_bytes/(guest_operations*4),
+        'static_opcode_histogram':dict(sorted(Counter(native_mnemonic(i.mnemonic) for i in decoded).items())),
+        'single_operation_shapes':[shapes[key] for key in sorted(shapes)],
+        'limits':'Static counts fully decode final emitted bytes, include both branch paths and count loop bodies once. Shape/body counts exclude the one-byte harness RET. These counts are not dynamic instruction counts, CPU cycles or application performance.'}
+
+
+def emulate_native_trace(native,start,end,initial,instruction_budget=100000):
+    code_base,state_base,stack_base=0x10000000,0x20000000,0x30000000
+    code_size=(len(native)+4095)&~4095;stop=code_base+code_size+4096
+    machine=Uc(UC_ARCH_X86,UC_MODE_64);machine.ctl_set_cpu_model(intel.UC_CPU_X86_HASWELL)
+    machine.mem_map(code_base,code_size);machine.mem_write(code_base,native)
+    machine.mem_map(stop,4096);machine.mem_write(stop,b'\x90')
+    machine.mem_map(state_base,4096);machine.mem_write(state_base,bytes(initial))
+    machine.mem_map(stack_base,4096);machine.mem_write(stack_base+2048,struct.pack('<Q',stop))
+    machine.reg_write(intel.UC_X86_REG_RDI,state_base);machine.reg_write(intel.UC_X86_REG_RSP,stack_base+2048)
+    machine.reg_write(intel.UC_X86_REG_MXCSR,0x1f80)
+    counts=Counter();previous=None;backward_edges=0
+    def trace(_,pc,size,__):
+        nonlocal previous,backward_edges
+        if not code_base+start<=pc<code_base+end or pc+size>code_base+end:
+            raise AssertionError('Generated x86 trace escaped its exact mini-function boundary')
+        offset=pc-code_base;counts[offset]+=1
+        if previous is not None and offset<previous: backward_edges+=1
+        previous=offset
+    machine.hook_add(UC_HOOK_CODE,trace)
+    machine.emu_start(code_base+start,stop,timeout=1_000_000,count=instruction_budget)
+    if machine.reg_read(intel.UC_X86_REG_RIP)!=stop:
+        raise AssertionError('Generated x86 trace did not return within its finite instruction/time budget')
+    if counts[end-1]!=1 or native[end-1]!=0xc3:
+        raise AssertionError('Generated x86 trace must execute exactly one harness RET')
+    observed=State.from_buffer_copy(machine.mem_read(state_base,ctypes.sizeof(State)))
+    return observed,{'dynamic_native_instructions_including_ret':sum(counts.values()),
+        'dynamic_body_native_instructions':sum(counts.values())-1,'harness_ret_instructions':1,
+        'unique_native_instruction_addresses':len(counts),'backward_edges_taken':backward_edges}
+
+
+def native_trace_representatives(batch):
+    focus=batch['cohort']
+    if focus=='doubling_products':
+        selections=[{'name':'pmull','lane':8,'upper':False},{'name':'pmull','lane':8,'upper':True},
+            {'name':'pmul','bytes':16},{'name':'sqrdmulh','lane':4,'bytes':16,'index':None},
+            {'name':'sqrdmulh','lane':2,'bytes':16,'index':None},
+            {'name':'sqdmull','lane':4,'upper':True,'index':None},
+            {'name':'sqdmlal','lane':4,'bytes':8,'index':3},{'name':'sqdmlsl','lane':2,'bytes':16,'upper':False},
+            {'name':'sqrdmulh','lane':2,'bytes':8,'index':7}]
+    elif focus=='register_shifts':
+        selections=[{'name':'sqshl','lane':8,'scalar':True,'immediate':False},
+            {'name':'sshl','lane':1,'bytes':16,'immediate':False},
+            {'name':'sqrshl','lane':8,'bytes':16,'immediate':False},
+            {'name':'uqshl','lane':1,'bytes':16,'immediate':True,'amount':1},
+            {'name':'sqshl','lane':1,'bytes':16,'immediate':True,'amount':1},
+            {'name':'sqshlu','lane':1,'bytes':16,'immediate':True,'amount':0},
+            {'name':'sqshlu','lane':8,'bytes':16,'immediate':True,'amount':0},
+            {'name':'sqshl','lane':4,'bytes':16,'immediate':True,'amount':31}]
+    else: return []
+    representatives=[]
+    for selection in selections:
+        for index,function in enumerate(batch['functions']):
+            if len(function['operations'])==1 and all(function['operations'][0].get(k)==v for k,v in selection.items()):
+                representatives.append(index);break
+        else: raise AssertionError(f'Missing bounded dynamic representative: {selection}')
+    return representatives
+
+
+def count_representative_native_paths(batch):
+    rows=[]
+    with executable(batch['native']) as address:
+        for index in native_trace_representatives(batch):
+            function=batch['functions'][index];operations=function['operations'];entry=batch['entries'][index]
+            start=batch['instruction_offsets'][entry];end=batch['instruction_offsets'][entry+1]+1
+            patterns=(0,7) if batch['cohort']=='doubling_products' else (0,6) if operations[0]['immediate'] else (
+                register_shift_counts(operations[0]['lane']*8).index(-64),register_shift_counts(operations[0]['lane']*8).index(1))
+            native=ctypes.CFUNCTYPE(None,ctypes.POINTER(State))(address+start)
+            for pattern in patterns:
+                initial=State();seed_extended_state(initial,index*16+pattern);initial.nzcv=0xf0000000
+                if batch['cohort']=='doubling_products': seed_doubling_products(initial,operations,pattern,0)
+                else: register_shift_seed(initial,operations,pattern,0)
+                mathematical=REGISTER_COHORTS[batch['cohort']][1](operations,initial)
+                actual=State.from_buffer_copy(initial);native(ctypes.byref(actual))
+                emulated,counts=emulate_native_trace(batch['native'],start,end,initial)
+                if mathematical!=state_dict(actual) or state_dict(actual)!=state_dict(emulated):
+                    raise AssertionError(json.dumps({'dynamic_operations':operations,'initial':state_dict(initial),
+                        'math':mathematical,'actual_native':state_dict(actual),'x86_emulated':state_dict(emulated)}))
+                rows.append({'shape':native_operation_shape(operations[0]),'word':f"0x{operations[0]['word']:08x}",
+                    'pattern':pattern,'native_start':start,'native_end':end,
+                    'native_function_sha256':digest(batch['native'][start:end]),'initial_state_sha256':digest(bytes(initial)),
+                    'output_state_sha256':digest(bytes(actual)),**counts})
+    return {'reference':f'Unicorn {unicorn_version} x86-64 Haswell instruction-hook trace; same final emitted bytes also executed on the actual host CPU',
+        'complete_state_math_actual_native_emulator_comparisons':len(rows),'instruction_budget_per_trace':100000,
+        'timeout_microseconds_per_trace':1000000,'cases':rows,
+        'limits':'Dynamic counts are bounded emulator instruction-path counts, including repeated loop bodies and taken branches. They are not CPU hardware counter readings, CPU cycles or application performance; the harness RET is reported separately.'}
+
+
+def retain_native_binary_evidence(batch,accounting,dynamic):
+    manifest_data=(json.dumps(batch['manifest'],sort_keys=True,indent=2)+'\n').encode()
+    key=digest(batch['source']+batch['native']+manifest_data+Path(__file__).read_bytes())
+    directory=ROOT/'.stela/native-evidence'/f"simd-{batch['cohort']}"/key
+    directory.mkdir(parents=True,exist_ok=True)
+    files={'source.arm64':batch['source'],'native.bin':batch['native'],'manifest.json':manifest_data,
+        'accounting.json':(json.dumps({'static':accounting,'dynamic':dynamic},indent=2)+'\n').encode()}
+    receipts={}
+    for name,data in files.items():
+        path=directory/name
+        if path.exists() and path.read_bytes()!=data: raise AssertionError(f'Immutable native evidence changed: {path}')
+        if not path.exists(): path.write_bytes(data)
+        receipts[name]={'path':str(path.relative_to(ROOT)),'sha256':digest(data),'bytes':len(data)}
+    return receipts
+
 
 
 def run_register_cohort(cli, focus):
@@ -1261,9 +1632,10 @@ def run_register_cohort(cli, focus):
             batch=compile_batch(cli,Path(temporary),functions,index,cpu_target=selection,target_id=target_id)
             batch['cohort']=focus
             result=bounded_cases([batch])
-            decoded=list(Cs(CS_ARCH_X86,CS_MODE_64).disasm(batch['native'],0))
-            assert sum(i.size for i in decoded)==len(batch['native'])
-            mnemonics=Counter(i.mnemonic for i in decoded)
+            decoded=decode_native_stream(batch['native'])
+            accounting=native_binary_accounting(batch,decoded)
+            retained=retain_native_binary_evidence(batch,accounting,result['dynamic_x86_trace'])
+            mnemonics=Counter(native_mnemonic(i.mnemonic) for i in decoded)
             optional={o['mnemonic'] for o in info['simd_opcodes'] if o['minimum_target']!='x86_64-baseline'}
             used=sorted(optional & mnemonics.keys())
             expected=set()
@@ -1282,11 +1654,16 @@ def run_register_cohort(cli, focus):
             elif focus=='products':
                 if '+sse4.1' in target_id: expected.update(('pmulld','pmuldq'))
                 if '+sse4.2' in target_id: expected.add('pcmpgtq')
+            elif focus=='doubling_products':
+                if '+ssse3' in target_id: expected.add('pmulhrsw')
+                if '+sse4.1' in target_id: expected.update(('pmuldq','pmulld'))
+                if '+pclmulqdq' in target_id: expected.add('pclmulqdq')
             elif focus=='halving':
                 if '+ssse3' in target_id: expected.add('pmaddubsw')
                 if '+sse4.1' in target_id: expected.update(('pmovsxdq','pmovzxdq'))
             assert set(used)==expected,(target_id,used,expected)
             profiles[selection]={**result,'compilation':batch['receipt'],'optional_opcodes_used':used,
+                'native_binary_accounting':accounting,'retained_native_evidence':retained,
                 'packed_shifts_used':sorted({o['mnemonic'] for o in info['simd_immediate_shifts']} & mnemonics.keys())}
     assert digest(cli.read_bytes())==cli_hash and digest(Path(__file__).read_bytes())==harness_hash
     baseline=profiles['baseline']

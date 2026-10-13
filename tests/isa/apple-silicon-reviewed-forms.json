@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v21",
+  "registry_version": "apple-silicon-reviewed-forms-v22",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -277,6 +277,40 @@
         "programs": 17499,
         "three_way_register_state_comparisons": 71088,
         "cpu_profiles.baseline.three_way_register_state_comparisons": 71088
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_register_shifts": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-register_shifts-differential-report.json",
+      "kind": "simd_register_shifts_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 1456,
+        "three_way_register_state_comparisons": 37912,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 37912,
+        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 529302
+      },
+      "required_positive_counts": [
+        "total_profile_comparisons"
+      ]
+    },
+    "simd_doubling_products": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-doubling_products-differential-report.json",
+      "kind": "simd_doubling_products_arm_vs_native_x86",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_measurements": {
+        "programs": 1512,
+        "three_way_register_state_comparisons": 30240,
+        "cpu_profiles.baseline.three_way_register_state_comparisons": 30240,
+        "cpu_profiles.baseline.native_binary_accounting.static_body_native_instructions": 489364
       },
       "required_positive_counts": [
         "total_profile_comparisons"
@@ -20481,6 +20515,1678 @@
           "word": "0x0f001400",
           "expected_mnemonics": [
             "orr"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRSHL_asimdsame_only",
+      "instruction_id": "SQRSHL_advsimd",
+      "mnemonic": "SQRSHL",
+      "category": "fp_simd",
+      "source_file": "sqrshl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e205c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8f902f9e11a7b56ea5c6e1e6ec1c18a9c0264bcb9c60ee66f2e84374e753c45d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e225c20",
+          "expected_mnemonics": [
+            "sqrshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRSHL_asisdsame_only",
+      "instruction_id": "SQRSHL_advsimd",
+      "mnemonic": "SQRSHL",
+      "category": "fp_simd",
+      "source_file": "sqrshl_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e205c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "8f902f9e11a7b56ea5c6e1e6ec1c18a9c0264bcb9c60ee66f2e84374e753c45d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e225c20",
+          "expected_mnemonics": [
+            "sqrshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHLU_asimdshf_R",
+      "instruction_id": "SQSHLU_advsimd",
+      "mnemonic": "SQSHLU",
+      "category": "fp_simd",
+      "source_file": "sqshlu_advsimd.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f006400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a2630f6110632536724dbfaf1601e6c79ddc0e66da91ddbd75cfbf28d1c70cbc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f086420",
+          "expected_mnemonics": [
+            "sqshlu"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHLU_asisdshf_R",
+      "instruction_id": "SQSHLU_advsimd",
+      "mnemonic": "SQSHLU",
+      "category": "fp_simd",
+      "source_file": "sqshlu_advsimd.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f006400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a2630f6110632536724dbfaf1601e6c79ddc0e66da91ddbd75cfbf28d1c70cbc",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f086420",
+          "expected_mnemonics": [
+            "sqshlu"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHL_asimdsame_only",
+      "instruction_id": "SQSHL_advsimd_reg",
+      "mnemonic": "SQSHL",
+      "category": "fp_simd",
+      "source_file": "sqshl_advsimd_reg.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e204c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f39fb95662b7b4249049fa95ca1bed3c9c87e140c2395d269236081b02e66c5f",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e224c20",
+          "expected_mnemonics": [
+            "sqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHL_asimdshf_R",
+      "instruction_id": "SQSHL_advsimd_imm",
+      "mnemonic": "SQSHL",
+      "category": "fp_simd",
+      "source_file": "sqshl_advsimd_imm.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x0f007400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0c65a378ec134a4706e392bb9a813a2b8abda3a3c1b3cc9447561373e2993194",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f087420",
+          "expected_mnemonics": [
+            "sqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHL_asisdsame_only",
+      "instruction_id": "SQSHL_advsimd_reg",
+      "mnemonic": "SQSHL",
+      "category": "fp_simd",
+      "source_file": "sqshl_advsimd_reg.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e204c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f39fb95662b7b4249049fa95ca1bed3c9c87e140c2395d269236081b02e66c5f",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e224c20",
+          "expected_mnemonics": [
+            "sqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQSHL_asisdshf_R",
+      "instruction_id": "SQSHL_advsimd_imm",
+      "mnemonic": "SQSHL",
+      "category": "fp_simd",
+      "source_file": "sqshl_advsimd_imm.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x5f007400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0c65a378ec134a4706e392bb9a813a2b8abda3a3c1b3cc9447561373e2993194",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f087420",
+          "expected_mnemonics": [
+            "sqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSHL_asimdsame_only",
+      "instruction_id": "SRSHL_advsimd",
+      "mnemonic": "SRSHL",
+      "category": "fp_simd",
+      "source_file": "srshl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e205400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b63ab3d08791d75b9443cff906d189f8f8c7b28fd7c88f2d0066d03ecf114718",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e225420",
+          "expected_mnemonics": [
+            "srshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SRSHL_asisdsame_only",
+      "instruction_id": "SRSHL_advsimd",
+      "mnemonic": "SRSHL",
+      "category": "fp_simd",
+      "source_file": "srshl_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee05400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "b63ab3d08791d75b9443cff906d189f8f8c7b28fd7c88f2d0066d03ecf114718",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee25420",
+          "expected_mnemonics": [
+            "srshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSHL_asimdsame_only",
+      "instruction_id": "SSHL_advsimd",
+      "mnemonic": "SSHL",
+      "category": "fp_simd",
+      "source_file": "sshl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e204400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "34844ebe92c2cf9b7717aa0d72a0d2cd07ce80488bb3dca5a3e3ae9ae3ae6b97",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e224420",
+          "expected_mnemonics": [
+            "sshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SSHL_asisdsame_only",
+      "instruction_id": "SSHL_advsimd",
+      "mnemonic": "SSHL",
+      "category": "fp_simd",
+      "source_file": "sshl_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5ee04400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "34844ebe92c2cf9b7717aa0d72a0d2cd07ce80488bb3dca5a3e3ae9ae3ae6b97",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5ee24420",
+          "expected_mnemonics": [
+            "sshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQRSHL_asimdsame_only",
+      "instruction_id": "UQRSHL_advsimd",
+      "mnemonic": "UQRSHL",
+      "category": "fp_simd",
+      "source_file": "uqrshl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e205c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "1d3e3d92e2edf9cd16d3cf8d776abf73b1c8849f88d1fd6043103dfb39ac4232",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e225c20",
+          "expected_mnemonics": [
+            "uqrshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQRSHL_asisdsame_only",
+      "instruction_id": "UQRSHL_advsimd",
+      "mnemonic": "UQRSHL",
+      "category": "fp_simd",
+      "source_file": "uqrshl_advsimd.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e205c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "1d3e3d92e2edf9cd16d3cf8d776abf73b1c8849f88d1fd6043103dfb39ac4232",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e225c20",
+          "expected_mnemonics": [
+            "uqrshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSHL_asimdsame_only",
+      "instruction_id": "UQSHL_advsimd_reg",
+      "mnemonic": "UQSHL",
+      "category": "fp_simd",
+      "source_file": "uqshl_advsimd_reg.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e204c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "da24a944ac5870c1a549c1f8b1f228b655c70f1a18d0e05a0f3920504d9b57c9",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e224c20",
+          "expected_mnemonics": [
+            "uqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSHL_asimdshf_R",
+      "instruction_id": "UQSHL_advsimd_imm",
+      "mnemonic": "UQSHL",
+      "category": "fp_simd",
+      "source_file": "uqshl_advsimd_imm.xml",
+      "encoding_mask": "0xbf80fc00",
+      "encoding_value": "0x2f007400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "139560c322030a2d3fd5531e5230b14b101e8fd43f468f45bb2dc17774365d07",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f087420",
+          "expected_mnemonics": [
+            "uqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSHL_asisdsame_only",
+      "instruction_id": "UQSHL_advsimd_reg",
+      "mnemonic": "UQSHL",
+      "category": "fp_simd",
+      "source_file": "uqshl_advsimd_reg.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e204c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "da24a944ac5870c1a549c1f8b1f228b655c70f1a18d0e05a0f3920504d9b57c9",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e224c20",
+          "expected_mnemonics": [
+            "uqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UQSHL_asisdshf_R",
+      "instruction_id": "UQSHL_advsimd_imm",
+      "mnemonic": "UQSHL",
+      "category": "fp_simd",
+      "source_file": "uqshl_advsimd_imm.xml",
+      "encoding_mask": "0xff80fc00",
+      "encoding_value": "0x7f007400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "139560c322030a2d3fd5531e5230b14b101e8fd43f468f45bb2dc17774365d07",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f087420",
+          "expected_mnemonics": [
+            "uqshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSHL_asimdsame_only",
+      "instruction_id": "URSHL_advsimd",
+      "mnemonic": "URSHL",
+      "category": "fp_simd",
+      "source_file": "urshl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e205400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c53547f9d1245e827bb924604eb46ab27f1ad9011750e05b7fb8fc85f7744800",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e225420",
+          "expected_mnemonics": [
+            "urshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "URSHL_asisdsame_only",
+      "instruction_id": "URSHL_advsimd",
+      "mnemonic": "URSHL",
+      "category": "fp_simd",
+      "source_file": "urshl_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee05400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c53547f9d1245e827bb924604eb46ab27f1ad9011750e05b7fb8fc85f7744800",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee25420",
+          "expected_mnemonics": [
+            "urshl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USHL_asimdsame_only",
+      "instruction_id": "USHL_advsimd",
+      "mnemonic": "USHL",
+      "category": "fp_simd",
+      "source_file": "ushl_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e204400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "538f3744079b6ca905c038e584b398d87cffb5c41f06869226e7fd2636991e4d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e224420",
+          "expected_mnemonics": [
+            "ushl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "USHL_asisdsame_only",
+      "instruction_id": "USHL_advsimd",
+      "mnemonic": "USHL",
+      "category": "fp_simd",
+      "source_file": "ushl_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ee04400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "538f3744079b6ca905c038e584b398d87cffb5c41f06869226e7fd2636991e4d",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD. All allocated scalar/vector register-controlled SSHL/USHL/SRSHL/URSHL and SQSHL/UQSHL/SQRSHL/UQRSHL forms, plus immediate SQSHL/UQSHL/SQSHLU. Counts use only the signed low byte, with mathematical out-of-width and rounded-right behavior. Active-lane saturation sets sticky FPSR.QC; other status/control bits and RAM are unchanged. Source/count/destination aliases, V31, scalar/Q=0 upper clearing and all legal immediate counts are supported. Disabled-feature traps, streaming SME, guest exception delivery and full processes remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode, ShiftSat, RShr and saturation contracts reviewed. Complete-state original ARM, independent arbitrary-precision lane math and native checks cover out-of-width counts, ignored count bits, signed/unsigned bounds, immediate boundaries, scalar inactive poison, aliases and incoming QC clear/set. Native integer variable shifts and packed SSE2 immediate shifts preserve precise guest instruction entries without helper/interpreter fallback. Final emitted binaries are fully disassembled and retained with bounded representative x86 instruction-path traces.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs"
+      ],
+      "evidence_groups": [
+        "simd_register_shifts"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ee24420",
+          "expected_mnemonics": [
+            "ushl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PMULL_asimddiff_L",
+      "instruction_id": "PMULL_advsimd",
+      "mnemonic": "PMULL",
+      "category": "fp_simd",
+      "source_file": "pmull_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20e000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "4c7002b71bfa73e2f46195c2fc4aa00f2cd1c3c0062ea7abcd042354cef28903",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22e020",
+          "expected_mnemonics": [
+            "pmull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PMUL_asimdsame_only",
+      "instruction_id": "PMUL_advsimd",
+      "mnemonic": "PMUL",
+      "category": "fp_simd",
+      "source_file": "pmul_advsimd.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e209c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a9d4b69de90a93de360c0d00b7ac047e634da8b247dd392b2894c0c148128f92",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e229c20",
+          "expected_mnemonics": [
+            "pmul"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLAL_asimddiff_L",
+      "instruction_id": "SQDMLAL_advsimd_vec",
+      "mnemonic": "SQDMLAL",
+      "category": "fp_simd",
+      "source_file": "sqdmlal_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e209000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0eaff8f3b13fc38d1af4200e1b8eae8503dc43decd3d760c0981e58f9e7671e1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e629020",
+          "expected_mnemonics": [
+            "sqdmlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLAL_asimdelem_L",
+      "instruction_id": "SQDMLAL_advsimd_elt",
+      "mnemonic": "SQDMLAL",
+      "category": "fp_simd",
+      "source_file": "sqdmlal_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f003000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "ba9d7f35a91ded091e99fcf28bfdb0aa9765ddd06fb0e17bfb91a6d0ff5aa962",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f423020",
+          "expected_mnemonics": [
+            "sqdmlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLAL_asisddiff_only",
+      "instruction_id": "SQDMLAL_advsimd_vec",
+      "mnemonic": "SQDMLAL",
+      "category": "fp_simd",
+      "source_file": "sqdmlal_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e209000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "0eaff8f3b13fc38d1af4200e1b8eae8503dc43decd3d760c0981e58f9e7671e1",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e629020",
+          "expected_mnemonics": [
+            "sqdmlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLAL_asisdelem_L",
+      "instruction_id": "SQDMLAL_advsimd_elt",
+      "mnemonic": "SQDMLAL",
+      "category": "fp_simd",
+      "source_file": "sqdmlal_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x5f003000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "ba9d7f35a91ded091e99fcf28bfdb0aa9765ddd06fb0e17bfb91a6d0ff5aa962",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f423020",
+          "expected_mnemonics": [
+            "sqdmlal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLSL_asimddiff_L",
+      "instruction_id": "SQDMLSL_advsimd_vec",
+      "mnemonic": "SQDMLSL",
+      "category": "fp_simd",
+      "source_file": "sqdmlsl_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20b000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f247ac89ecd7829c436b44375cccbca582c8fece152195ae60705220590a1ffe",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e62b020",
+          "expected_mnemonics": [
+            "sqdmlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLSL_asimdelem_L",
+      "instruction_id": "SQDMLSL_advsimd_elt",
+      "mnemonic": "SQDMLSL",
+      "category": "fp_simd",
+      "source_file": "sqdmlsl_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f007000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a24f275c0a592db015540089d4b1fcc591beaf8a9f9ba5d96ccc4dd290d359ba",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f427020",
+          "expected_mnemonics": [
+            "sqdmlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLSL_asisddiff_only",
+      "instruction_id": "SQDMLSL_advsimd_vec",
+      "mnemonic": "SQDMLSL",
+      "category": "fp_simd",
+      "source_file": "sqdmlsl_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e20b000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f247ac89ecd7829c436b44375cccbca582c8fece152195ae60705220590a1ffe",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e62b020",
+          "expected_mnemonics": [
+            "sqdmlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMLSL_asisdelem_L",
+      "instruction_id": "SQDMLSL_advsimd_elt",
+      "mnemonic": "SQDMLSL",
+      "category": "fp_simd",
+      "source_file": "sqdmlsl_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x5f007000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "a24f275c0a592db015540089d4b1fcc591beaf8a9f9ba5d96ccc4dd290d359ba",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f427020",
+          "expected_mnemonics": [
+            "sqdmlsl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULH_asimdelem_R",
+      "instruction_id": "SQDMULH_advsimd_elt",
+      "mnemonic": "SQDMULH",
+      "category": "fp_simd",
+      "source_file": "sqdmulh_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f00c000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "10874880519a5e2778b996131b060ddeac572b46096316c4d080930eeb464c64",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f42c020",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULH_asimdsame_only",
+      "instruction_id": "SQDMULH_advsimd_vec",
+      "mnemonic": "SQDMULH",
+      "category": "fp_simd",
+      "source_file": "sqdmulh_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20b400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c5df1b6069fd9d645c40044d026b02eee23778a3189ca629eea81073851ac9e2",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e62b420",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULH_asisdelem_R",
+      "instruction_id": "SQDMULH_advsimd_elt",
+      "mnemonic": "SQDMULH",
+      "category": "fp_simd",
+      "source_file": "sqdmulh_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x5f00c000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "10874880519a5e2778b996131b060ddeac572b46096316c4d080930eeb464c64",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f42c020",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULH_asisdsame_only",
+      "instruction_id": "SQDMULH_advsimd_vec",
+      "mnemonic": "SQDMULH",
+      "category": "fp_simd",
+      "source_file": "sqdmulh_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e20b400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "c5df1b6069fd9d645c40044d026b02eee23778a3189ca629eea81073851ac9e2",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e62b420",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULL_asimddiff_L",
+      "instruction_id": "SQDMULL_advsimd_vec",
+      "mnemonic": "SQDMULL",
+      "category": "fp_simd",
+      "source_file": "sqdmull_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x0e20d000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "fcb6fe1a1898212ab3f813bb66fb575981d823e7926896d468d470f3974ece11",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e62d020",
+          "expected_mnemonics": [
+            "sqdmull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULL_asimdelem_L",
+      "instruction_id": "SQDMULL_advsimd_elt",
+      "mnemonic": "SQDMULL",
+      "category": "fp_simd",
+      "source_file": "sqdmull_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f00b000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "2d147eb16727e82046574490b63ea619c86ad6e9583c6664fc7ee3c91974cf35",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f42b020",
+          "expected_mnemonics": [
+            "sqdmull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULL_asisddiff_only",
+      "instruction_id": "SQDMULL_advsimd_vec",
+      "mnemonic": "SQDMULL",
+      "category": "fp_simd",
+      "source_file": "sqdmull_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x5e20d000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "fcb6fe1a1898212ab3f813bb66fb575981d823e7926896d468d470f3974ece11",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e62d020",
+          "expected_mnemonics": [
+            "sqdmull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQDMULL_asisdelem_L",
+      "instruction_id": "SQDMULL_advsimd_elt",
+      "mnemonic": "SQDMULL",
+      "category": "fp_simd",
+      "source_file": "sqdmull_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x5f00b000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "2d147eb16727e82046574490b63ea619c86ad6e9583c6664fc7ee3c91974cf35",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f42b020",
+          "expected_mnemonics": [
+            "sqdmull"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRDMULH_asimdelem_R",
+      "instruction_id": "SQRDMULH_advsimd_elt",
+      "mnemonic": "SQRDMULH",
+      "category": "fp_simd",
+      "source_file": "sqrdmulh_advsimd_elt.xml",
+      "encoding_mask": "0xbf00f400",
+      "encoding_value": "0x0f00d000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "024b321bc7c8129feefe07e3d2cb0b4c5380affae1d23dbeed14d7a1b9ca42a0",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f42d020",
+          "expected_mnemonics": [
+            "sqrdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRDMULH_asimdsame_only",
+      "instruction_id": "SQRDMULH_advsimd_vec",
+      "mnemonic": "SQRDMULH",
+      "category": "fp_simd",
+      "source_file": "sqrdmulh_advsimd_vec.xml",
+      "encoding_mask": "0xbf20fc00",
+      "encoding_value": "0x2e20b400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f5f71a76d9c72c55901b290f2a8942ffdd9db55e5272e6bccebb517a543293f8",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e62b420",
+          "expected_mnemonics": [
+            "sqrdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRDMULH_asisdelem_R",
+      "instruction_id": "SQRDMULH_advsimd_elt",
+      "mnemonic": "SQRDMULH",
+      "category": "fp_simd",
+      "source_file": "sqrdmulh_advsimd_elt.xml",
+      "encoding_mask": "0xff00f400",
+      "encoding_value": "0x5f00d000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "024b321bc7c8129feefe07e3d2cb0b4c5380affae1d23dbeed14d7a1b9ca42a0",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f42d020",
+          "expected_mnemonics": [
+            "sqrdmulh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SQRDMULH_asisdsame_only",
+      "instruction_id": "SQRDMULH_advsimd_vec",
+      "mnemonic": "SQRDMULH",
+      "category": "fp_simd",
+      "source_file": "sqrdmulh_advsimd_vec.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x7e20b400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_sha256": "f5f71a76d9c72c55901b290f2a8942ffdd9db55e5272e6bccebb517a543293f8",
+      "profile": "direct-private-ram-leaf-v2",
+      "scope": "Enabled FP/AdvSIMD/PMULL. PMUL byte lanes and PMULL byte/64-bit carryless full products; all allocated scalar/vector/by-element SQDMULH/SQRDMULH/SQDMULL/SQDMLAL/SQDMLSL shapes. Correct high-source halves and indexed register/lane selection, aliased inputs and accumulators, scalar/Q=0 upper clearing. Doubling products saturate before independent accumulating saturation; active saturation sets sticky FPSR.QC. Polynomial forms preserve FPSR; all forms preserve NZCV/FPCR, other status bits and RAM. Disabled-feature traps, streaming SME and complete process execution remain separate.",
+      "review": "Pinned Arm A64 2026-06 decode/operation facts and polynomial/double-saturation contracts reviewed. Original ARM, independent arbitrary-precision polynomial/signed-product math and native baseline/detected-feature complete-state checks cover MIN*MIN, two-stage accumulation, signed rounding ties, indices, halves, aliases and inactive poison. Packed SSE2 high-half word products, checked SSSE3 PMULHRSW and SSE4.1 multiply mappings preserve baseline semantics. Independent PCLMULQDQ targeting replaces the bounded SSE2 polynomial64 loop where available. Final native binaries, source maps and bounded representative instruction-path counts are retained; application performance remains separate.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/products.rs",
+        "crates/stela-compiler/src/x86_64/simd/saturating.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "evidence_groups": [
+        "simd_doubling_products"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e62b420",
+          "expected_mnemonics": [
+            "sqrdmulh"
           ]
         }
       ]

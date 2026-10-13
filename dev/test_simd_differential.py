@@ -12,6 +12,37 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_native_binary_accounting_partitions_guest_bodies_and_ret(self):
+        operation={'name':'fixture','lane':8,'bytes':8,'word':0}
+        batch={'native':bytes.fromhex('31c0c3'),'source':struct.pack('<II',0,suite.RET),
+            'functions':[{'operations':[operation]}],'entries':[0],'instruction_offsets':[0,2]}
+        report=suite.native_binary_accounting(batch)
+        self.assertEqual(report['static_native_instructions_including_ret'],2)
+        self.assertEqual(report['static_body_native_instructions'],1)
+        self.assertEqual(report['static_body_native_bytes'],2)
+        self.assertEqual(report['harness_ret_bytes'],1)
+        self.assertEqual(report['body_native_to_guest_byte_expansion'],0.5)
+        self.assertEqual(report['static_opcode_histogram'],{'ret':1,'xor':1})
+        self.assertEqual(report['single_operation_shapes'][0]['native_instructions_min'],1)
+        for offsets in ([1,2],[0,1],[0]):
+            with self.assertRaises(AssertionError): suite.native_binary_accounting({**batch,'instruction_offsets':offsets})
+        with self.assertRaises(AssertionError): suite.decode_native_stream(bytes.fromhex('900f'))
+        self.assertEqual(suite.native_mnemonic('pclmulhqhqdq'),'pclmulqdq')
+
+    def test_native_dynamic_trace_counts_loop_repeats_and_requires_return(self):
+        # mov ecx,3; dec ecx; jnz dec; ret: four static instructions, eight dynamic.
+        native=bytes.fromhex('b903000000ffc975fcc3');initial=State()
+        observed,counts=suite.emulate_native_trace(native,0,len(native),initial)
+        self.assertEqual(bytes(observed),bytes(initial))
+        self.assertEqual(counts['dynamic_native_instructions_including_ret'],8)
+        self.assertEqual(counts['dynamic_body_native_instructions'],7)
+        self.assertEqual(counts['unique_native_instruction_addresses'],4)
+        self.assertEqual(counts['backward_edges_taken'],2)
+        with self.assertRaises(AssertionError):
+            suite.emulate_native_trace(bytes.fromhex('ebfec3'),0,3,initial,instruction_budget=8)
+        with self.assertRaises(AssertionError):
+            suite.emulate_native_trace(bytes.fromhex('eb0090c3'),0,2,initial,instruction_budget=8)
+
     def test_immediate_oracle_uses_exact_numeric_float_bits_and_upper_lane_preservation(self):
         for lane,one in [(2,0x3c00),(4,0x3f800000),(8,0x3ff0000000000000)]:
             self.assertEqual(suite.immediate_float_bits(0x70,lane),one)
@@ -38,6 +69,44 @@ class SimdDifferentialTests(unittest.TestCase):
         observed=suite.halving_mathematical([{**base,'operation':'high','lane':2,'bytes':8,'upper':True,'round':True}],initial)
         self.assertEqual(observed['v'][0],[0x0123456789abcdef,0])
         self.assertEqual(observed['fpsr'],initial.fpsr)
+
+    def test_doubling_product_oracle_keeps_separate_saturation_and_rounding(self):
+        initial=State();initial.fpsr=0x1f
+        initial.v[1][:]=[0x8000,0];initial.v[2][:]=[0x8000,0]
+        initial.v[0][:]=[0xffffffff,0xffffffffffffffff]
+        base={'d':0,'n':1,'m':2,'lane':2,'output_lane':4,'bytes':4,'upper':False,'index':None}
+        observed=suite.doubling_product_mathematical([{**base,'name':'sqdmlal'}],initial)
+        self.assertEqual(observed['v'][0],[0x7ffffffe,0])
+        self.assertEqual(observed['fpsr'],(1<<27)|0x1f)
+        observed=suite.doubling_product_mathematical([{**base,'name':'sqdmlsl'}],initial)
+        self.assertEqual(observed['v'][0],[0x80000000,0])
+        high={**base,'name':'sqrdmulh','output_lane':2,'bytes':2}
+        self.assertEqual(suite.doubling_product_mathematical([high],initial)['v'][0],[0x7fff,0])
+        initial.v[1][:]=[0xffff,0];initial.v[2][:]=[0x4000,0]
+        self.assertEqual(suite.doubling_product_mathematical([high],initial)['v'][0],[0,0])
+        self.assertEqual(suite.doubling_product_mathematical([{**high,'name':'sqdmulh'}],initial)['v'][0],[0xffff,0])
+
+    def test_polynomial_oracle_is_carryless_and_selects_both_upper_inputs(self):
+        initial=State();initial.fpsr=(1<<27)|0x1f
+        initial.v[1][:]=[3,1<<63];initial.v[2][:]=[3,1<<63]
+        base={'name':'pmull','d':0,'n':1,'m':2,'lane':8,'output_lane':16,'bytes':16,'upper':True,'index':None}
+        observed=suite.doubling_product_mathematical([base],initial)
+        self.assertEqual(observed['v'][0],[0,1<<62])
+        self.assertEqual(observed['fpsr'],initial.fpsr)
+        self.assertEqual(suite.doubling_product_mathematical([{**base,'upper':False}],initial)['v'][0],[5,0])
+
+    def test_doubling_product_generator_independently_decodes_each_allocated_form(self):
+        decoder=Cs(CS_ARCH_ARM64,CS_MODE_ARM)
+        operations=[op for program in suite.doubling_product_programs() for op in program['operations']]
+        for operation in operations:
+            decoded=list(decoder.disasm(struct.pack('<I',operation['word']),0))
+            self.assertEqual(len(decoded),1,operation)
+            self.assertEqual(decoded[0].mnemonic.rstrip('2'),operation['name'],operation)
+        for name in ('sqdmulh','sqrdmulh','sqdmull','sqdmlal','sqdmlsl'):
+            subset=[o for o in operations if o['name']==name]
+            self.assertEqual({o['d'] for o in subset},set(range(32)))
+            for lane in (2,4):
+                self.assertEqual({o['index'] for o in subset if o['lane']==lane and o['index'] is not None},set(range(16//lane)))
 
     def test_product_oracle_keeps_full_signed_products_and_pretruncation_differences(self):
         initial=State()
@@ -92,7 +161,9 @@ class SimdDifferentialTests(unittest.TestCase):
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
                 ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22),
                 ('simd_products',suite.product_programs,25),('simd_halving',suite.halving_programs,16),
-                ('simd_immediates',suite.immediate_programs,30)]:
+                ('simd_immediates',suite.immediate_programs,30),
+                ('simd_register_shifts',suite.register_shift_programs,22),
+                ('simd_doubling_products',suite.doubling_product_programs,22)]:
             forms=[f for f in registry['forms'] if group in f.get('evidence_groups',[])]
             operations=[o for p in generator() for o in p['operations']]
             self.assertEqual(len(forms),count,group)
@@ -100,6 +171,58 @@ class SimdDifferentialTests(unittest.TestCase):
                 matches=[o for o in operations if o['word']&int(form['encoding_mask'],16)==int(form['encoding_value'],16)]
                 self.assertTrue(matches,form['id'])
                 self.assertEqual({o['d'] for o in matches},set(range(32)),form['id'])
+
+    def test_register_shift_encodings_cover_allocated_sizes_and_every_destination(self):
+        operations=[o for p in suite.register_shift_programs() for o in p['operations']]
+        decoder=Cs(CS_ARCH_ARM64,CS_MODE_ARM)
+        for op in operations:
+            decoded=list(decoder.disasm(struct.pack('<I',op['word']),0))
+            self.assertEqual(len(decoded),1,hex(op['word']))
+            self.assertEqual(decoded[0].mnemonic,op['name'])
+        for name in ('sshl','ushl','srshl','urshl','sqshl','uqshl','sqrshl','uqrshl'):
+            for scalar in (False,True):
+                matches=[o for o in operations if o['name']==name and o['scalar']==scalar and not o['immediate']]
+                self.assertEqual({o['d'] for o in matches},set(range(32)))
+                self.assertEqual({o['lane'] for o in matches},{8} if scalar and 'q' not in name else {1,2,4,8})
+        for name in ('sqshl','uqshl','sqshlu'):
+            for scalar in (False,True):
+                matches=[o for o in operations if o['name']==name and o['scalar']==scalar and o['immediate']]
+                self.assertEqual({o['d'] for o in matches},set(range(32)))
+                self.assertEqual({o['lane'] for o in matches},{1,2,4,8})
+
+    def test_register_shift_oracle_large_counts_rounding_qc_and_signed_to_unsigned_zero(self):
+        initial=State();initial.fpsr=0x1f;initial.v[1][:]=[suite.MASK,suite.MASK]
+        base={'d':0,'n':1,'m':2,'lane':8,'bytes':8,'signed':False,'unsigned_result':True,
+              'round':True,'saturating':False,'immediate':False}
+        initial.v[2][:]=[0xfedcba98765432c0,0]
+        self.assertEqual(suite.register_shift_mathematical([base],initial)['v'][0],[1,0])
+        self.assertEqual(suite.register_shift_mathematical([{**base,'signed':True}],initial)['v'][0],[0,0])
+        initial.v[2][:]=[0x0123456789abcd80,0]
+        self.assertEqual(suite.register_shift_mathematical([base],initial)['v'][0],[0,0])
+        self.assertEqual(suite.register_shift_mathematical([{**base,'signed':True,'round':False}],initial)['v'][0],[suite.MASK,0])
+        initial.v[2][:]=[127,0]
+        observed=suite.register_shift_mathematical([{**base,'saturating':True}],initial)
+        self.assertEqual(observed['v'][0],[suite.MASK,0]);self.assertEqual(observed['fpsr'],0x800001f)
+        initial.v[1][:]=[0,suite.MASK]
+        observed=suite.register_shift_mathematical([{**base,'saturating':True}],initial)
+        self.assertEqual(observed['v'][0],[0,0]);self.assertEqual(observed['fpsr'],0x1f)
+        initial.v[1][:]=[suite.MASK,suite.MASK]
+        mixed={**base,'signed':True,'saturating':True,'immediate':True,'amount':0}
+        observed=suite.register_shift_mathematical([mixed],initial)
+        self.assertEqual(observed['v'][0],[0,0]);self.assertEqual(observed['fpsr'],0x800001f)
+        initial.fpsr=0x800001f;initial.v[1][:]=[0,0]
+        self.assertEqual(suite.register_shift_mathematical([mixed],initial)['fpsr'],0x800001f)
+
+    def test_register_shift_directed_seed_has_extreme_signed_bytes_and_poisoned_count_bits(self):
+        operation=next(p['operations'][0] for p in suite.register_shift_programs()
+                       if not p['operations'][0]['immediate'] and p['operations'][0]['lane']==8
+                       and p['operations'][0]['scalar'] and p['operations'][0]['n']!=p['operations'][0]['m'])
+        seen=set()
+        for pattern in range(suite.register_shift_pattern_count([operation])):
+            initial=State();suite.register_shift_seed(initial,[operation],pattern,0)
+            count=initial.v[operation['m']][0];seen.add(count&255)
+            if pattern<suite.register_shift_pattern_count([operation])-2: self.assertNotEqual(count>>8,0)
+        self.assertTrue({0x80,0x7f,0xc0,0x40,0xff,0}.issubset(seen))
 
     def test_shift_oracle_full_width_rounding_boundaries(self):
         initial=State()
