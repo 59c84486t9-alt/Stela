@@ -11,6 +11,29 @@ suite = importlib.import_module('pauth-differential')
 
 
 class PauthGuards(unittest.TestCase):
+    def test_branch_grid_and_math_cover_sources_aliases_zero_sp_and_poisoned_link(self):
+        rows = list(suite.branch_cases())
+        forms = {(r['key'], r['link'], r['modifier'] == 'zero') for r in rows}
+        self.assertEqual(len(forms), 8)
+        self.assertEqual({r['target'] for r in rows}, set(range(32)))
+        self.assertEqual({r['modifier'] for r in rows if isinstance(r['modifier'], int)}, set(range(31)))
+        self.assertEqual({r['flag'] for r in rows}, set(range(16)))
+        for link in (False, True):
+            for key in ('ia', 'ib'):
+                for target, modifier in [(0, 1), (30, 1), (0, 30), (30, 'sp')]:
+                    for failed in (False, True):
+                        initial = suite.initial_state(suite.STOP, 0x2000, 123)
+                        value = initial.sp if modifier == 'sp' else initial.x[modifier]
+                        initial.x[target] = suite.domain_sign(suite.STOP, value, key) ^ ((1 << 47) if failed else 0)
+                        case = {'link': link, 'key': key, 'target': target, 'modifier': modifier}
+                        expected, pc, valid = suite.branch_math(case, initial)
+                        self.assertEqual(valid, not failed)
+                        self.assertEqual(pc, suite.STOP if valid else suite.STOP | ((1 if key == 'ia' else 2) << 61))
+                        before = State.from_buffer_copy(initial)
+                        if link:
+                            before.x[30] = suite.BASE + 4
+                        self.assertEqual(bytes(expected), bytes(before))
+
     def test_nibble_transforms_have_required_inverse_and_mix_involution(self):
         for word in [0, suite.MASK, 0x0123456789abcdef, 0xfedcba9876543210, 1 << 63]:
             self.assertEqual(suite.shuffle(suite.shuffle(word), True), word)

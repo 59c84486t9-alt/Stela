@@ -172,11 +172,21 @@ pub enum PointerAuthenticationOperation {
         destination: u8,
     },
     ReturnIaSp,
+    Branch {
+        key: PointerAuthenticationKey,
+        target: u8,
+        modifier: PointerAuthenticationModifier,
+        link: bool,
+    },
 }
 
 impl PointerAuthenticationOperation {
     pub const fn is_return(self) -> bool {
         matches!(self, Self::ReturnIbSp | Self::ReturnIaSp)
+    }
+
+    pub const fn is_transfer(self) -> bool {
+        self.is_return() || matches!(self, Self::Branch { .. })
     }
 
     pub const fn required_key(self) -> Option<PointerAuthenticationKey> {
@@ -185,7 +195,9 @@ impl PointerAuthenticationOperation {
                 Some(PointerAuthenticationKey::Ib)
             }
             Self::ReturnIaSp => Some(PointerAuthenticationKey::Ia),
-            Self::Sign { key, .. } | Self::Authenticate { key, .. } => Some(key),
+            Self::Sign { key, .. } | Self::Authenticate { key, .. } | Self::Branch { key, .. } => {
+                Some(key)
+            }
             Self::Strip { .. } => None,
         }
     }
@@ -200,9 +212,9 @@ pub struct PointerAuthentication {
     pub next_pc: GuestAddress,
 }
 
-/// June2026 basic PAC/AUT integer and HINT forms, XPAC and RETAA/RETAB.
+/// June2026 basic PAC/AUT integer and HINT forms, XPAC and authenticated transfers.
 /// The explicit software profile disables PAuth_LR/PACM, FPAC and GCS. Other
-/// authenticated branches/calls, PACGA and system controls remain unsupported.
+/// PAC operations (including PACGA) and system controls remain unsupported.
 /// Runtime consumers revalidate this descriptor against immutable source bytes.
 pub fn decode_pointer_authentication(
     pc: GuestAddress,
@@ -313,6 +325,25 @@ pub fn decode_pointer_authentication(
             data: word & (1 << 10) != 0,
             destination: (word & 31) as u8,
         },
+        _ if word & 0xfedff800 == 0xd61f0800 => {
+            let rm = (word & 31) as u8;
+            let modifier = if word & (1 << 24) == 0 {
+                if rm != 31 {
+                    return Ok(None);
+                }
+                Zero
+            } else if rm == 31 {
+                StackPointer
+            } else {
+                Register(rm)
+            };
+            PointerAuthenticationOperation::Branch {
+                key: if word & (1 << 10) == 0 { Ia } else { Ib },
+                target: ((word >> 5) & 31) as u8,
+                modifier,
+                link: word & (1 << 21) != 0,
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(PointerAuthentication {
@@ -1014,9 +1045,8 @@ mod tests {
             assert!(decode_pointer_authentication(GuestAddress(pc.0 + 1), word).is_err());
             assert!(decode_pointer_authentication(GuestAddress(u64::MAX - 3), word).is_err());
         }
-        // Authenticated register branches/calls, PACGA and reserved words remain out
-        // of this basic instruction boundary.
-        for word in [0xd71f0800, 0xd73f0800, 0x9ac03000, 0xdac12000, 0xdac15000] {
+        // PACGA and reserved zero-modifier encodings remain outside this boundary.
+        for word in [0xd61f0800, 0xd63f0800, 0x9ac03000, 0xdac12000, 0xdac15000] {
             assert_eq!(decode_pointer_authentication(pc, word).unwrap(), None);
         }
     }
@@ -1085,8 +1115,59 @@ mod tests {
         }
         for word in [
             0x5ac10000, 0xfac10000, 0xdac00000, 0xdac18000, 0xdac12000, 0xdac15000, 0x9ac03000,
-            0xd71f0800, 0xd73f0800,
+            0xd61f0800, 0xd63f0c00,
         ] {
+            assert!(decode_pointer_authentication(pc, word).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn authenticated_branch_fields_distinguish_zero_sp_link_and_instruction_keys() {
+        use PointerAuthenticationKey::{Ia, Ib};
+        use PointerAuthenticationModifier::{Register, StackPointer, Zero};
+        let pc = GuestAddress(0x1000);
+        for link in [false, true] {
+            for (key_bit, key) in [(0, Ia), (1, Ib)] {
+                for zero in [false, true] {
+                    for target in 0..32u32 {
+                        for rm in 0..32u32 {
+                            let word = 0xd61f0800
+                                | (u32::from(!zero) << 24)
+                                | (u32::from(link) << 21)
+                                | (key_bit << 10)
+                                | (target << 5)
+                                | rm;
+                            let decoded = decode_pointer_authentication(pc, word).unwrap();
+                            if zero && rm != 31 {
+                                assert!(decoded.is_none());
+                                continue;
+                            }
+                            let value = decoded.unwrap();
+                            assert_eq!(
+                                value.operation,
+                                PointerAuthenticationOperation::Branch {
+                                    key,
+                                    target: target as u8,
+                                    modifier: if zero {
+                                        Zero
+                                    } else if rm == 31 {
+                                        StackPointer
+                                    } else {
+                                        Register(rm as u8)
+                                    },
+                                    link,
+                                }
+                            );
+                            assert!(value.operation.is_transfer());
+                            assert!(!value.operation.is_return());
+                            assert_eq!(value.operation.required_key(), Some(key));
+                            assert!(compile(&bytes(&[word]), pc).is_err());
+                        }
+                    }
+                }
+            }
+        }
+        for word in [0xd71f0000, 0xd75f0800, 0xd79f0800, 0xd71f1800, 0x571f0800] {
             assert!(decode_pointer_authentication(pc, word).unwrap().is_none());
         }
     }
@@ -1200,10 +1281,12 @@ mod tests {
             );
             for bit in 0..32 {
                 let changed = word ^ (1 << bit);
+                let decoded = decode_pointer_authentication(pc, changed).unwrap();
                 assert_eq!(
-                    decode_pointer_authentication(pc, changed)
-                        .unwrap()
-                        .is_some(),
+                    decoded.is_some_and(|request| !matches!(
+                        request.operation,
+                        PointerAuthenticationOperation::Branch { .. }
+                    )),
                     fixed.iter().any(|(fixed, _)| *fixed == changed)
                 );
             }

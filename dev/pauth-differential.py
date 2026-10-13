@@ -944,6 +944,76 @@ SIGNER_BEGIN, SIGNER_END = 0x898c0, 0x89920
 METADATA_BASE = 0x90000000000
 
 
+def branch_cases():
+    """Eight architectural forms, all NZCV, every source and modifier role."""
+    for link in (False, True):
+        for key in ('ia', 'ib'):
+            for zero in (False, True):
+                operands = [(0, 1), (30, 1), (0, 30), (30, 30), (31, 31)]
+                operands += [(r, 31 if zero else r) for r in range(32)]
+                if not zero:
+                    operands += [(0, r) for r in range(32)]
+                for target, rm in sorted(set(operands)):
+                    modifier = 'zero' if zero else 'sp' if rm == 31 else rm
+                    word = 0xd61f0800 | (int(not zero) << 24) | (int(link) << 21) | (int(key == 'ib') << 10) | (target << 5) | (31 if zero else rm)
+                    for flag in range(16):
+                        yield {'word': word, 'key': key, 'link': link, 'target': target, 'modifier': modifier, 'flag': flag}
+
+
+def branch_math(case, initial):
+    expected = State.from_buffer_copy(initial)
+    pointer = 0 if case['target'] == 31 else initial.x[case['target']]
+    modifier = case['modifier']
+    modifier = 0 if modifier == 'zero' else initial.sp if modifier == 'sp' else initial.x[modifier]
+    target, authenticated = domain_authenticate(pointer, modifier, case['key'])
+    if case['link']:
+        expected.x[30] = BASE + 4
+    return expected, target, authenticated
+
+
+def branch_cohort(cli, folder, state_path, keys_path):
+    rows, seen = [], set()
+    for index, case in enumerate(branch_cases()):
+        initial = initial_state(STOP, 0x2000, 0x500000 + index)
+        initial.nzcv = case['flag'] << 28
+        modifier = case['modifier']
+        if isinstance(modifier, int):
+            initial.x[modifier] = 0x2000
+        value = 0 if modifier == 'zero' else initial.sp if modifier == 'sp' else initial.x[modifier]
+        if case['target'] != 31:
+            initial.x[case['target']] = domain_sign(STOP, value, case['key'])
+            if case['flag'] & 1:
+                initial.x[case['target']] ^= 1 << 47
+        expected, pc, authenticated = branch_math(case, initial)
+        original, original_pc, error = original_generic(case, initial)
+        assert bytes(original) == bytes(expected) and original_pc == pc, (case, error)
+        assert error is None or (authenticated is False and error['code'] in (8, 21))
+        path = folder / 'branch.arm64'; path.write_bytes(struct.pack('<I', case['word']))
+        state_path.write_text(json.dumps(state_dict(initial)))
+        report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(path), '--guest-base', hex(BASE),
+            '--stop-pc', hex(pc), '--block-budget', '1', '--state', str(state_path), '--software-pauth-keys', str(keys_path),
+            '--cache-dir', str(folder / 'branch-cache')], timeout=15))
+        mod = 'zero' if modifier == 'zero' else 'stack_pointer' if modifier == 'sp' else {'register': modifier}
+        descriptor = {'operation': {'branch': {'key': case['key'], 'target': case['target'], 'modifier': mod, 'link': case['link']}},
+                      'instruction_pc': BASE, 'next_pc': BASE + 4}
+        assert report['state'] == state_dict(expected) and report['pc'] == pc
+        assert report['source_sha256'] == digest(path.read_bytes()) and report['abi'] == ABI
+        assert report['software_pauth_profile'] == FULL_PROFILE and report['complete_binary_verified'] is False
+        outcome = report['outcome']
+        assert outcome['blocks_executed'] == 1 and outcome['last_exit'] == [BASE, 6]
+        assert outcome['pointer_authentication_events'] == [{'instruction': descriptor, 'next_pc': pc, 'authenticated': authenticated}]
+        reason = {'kind': 'stop_address'} if authenticated else {'kind': 'pointer_authentication_poisoned_branch', 'instruction': descriptor, 'poisoned_target': pc}
+        assert outcome['reason'] == reason
+        cold = case['word'] not in seen
+        assert outcome['compiled_blocks'] == int(cold) and outcome['disk_cache_hits'] == int(not cold)
+        seen.add(case['word'])
+        rows.append({'case': case, 'initial': state_dict(initial), 'original': state_dict(original), 'original_pc': pc,
+                     'original_error': error, 'native': report})
+    return {'canonical_forms': 8, 'original_model_native_full_state_comparisons': len(rows), 'cold_blocks': len(seen),
+            'disk_hits': len(rows) - len(seen), 'poisoned_transfers': sum(not r['native']['outcome']['pointer_authentication_events'][0]['authenticated'] for r in rows),
+            'cases': rows, 'limits': 'Classic PAuth1: failed calls update X30 before poisoned fetch. GCS/BTI/PSTATE.BTYPE disabled; architectural exception delivery is pending.'}
+
+
 def signer_math(initial, diversity, key, address_diversity):
     state = State.from_buffer_copy(initial)
     if initial.x[1] == 0:
@@ -1139,7 +1209,7 @@ def main():
     clock_integrated = []
     clock_manifests = []
     clock_register_cases, clock_register_manifests = [], []
-    generic, signer, fixups = None, None, None
+    generic, signer, fixups, branches = None, None, None, None
     seen = set()
     equal = divergent = poisoned_returns = failed_auth = 0
     with tempfile.TemporaryDirectory(prefix='stela-pauth-') as temporary:
@@ -1202,6 +1272,7 @@ def main():
             offset, image = dyld_suite.classic_slice(container)
             assert offset == dyld_suite.SLICE_OFFSET and digest(image) == dyld_suite.SLICE_SHA256
             signer = signer_cohort(cli, folder, state_path, keys_path, image)
+            branches = branch_cohort(cli, folder, state_path, keys_path)
             fixups = fixup_plan_cohort(cli, folder, keys_path, image, dyld_suite.DEFAULT_DYLD)
             assert digest(dyld_suite.DEFAULT_DYLD.read_bytes()) == dyld_suite.CONTAINER_SHA256
         if args.executable:
@@ -1274,6 +1345,7 @@ def main():
                          'instruction_tbi': False, 'data_tbi': True, 'virtual_address_bits': 47, 'pauth2': False, 'fpac': False},
               'public_fixed_test_keys': True, 'cache_receipts': manifests, 'cases': records,
               'generic_pauth': generic, 'original_sign_pointer': signer, 'authenticated_fixup_plan': fixups,
+              'authenticated_branches': branches,
               'integrated_original_dyld_pac_probes': integrated,
               'integrated_original_dyld_clock_probes': clock_integrated, 'clock_cache_receipts': clock_manifests,
               'original_clock_replay_full_state_ram_comparisons': len(clock_integrated),
@@ -1284,7 +1356,7 @@ def main():
                          'Native executes original scalar prefix then explicit PAC runtime boundary; cryptography is a software helper, not inline native PAC.',
                          'Authentication failures poison pointers; RETAB typed stop records pending instruction-fetch exception delivery.',
                          'Noncanonical signing: June2026 ASL corrupts bit62, older Unicorn2.1.4 corrupts bit63;64 exact classified observations are not counted as three-way equality.',
-                         'Optional generic cohort covers33 basic IA/IB/DA/DB PAC/AUT/XPAC/RET forms; PACGA, authenticated branches/calls and system controls remain unsupported. Data signing invalid-extension differences classify exact bit54 versus older Unicorn bit55 insertion behavior, not equality.',
+                         'Optional generic cohort covers33 basic IA/IB/DA/DB PAC/AUT/XPAC/RET forms and eight authenticated branch/call forms; PACGA and unreviewed system controls remain unsupported. Data signing invalid-extension differences classify exact bit54 versus older Unicorn bit55 insertion behavior, not equality.',
                          'MRS Rt31 discardedvalue is unobservable; the unchangedinstruction executes and fullstate preservation is checked, while native event replays a separatelyrecorded postinstruction counter sample. Other31Rt replay actualMRSdestination results.',
                          'Optional clock bootstrap executes44 originalinstructions, twoPACsigns+RETAB, actualISB/CNTVCT, allnine stores and restoredframe. Counterreplay provesopaque input effects; original62500000Hz and nativevirtual1GHz rates are not equated. Nativehost samples are separatelybounded by publicmach_continuous_time.',
                          'PAC-only vectors do not access guest RAM; complete clock probes compare every stack byte and all readable image/clock views. Full784B state is checked throughout; no full OS process, Apple hardware or performance claim.']}

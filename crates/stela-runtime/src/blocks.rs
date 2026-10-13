@@ -64,6 +64,11 @@ pub enum StopReason {
         instruction: PointerAuthentication,
         poisoned_target: GuestAddress,
     },
+    /// Classic PAuth poisoned an indirect branch/call target before any fetch.
+    PointerAuthenticationPoisonedBranch {
+        instruction: PointerAuthentication,
+        poisoned_target: GuestAddress,
+    },
     ClockRequired {
         instruction: ClockInstruction,
     },
@@ -727,8 +732,8 @@ impl BlockRuntime {
                     }
                 };
                 state.pc = next;
-                let poisoned_return =
-                    instruction.operation.is_return() && authenticated == Some(false);
+                let poisoned_transfer =
+                    instruction.operation.is_transfer() && authenticated == Some(false);
                 outcome
                     .pointer_authentication_events
                     .push(PointerAuthenticationEvent {
@@ -736,10 +741,17 @@ impl BlockRuntime {
                         next_pc: next,
                         authenticated,
                     });
-                if poisoned_return {
-                    outcome.reason = StopReason::PointerAuthenticationPoisonedReturn {
-                        instruction,
-                        poisoned_target: next,
+                if poisoned_transfer {
+                    outcome.reason = if instruction.operation.is_return() {
+                        StopReason::PointerAuthenticationPoisonedReturn {
+                            instruction,
+                            poisoned_target: next,
+                        }
+                    } else {
+                        StopReason::PointerAuthenticationPoisonedBranch {
+                            instruction,
+                            poisoned_target: next,
+                        }
                     };
                     break;
                 }
@@ -881,6 +893,28 @@ fn complete_pauth(
             };
             let result = context.authenticate(key, registers.x[30], registers.sp)?;
             // Authenticated RET uses a temporary target. The signed LR stays in X30.
+            Ok((GuestAddress(result.pointer), Some(result.authenticated)))
+        }
+        PointerAuthenticationOperation::Branch {
+            key,
+            target,
+            modifier,
+            link,
+        } => {
+            ensure!(target < 32, "invalid authenticated branch target register");
+            let pointer = if target == 31 {
+                0
+            } else {
+                registers.x[usize::from(target)]
+            };
+            // Both operands may alias X30. Authentication uses their old values.
+            let modifier = pauth_modifier(registers, modifier)?;
+            let result = context.authenticate(runtime_pauth_key(key), pointer, modifier)?;
+            if link {
+                // PAuth1 poisons on failure and still performs this architectural
+                // write before instruction fetch faults at the poisoned target.
+                registers.x[30] = instruction.next_pc.0;
+            }
             Ok((GuestAddress(result.pointer), Some(result.authenticated)))
         }
         Sign {
@@ -1522,6 +1556,97 @@ mod basic_pauth_tests {
     }
 
     #[test]
+    fn authenticated_calls_snapshot_aliases_link_before_poison_and_never_fetch_failure()
+    -> Result<()> {
+        let context = full_context();
+        let cache = tempfile::tempdir()?;
+        for key in [pauth::Key::Ia, pauth::Key::Ib] {
+            for link in [false, true] {
+                for (target, rm, zero) in [
+                    (0, 1, false),
+                    (30, 1, false),
+                    (0, 30, false),
+                    (30, 31, false),
+                    (31, 31, true),
+                ] {
+                    let word = 0xd61f0800
+                        | (u32::from(!zero) << 24)
+                        | (u32::from(link) << 21)
+                        | (u32::from(key == pauth::Key::Ib) << 10)
+                        | (target << 5)
+                        | rm;
+                    let mut vm = runtime(cache.path(), &[0x910004e7, word])?;
+                    for flags in 0..16 {
+                        for corrupt in [false, true] {
+                            let mut state = initial(flags);
+                            let modifier = if zero {
+                                0
+                            } else if rm == 31 {
+                                state.registers.sp
+                            } else {
+                                state.registers.x[rm as usize]
+                            };
+                            if target != 31 {
+                                state.registers.x[target as usize] = context
+                                    .sign(key, STOP.0, modifier)?
+                                    ^ if corrupt { 1 << 47 } else { 0 };
+                            }
+                            let pointer = if target == 31 {
+                                0
+                            } else {
+                                state.registers.x[target as usize]
+                            };
+                            let result = context.authenticate(key, pointer, modifier)?;
+                            let mut expected = state.registers.clone();
+                            expected.x[7] = expected.x[7].wrapping_add(1);
+                            if link {
+                                expected.x[30] = BASE.0 + 8;
+                            }
+                            // SAFETY: register prefix and authenticated transfer only; the target is a stop sentinel.
+                            let outcome = unsafe {
+                                vm.run_with_pauth(
+                                    &mut state,
+                                    Some(GuestAddress(result.pointer)),
+                                    1,
+                                    &context,
+                                )?
+                            };
+                            assert_eq!(state.registers, expected);
+                            assert_eq!(state.pc, GuestAddress(result.pointer));
+                            assert_eq!(outcome.blocks_executed, 1);
+                            assert_eq!(
+                                outcome.pointer_authentication_events[0].authenticated,
+                                Some(result.authenticated)
+                            );
+                            if result.authenticated {
+                                assert_eq!(outcome.reason, StopReason::StopAddress);
+                            } else {
+                                assert!(matches!(
+                                    outcome.reason,
+                                    StopReason::PointerAuthenticationPoisonedBranch { .. }
+                                ));
+                                let before = state.registers.clone();
+                                let poisoned_pc = state.pc;
+                                // SAFETY: noncanonical poisoned target is rejected before fetch or a matching stop sentinel.
+                                let resumed = unsafe {
+                                    vm.run_with_pauth(&mut state, Some(poisoned_pc), 1, &context)?
+                                };
+                                assert!(matches!(
+                                    resumed.reason,
+                                    StopReason::NoncanonicalInstructionTarget { .. }
+                                ));
+                                assert_eq!(resumed.blocks_executed, 0);
+                                assert_eq!(state.registers, before);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn missing_key_stops_atomically_and_resumes_without_repeating_native_prefix() -> Result<()> {
         let ib_only = pauth::Context::new(9, pauth::Keys::from_ib_words(3, 4));
         let full = full_context();
@@ -1532,6 +1657,7 @@ mod basic_pauth_tests {
             (0xdac10c11, PointerAuthenticationKey::Db),
             (0xdac11011, PointerAuthenticationKey::Ia),
             (0xd65f0bff, PointerAuthenticationKey::Ia),
+            (0xd73f0bdf, PointerAuthenticationKey::Ia), // BLRAA X30,SP
         ] {
             let mut vm = runtime(cache.path(), &[0x910004e7, word, 0])?; // ADD X7,X7,#1
             let mut state = initial(11);
