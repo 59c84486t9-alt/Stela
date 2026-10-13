@@ -119,6 +119,67 @@ def expected_state(initial):
     return expected
 
 
+def original_segment_regions(image, load_base):
+    """Independently materialize logical LC_SEGMENT_64 bytes for ARM oracles."""
+    require(image[:4] == b'\xcf\xfa\xed\xfe' and len(image) >= 32, 'original image is not thin Mach-O64')
+    count, command_bytes = struct.unpack_from('<II', image, 16)
+    require(count <= 4096 and 32 + command_bytes <= len(image), 'original load commands exceed file')
+    cursor, segments = 32, []
+    for _ in range(count):
+        command, size = struct.unpack_from('<II', image, cursor)
+        require(size >= 8 and size % 8 == 0 and cursor + size <= 32 + command_bytes, 'invalid original command extent')
+        if command == 0x19:
+            name = image[cursor + 8:cursor + 24].split(b'\0')[0].decode('ascii')
+            address, virtual_bytes, offset, file_bytes, maximum, protection, sections, flags = struct.unpack_from('<4Q4I', image, cursor + 24)
+            require(size == 72 + 80 * sections and file_bytes <= virtual_bytes and offset + file_bytes <= len(image)
+                    and address + virtual_bytes <= 1 << 64 and protection & ~maximum == 0,
+                    'invalid original segment bounds/protection')
+            segments.append({'name': name, 'preferred': address, 'virtual_bytes': virtual_bytes,
+                             'file_offset': offset, 'file_bytes': file_bytes, 'maximum_protection': maximum,
+                             'initial_protection': protection, 'flags': flags})
+        cursor += size
+    require(cursor == 32 + command_bytes, 'original command count/extent mismatch')
+    text = [segment for segment in segments if segment['name'] == '__TEXT']
+    require(len(text) == 1, 'original image requires unique __TEXT')
+    regions, total = [], 0
+    for segment in segments:
+        if not segment['virtual_bytes'] or not segment['initial_protection']:
+            continue
+        address = load_base + segment['preferred'] - text[0]['preferred']
+        require(address >= 0 and address + segment['virtual_bytes'] <= 1 << 47, 'original region exceeds direct-RAM profile')
+        total += segment['virtual_bytes']
+        require(total <= 256 * 1024 * 1024, 'original image virtual extent exceeds oracle budget')
+        data = image[segment['file_offset']:segment['file_offset'] + segment['file_bytes']]
+        data += bytes(segment['virtual_bytes'] - segment['file_bytes'])
+        regions.append({**segment, 'address': address, 'data': data})
+    return regions
+
+
+def original_kernel_args(stack_base, stack_bytes, main_header, executable, arguments):
+    """Construct deterministic oracle input from the reviewed word-array ABI."""
+    strings = [*arguments['argv'], *arguments['environment'], list(executable), *arguments['apple']]
+    strings = [bytes(value) for value in strings]
+    require(all(b'\0' not in value for value in strings), 'argument contains NUL')
+    top = stack_base + stack_bytes
+    string_start = top - sum(len(value) + 1 for value in strings)
+    argc_address = (string_start - (len(strings) + 4) * 8) & ~15
+    raw_sp = argc_address - 8
+    require((raw_sp & ~15) - 0x6c0 >= stack_base, 'oracle stack lacks bootstrap scratch')
+    payload, pointers, cursor = bytearray(top - raw_sp), [], string_start
+    for value in strings:
+        pointers.append(cursor)
+        offset = cursor - raw_sp
+        payload[offset:offset + len(value)] = value
+        cursor += len(value) + 1
+    argc, envc = len(arguments['argv']), len(arguments['environment'])
+    words = [main_header, argc, *pointers[:argc], 0,
+             *pointers[argc:argc + envc], 0, *pointers[argc + envc:], 0]
+    require(len(words) * 8 <= string_start - raw_sp, 'oracle argument table overlaps strings')
+    for index, word in enumerate(words):
+        struct.pack_into('<Q', payload, index * 8, word)
+    return raw_sp, bytes(payload)
+
+
 def original_state(view, slide, initial):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     base = view['text_address'] + slide
@@ -228,7 +289,7 @@ def audit_arguments(report, path, arguments):
                 and matches[0]['executable'] is False, 'owned stack/guard permissions differ')
 
 
-def audit_integrated(report, view, executable, arguments, compiler):
+def audit_process_input(report, view, executable, arguments, compiler):
     image = executable.read_bytes()
     require(image[:4] == b'\xcf\xfa\xed\xfe', 'integrated verifier currently requires a thin acquired main executable')
     header = struct.unpack_from('<8I', image)
@@ -263,6 +324,15 @@ def audit_integrated(report, view, executable, arguments, compiler):
         vector[:] = [0, 0]
     initial.fpcr = initial.fpsr = 0
     require(report['initial_state'] == state_dict(initial), 'initial process state differs from thread/stack plan')
+    for key, path in [('probe_source_sha256', ROOT / 'src/dyld_entry.rs'),
+                      ('process_source_sha256', ROOT / 'crates/stela-runtime/src/process.rs')]:
+        require(report[key] == digest(path.read_bytes()), 'integrated probe source identity differs')
+    return initial
+
+
+def audit_integrated(report, view, executable, arguments, compiler):
+    initial = audit_process_input(report, view, executable, arguments, compiler)
+    dyld = report['dyld']
     expected = expected_state(initial)
     original = original_state(view, dyld['slide'], initial)
     require(bytes(original) == bytes(expected) and report['state'] == state_dict(expected), 'integrated original/math/native state differs')

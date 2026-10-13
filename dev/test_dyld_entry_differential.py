@@ -60,6 +60,36 @@ class DyldEntryGuards(unittest.TestCase):
         self.assertEqual(list(expected.x)[1:29], list(initial.x)[1:29])
         self.assertEqual(bytes(expected)[256:], bytes(initial)[256:])
 
+    def test_original_regions_preserve_file_padding_and_zero_only_segment_tail(self):
+        image = thin()
+        image[-1] = 0x5a
+        struct.pack_into('<Q', image, 32 + 32, len(image) + 4096)
+        region = suite.original_segment_regions(image, 0x600000)[0]
+        self.assertEqual(region['address'], 0x600000)
+        self.assertEqual(region['data'][:len(image)], image)
+        self.assertEqual(region['data'][-4096:], bytes(4096))
+        with self.assertRaises(AssertionError):
+            suite.original_segment_regions(image, (1 << 47) - 4096)
+        struct.pack_into('<Q', image, 32 + 48, len(image) + 1)
+        with self.assertRaises(AssertionError):
+            suite.original_segment_regions(image, 0x600000)
+
+    def test_original_kernel_arrays_preserve_bytes_and_require_bootstrap_scratch(self):
+        arguments = {'argv': [[0xff], list(b'arg')], 'environment': [list(b'A=B')], 'apple': [list(b'entry=1')]}
+        raw, payload = suite.original_kernel_args(0x8000, 4096, 0x600000, b'/m', arguments)
+        self.assertEqual(raw % 16, 8)
+        self.assertEqual(struct.unpack_from('<2Q', payload), (0x600000, 2))
+        words = struct.unpack_from('<10Q', payload)
+        self.assertEqual((words[4], words[6], words[9]), (0, 0, 0))
+        for pointer, value in zip([words[2], words[3], words[5], words[7], words[8]],
+                                  [b'\xff', b'arg', b'A=B', b'/m', b'entry=1']):
+            self.assertEqual(payload[pointer - raw:pointer - raw + len(value) + 1], value + b'\0')
+        with self.assertRaises(AssertionError):
+            suite.original_kernel_args(0x8000, 1024, 0x600000, b'/m', arguments)
+        arguments['argv'] = [[0]]
+        with self.assertRaises(AssertionError):
+            suite.original_kernel_args(0x8000, 4096, 0x600000, b'/m', arguments)
+
     def test_native_receipt_rejects_state_pac_source_and_cache_drift(self):
         expected = suite.expected_state(State())
         report = {'kind': 'native_block_run', 'abi': suite.ABI, 'complete_binary_verified': False,

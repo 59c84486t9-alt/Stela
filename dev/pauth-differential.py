@@ -293,34 +293,10 @@ def cache_receipts(cache, source_hashes):
 
 def audit_integrated(report, view, executable, arguments, compiler):
     dyld_suite = importlib.import_module('dyld-entry-differential')
-    image = executable.read_bytes()
-    assert image[:4] == b'\xcf\xfa\xed\xfe'
-    header = struct.unpack_from('<8I', image)
-    assert report['kind'] == 'original_dyld_startup_prefix_probe' and report['schema_version'] == 1
-    assert report['complete_binary_verified'] is False and report['fixups_applied'] is False and report['native_executed'] is True
-    assert report['compiler_source_sha256'] == compiler and report['abi'] == ABI
-    assert report['software_pauth_profile'] == PROFILE and report['pauth_instruction_executed'] is True
-    assert report['main']['container_sha256'] == digest(image) and report['main']['slice_offset'] == 0
-    main = report['main']['plan']
-    assert main['slice_sha256'] == digest(image) and main['slice_bytes'] == len(image)
-    assert (main['cpu_type'], main['cpu_subtype'], main['file_type'], main['header_flags']) == header[1:4] + (header[6],)
+    initial = dyld_suite.audit_process_input(report, view, executable, arguments, compiler)
+    assert report['abi'] == ABI and report['software_pauth_profile'] == PROFILE
+    assert report['pauth_instruction_executed'] is True
     dyld = report['dyld']
-    assert dyld['container_sha256'] == dyld_suite.CONTAINER_SHA256 and dyld['slice_offset'] == dyld_suite.SLICE_OFFSET
-    assert dyld['plan']['image']['slice_sha256'] == dyld_suite.SLICE_SHA256 and dyld['plan']['image']['file_type'] == 7
-    raw = view['thread_command']
-    thread = dyld['plan']['thread']
-    assert thread['raw_command_hex'] == raw.hex() and thread['raw_command_sha256'] == digest(raw)
-    assert (thread['flavor'], thread['count']) == (6, 68) and thread['x'] == list(struct.unpack_from('<31Q', raw, 16))
-    assert (thread['sp'], thread['pc'], thread['cpsr'], thread['pad']) == struct.unpack_from('<QQII', raw, 264)
-    assert report['process_arguments'] == arguments
-    dyld_suite.audit_arguments(report, executable, arguments)
-    initial = State()
-    initial.x[:] = thread['x']
-    initial.sp, initial.nzcv = report['arguments']['raw_sp'], thread['cpsr']
-    for vector in initial.v:
-        vector[:] = [0, 0]
-    initial.fpcr = initial.fpsr = 0
-    assert report['initial_state'] == state_dict(initial)
     expected = dyld_suite.expected_state(initial)
     expected.x[30] = sign_ib(0, expected.sp)
     assert expected.x[30] != 0  # This observed startup PAC must really sign null LR.
@@ -354,23 +330,389 @@ def audit_integrated(report, view, executable, arguments, compiler):
     return {'original': state_dict(observed), 'independent_math': state_dict(expected), 'native': report}
 
 
+CLOCK_BASE = 0xfffffc000
+CLOCK_BYTES = 16 * 1024
+CLOCK_PROFILE = 'stela-continuous-ns-arm-commpage-clock-v1'
+CLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-v1'
+BOOTSTRAP_PCS = tuple([0x4bf0 + i * 4 for i in range(5)] + list(range(0x30460, 0x304a4, 4))
+                     + list(range(0x8054c, 0x80584, 4)) + list(range(0x805d4, 0x805f4, 4)))
+
+
+def clock_page(sleep_ticks):
+    assert 0 <= sleep_ticks <= MASK
+    page = bytearray(CLOCK_BYTES)
+    struct.pack_into('<Q', page, 0x88, (-sleep_ticks) & MASK)
+    page[0x90:0x92] = b'\x01\x01'
+    struct.pack_into('<Q', page, 0x98, sleep_ticks)
+    struct.pack_into('<Q', page, 0xa8, 0)
+    return bytes(page)
+
+
+def bootstrap_math(initial, stack_before, stack_base, slide, counter):
+    """Independent exact observed path, no general ARM decoder/interpreter."""
+    state = State.from_buffer_copy(initial)
+    state.x[0] = initial.sp
+    state.sp &= ~15
+    state.x[29] = 0
+    state.x[30] = sign_ib(0, state.sp)
+    stack = bytearray(stack_before)
+    writes = []
+    def store(address, *values):
+        data = struct.pack('<' + 'Q' * len(values), *values)
+        offset = address - stack_base
+        assert 0 <= offset and offset + len(data) <= len(stack)
+        stack[offset:offset + len(data)] = data
+        writes.append({'address': address, 'bytes': len(data), 'value_hex': data.hex()})
+    state.sp -= 0x60
+    for index, first in enumerate([28, 26, 24, 22, 20]):
+        store(state.sp + 16 * index, state.x[first], state.x[first - 1])
+    store(state.sp + 0x50, state.x[29], state.x[30])
+    state.x[29] = state.sp + 0x50
+    state.sp -= 0x620
+    for destination, source in [(26, 3), (23, 2), (21, 1), (22, 0), (19, 3)]:
+        state.x[destination] = state.x[source]
+    store(state.sp + 0x38, state.x[0])
+    assert state.x[3] == 0
+    state.x[30] = sign_ib(slide + 0x304a4, state.sp)
+    state.sp -= 0x40
+    store(state.sp + 0x20, state.x[20], state.x[19])
+    store(state.sp + 0x30, state.x[29], state.x[30])
+    state.x[29] = state.sp + 0x30
+    state.x[19] = 0xfffffc098
+    # CONT_HWCLOCK=1/USER_TIMEBASE=1 select both comparisons and the ISB/MRS path.
+    state.nzcv = 0x80000000  # CMP W8(1),#2 => negative, nonzero, borrow, no overflow.
+    state.x[8], state.x[9], state.x[0] = counter, 0, counter
+    def pair(address):
+        offset = address - stack_base
+        return struct.unpack_from('<2Q', stack, offset)
+    state.x[29], state.x[30] = pair(state.sp + 0x30)
+    state.x[20], state.x[19] = pair(state.sp + 0x20)
+    state.sp += 0x40
+    target, valid = authenticate_ib(state.x[30], state.sp)
+    assert valid and target == slide + 0x304a4
+    assert len(writes) == 9 and sum(item['bytes'] for item in writes) == 136
+    return state, bytes(stack), writes
+
+
+def original_bootstrap(view, main_bytes, main_base, slide, stack_base, stack_bytes, initial, payload, sleep_ticks):
+    """Execute all44 unchanged original instructions including real CNTVCT MRS."""
+    dyld_suite = importlib.import_module('dyld-entry-differential')
+    container = dyld_suite.DEFAULT_DYLD.read_bytes()
+    assert digest(container) == dyld_suite.CONTAINER_SHA256
+    offset, image = dyld_suite.classic_slice(container)
+    assert offset == dyld_suite.SLICE_OFFSET and digest(image) == dyld_suite.SLICE_SHA256
+    machine = arm_machine(KEY)
+    # Remove the unused single-instruction test page; every accessible byte below
+    # is an explicit original image, owned stack/guard, or selected clock view.
+    machine.mem_unmap(BASE, 4096)
+    machine.cpr_write(3, 0, 14, 1, 0, machine.cpr_read(3, 0, 14, 1, 0) | 2)
+    assert machine.cpr_read(3, 0, 14, 1, 0) & 2
+    regions = []
+    for name, data, base in [('dyld', image, slide), ('main', main_bytes, main_base)]:
+        for region in dyld_suite.original_segment_regions(data, base):
+            assert region['address'] % 4096 == 0 and region['virtual_bytes'] % 4096 == 0
+            protection = region['initial_protection'] & (~2 if region['flags'] & 16 else MASK)
+            machine.mem_map(region['address'], region['virtual_bytes'])
+            machine.mem_write(region['address'], region['data'])
+            machine.mem_protect(region['address'], region['virtual_bytes'], protection)
+            regions.append({**region, 'image': name, 'protection': protection})
+    stack_before = bytearray(stack_bytes)
+    start = initial.sp - stack_base
+    assert 0 <= start and start + len(payload) == stack_bytes
+    stack_before[start:] = payload
+    machine.mem_map(stack_base, stack_bytes, 3)
+    machine.mem_write(stack_base, bytes(stack_before))
+    for address in [stack_base - 4096, stack_base + stack_bytes]:
+        machine.mem_map(address, 4096, 0)
+    page = clock_page(sleep_ticks)
+    machine.mem_map(CLOCK_BASE, CLOCK_BYTES)
+    machine.mem_write(CLOCK_BASE, page)
+    machine.mem_protect(CLOCK_BASE, CLOCK_BYTES, 1)
+    initialize_arm(machine, initial)
+    steps, accesses = [], []
+    captured = []
+    def code(_, pc, size, unused):
+        if steps:
+            steps[-1]['after'] = state_dict(capture_arm(machine, initial))
+        assert size == 4 and len(steps) < len(BOOTSTRAP_PCS)
+        assert pc == slide + BOOTSTRAP_PCS[len(steps)]
+        preferred = pc - slide
+        assert bytes(machine.mem_read(pc, 4)) == image[preferred:preferred + 4]
+        if preferred == 0x805dc:
+            captured.append(machine.reg_read(arm.UC_ARM64_REG_X8))
+        steps.append({'pc': pc, 'word': struct.unpack_from('<I', image, preferred)[0],
+                      'before': state_dict(capture_arm(machine, initial))})
+    def memory(_, kind, address, size, value, unused):
+        write = kind == unicorn.UC_MEM_WRITE
+        protected = 2 if write else 1
+        owned = stack_base <= address and address + size <= stack_base + stack_bytes
+        owned |= not write and CLOCK_BASE <= address and address + size <= CLOCK_BASE + CLOCK_BYTES
+        owned |= any(region['address'] <= address and address + size <= region['address'] + region['virtual_bytes']
+                     and region['protection'] & protected for region in regions)
+        assert owned, ('unowned original access', hex(address), size)
+        accesses.append({'pc': machine.reg_read(arm.UC_ARM64_REG_PC), 'kind': 'write' if write else 'read',
+                         'address': address, 'bytes': size})
+    machine.hook_add(UC_HOOK_CODE, code)
+    machine.hook_add(unicorn.UC_HOOK_MEM_READ | unicorn.UC_HOOK_MEM_WRITE, memory)
+    stop = slide + 0x304a4
+    machine.emu_start(slide + dyld_suite.ENTRY, stop, count=128)
+    final = capture_arm(machine, initial)
+    steps[-1]['after'] = state_dict(final)
+    assert len(steps) == 44 and len(captured) == 1 and machine.reg_read(arm.UC_ARM64_REG_PC) == stop
+    counter = captured[0]
+    assert counter >= sleep_ticks
+    expected, expected_stack, writes = bootstrap_math(initial, bytes(stack_before), stack_base, slide, counter)
+    after = bytes(machine.mem_read(stack_base, stack_bytes))
+    assert bytes(final) == bytes(expected) and after == expected_stack
+    observed_writes = {address for event in accesses if event['kind'] == 'write'
+                       for address in range(event['address'], event['address'] + event['bytes'])}
+    expected_writes = {address for event in writes for address in range(event['address'], event['address'] + event['bytes'])}
+    assert observed_writes == expected_writes and len(expected_writes) == 136
+    images = []
+    for region in regions:
+        actual = bytes(machine.mem_read(region['address'], region['virtual_bytes']))
+        assert actual == region['data']
+        images.append({'image': region['image'], 'segment': region['name'], 'address': region['address'],
+                       'bytes': region['virtual_bytes'], 'initial_sha256': digest(region['data']), 'final_sha256': digest(actual)})
+    assert bytes(machine.mem_read(CLOCK_BASE, CLOCK_BYTES)) == page
+    return {'counter': counter, 'sleep_ticks': sleep_ticks, 'initial': state_dict(initial), 'state': state_dict(final),
+            'stack_before_hex': bytes(stack_before).hex(), 'stack_after_hex': after.hex(), 'memory_effects': images,
+            'clock_page_hex': page.hex(), 'steps': steps, 'accesses': accesses, 'writes': writes,
+            'cntfrq_el0': machine.cpr_read(3, 3, 14, 0, 0), 'cntkctl_el1': machine.cpr_read(3, 0, 14, 1, 0),
+            'pc': stop, 'limits': 'Original real MRS counter is opaque replay input; emulator62500000Hz and nativevirtual1GHz rate are not equated.'}
+
+
+def audit_clock_probe(report, oracle, view, executable, arguments, compiler, replay, host_bounds=None):
+    dyld_suite = importlib.import_module('dyld-entry-differential')
+    initial = dyld_suite.audit_process_input(report, view, executable, arguments, compiler)
+    assert state_dict(initial) == oracle['initial']
+    assert report['bootstrap_clock'] is True and report['abi'] == CLOCK_ABI
+    assert report['software_pauth_profile'] == PROFILE and report['pauth_instruction_executed'] is True
+    slide = report['dyld']['slide']
+    assert report['entry_pc'] == slide + dyld_suite.ENTRY and report['pc'] == report['stop_pc'] == slide + 0x304a4
+    assert report['target_pc'] == slide + dyld_suite.TARGET and report['original_prefix_words'] == list(dyld_suite.PREFIX_WORDS)
+    assert report['target_analysis_profile'] == 'ordinary' and report['target_analysis']['supported'] is False
+    assert report['selected_profile_target_analysis']['supported'] is True
+    clock = report['clock']
+    assert clock['profile_id'] == CLOCK_PROFILE and clock['frequency'] == 1_000_000_000
+    region = clock['region']
+    assert (region['guest_address'], region['virtual_bytes'], region['readable'], region['writable'], region['executable']) == (CLOCK_BASE, CLOCK_BYTES, True, False, False)
+    events = clock['events']
+    assert len(events) == 2 and [event['sequence'] for event in events] == [0, 1]
+    first, last = [event['snapshot'] for event in events]
+    assert clock['snapshot'] == last
+    assert last['counter'] >= first['counter'] >= first['sleep_ticks']
+    assert last['sleep_ticks'] >= first['sleep_ticks'] and last['counter'] - last['sleep_ticks'] >= first['counter'] - first['sleep_ticks']
+    if replay:
+        assert clock['source_id'] == 'explicit-finite-replay-v1'
+        assert first == last == {'counter': oracle['counter'], 'sleep_ticks': oracle['sleep_ticks']}
+    else:
+        assert clock['source_id'] == 'darwin-x86_64-absolute-plus-commpage-sleep-v1'
+        assert host_bounds is not None and host_bounds[0] <= first['counter'] <= last['counter'] <= host_bounds[1]
+    assert bytes.fromhex(clock['page_before_hex']) == clock_page(first['sleep_ticks'])
+    assert bytes.fromhex(clock['page_after_hex']) == clock_page(last['sleep_ticks'])
+    assert report['stack_before_hex'] == oracle['stack_before_hex']
+    expected, stack, writes = bootstrap_math(initial, bytes.fromhex(oracle['stack_before_hex']), report['stack']['base'], slide, last['counter'])
+    assert report['state'] == state_dict(expected)
+    assert report['stack_after_hex'] == stack.hex() == oracle['stack_after_hex']
+    if replay:
+        assert report['state'] == oracle['state']
+    expected_memory = [dict(region) for region in oracle['memory_effects']]
+    expected_memory.append({'address': report['stack']['base'], 'bytes': len(stack),
+                            'initial_sha256': digest(bytes.fromhex(oracle['stack_before_hex'])), 'final_sha256': digest(stack)})
+    expected_by_address = {region['address']: region for region in expected_memory}
+    effects = report['memory_effects']
+    assert len(effects) == len(expected_by_address)
+    assert {effect['address'] for effect in effects} == set(expected_by_address)
+    owned_readable = {(region['guest_address'], region['virtual_bytes']) for region in report['mapped_regions'] if region['readable']}
+    assert owned_readable == {(effect['address'], effect['bytes']) for effect in effects}
+    for effect in effects:
+        expected_region = expected_by_address[effect['address']]
+        assert all(effect[field] == expected_region[field] for field in ('bytes', 'initial_sha256', 'final_sha256'))
+    outcome = report['outcome']
+    assert outcome['reason'] == {'kind': 'stop_address'} and outcome['blocks_executed'] == 11
+    assert outcome['last_exit'] == [slide + 0x805f0, 6] and outcome['memory_cache_hits'] == 0
+    def pa(operation, pc, next_pc, actual_pc, authenticated):
+        return {'instruction': {'operation': operation, 'instruction_pc': slide + pc, 'next_pc': slide + next_pc},
+                'next_pc': slide + actual_pc, 'authenticated': authenticated}
+    assert outcome['pointer_authentication_events'] == [pa('sign_ib_sp', 0x30460, 0x30464, 0x30464, None),
+        pa('sign_ib_sp', 0x8054c, 0x80550, 0x80550, None), pa('return_ib_sp', 0x805f0, 0x805f4, 0x304a4, True)]
+    assert outcome['clock_events'] == [
+        {'instruction': {'operation': {'kind': 'instruction_synchronization'}, 'instruction_pc': slide + 0x805d4, 'next_pc': slide + 0x805d8}, 'next_pc': slide + 0x805d8, 'counter': None},
+        {'instruction': {'operation': {'kind': 'read_virtual_counter', 'destination': 8}, 'instruction_pc': slide + 0x805d8, 'next_pc': slide + 0x805dc}, 'next_pc': slide + 0x805dc, 'counter': last['counter']}]
+    for field, path in [('pauth_source_sha256', ROOT / 'crates/stela-runtime/src/pauth.rs'),
+                        ('clock_source_sha256', ROOT / 'crates/stela-runtime/src/clock.rs')]:
+        if field in report:
+            assert report[field] == digest(path.read_bytes())
+    return {'native': report, 'independent_math': state_dict(expected), 'whole_stack_bytes_compared': len(stack),
+            'distinct_original_store_bytes': sum(event['bytes'] for event in writes),
+            'replay_three_way_equal': replay, 'host_counter_bounds': host_bounds}
+
+
+def clock_cache_receipts(cache, image):
+    roots = (0x4bf0, 0x30460, 0x30464, 0x304a0, 0x8054c, 0x80550, 0x80570, 0x8057c, 0x805d4, 0x805d8, 0x805dc)
+    expected = {slide + pc for slide in (0x40000000000, 0x40000004000) for pc in roots}
+    rows = []
+    for path in sorted(cache.glob('*/manifest.json')):
+        raw = path.read_bytes()
+        manifest = json.loads(raw)
+        identity, mapping = manifest['identity'], manifest['source_map']
+        entry = identity['guest_base']
+        assert entry in expected and identity['abi'] == CLOCK_ABI and manifest['verified'] is False
+        # Prefer exact membership rather than address ordering where the two
+        # placements' helper addresses interleave.
+        candidates = [base for base in (0x40000000000, 0x40000004000) if entry - base in roots]
+        assert len(candidates) == 1
+        slide = candidates[0]
+        preferred = entry - slide
+        assert [pc for pc, _ in mapping] == list(range(entry, entry + 4 * len(mapping), 4))
+        assert identity['source_sha256'] == digest(image[preferred:preferred + 4 * len(mapping)])
+        native = path.with_name('native.bin').read_bytes()
+        assert manifest['native_sha256'] == digest(native) and manifest['native_bytes'] == len(native)
+        assert all(a[1] < b[1] for a, b in zip(mapping, mapping[1:])) and mapping[-1][1] < len(native)
+        assert json.loads(path.with_name('manifest.sha256.json').read_bytes()) == digest(raw)
+        assert all(struct.pack('<Q', limb) not in native for limb in KEY)
+        rows.append({'key': path.parent.name, 'manifest': manifest, 'manifest_sha256': digest(raw)})
+    assert {row['manifest']['identity']['guest_base'] for row in rows} == expected and len(rows) == 22
+    return rows
+
+
+def host_continuous_time():
+    """Independent public host API bound, not the provider's private source."""
+    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+    class Timebase(ctypes.Structure):
+        _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+    info = Timebase()
+    library.mach_timebase_info.argtypes = [ctypes.POINTER(Timebase)]
+    library.mach_timebase_info.restype = ctypes.c_int
+    assert library.mach_timebase_info(ctypes.byref(info)) == 0 and (info.numer, info.denom) == (1, 1)
+    library.mach_continuous_time.argtypes = []
+    library.mach_continuous_time.restype = ctypes.c_uint64
+    return library.mach_continuous_time()
+
+
+def clock_instruction_math(initial, destination, counter):
+    state = State.from_buffer_copy(initial)
+    state.x[7] = 42
+    if destination != 31:
+        state.x[destination] = counter
+    return state
+
+
+def clock_instruction_original(initial, destination):
+    machine = arm_machine()
+    machine.cpr_write(3, 0, 14, 1, 0, machine.cpr_read(3, 0, 14, 1, 0) | 2)
+    source = struct.pack('<3I', 0xd2800547, 0xd5033fdf, 0xd53be040 | destination)
+    machine.mem_write(BASE, source)
+    initialize_arm(machine, initial)
+    pcs = []
+    machine.hook_add(UC_HOOK_CODE, lambda _, pc, size, unused: pcs.append([pc, size]))
+    machine.emu_start(BASE, BASE + 12, count=3)
+    assert pcs == [[BASE + i * 4, 4] for i in range(3)]
+    observed = capture_arm(machine, initial)
+    if destination == 31:
+        # MRS XZR discards its architectural result. This separately sampled
+        # opaque replay value is not mislabeled as that unobservable read.
+        counter = machine.cpr_read(3, 3, 14, 0, 2)
+        observation = 'post_instruction_counter_sample; discarded_read_value_unobservable'
+    else:
+        counter = observed.x[destination]
+        observation = 'actual_mrs_destination_value'
+    assert counter > 0
+    expected = clock_instruction_math(initial, destination, counter)
+    assert bytes(observed) == bytes(expected) and machine.reg_read(arm.UC_ARM64_REG_PC) == BASE + 12
+    return observed, counter, observation, source, machine.cpr_read(3, 3, 14, 0, 0)
+
+
+def validate_clock_instruction(report, initial, destination, counter, source, compiled, disk):
+    expected = clock_instruction_math(initial, destination, counter)
+    assert report['kind'] == 'native_block_run' and report['complete_binary_verified'] is False
+    assert report['abi'] == CLOCK_ABI and report['software_pauth_profile'] == PROFILE
+    assert report['source_sha256'] == digest(source) and report['guest_base'] == BASE and report['pc'] == BASE + 12
+    assert report['state'] == state_dict(expected)
+    outcome = report['outcome']
+    assert outcome['reason'] == {'kind': 'stop_address'} and outcome['blocks_executed'] == 2
+    assert outcome['last_exit'] == [BASE + 8, 7]
+    assert outcome['compiled_blocks'] == compiled and outcome['disk_cache_hits'] == disk and outcome['memory_cache_hits'] == 0
+    assert 'pointer_authentication_events' not in outcome
+    assert outcome['clock_events'] == [
+        {'instruction': {'operation': {'kind': 'instruction_synchronization'}, 'instruction_pc': BASE + 4, 'next_pc': BASE + 8}, 'next_pc': BASE + 8, 'counter': None},
+        {'instruction': {'operation': {'kind': 'read_virtual_counter', 'destination': destination}, 'instruction_pc': BASE + 8, 'next_pc': BASE + 12}, 'next_pc': BASE + 12, 'counter': counter}]
+    snapshot = {'counter': counter, 'sleep_ticks': 0}
+    clock = report['clock']
+    assert clock['snapshot'] == snapshot and clock['events'] == [{'sequence': i, 'snapshot': snapshot} for i in (0, 1)]
+    assert clock['profile_id'] == CLOCK_PROFILE and clock['frequency'] == 1_000_000_000 and clock['source_id'] == 'explicit-finite-replay-v1'
+    assert (clock['region']['guest_address'], clock['region']['virtual_bytes'], clock['region']['readable'],
+            clock['region']['writable'], clock['region']['executable']) == (CLOCK_BASE, CLOCK_BYTES, True, False, False)
+    return expected
+
+
+def raw_clock_cohort(cli, folder, key_path, state_path):
+    source_path, snapshot_path = folder / 'clock-register.arm64', folder / 'clock-register.json'
+    cache = folder / 'clock-register-cache'
+    rows = []
+    for destination in range(32):
+        for flags in range(16):
+            initial = initial_state(MASK ^ destination, 0x220004000008, destination * 16 + flags)
+            observed, counter, observation, source, frequency = clock_instruction_original(initial, destination)
+            source_path.write_bytes(source)
+            state_path.write_text(json.dumps(state_dict(initial)))
+            snapshot_path.write_text(json.dumps({'counter': counter, 'sleep_ticks': 0}))
+            report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path), '--state', str(state_path),
+                '--guest-base', hex(BASE), '--stop-pc', hex(BASE + 12), '--block-budget', '2',
+                '--software-pauth-ib-key', str(key_path), '--clock-snapshot', str(snapshot_path), '--cache-dir', str(cache)], timeout=15))
+            compiled = (2 if destination == 0 else 1) if flags == 0 else 0
+            expected = validate_clock_instruction(report, initial, destination, counter, source, compiled, 2 - compiled)
+            assert bytes(observed) == bytes(expected)
+            rows.append({'destination': destination, 'nzcv': initial.nzcv, 'initial': state_dict(initial),
+                         'original': state_dict(observed), 'native': report, 'counter': counter,
+                         'counter_observation': observation, 'original_cntfrq_el0': frequency})
+    assert len(rows) == 512
+    expected_sources = {(BASE, digest(struct.pack('<2I', 0xd2800547, 0xd5033fdf)))}
+    expected_sources |= {(BASE + 8, digest(struct.pack('<I', 0xd53be040 | rt))) for rt in range(32)}
+    manifests = []
+    for path in sorted(cache.glob('*/manifest.json')):
+        raw = path.read_bytes()
+        manifest = json.loads(raw)
+        identity, mapping = manifest['identity'], manifest['source_map']
+        assert (identity['guest_base'], identity['source_sha256']) in expected_sources
+        assert identity['abi'] == CLOCK_ABI and manifest['verified'] is False
+        expected_pcs = [BASE, BASE + 4] if identity['guest_base'] == BASE else [BASE + 8]
+        assert [pc for pc, _ in mapping] == expected_pcs
+        native = path.with_name('native.bin').read_bytes()
+        assert manifest['native_sha256'] == digest(native) and manifest['native_bytes'] == len(native)
+        assert mapping[-1][1] < len(native) and all(a[1] < b[1] for a, b in zip(mapping, mapping[1:]))
+        assert json.loads(path.with_name('manifest.sha256.json').read_bytes()) == digest(raw)
+        assert all(struct.pack('<Q', limb) not in native for limb in KEY)
+        manifests.append({'key': path.parent.name, 'manifest': manifest, 'manifest_sha256': digest(raw)})
+    assert len(manifests) == 33 and {(row['manifest']['identity']['guest_base'], row['manifest']['identity']['source_sha256']) for row in manifests} == expected_sources
+    return rows, manifests
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--executable', type=Path, action='append', default=[])
+    parser.add_argument('--bootstrap-clock', action='store_true', help='also verify the complete original mach_continuous_time startup call')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/pauth-differential-report.json')
     args = parser.parse_args()
+    if args.bootstrap_clock and len(args.executable) != 2:
+        parser.error('--bootstrap-clock requires two explicit --executable inputs for cold/disk coverage')
     if not args.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'crates/stela-runtime/src/pauth.rs',
                ROOT / 'crates/stela-runtime/src/blocks.rs', ROOT / 'src/main.rs',
                ROOT / 'dev/dyld-entry-differential.py', ROOT / 'src/dyld_entry.rs',
-               ROOT / 'crates/stela-runtime/src/process.rs']
+               ROOT / 'crates/stela-runtime/src/process.rs', ROOT / 'crates/stela-runtime/src/clock.rs',
+               ROOT / 'crates/stela-runtime/src/memory.rs']
     pins = {str(path.relative_to(ROOT)): digest(path.read_bytes()) for path in sources}
     cli_hash = digest(cli.read_bytes())
     records = []
     integrated = []
+    clock_integrated = []
+    clock_manifests = []
+    clock_register_cases, clock_register_manifests = [], []
     seen = set()
     equal = divergent = poisoned_returns = failed_auth = 0
     with tempfile.TemporaryDirectory(prefix='stela-pauth-') as temporary:
@@ -446,8 +788,40 @@ def main():
                     integrated.append(audit_integrated(report, view, executable, arguments, records[0]['native']['compiler_source_sha256']))
                     assert report['outcome']['compiled_blocks'] == 2 * int(index == 0)
                     assert report['outcome']['disk_cache_hits'] == 2 * int(index != 0)
+                    if args.bootstrap_clock:
+                        slide = 0x40000000000 + placement
+                        main_base = 0x60000000000 + index * 0x1000000
+                        stack_base = 0x80000000000 + index * 0x1000000
+                        raw_sp, payload = dyld_suite.original_kernel_args(stack_base, 65536, main_base, str(executable).encode(), arguments)
+                        initial = State.from_buffer_copy(bytes(ctypes.sizeof(State)))
+                        initial.x[:] = struct.unpack_from('<31Q', view['thread_command'], 16)
+                        initial.sp = raw_sp
+                        initial.nzcv = struct.unpack_from('<I', view['thread_command'], 280)[0]
+                        oracle = original_bootstrap(view, executable.read_bytes(), main_base, slide, stack_base, 65536,
+                                                    initial, payload, 0 if placement == 0 else 123456789)
+                        snapshot_path = folder / 'clock.json'
+                        snapshot_path.write_text(json.dumps({'counter': oracle['counter'], 'sleep_ticks': oracle['sleep_ticks']}))
+                        command = [str(cli), 'probe-dyld-entry', str(dyld_suite.DEFAULT_DYLD), '--executable', str(executable),
+                            '--arguments', str(argument_path), '--image-base', hex(main_base), '--dyld-slide', hex(slide),
+                            '--stack-base', hex(stack_base), '--software-pauth-ib-key', str(key_path), '--bootstrap-clock',
+                            '--cache-dir', str(folder / 'clock-cache')]
+                        replay = json.loads(subprocess.check_output([*command, '--clock-snapshot', str(snapshot_path)], timeout=30))
+                        checked_replay = audit_clock_probe(replay, oracle, view, executable, arguments,
+                            records[0]['native']['compiler_source_sha256'], True)
+                        assert replay['outcome']['compiled_blocks'] == 11 * int(index == 0)
+                        assert replay['outcome']['disk_cache_hits'] == 11 * int(index != 0)
+                        before = host_continuous_time()
+                        host = json.loads(subprocess.check_output(command, timeout=30))
+                        after = host_continuous_time()
+                        checked_host = audit_clock_probe(host, oracle, view, executable, arguments,
+                            records[0]['native']['compiler_source_sha256'], False, [before, after])
+                        assert host['outcome']['compiled_blocks'] == 0 and host['outcome']['disk_cache_hits'] == 11
+                        clock_integrated.append({'original': oracle, 'replay': checked_replay, 'native_host_clock': checked_host})
                 assert digest(executable.read_bytes()) == input_hash
             assert digest(dyld_suite.DEFAULT_DYLD.read_bytes()) == dyld_suite.CONTAINER_SHA256
+            if args.bootstrap_clock:
+                clock_manifests = clock_cache_receipts(folder / 'clock-cache', image)
+                clock_register_cases, clock_register_manifests = raw_clock_cohort(cli, folder, key_path, state_path)
     assert len(records) == 3200 and equal == 3136 and divergent == 64
     assert poisoned_returns == 384 and failed_auth == 448
     assert digest(cli.read_bytes()) == cli_hash and all(digest((ROOT / path).read_bytes()) == checksum for path, checksum in pins.items())
@@ -461,12 +835,19 @@ def main():
                          'instruction_tbi': False, 'data_tbi': True, 'virtual_address_bits': 47, 'pauth2': False, 'fpac': False},
               'public_fixed_test_keys': True, 'cache_receipts': manifests, 'cases': records,
               'integrated_original_dyld_pac_probes': integrated,
+              'integrated_original_dyld_clock_probes': clock_integrated, 'clock_cache_receipts': clock_manifests,
+              'original_clock_replay_full_state_ram_comparisons': len(clock_integrated),
+              'native_host_clock_bounded_state_ram_comparisons': len(clock_integrated),
+              'clock_register_full_state_comparisons': len(clock_register_cases),
+              'clock_register_cases': clock_register_cases, 'clock_register_cache_receipts': clock_register_manifests,
               'limits': ['Explicit software QARMA5 classic PAuth1 IB/SP profile, not Apple hardware bit identity or complete arm64e support.',
                          'Native executes original scalar prefix then explicit PAC runtime boundary; cryptography is a software helper, not inline native PAC.',
                          'Authentication failures poison pointers; RETAB typed stop records pending instruction-fetch exception delivery.',
                          'Noncanonical signing: June2026 ASL corrupts bit62, older Unicorn2.1.4 corrupts bit63;64 exact classified observations are not counted as three-way equality.',
                          'Generic IA/DA/DB/PACGA/XPAC remain oracle-only, outside the three production instruction forms.',
-                         'All784B state including dirty V/FP and scalar prefix verified; no guest memory access, OS process, Apple hardware or performance claim.']}
+                         'MRS Rt31 discardedvalue is unobservable; the unchangedinstruction executes and fullstate preservation is checked, while native event replays a separatelyrecorded postinstruction counter sample. Other31Rt replay actualMRSdestination results.',
+                         'Optional clock bootstrap executes44 originalinstructions, twoPACsigns+RETAB, actualISB/CNTVCT, allnine stores and restoredframe. Counterreplay provesopaque input effects; original62500000Hz and nativevirtual1GHz rates are not equated. Nativehost samples are separatelybounded by publicmach_continuous_time.',
+                         'PAC-only vectors do not access guest RAM; complete clock probes compare every stack byte and all readable image/clock views. Full784B state is checked throughout; no full OS process, Apple hardware or performance claim.']}
     snapshot = write_evidence(args.output, result)
     print(json.dumps({'passed': True, 'three_way': equal, 'native_math': len(records), 'divergences': divergent,
                       'report': str(args.output), 'snapshot': str(snapshot)}, indent=2))
