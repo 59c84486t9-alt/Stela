@@ -57,6 +57,15 @@ pub(crate) fn emit(
     if let Some((pc, terminal)) = terminal {
         block.source_map.push((*pc, code.len()));
         match terminal {
+            Terminator::PointerAuthentication(request) => {
+                // Return to the checked runtime helper with unchanged guest
+                // state at this instruction. Never embed keys/helper pointers.
+                direct_exit(
+                    code,
+                    request.instruction_pc,
+                    ExitKind::PointerAuthentication,
+                );
+            }
             Terminator::Trap(trap) => {
                 // The original instruction remains the stop PC for both SVC
                 // and BRK. Exception-return metadata stays with the decoder;
@@ -131,6 +140,68 @@ pub(crate) fn emit(
 mod tests {
     use super::*;
     use crate::block::{SynchronousTrap, TrapKind};
+
+    #[test]
+    fn pac_helper_exit_has_no_guest_writes_or_embedded_service_address() {
+        use crate::block::{PointerAuthentication, PointerAuthenticationOperation};
+        for operation in [
+            PointerAuthenticationOperation::SignIbSp,
+            PointerAuthenticationOperation::AuthenticateIbSp,
+            PointerAuthenticationOperation::ReturnIbSp,
+        ] {
+            let pc = GuestAddress(0x123456789000);
+            let request = PointerAuthentication {
+                operation,
+                instruction_pc: pc,
+                next_pc: GuestAddress(pc.0 + 4),
+            };
+            let native = emit(
+                &[],
+                Some(&(pc, Terminator::PointerAuthentication(request))),
+                request.next_pc,
+            );
+            let mut expected = vec![0x48, 0xb8];
+            expected.extend(pc.0.to_le_bytes());
+            expected.extend([0xba, 6, 0, 0, 0, 0xc3]);
+            // Only the SysV return registers RAX/RDX are touched, including for
+            // RETAB: the runtime must keep signed LR while authenticating target.
+            assert_eq!(native.x86_64_code, expected);
+            assert_eq!(native.source_map, [(pc, 0)]);
+        }
+    }
+
+    #[test]
+    fn ordinary_native_prefix_is_preserved_before_pac_boundary() {
+        use crate::{
+            Lifter,
+            aarch64::Decoder,
+            block::{PointerAuthentication, PointerAuthenticationOperation},
+        };
+        let base = GuestAddress(0x4000);
+        let instruction = Decoder.lift(base, 0xd2800020).unwrap();
+        let pc = GuestAddress(base.0 + 4);
+        let ordinary = emit(std::slice::from_ref(&instruction), None, pc);
+        let request = PointerAuthentication {
+            operation: PointerAuthenticationOperation::SignIbSp,
+            instruction_pc: pc,
+            next_pc: GuestAddress(pc.0 + 4),
+        };
+        let native = emit(
+            &[instruction],
+            Some(&(pc, Terminator::PointerAuthentication(request))),
+            request.next_pc,
+        );
+        assert_eq!(
+            &native.x86_64_code[..ordinary.x86_64_code.len() - 16],
+            &ordinary.x86_64_code[..ordinary.x86_64_code.len() - 16]
+        );
+        assert_eq!(native.source_map.len(), 2);
+        assert_eq!(native.source_map[1].0, pc);
+        assert_eq!(
+            &native.x86_64_code[native.x86_64_code.len() - 6..],
+            &[0xba, 6, 0, 0, 0, 0xc3]
+        );
+    }
 
     #[test]
     fn trap_exit_uses_instruction_pc_and_only_native_return_scratch_registers() {

@@ -3,8 +3,10 @@
 //! Native entry is System V `BlockExit function(GuestState *state)`. The caller
 //! owns dispatch and fetch validation; emitted code never jumps to a guest PC.
 //! Guest memory uses the ordinary direct-RAM profile. GCS and guarded/BTI pages
-//! are disabled, and PAC, architectural exception entry and PSTATE.BTYPE are
-//! not modeled. SVC/BRK stop at an explicit synchronous-trap boundary.
+//! are disabled, and architectural exception entry and PSTATE.BTYPE are not
+//! modeled. Ordinary compilation declines PAC; explicit software PAC compilation
+//! requests a runtime helper without authenticating or changing its operand.
+//! SVC/BRK stop at an explicit synchronous-trap boundary.
 
 use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock,
@@ -14,6 +16,27 @@ use serde::Serialize;
 
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
+/// Same state/return layout, with an explicitly enabled runtime PAC boundary.
+/// This identifies software-profile helper requests, not Apple signature identity.
+pub const PAUTH_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockProfile {
+    #[default]
+    Ordinary,
+    AppleArm64eSoftwarePauthV1,
+}
+
+impl BlockProfile {
+    pub const fn abi(self) -> &'static str {
+        match self {
+            Self::Ordinary => BLOCK_ABI,
+            Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
+        }
+    }
+}
 /// Maximum input window; a terminator can consume a shorter prefix.
 pub const MAX_BLOCK_INSTRUCTIONS: usize = 256;
 
@@ -26,6 +49,7 @@ pub enum ExitKind {
     Call = 3,
     Return = 4,
     Trap = 5,
+    PointerAuthentication = 6,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -39,9 +63,54 @@ impl TryFrom<u64> for ExitKind {
             3 => Ok(Self::Call),
             4 => Ok(Self::Return),
             5 => Ok(Self::Trap),
+            6 => Ok(Self::PointerAuthentication),
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerAuthenticationOperation {
+    SignIbSp,
+    AuthenticateIbSp,
+    ReturnIbSp,
+}
+
+/// A helper request at an unchanged original instruction. The native block
+/// commits its ordinary prefix but performs no PAC operation or guest transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PointerAuthentication {
+    pub operation: PointerAuthenticationOperation,
+    pub instruction_pc: GuestAddress,
+    pub next_pc: GuestAddress,
+}
+
+/// June 2026 Arm PACIBSP/AUTIBSP HINT-space and RETAB fixed encodings.
+/// Other keys/modifiers, PAuth_LR, authenticated calls and XPAC remain unsupported.
+/// Runtime consumers revalidate this descriptor against immutable source bytes.
+pub fn decode_pointer_authentication(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<PointerAuthentication>, CompileError> {
+    if !pc.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "PAC instruction PC must be aligned to 4 bytes".into(),
+        ));
+    }
+    let operation = match word {
+        0xd503237f => PointerAuthenticationOperation::SignIbSp,
+        0xd50323ff => PointerAuthenticationOperation::AuthenticateIbSp,
+        0xd65f0fff => PointerAuthenticationOperation::ReturnIbSp,
+        _ => return Ok(None),
+    };
+    Ok(Some(PointerAuthentication {
+        operation,
+        instruction_pc: pc,
+        next_pc: GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
+            CompileError("PAC continuation PC overflows guest address range".into())
+        })?),
+    }))
 }
 
 /// Identifies the original instruction, without performing exception delivery.
@@ -112,6 +181,7 @@ pub(crate) enum Terminator {
     DirectCall(GuestAddress),
     Register { source: Register, kind: ExitKind },
     Trap(SynchronousTrap),
+    PointerAuthentication(PointerAuthentication),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -200,15 +270,25 @@ pub struct BlockAnalysis {
     pub static_successors: Vec<StaticSuccessor>,
     pub dynamic_edge: Option<DynamicEdge>,
     pub trap: Option<SynchronousTrap>,
+    pub pointer_authentication: Option<PointerAuthentication>,
 }
 /// Discover boundaries and edges from the exact parser used by both AOT and JIT.
 /// Static call continuations are candidates, not proof that the callee returns.
 /// Dynamic targets and trap resumption require external runtime evidence.
 pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, BlockAnalysisError> {
-    let parsed = parse(source, base)?;
+    analyze_with_profile(source, base, BlockProfile::Ordinary)
+}
+
+pub fn analyze_with_profile(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+) -> Result<BlockAnalysis, BlockAnalysisError> {
+    let parsed = parse(source, base, profile)?;
     let mut successors = Vec::new();
     let mut dynamic_edge = None;
     let mut trap = None;
+    let mut pointer_authentication = None;
     let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
     match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
         None => add(SuccessorKind::Fallthrough, parsed.next_pc),
@@ -248,6 +328,23 @@ pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, Block
             }
         }
         Some(Terminator::Trap(value)) => trap = Some(*value),
+        Some(Terminator::PointerAuthentication(value)) => {
+            pointer_authentication = Some(*value);
+            match value.operation {
+                PointerAuthenticationOperation::SignIbSp
+                | PointerAuthenticationOperation::AuthenticateIbSp => {
+                    add(SuccessorKind::Fallthrough, value.next_pc);
+                }
+                PointerAuthenticationOperation::ReturnIbSp => {
+                    // The source is signed LR. Only an enabled runtime service
+                    // may authenticate it; this is never a raw ordinary RET.
+                    dynamic_edge = Some(DynamicEdge {
+                        kind: DynamicEdgeKind::Return,
+                        register: 30,
+                    });
+                }
+            }
+        }
         Some(Terminator::Branch(_)) => {
             unreachable!("private parser only stores branch operations as terminators")
         }
@@ -258,10 +355,15 @@ pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, Block
         static_successors: successors,
         dynamic_edge,
         trap,
+        pointer_authentication,
     })
 }
 
-fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, BlockAnalysisError> {
+fn parse(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+) -> Result<ParsedBlock, BlockAnalysisError> {
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(BlockAnalysisError {
             pc: base,
@@ -286,6 +388,16 @@ fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, BlockAnalysis
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
+        if profile == BlockProfile::AppleArm64eSoftwarePauthV1
+            && let Some(decoded) =
+                decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
+        {
+            terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
+            break;
+        }
         if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {
             pc,
             detail: error.0,
@@ -320,7 +432,15 @@ fn parse(source: &[u8], base: GuestAddress) -> Result<ParsedBlock, BlockAnalysis
 /// Validate and identify the consumed prefix without generating native code.
 /// Uses the same semantic lift and transfer boundaries as [`compile`].
 pub fn source_bytes(source: &[u8], base: GuestAddress) -> Result<usize, CompileError> {
-    Ok(parse(source, base)
+    source_bytes_with_profile(source, base, BlockProfile::Ordinary)
+}
+
+pub fn source_bytes_with_profile(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+) -> Result<usize, CompileError> {
+    Ok(parse(source, base, profile)
         .map_err(|error| CompileError(error.detail))?
         .source_bytes)
 }
@@ -329,7 +449,15 @@ pub fn source_bytes(source: &[u8], base: GuestAddress) -> Result<usize, CompileE
 /// Unknown semantics before that boundary are rejected. Bytes following a
 /// terminator are unconsumed and do not participate in the returned source map.
 pub fn compile(source: &[u8], base: GuestAddress) -> Result<CompiledBlock, CompileError> {
-    let parsed = parse(source, base).map_err(|error| CompileError(error.detail))?;
+    compile_with_profile(source, base, BlockProfile::Ordinary)
+}
+
+pub fn compile_with_profile(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+) -> Result<CompiledBlock, CompileError> {
+    let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
     let native = crate::x86_64::block::emit(
         &parsed.instructions,
         parsed.terminal.as_ref(),
@@ -479,11 +607,112 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..6 {
+        for kind in 0..7 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(6), Err(()));
+        assert_eq!(ExitKind::try_from(7), Err(()));
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
+    }
+
+    #[test]
+    fn pointer_authentication_exact_encodings_and_address_guards() {
+        let pc = GuestAddress(0x12340000);
+        let encodings = [
+            (0xd503237f, PointerAuthenticationOperation::SignIbSp),
+            (0xd50323ff, PointerAuthenticationOperation::AuthenticateIbSp),
+            (0xd65f0fff, PointerAuthenticationOperation::ReturnIbSp),
+        ];
+        for (word, operation) in encodings {
+            assert_eq!(
+                decode_pointer_authentication(pc, word).unwrap(),
+                Some(PointerAuthentication {
+                    operation,
+                    instruction_pc: pc,
+                    next_pc: GuestAddress(pc.0 + 4),
+                })
+            );
+            for bit in 0..32 {
+                let changed = word ^ (1 << bit);
+                if !encodings.iter().any(|(word, _)| *word == changed) {
+                    assert_eq!(decode_pointer_authentication(pc, changed).unwrap(), None);
+                }
+            }
+            assert!(decode_pointer_authentication(GuestAddress(pc.0 + 1), word).is_err());
+            assert!(decode_pointer_authentication(GuestAddress(u64::MAX - 3), word).is_err());
+        }
+        // Different keys, zero modifiers and authenticated register branches
+        // must not be mistaken for this three-instruction software boundary.
+        for word in [
+            0xd503233f, 0xd50323bf, 0xd503235f, 0xd50323df, 0xd65f0bff, 0xd71f0800, 0xd73f0800,
+        ] {
+            assert_eq!(decode_pointer_authentication(pc, word).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn pointer_authentication_profile_consumes_only_native_prefix_and_boundary() {
+        let base = GuestAddress(0x4000);
+        let profile = BlockProfile::AppleArm64eSoftwarePauthV1;
+        for word in [0xd503237f, 0xd50323ff, 0xd65f0fff] {
+            let source = bytes(&[0xd2800020, word, 0]); // MOV X0,#1; helper; unknown data
+            let ordinary = analyze(&source, base).unwrap_err();
+            assert_eq!(ordinary.pc, GuestAddress(base.0 + 4));
+            assert!(compile(&source, base).is_err());
+            assert!(source_bytes(&source, base).is_err());
+            let analysis = analyze_with_profile(&source, base, profile).unwrap();
+            let compiled = compile_with_profile(&source, base, profile).unwrap();
+            assert_eq!(
+                source_bytes_with_profile(&source, base, profile).unwrap(),
+                8
+            );
+            assert_eq!(compiled.source_bytes, 8);
+            assert_eq!(analysis.source_bytes, 8);
+            assert_eq!(analysis.terminator_pc, Some(GuestAddress(base.0 + 4)));
+            assert!(analysis.trap.is_none());
+            let request = analysis.pointer_authentication.unwrap();
+            assert_eq!(request.instruction_pc, GuestAddress(base.0 + 4));
+            assert_eq!(request.next_pc, GuestAddress(base.0 + 8));
+            assert_eq!(
+                compiled
+                    .native
+                    .source_map
+                    .iter()
+                    .map(|(pc, _)| *pc)
+                    .collect::<Vec<_>>(),
+                [base, request.instruction_pc]
+            );
+            if word == 0xd65f0fff {
+                assert!(analysis.static_successors.is_empty());
+                assert_eq!(
+                    analysis.dynamic_edge,
+                    Some(DynamicEdge {
+                        kind: DynamicEdgeKind::Return,
+                        register: 30
+                    })
+                );
+            } else {
+                assert_eq!(
+                    analysis.static_successors,
+                    [StaticSuccessor {
+                        kind: SuccessorKind::Fallthrough,
+                        target: request.next_pc
+                    }]
+                );
+                assert!(analysis.dynamic_edge.is_none());
+            }
+            let failure = analyze_with_profile(&bytes(&[0, word]), base, profile).unwrap_err();
+            assert_eq!(failure.pc, base);
+        }
+        assert_eq!(BlockProfile::default().abi(), BLOCK_ABI);
+        assert_ne!(profile.abi(), BLOCK_ABI);
+        // Ordinary transfers and trap behavior are identical in either profile.
+        for word in [0xd65f03c0, 0x14000002, 0xd4001001] {
+            let source = bytes(&[word, 0]);
+            assert_eq!(
+                analyze(&source, base).unwrap(),
+                analyze_with_profile(&source, base, profile).unwrap()
+            );
+        }
     }
 
     #[test]

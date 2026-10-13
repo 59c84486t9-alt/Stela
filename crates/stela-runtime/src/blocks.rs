@@ -1,14 +1,15 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
-use crate::{Prepared, execution::platform, prepare_block};
+use crate::{Prepared, execution::platform, pauth, prepare_block_with_profile};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
     GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
     block::{
-        BLOCK_ABI, BlockAnalysis, BlockExit, DynamicEdge, ExitKind, MAX_BLOCK_INSTRUCTIONS,
-        SynchronousTrap, analyze, decode_trap,
+        BlockAnalysis, BlockExit, BlockProfile, DynamicEdge, ExitKind, MAX_BLOCK_INSTRUCTIONS,
+        PointerAuthentication, PointerAuthenticationOperation, SynchronousTrap,
+        analyze_with_profile, decode_pointer_authentication, decode_trap,
     },
 };
 use stela_core::sha256;
@@ -36,8 +37,36 @@ pub enum StopReason {
     UnmappedTarget,
     UnalignedTarget,
     TruncatedInstruction,
-    Unsupported { detail: String },
-    SynchronousTrap { trap: SynchronousTrap },
+    NoncanonicalInstructionTarget {
+        address: GuestAddress,
+    },
+    Unsupported {
+        detail: String,
+    },
+    SynchronousTrap {
+        trap: SynchronousTrap,
+    },
+    PointerAuthenticationRequired {
+        instruction: PointerAuthentication,
+    },
+    PointerAuthenticationUnsupported {
+        instruction: PointerAuthentication,
+        detail: String,
+    },
+    /// Classic PAuth poisoned a return target. No target instruction executed;
+    /// guest instruction-fetch exception delivery remains the caller's work.
+    PointerAuthenticationPoisonedReturn {
+        instruction: PointerAuthentication,
+        poisoned_target: GuestAddress,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct PointerAuthenticationEvent {
+    pub instruction: PointerAuthentication,
+    pub next_pc: GuestAddress,
+    /// Signing has no authentication result; AUT/RET report the actual check.
+    pub authenticated: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +77,8 @@ pub struct RunOutcome {
     pub disk_cache_hits: usize,
     pub memory_cache_hits: usize,
     pub last_exit: Option<(u64, u64)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pointer_authentication_events: Vec<PointerAuthenticationEvent>,
 }
 
 #[derive(Debug)]
@@ -71,6 +102,7 @@ struct LoadedBlock {
 #[derive(Debug)]
 pub struct BlockRuntime {
     address_space: u64,
+    profile: BlockProfile,
     cache_root: PathBuf,
     next_generation: u64,
     regions: BTreeMap<u64, CodeRegion>,
@@ -131,8 +163,19 @@ pub struct DiscoveryReport {
 
 impl BlockRuntime {
     pub fn new(address_space: u64, cache_root: PathBuf) -> Self {
+        Self::new_with_profile(address_space, cache_root, BlockProfile::Ordinary)
+    }
+
+    /// Explicit helper profile is part of every persistent translation identity.
+    /// Preparing AOT needs no keys; execution receives a separately bound context.
+    pub fn new_with_profile(
+        address_space: u64,
+        cache_root: PathBuf,
+        profile: BlockProfile,
+    ) -> Self {
         Self {
             address_space,
+            profile,
             cache_root,
             next_generation: 0,
             regions: BTreeMap::new(),
@@ -143,6 +186,10 @@ impl BlockRuntime {
 
     pub fn address_space(&self) -> u64 {
         self.address_space
+    }
+
+    pub fn profile(&self) -> BlockProfile {
+        self.profile
     }
 
     /// Own an immutable file/code snapshot. Partial trailing bytes are retained
@@ -206,8 +253,8 @@ impl BlockRuntime {
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
-        let analysis = analyze(window, pc)?;
-        let prepared = prepare_block(window, pc, &self.cache_root)?;
+        let analysis = analyze_with_profile(window, pc, self.profile)?;
+        let prepared = prepare_block_with_profile(window, pc, &self.cache_root, self.profile)?;
         ensure!(
             prepared.source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
@@ -215,7 +262,7 @@ impl BlockRuntime {
         let manifest = &prepared.prepared.manifest;
         ensure!(
             manifest.identity.guest_base == pc.0
-                && manifest.identity.abi == BLOCK_ABI
+                && manifest.identity.abi == self.profile.abi()
                 && manifest.identity.target_cpu == "x86_64-baseline"
                 && manifest.identity.schema_version == 1,
             "unsupported block translation identity"
@@ -283,7 +330,11 @@ impl BlockRuntime {
                     let offset = usize::try_from(raw - base)?;
                     let available =
                         ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
-                    match analyze(&region.source[offset..offset + available], pc) {
+                    match analyze_with_profile(
+                        &region.source[offset..offset + available],
+                        pc,
+                        self.profile,
+                    ) {
                         Ok(_) => None,
                         Err(error) => Some(DiscoveryProblem::Unsupported {
                             failure_pc: error.pc,
@@ -409,6 +460,41 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
+        unsafe { self.run_inner(state, stop_pc, block_budget, None) }
+    }
+
+    /// Execute the explicit software PAuth profile with a process-owned key domain.
+    /// Keys are borrowed, never emitted into artifacts or copied into guest RAM.
+    ///
+    /// # Safety
+    /// Same direct-RAM and trusted-code requirements as [`Self::run`]. The caller
+    /// must retain a coherent process key lifecycle; this does not provide Apple
+    /// hardware key identity, TLS, shared-cache signing or exception delivery.
+    pub unsafe fn run_with_pauth(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        context: &pauth::Context,
+    ) -> Result<RunOutcome> {
+        ensure!(
+            self.profile == BlockProfile::AppleArm64eSoftwarePauthV1,
+            "PAuth execution requires the explicit software PAuth block profile"
+        );
+        ensure!(
+            context.address_space() == self.address_space,
+            "PAuth context belongs to another guest address space"
+        );
+        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context)) }
+    }
+
+    unsafe fn run_inner(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        context: Option<&pauth::Context>,
+    ) -> Result<RunOutcome> {
         platform::ensure_supported()?;
         let mut outcome = RunOutcome {
             reason: StopReason::BudgetExhausted,
@@ -417,9 +503,25 @@ impl BlockRuntime {
             disk_cache_hits: 0,
             memory_cache_hits: 0,
             last_exit: None,
+            pointer_authentication_events: Vec::new(),
         };
         loop {
             let pc = state.pc;
+            // A zero budget requests no instruction fetch or execution.
+            if self.profile == BlockProfile::AppleArm64eSoftwarePauthV1 && block_budget == 0 {
+                break;
+            }
+            // Instruction TBI is disabled in the fixed VA47 software profile.
+            // This also prevents a resumed poisoned RETAB target from becoming
+            // executable through a registered snapshot or matching stop sentinel.
+            let extension = pc.0 >> 47;
+            if self.profile == BlockProfile::AppleArm64eSoftwarePauthV1
+                && extension != 0
+                && extension != u64::MAX >> 47
+            {
+                outcome.reason = StopReason::NoncanonicalInstructionTarget { address: pc };
+                break;
+            }
             if stop_pc == Some(pc) {
                 outcome.reason = StopReason::StopAddress;
                 break;
@@ -444,9 +546,10 @@ impl BlockRuntime {
             if !self.loaded.contains_key(&pc.0) {
                 let offset = usize::try_from(pc.0 - base)?;
                 let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
-                if let Err(error) = stela_compiler::block::source_bytes(
+                if let Err(error) = stela_compiler::block::source_bytes_with_profile(
                     &region.source[offset..offset + words * 4],
                     pc,
+                    self.profile,
                 ) {
                     outcome.reason = StopReason::Unsupported {
                         detail: error.to_string(),
@@ -476,9 +579,59 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let pointer_authentication = if exit_kind == ExitKind::PointerAuthentication {
+                ensure!(
+                    self.profile == BlockProfile::AppleArm64eSoftwarePauthV1,
+                    "ordinary block produced an unrequested PAuth helper exit"
+                );
+                Some(validate_pauth_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some(instruction) = pointer_authentication {
+                let Some(context) = context else {
+                    outcome.reason = StopReason::PointerAuthenticationRequired { instruction };
+                    break;
+                };
+                let result = complete_pauth(context, &instruction, &mut state.registers);
+                let (next, authenticated) = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        outcome.reason = StopReason::PointerAuthenticationUnsupported {
+                            instruction,
+                            detail: error.to_string(),
+                        };
+                        break;
+                    }
+                };
+                state.pc = next;
+                let poisoned_return = instruction.operation
+                    == PointerAuthenticationOperation::ReturnIbSp
+                    && authenticated == Some(false);
+                outcome
+                    .pointer_authentication_events
+                    .push(PointerAuthenticationEvent {
+                        instruction,
+                        next_pc: next,
+                        authenticated,
+                    });
+                if poisoned_return {
+                    outcome.reason = StopReason::PointerAuthenticationPoisonedReturn {
+                        instruction,
+                        poisoned_target: next,
+                    };
+                    break;
+                }
+            }
             if let Some(trap) = trap {
                 // The already executed instruction takes precedence over a
                 // coincident stop address or exhausted block budget. Do not
@@ -494,6 +647,67 @@ impl BlockRuntime {
     pub fn loaded_manifest(&self, pc: GuestAddress) -> Option<&crate::Manifest> {
         self.loaded.get(&pc.0).map(|block| &block.prepared.manifest)
     }
+}
+
+fn complete_pauth(
+    context: &pauth::Context,
+    instruction: &PointerAuthentication,
+    registers: &mut GuestState,
+) -> Result<(GuestAddress, Option<bool>)> {
+    match instruction.operation {
+        PointerAuthenticationOperation::SignIbSp => {
+            let signed = context.sign_ib(registers.x[30], registers.sp)?;
+            registers.x[30] = signed;
+            Ok((instruction.next_pc, None))
+        }
+        PointerAuthenticationOperation::AuthenticateIbSp => {
+            let result = context.authenticate_ib(registers.x[30], registers.sp)?;
+            registers.x[30] = result.pointer;
+            Ok((instruction.next_pc, Some(result.authenticated)))
+        }
+        PointerAuthenticationOperation::ReturnIbSp => {
+            let result = context.authenticate_ib(registers.x[30], registers.sp)?;
+            // RETAB authenticates a temporary target. The signed LR stays in X30.
+            Ok((GuestAddress(result.pointer), Some(result.authenticated)))
+        }
+    }
+}
+
+fn validate_pauth_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<PointerAuthentication> {
+    ensure!(
+        source_bytes >= 4 && source_bytes.is_multiple_of(4),
+        "invalid PAuth block extent"
+    );
+    let terminal = entry
+        .0
+        .checked_add(source_bytes as u64 - 4)
+        .context("PAuth terminal address overflow")?;
+    ensure!(
+        exit.0 == terminal,
+        "PAuth exit differs from consumed terminal instruction"
+    );
+    let offset = usize::try_from(
+        terminal
+            .checked_sub(region_base)
+            .context("PAuth precedes source region")?,
+    )?;
+    let end = offset
+        .checked_add(4)
+        .context("PAuth source extent overflow")?;
+    let word = u32::from_le_bytes(
+        source
+            .get(offset..end)
+            .context("PAuth exceeds immutable source")?
+            .try_into()?,
+    );
+    decode_pointer_authentication(exit, word)?
+        .context("PAuth exit does not identify a reviewed instruction")
 }
 
 fn validate_trap_exit(
@@ -566,6 +780,32 @@ fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: us
 #[cfg(test)]
 mod trap_validation_tests {
     use super::*;
+
+    #[test]
+    fn pauth_exit_requires_the_exact_consumed_immutable_helper_instruction() {
+        let base = GuestAddress(0x1000);
+        let terminal = GuestAddress(0x1004);
+        let source: Vec<_> = [0x91000400u32, 0xd503237f]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(
+            validate_pauth_exit(base, terminal, 8, base.0, &source).unwrap(),
+            decode_pointer_authentication(terminal, 0xd503237f)
+                .unwrap()
+                .unwrap()
+        );
+        for (returned, bytes, region) in [
+            (base, 8, base.0),
+            (terminal, 0, base.0),
+            (terminal, 6, base.0),
+            (GuestAddress(0x1008), 12, base.0),
+            (terminal, 8, 0x2000),
+        ] {
+            assert!(validate_pauth_exit(base, returned, bytes, region, &source).is_err());
+        }
+        assert!(validate_pauth_exit(base, base, 4, base.0, &source).is_err());
+    }
 
     #[test]
     fn trap_exit_requires_the_exact_consumed_immutable_terminator() {

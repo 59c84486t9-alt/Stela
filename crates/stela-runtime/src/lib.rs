@@ -5,6 +5,7 @@ pub mod darwin;
 pub mod dispatch;
 pub mod execution;
 pub mod memory;
+pub mod pauth;
 pub mod process;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -107,19 +108,35 @@ pub struct PreparedBlock {
 /// Decode the consumed prefix to identify it before looking up persistent AOT.
 /// A disk hit avoids code generation; source extent still requires decoding.
 pub fn prepare_block(source: &[u8], base: GuestAddress, root: &Path) -> Result<PreparedBlock> {
+    prepare_block_with_profile(
+        source,
+        base,
+        root,
+        stela_compiler::block::BlockProfile::Ordinary,
+    )
+}
+
+/// Profile-tagged shared AOT/JIT preparation. PAC keys stay outside artifacts;
+/// this profile prepares a checked helper boundary rather than authenticating.
+pub fn prepare_block_with_profile(
+    source: &[u8],
+    base: GuestAddress,
+    root: &Path,
+    profile: stela_compiler::block::BlockProfile,
+) -> Result<PreparedBlock> {
     use stela_compiler::block;
-    let source_bytes = block::source_bytes(source, base)?;
+    let source_bytes = block::source_bytes_with_profile(source, base, profile)?;
     let prefix = &source[..source_bytes];
     let identity = Identity {
         schema_version: 1,
         source_sha256: sha256(prefix),
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
-        abi: block::BLOCK_ABI.into(),
+        abi: profile.abi().into(),
         target_cpu: "x86_64-baseline".into(),
     };
     let prepared = prepare(identity, root, || {
-        block::compile(prefix, base).map(|b| b.native)
+        block::compile_with_profile(prefix, base, profile).map(|b| b.native)
     })?;
     Ok(PreparedBlock {
         source_bytes,
@@ -198,6 +215,67 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect()
+    }
+    #[test]
+    fn pac_profile_cache_identity_is_explicit_and_reuses_only_consumed_prefix() -> Result<()> {
+        use stela_compiler::block::BlockProfile;
+        let root = tempfile::tempdir()?;
+        let base = GuestAddress(0x1000);
+        let profile = BlockProfile::AppleArm64eSoftwarePauthV1;
+        let ordinary_source = source(42);
+        let ordinary = prepare_block(&ordinary_source, base, root.path())?;
+        let opted_in = prepare_block_with_profile(&ordinary_source, base, root.path(), profile)?;
+        assert_ne!(ordinary.prepared.key, opted_in.prepared.key);
+        assert_eq!(
+            ordinary.prepared.manifest.identity.abi,
+            BlockProfile::Ordinary.abi()
+        );
+        assert_eq!(opted_in.prepared.manifest.identity.abi, profile.abi());
+        assert_eq!(
+            ordinary.prepared.manifest.native_sha256,
+            opted_in.prepared.manifest.native_sha256
+        );
+        let source: Vec<u8> = [0xd2800020_u32, 0xd503237f, 0]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        assert!(prepare_block(&source, base, root.path()).is_err());
+        let first = prepare_block_with_profile(&source, base, root.path(), profile)?;
+        assert_eq!(first.source_bytes, 8);
+        assert!(!first.prepared.cache_hit);
+        let mut changed_unconsumed = source.clone();
+        changed_unconsumed[8..].copy_from_slice(&0xffffffff_u32.to_le_bytes());
+        let reused = prepare_block_with_profile(&changed_unconsumed, base, root.path(), profile)?;
+        assert!(reused.prepared.cache_hit);
+        assert_eq!(first.prepared.key, reused.prepared.key);
+        assert_ne!(
+            first.prepared.key,
+            prepare_block_with_profile(&source, GuestAddress(0x2000), root.path(), profile)?
+                .prepared
+                .key
+        );
+        let mut changed_helper = source.clone();
+        changed_helper[4..8].copy_from_slice(&0xd50323ff_u32.to_le_bytes());
+        assert_ne!(
+            first.prepared.key,
+            prepare_block_with_profile(&changed_helper, base, root.path(), profile)?
+                .prepared
+                .key
+        );
+        // Preparation never maps or invokes the artifact; an intact checksum
+        // cannot make metadata from another profile acceptable under this key.
+        let mut manifest = first.prepared.manifest;
+        manifest.identity.abi = BlockProfile::Ordinary.abi().into();
+        write_json(&first.prepared.directory.join("manifest.json"), &manifest)?;
+        let hash = sha256(&std::fs::read(
+            first.prepared.directory.join("manifest.json"),
+        )?);
+        write_json(
+            &first.prepared.directory.join("manifest.sha256.json"),
+            &hash,
+        )?;
+        assert!(prepare_block_with_profile(&source, base, root.path(), profile).is_err());
+        Ok(())
     }
     #[test]
     fn validly_checksummed_legacy_state_abis_are_rejected_without_loading_code() -> Result<()> {
