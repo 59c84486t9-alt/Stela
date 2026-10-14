@@ -5,6 +5,7 @@ pub mod fused;
 pub mod integer;
 pub mod minmax;
 pub mod precision;
+pub mod rounding;
 
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,

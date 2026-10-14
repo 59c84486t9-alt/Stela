@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -2707,7 +2707,7 @@ def execute_numerical_batches(batches, oracle=None):
         for record in oracle['records']:
             path = invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
             counts[path] += 1
-            if path == 'helper' and batches[0].get('cohort') == COMPARISON_MINMAX_FOCUS:
+            if path == 'helper' and batches[0].get('cohort') in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS):
                 helper_cases.append(record['case'])
             if path == 'inline' and record.get('control_policy_success'):
                 counts['inline_policy'] += 1
@@ -3075,7 +3075,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -3351,7 +3351,10 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
                 or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
             raise AssertionError(f'Full-frame original instruction/EL0/control evidence changed: {index}')
         untouched = State.from_buffer_copy(original)
-        if focus == COMPARISON_MINMAX_FOCUS:
+        if focus == ROUND_INTEGRAL_FOCUS:
+            validate_round_integral_original_effects(initial, original, operation)
+            untouched.v[operation['d']][:] = initial.v[operation['d']]
+        elif focus == COMPARISON_MINMAX_FOCUS:
             validate_comparison_minmax_original_effects(initial, original, operation)
             if operation['output_kind'] == 'flags':
                 untouched.nzcv = initial.nzcv
@@ -4501,15 +4504,251 @@ def vector_numerical_helpers(records):
             and State.from_buffer_copy(record['initial']).fpcr == 0]
 
 
+ROUND_INTEGRAL_FOCUS = 'round_integral_numerical'
+ROUND_INTEGRAL_ORACLE = ROOT / '.stela/research/round-integral/oracle/receipt.json'
+ROUND_INTEGRAL_SCALAR_BASES = {'frintn': 0x1e244000, 'frintp': 0x1e24c000,
+    'frintm': 0x1e254000, 'frintz': 0x1e25c000, 'frinta': 0x1e264000,
+    'frintx': 0x1e274000, 'frinti': 0x1e27c000, 'frint32z': 0x1e284000,
+    'frint32x': 0x1e28c000, 'frint64z': 0x1e294000, 'frint64x': 0x1e29c000}
+ROUND_INTEGRAL_VECTOR_BASES = {'frintn': 0x0e218800, 'frintp': 0x0ea18800,
+    'frintm': 0x0e219800, 'frintz': 0x0ea19800, 'frinta': 0x2e218800,
+    'frintx': 0x2e219800, 'frinti': 0x2ea19800, 'frint32z': 0x0e21e800,
+    'frint32x': 0x2e21e800, 'frint64z': 0x0e21f800, 'frint64x': 0x2e21f800}
+ROUND_INTEGRAL_ROLES = ((0, 1), (1, 1), (31, 31), (31, 30))
+ROUND_INTEGRAL_CONTROLS = (NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_FZ, NUMERICAL_FZ16,
+    NUMERICAL_DN, CONVERSION_AHP, NUMERICAL_NEP, NUMERICAL_AH | NUMERICAL_FIZ,
+    NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_DN,
+    NUMERICAL_FIZ | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_FIZ | NUMERICAL_FZ)
+ROUND_INTEGRAL_CASES = 27281
+ROUND_INTEGRAL_ROUND_SHIFT = 22
+ROUND_INTEGRAL_HALF_VECTOR_OFFSET = 0x00580000
+
+
+def round_integral_operation(name, lane, width, scalar, d=0, n=1):
+    bounded = int(name[5:7]) if name.startswith(('frint32', 'frint64')) else None
+    if (name not in ROUND_INTEGRAL_SCALAR_BASES or lane not in (2, 4, 8)
+            or bounded and lane == 2 or any(not 0 <= register < 32 for register in (d, n))
+            or scalar and width != lane or not scalar and (lane, width) not in VECTOR_NUMERICAL_SHAPES):
+        raise ValueError('Unallocated integral rounding operation')
+    if scalar:
+        word = ROUND_INTEGRAL_SCALAR_BASES[name] | {2: 3, 4: 0, 8: 1}[lane] << 22
+        canonical = name.upper() + "_" + {2: "H", 4: "S", 8: "D"}[lane] + "_floatdp1"
+    else:
+        word = ROUND_INTEGRAL_VECTOR_BASES[name] | (ROUND_INTEGRAL_HALF_VECTOR_OFFSET if lane == 2 else int(lane == 8) << 22)
+        word |= int(width == 16) << 30
+        canonical = f'{name.upper()}_asimdmisc{"fp16" if lane == 2 else ""}_R'
+    return {'name': name, 'lane': lane, 'bytes': width, 'scalar': scalar, 'd': d, 'n': n,
+        'word': word | n << 5 | d, 'canonical_id': canonical, 'bounded_bits': bounded,
+        'source_lane_count': 1 if scalar else width // lane, 'output_kind': 'vector',
+        'merge': 'old_destination_if_nep' if scalar else 'none', 'cohort_family': 'round_integral'}
+
+
+def round_integral_functions():
+    functions = []
+    for name in ROUND_INTEGRAL_SCALAR_BASES:
+        bounded = name.startswith(('frint32', 'frint64'))
+        shapes = [(lane, lane, True) for lane in ((4, 8) if bounded else (2, 4, 8))]
+        shapes += [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES if not bounded or lane != 2]
+        for lane, width, scalar in shapes:
+            functions.extend(round_integral_operation(name, lane, width, scalar, d, n) for d, n in ROUND_INTEGRAL_ROLES)
+    return functions
+
+
+def round_integral_shape(operation):
+    return tuple(operation[key] for key in ('name', 'lane', 'bytes', 'scalar'))
+
+
+def round_integral_values(lane):
+    fraction, bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[lane]
+    sign, infinity = 1 << (lane * 8 - 1), (bias * 2 + 1) << fraction
+    positive = [('zero', 0)]
+    dyadics = (('quarter', 1, -2), ('half', 1, -1), ('threequarter', 3, -2),
+        ('one', 1, 0), ('onehalf', 3, -1), ('two', 2, 0), ('twohalf', 5, -1),
+        ('threehalf', 7, -1), ('fourhalf', 9, -1))
+    positive += [(label, conversion_exact_positive_bits(lane, number, exponent)) for label, number, exponent in dyadics]
+    for label, number in (('half', 1), ('onehalf', 3), ('twohalf', 5)):
+        bits = conversion_exact_positive_bits(lane, number, -1)
+        positive.extend(((label + '_below', bits - 1), (label + '_above', bits + 1)))
+    last_fraction = conversion_exact_positive_bits(lane, (1 << (fraction + 1)) - 1, -1)
+    integral = conversion_exact_positive_bits(lane, 1, fraction)
+    positive += [('last_fraction', last_fraction), ('integral_threshold', integral), ('integral_next', integral + 1),
+        ('minsubnormal', 1), ('maxsubnormal', (1 << fraction) - 1), ('minnormal', 1 << fraction),
+        ('maxfinite', infinity - 1), ('infinity', infinity), ('qnan', infinity | 1 << (fraction - 1) | 3),
+        ('snan', infinity | 5), ('qnan_payload', infinity | 1 << (fraction - 1) | 7)]
+    return [(label + suffix, bits | signed) for label, bits in positive for suffix, signed in (('_positive', 0), ('_negative', sign))]
+
+
+def round_integral_bound_values(operation):
+    if not operation['bounded_bits']:
+        return []
+    lane, bound = operation['lane'], operation['bounded_bits'] - 1
+    sign = 1 << (lane * 8 - 1)
+    limit = conversion_exact_positive_bits(lane, 1, bound)
+    values = [(label + suffix, bits | signed) for label, bits in
+        (('bound_below', limit - 1), ('bound_exact', limit), ('bound_above', limit + 1))
+        for suffix, signed in (('_positive', 0), ('_negative', sign))]
+    for label, number, exponent in (('bound_maximum', (1 << bound) - 1, 0),
+            ('bound_half_below', (1 << (bound + 1)) - 1, -1),
+            ('bound_half_above', (1 << (bound + 1)) + 1, -1)):
+        bits = conversion_exact_positive_bits(lane, number, exponent)
+        if bits is not None:
+            values.extend((label + suffix, bits | signed) for suffix, signed in (('_positive', 0), ('_negative', sign)))
+    return values
+
+
+def round_integral_state(operation, index, values, control=0, sticky=0):
+    initial = State()
+    rng = random.Random(0x524f554e44494e54 + index)
+    initial.x[:] = [rng.getrandbits(64) for _ in range(31)]
+    initial.sp, initial.nzcv = 0x48010000 + index % 16 * 16, (index % 16) << 28
+    seed_extended_state(initial, index * 31 + 29)
+    initial.reserved, initial.fpcr, initial.fpsr = VECTOR_NUMERICAL_CANARY, control, sticky
+    lane, count = operation['lane'], operation['source_lane_count']
+    if len(values) != count:
+        raise ValueError('Incorrect integral rounding source lane count')
+    bits = lane * 8
+    poison = dict(round_integral_values(lane))['snan_negative']
+    packed = sum(poison << (position * bits) for position in range(16 // lane))
+    for position, value in enumerate(values):
+        if not 0 <= value < 1 << bits:
+            raise ValueError('Invalid integral rounding source lane')
+        mask = ((1 << bits) - 1) << (position * bits)
+        packed = packed & ~mask | value << (position * bits)
+    initial.v[operation['n']][:] = [packed & MASK, packed >> 64]
+    return initial
+
+
+def round_integral_corpus():
+    functions, records, enable_forms = round_integral_functions(), [], set()
+    def append(function, label, values, control=0, sticky=0):
+        initial = round_integral_state(functions[function], len(records), values, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function in range(0, len(functions), len(ROUND_INTEGRAL_ROLES)):
+        op = functions[function]
+        values, count = round_integral_values(op['lane']), op['source_lane_count']
+        catalog = dict(values)
+        bounds = round_integral_bound_values(op)
+        for label, value in values + bounds:
+            append(function, 'value_' + label, [value] * count)
+        ties = [(label, value) for label, value in values if label.split('_')[0] in ('half', 'onehalf', 'twohalf')]
+        # Fourteen signed values: exact ties and immediate neighbors of half/onehalf.
+        ties = [(label, value) for label, value in ties if not label.startswith(('twohalf_below', 'twohalf_above'))]
+        for control in (mode << ROUND_INTEGRAL_ROUND_SHIFT for mode in range(4)):
+            for label, value in ties + bounds:
+                append(function, 'round_' + label, [value] * count, control)
+        controlled = [(label, catalog[label]) for stem in ('qnan', 'snan', 'minsubnormal', 'maxsubnormal', 'half')
+            for label in (stem + '_positive', stem + '_negative')]
+        for control in ROUND_INTEGRAL_CONTROLS:
+            for label, value in controlled:
+                append(function, 'control_' + label, [value] * count, control)
+        for ah in (NUMERICAL_AH, NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_FIZ):
+            for mode in range(4):
+                for stem in ('half', 'onehalf', 'minsubnormal'):
+                    for suffix in ('_positive', '_negative'):
+                        label = stem + suffix
+                        append(function, 'ah_round_' + label, [catalog[label]] * count, ah | mode << ROUND_INTEGRAL_ROUND_SHIFT)
+        if op['canonical_id'] not in enable_forms:
+            enable_forms.add(op['canonical_id'])
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_enable_readback_only', [catalog['half_positive']] * count, control)
+        for role in range(1, len(ROUND_INTEGRAL_ROLES)):
+            for label, control in (('snan_positive', 0), ('half_negative', NUMERICAL_NEP),
+                    ('minsubnormal_negative', NUMERICAL_AH | NUMERICAL_FIZ), ('qnan_negative', NUMERICAL_DN)):
+                append(function + role, 'alias_' + label, [catalog[label]] * count, control)
+        if not op['scalar']:
+            patterns = ('snan_positive', 'qnan_negative', 'minsubnormal_negative', 'infinity_positive')
+            for control in (0, NUMERICAL_AH, NUMERICAL_FZ16 if op['lane'] == 2 else NUMERICAL_FZ):
+                for pattern, label in enumerate(patterns):
+                    for position in range(count):
+                        active = [catalog['half_positive']] * count
+                        active[position] = catalog[label]
+                        append(function, f'mixed_{pattern}_{position}', active, control)
+        for sticky in (1 << 4, 1, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+            append(function, 'sticky_status', [catalog['half_negative']] * count, sticky=sticky)
+    if len(records) != ROUND_INTEGRAL_CASES:
+        raise AssertionError(f'Integral rounding corpus exceeded approved scope: {len(records)}')
+    return functions, records
+
+
+def prepare_round_integral_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *round_integral_corpus(), ROUND_INTEGRAL_FOCUS)
+
+
+def load_round_integral_oracle(path=ROUND_INTEGRAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, round_integral_functions(), ROUND_INTEGRAL_CASES, ROUND_INTEGRAL_FOCUS)
+
+
+def validate_round_integral_original_effects(initial, original, operation):
+    if operation['scalar']:
+        lane, destination = operation['lane'], operation['d']
+        merge = struct.pack('<2Q', *initial.v[destination]) if initial.fpcr & NUMERICAL_NEP else bytes(16)
+        if struct.pack('<2Q', *original.v[destination])[lane:] != merge[lane:]:
+            raise AssertionError('Integral rounding scalar inactive bits violated old-Vd NEP merge')
+    elif operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
+        raise AssertionError('Integral rounding vector64 did not clear upper64')
+
+
+def round_integral_runtime_cases(records):
+    selected = {}
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        form, shape = op['canonical_id'], round_integral_shape(op)
+        if record['unsupported']:
+            selected.setdefault(('enable', form if initial.fpcr == NUMERICAL_TRAP_ENABLE_MASK else initial.fpcr), record)
+        elif label == 'value_half_negative':
+            selected.setdefault(('shape', shape), record)
+        elif label == 'round_half_negative':
+            selected.setdefault(('rounding', form, initial.fpcr), record)
+        elif label == 'round_bound_half_below_negative':
+            selected.setdefault(('post_round_range', op['name'], initial.fpcr), record)
+        elif label == 'ah_round_half_negative' and op['name'] in ('frinti', 'frintx', 'frint32x', 'frint64x'):
+            selected.setdefault(('ah_rounding', op['name'], initial.fpcr), record)
+        elif label in ('value_bound_exact_positive', 'value_bound_exact_negative'):
+            selected.setdefault(('sentinel_range', op['name'], label), record)
+        elif label == 'control_snan_positive':
+            selected.setdefault(('control', op['name'], initial.fpcr), record)
+        elif label == 'control_minsubnormal_negative' and initial.fpcr in (NUMERICAL_AH, NUMERICAL_AH | NUMERICAL_FIZ, NUMERICAL_FZ16, NUMERICAL_FZ):
+            selected.setdefault(('denormal', op['lane'], op['name'], initial.fpcr), record)
+        elif label == 'control_half_negative' and initial.fpcr == NUMERICAL_NEP and op['scalar']:
+            selected.setdefault(('merge', form), record)
+        elif label == 'sticky_status':
+            selected.setdefault(('sticky', op['name']), record)
+        elif label.startswith('alias_'):
+            selected.setdefault(('alias', op['name'], op['d'], op['n']), record)
+        elif label == 'mixed_3_0' and op['bounded_bits'] and initial.fpcr == 0:
+            selected.setdefault(('mixed_invalid_inexact', shape), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def round_integral_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (case_ids is not None and record['case'] not in case_ids or initial.fpcr or initial.fpsr
+                or op['d'] != 0 or op['n'] != 1):
+            continue
+        selected.setdefault((op['bounded_bits'], op['lane'], op['scalar'], op['bytes']), record)
+    return list(selected.values())
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
     VECTOR_NUMERICAL_FOCUS: {'loader': load_vector_numerical_oracle, 'runtime_cases': vector_numerical_runtime_cases,
-        'helpers': vector_numerical_helpers, 'forms': 8},
+        'helpers': vector_numerical_helpers, 'forms': 8,
+        'limits': 'Enabled nonstreaming H/S/D vector arithmetic only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'},
     FUSED_NUMERICAL_FOCUS: {'loader': load_fused_numerical_oracle, 'runtime_cases': fused_numerical_runtime_cases,
-        'helpers': fused_numerical_helpers, 'forms': 24},
+        'helpers': fused_numerical_helpers, 'forms': 24,
+        'limits': 'Enabled nonstreaming scalar/vector/indexed H/S/D fused arithmetic only. Full-frame original observations compare under compatible controls; trap-delivery, disabled-feature, Apple hardware, complete application, OS and performance claims remain outside this cohort.'},
     CONVERSION_NUMERICAL_FOCUS: {'loader': load_conversion_numerical_oracle, 'runtime_cases': conversion_numerical_runtime_cases,
-        'helpers': conversion_numerical_helpers, 'forms': 163},
+        'helpers': conversion_numerical_helpers, 'forms': 163,
+        'limits': 'Enabled nonstreaming classic precision/integer/fixed-point conversion and JSCVT profile only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'},
     COMPARISON_MINMAX_FOCUS: {'loader': load_comparison_minmax_oracle, 'runtime_cases': comparison_minmax_runtime_cases,
-        'helpers': comparison_minmax_helpers, 'forms': 102},
+        'helpers': comparison_minmax_helpers, 'forms': 102,
+        'limits': 'Enabled nonstreaming scalar/AdvSIMD comparison and minmax only. Direct full-frame original equality excludes failed-FCCMP retained-enable control-policy successes. No enabled trap delivery, disabled FP access, Apple hardware, process, OS or performance claim.'},
+    ROUND_INTEGRAL_FOCUS: {'loader': load_round_integral_oracle, 'runtime_cases': round_integral_runtime_cases,
+        'helpers': round_integral_helpers, 'forms': 47,
+        'limits': 'Enabled nonstreaming scalar/AdvSIMD H/S/D integral rounding, including bounded 32/64-bit rounding, only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, disabled FP access, Apple hardware, application, OS or performance claim.'},
 }
 
 
@@ -4523,6 +4762,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
     fused = focus == FUSED_NUMERICAL_FOCUS
     conversion = focus == CONVERSION_NUMERICAL_FOCUS
     comparison_minmax = focus == COMPARISON_MINMAX_FOCUS
+    rounding = focus == ROUND_INTEGRAL_FOCUS
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
     source = b''.join(struct.pack('<II', operation['word'], numerical_return_word(operation)) for operation in oracle['functions'])
     source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
@@ -4596,9 +4836,9 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
             if record.get('control_policy_success'):
                 counts['control_policy_success_checks'] += 1
 
-    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if comparison_minmax
+    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if comparison_minmax or rounding
                else family['helpers'](oracle['records']))
-    if not comparison_minmax and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
+    if not comparison_minmax and not rounding and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
         raise AssertionError('Numerical helper boundary fixture omits an arrangement')
     for record in helpers:
         initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
@@ -4627,19 +4867,25 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         check_original(loop, loop_initial, loop_expected)
         counts['memory_cache_loop_checks'] += 1
 
-        for control in ((NUMERICAL_NEP, 0) if conversion or comparison_minmax else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
-            reference = record if comparison_minmax else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
+        for control in ((NUMERICAL_NEP, 0) if conversion or comparison_minmax or rounding else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
+            reference = record if comparison_minmax or rounding else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
                 and candidate['label'] == record['label'] and State.from_buffer_copy(candidate['initial']).fpcr == control)
             chain_initial = State.from_buffer_copy(reference['initial'])
-            control_register, status_register, clear_register = (20, 21, 22) if conversion or comparison_minmax else (0, 3, 4)
+            control_register, status_register, clear_register = (20, 21, 22) if conversion or comparison_minmax or rounding else (0, 3, 4)
             chain_initial.x[control_register] = control
             chain_initial.fpcr, chain_initial.fpsr = 0, FP_REGISTER_MASKS['fpsr']
             chain_expected = State.from_buffer_copy(reference['expected'])
-            if conversion or comparison_minmax:
+            if conversion or comparison_minmax or rounding:
                 chain_expected.x[control_register] = control
-                if comparison_minmax:
+                if comparison_minmax or rounding:
                     chain_expected.fpcr = control
-                    if operation['output_kind'] == 'vector' and operation['scalar'] and operation['merge'] != 'none' and control & NUMERICAL_NEP:
+                    if rounding and operation['scalar'] and control & NUMERICAL_NEP:
+                        bits = operation['lane'] * 8
+                        active_mask = (1 << bits) - 1
+                        merged = chain_initial.v[operation['d']][0] | chain_initial.v[operation['d']][1] << 64
+                        result = chain_expected.v[operation['d']][0] & active_mask | merged & ~active_mask
+                        chain_expected.v[operation['d']][:] = [result & MASK, result >> 64]
+                    elif operation['output_kind'] == 'vector' and operation['scalar'] and operation['merge'] != 'none' and control & NUMERICAL_NEP:
                         bits = operation['lane'] * 8
                         active_mask = (1 << bits) - 1
                         merge_register = operation['m'] if operation['merge'] == 'right_if_nep' else operation['n']
@@ -4680,7 +4926,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 'fpcr': NUMERICAL_INVALID_ENABLE, 'enabled_exceptions': 1}:
             raise AssertionError('Interior fused refusal did not preserve exact pending instruction and enable')
         counts['interior_fused_precise_refusal_checks'] += 1
-    transcript_name = f'{focus}-{target_id}' if fused or conversion or comparison_minmax else focus
+    transcript_name = f'{focus}-{target_id}' if fused or conversion or comparison_minmax or rounding else focus
     for name in ('budget_helper_resume_checks', 'disk_cache_checks', 'memory_cache_loop_checks', 'control_status_chain_checks', 'control_policy_success_checks'):
         counts.setdefault(name, 0)
     snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
@@ -4704,7 +4950,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -4749,7 +4995,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
                     raise AssertionError(f'FMA3 opcode/feature guard failed: {target_id} {operation} {fused_mnemonics}')
             raw = bounded_cases(batches)
             raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested trap enables remain intact and their RAZ/WI observations receive no successful native equality credit.'
-            if focus == COMPARISON_MINMAX_FOCUS:
+            if focus in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS):
                 oracle['raw_helper_case_ids'] = set(raw['raw_helper_case_ids'])
             runtime = full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 focus, cpu_target, target_id)
@@ -4782,13 +5028,10 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
         'control_readbacks': oracle['control_readbacks'], 'input_derivation': oracle['input_derivation'],
         'profiles': profiles, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
         'verification_wall_seconds': time.monotonic() - started,
-        'limits': 'Enabled nonstreaming scalar/vector/indexed H/S/D fused arithmetic only. Full-frame original observations compare under compatible controls; trap-delivery, disabled-feature, Apple hardware, complete application, OS and performance claims remain outside this cohort.'}
+        'limits': family['limits']}
     if focus == COMPARISON_MINMAX_FOCUS:
         report['runtime_control_policy_success_checks'] = sums('rust_runtime', 'control_policy_success_checks')
         report['raw_inline_control_policy_comparisons'] = sums('raw_native', 'raw_inline_control_policy_comparisons')
-        report['limits'] = 'Enabled nonstreaming scalar/AdvSIMD comparison and minmax only. Direct full-frame original equality excludes failed-FCCMP retained-enable control-policy successes. No enabled trap delivery, disabled FP access, Apple hardware, process, OS or performance claim.'
-    elif not fused:
-        report['limits'] = 'Enabled nonstreaming classic precision/integer/fixed-point conversion and JSCVT profile only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'
     write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     print(json.dumps(report, indent=2))
 
@@ -4799,7 +5042,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -5020,7 +5263,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -5144,7 +5387,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -5155,6 +5398,8 @@ def main():
                         help='Pinned full-frame original precision/integer conversion receipt')
     parser.add_argument('--comparison-minmax-oracle', type=Path, default=COMPARISON_MINMAX_ORACLE,
                         help='Pinned full-frame original comparison/minmax receipt')
+    parser.add_argument('--round-integral-oracle', type=Path, default=ROUND_INTEGRAL_ORACLE,
+                        help='Pinned full-frame original integral rounding receipt')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -5164,6 +5409,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == ROUND_INTEGRAL_FOCUS:
+        run_full_frame_numerical_cohort(cli, arguments.round_integral_oracle, ROUND_INTEGRAL_FOCUS)
         return
     if arguments.focus == COMPARISON_MINMAX_FOCUS:
         run_full_frame_numerical_cohort(cli, arguments.comparison_minmax_oracle, COMPARISON_MINMAX_FOCUS)

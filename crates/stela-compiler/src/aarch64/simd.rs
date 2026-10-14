@@ -14,6 +14,7 @@ pub mod minmax;
 pub mod products;
 pub mod rearrange;
 pub mod reductions;
+pub mod rounding;
 pub mod saturating;
 pub mod shifts;
 

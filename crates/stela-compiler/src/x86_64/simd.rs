@@ -18,6 +18,7 @@ mod precision;
 mod products;
 mod rearrange;
 mod reductions;
+mod rounding;
 mod saturating;
 mod shifts;
 
@@ -162,7 +163,9 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
             }
             Operand::JavaScript { .. } => false,
         },
-        FloatingPointOperation::Comparison(_) | FloatingPointOperation::MinMax(_) => false,
+        FloatingPointOperation::Comparison(_)
+        | FloatingPointOperation::MinMax(_)
+        | FloatingPointOperation::Rounding(_) => false,
     }
 }
 
@@ -183,6 +186,9 @@ pub(super) fn emit_numerical(
             comparison::emit(code, operand, pc)
         }
         crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
+        crate::aarch64::FloatingPointOperation::Rounding(operand) => {
+            rounding::emit(code, operand, pc, target)
+        }
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
             match operand {

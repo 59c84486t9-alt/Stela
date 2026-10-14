@@ -47,6 +47,7 @@
     "crates/stela-compiler/src/aarch64/floating.rs",
     "crates/stela-compiler/src/aarch64/floating/comparison.rs",
     "crates/stela-compiler/src/aarch64/floating/minmax.rs",
+    "crates/stela-compiler/src/aarch64/floating/rounding.rs",
     "crates/stela-compiler/src/aarch64/floating/fused.rs",
     "crates/stela-compiler/src/aarch64/floating/precision.rs",
     "crates/stela-compiler/src/aarch64/floating/integer.rs",
@@ -70,9 +71,11 @@
     "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
     "crates/stela-compiler/src/aarch64/simd/comparison.rs",
     "crates/stela-compiler/src/aarch64/simd/minmax.rs",
+    "crates/stela-compiler/src/aarch64/simd/rounding.rs",
     "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
     "crates/stela-compiler/src/x86_64/simd/comparison.rs",
     "crates/stela-compiler/src/x86_64/simd/minmax.rs",
+    "crates/stela-compiler/src/x86_64/simd/rounding.rs",
     "crates/stela-compiler/src/aarch64/simd/fused.rs",
     "crates/stela-compiler/src/aarch64/simd/conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/fused.rs",
@@ -97,7 +100,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v8",
+  "registry_version": "apple-silicon-block-forms-v9",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -196,9 +199,7 @@
         "runtime_disk_cache_checks",
         "runtime_memory_cache_loop_checks",
         "runtime_control_status_chain_checks",
-        "native_mxcsr_preservation_comparisons",
-        "raw_inline_control_policy_comparisons",
-        "runtime_control_policy_success_checks"
+        "native_mxcsr_preservation_comparisons"
       ],
       "required_measurements": {
         "original_full_frame_captures": 21220,
@@ -330,6 +331,52 @@
         "native_mxcsr_preservation_comparisons": 11648
       },
       "review": "Both target profiles retain 39,724 raw comparisons each: 7,888 direct original inline equalities, 600 separate conditional-false control-policy successes, 29,880 unchanged helper exits and 1,356 precise refusals. Each profile completes 1,089 Rust state comparisons including 103 separately counted policy successes, plus 114 refusal checks. Policy successes do not receive original-equality credit; original full-frame captures, unchanged boundaries and actual runtime completion remain separate evidence."
+    },
+    "round_integral_numerical": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-round_integral_numerical-differential-report.json",
+      "kind": "simd_round_integral_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/floating/comparison.rs",
+        "crates/stela-runtime/src/floating/minmax.rs",
+        "crates/stela-runtime/src/floating/rounding.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 47,
+        "original_full_frame_captures": 27281,
+        "raw_native_state_and_exit_comparisons": 54562,
+        "raw_original_complete_state_comparisons": 27584,
+        "raw_inline_complete_state_comparisons": 27584,
+        "raw_helper_unchanged_state_comparisons": 26320,
+        "raw_unsupported_unchanged_state_comparisons": 658,
+        "runtime_complete_state_comparisons": 1538,
+        "runtime_typed_unsupported_state_checks": 106,
+        "runtime_budget_resume_checks": 36,
+        "runtime_disk_cache_checks": 36,
+        "runtime_memory_cache_loop_checks": 36,
+        "runtime_control_status_chain_checks": 72,
+        "native_mxcsr_preservation_comparisons": 6368
+      },
+      "review": "Both target profiles retain 27,281 raw comparisons each: 13,792 direct original inline equalities, 13,160 unchanged helper exits and 329 precise refusals. Each profile completes 769 Rust state comparisons and 53 refusal checks. Actual emitted binaries receive 304 feature-containment checks per profile (608 total); baseline excludes ROUND, checked recipes require SSE4.1, and scalar H retains the integer recipe. Original full-frame captures, unchanged boundaries and successful runtime completion remain separate evidence."
     }
   },
   "forms": [
@@ -21906,6 +21953,3080 @@
       ],
       "review": "Exact June canonical fields and allocated arrangements are reviewed. Full-frame original equality is distinct from unchanged helper/refusal exits and conditional-false control-policy success; Rust completion, complete status, caller MXCSR, cache and budget evidence remain separately bound.",
       "scope": "All allocated scalar/vector binary min/max arrangements and source/destination aliases. Scalar NEP merges original Vn; vectors ignore NEP and 64-bit writes clear upper 64 bits. Plain/number variants preserve architectural NaN, signed-zero, denormal and output-flush distinctions. Enabled FP/AdvSIMD/FP16/AFP, AArch64, non-streaming H/S/D profile. Sources are snapshotted and destination/FPSR/NZCV effects commit transactionally. Retained numerical exception enables refuse before active FP effects; integer native paths preserve caller MXCSR, with immutable-source-validated exact fallback. No enabled trap delivery, disabled-FP access, streaming SME, numerical leaf ABI, Apple hardware or application execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32X_D_floatdp1",
+      "mnemonic": "FRINT32X",
+      "source_file": "frint32x_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e68c000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32x_float.xml",
+      "source_sha256": "c3eefc93caae627f515a98879197006e08720b75b7468bc695985b6819a97efb",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT32X",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e68c020",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e68c3ff",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32X_S_floatdp1",
+      "mnemonic": "FRINT32X",
+      "source_file": "frint32x_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e28c000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32x_float.xml",
+      "source_sha256": "c3eefc93caae627f515a98879197006e08720b75b7468bc695985b6819a97efb",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT32X",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e28c020",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e28c3ff",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32X_asimdmisc_R",
+      "mnemonic": "FRINT32X",
+      "source_file": "frint32x_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2e21e800",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32x_advsimd.xml",
+      "source_sha256": "a955192e9f6f1ee15cfb6805c93deedab84c4858664d72f1d4ce3952db0ba2fb",
+      "docvars": {
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINT32X"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e21e820",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e21ebff",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e21e820",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e21ebff",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e61e820",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e61ebff",
+          "expected_mnemonics": [
+            "frint32x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32Z_D_floatdp1",
+      "mnemonic": "FRINT32Z",
+      "source_file": "frint32z_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e684000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32z_float.xml",
+      "source_sha256": "6a5bcf944bf99e8a0b403a3d1a51c351857ea01ad75775bed1d54bbfeb8cdde2",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT32Z",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e684020",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6843ff",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32Z_S_floatdp1",
+      "mnemonic": "FRINT32Z",
+      "source_file": "frint32z_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e284000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32z_float.xml",
+      "source_sha256": "6a5bcf944bf99e8a0b403a3d1a51c351857ea01ad75775bed1d54bbfeb8cdde2",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT32Z",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e284020",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2843ff",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT32Z_asimdmisc_R",
+      "mnemonic": "FRINT32Z",
+      "source_file": "frint32z_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0e21e800",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint32z_advsimd.xml",
+      "source_sha256": "6403f013091d87b2e7b32486131e31301f379770c3737b00d4389061e693c3c4",
+      "docvars": {
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINT32Z"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e21e820",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e21ebff",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e21e820",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e21ebff",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e61e820",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e61ebff",
+          "expected_mnemonics": [
+            "frint32z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64X_D_floatdp1",
+      "mnemonic": "FRINT64X",
+      "source_file": "frint64x_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e69c000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64x_float.xml",
+      "source_sha256": "229aaaabfc8a646216f49f5bbd91825f8587def7a3cdb03cb75f98c4319ba2bf",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT64X",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e69c020",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e69c3ff",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64X_S_floatdp1",
+      "mnemonic": "FRINT64X",
+      "source_file": "frint64x_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e29c000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64x_float.xml",
+      "source_sha256": "229aaaabfc8a646216f49f5bbd91825f8587def7a3cdb03cb75f98c4319ba2bf",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT64X",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e29c020",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e29c3ff",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64X_asimdmisc_R",
+      "mnemonic": "FRINT64X",
+      "source_file": "frint64x_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2e21f800",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64x_advsimd.xml",
+      "source_sha256": "e2233a19df3e1ef01693b3e5a777ac82356fd6968dde0dd0fa0a0a55b5a3ce92",
+      "docvars": {
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINT64X"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e21f820",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e21fbff",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e21f820",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e21fbff",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e61f820",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e61fbff",
+          "expected_mnemonics": [
+            "frint64x"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64Z_D_floatdp1",
+      "mnemonic": "FRINT64Z",
+      "source_file": "frint64z_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e694000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64z_float.xml",
+      "source_sha256": "18c2b411117139d1493c327cb92653fe5e9b5bfabe7df83082b676844ecf08fd",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT64Z",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e694020",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6943ff",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64Z_S_floatdp1",
+      "mnemonic": "FRINT64Z",
+      "source_file": "frint64z_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e294000",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64z_float.xml",
+      "source_sha256": "18c2b411117139d1493c327cb92653fe5e9b5bfabe7df83082b676844ecf08fd",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINT64Z",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e294020",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2943ff",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINT64Z_asimdmisc_R",
+      "mnemonic": "FRINT64Z",
+      "source_file": "frint64z_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0e21f800",
+      "features": [
+        {
+          "feature": "FEAT_FRINTTS",
+          "name": "v8Ap5"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frint64z_advsimd.xml",
+      "source_sha256": "5c7a74085702579cb5def69b33fd0fe8d715a0597d1eecb7ea94e81f23e6410d",
+      "docvars": {
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINT64Z"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e21f820",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e21fbff",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e21f820",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e21fbff",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e61f820",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e61fbff",
+          "expected_mnemonics": [
+            "frint64z"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Bounded signed 32/64-bit integral rounding uses FPCR rounding for X and toward-zero for Z, then tests the rounded result range. NaN, infinity and invalid range return the floating negative integer-indefinite value with IOC; invalid results suppress IXC, while valid fractional results raise IXC for both X and Z. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTA_D_floatdp1",
+      "mnemonic": "FRINTA",
+      "source_file": "frinta_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e664000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinta_float.xml",
+      "source_sha256": "1c4121554a7a023cfa30fafd1c85ae93b4677dd5bd5cd16eaec3e51dd6d1b3dc",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTA",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e664020",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6643ff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties away from zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTA_H_floatdp1",
+      "mnemonic": "FRINTA",
+      "source_file": "frinta_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee64000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinta_float.xml",
+      "source_sha256": "1c4121554a7a023cfa30fafd1c85ae93b4677dd5bd5cd16eaec3e51dd6d1b3dc",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTA",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee64020",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee643ff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties away from zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTA_S_floatdp1",
+      "mnemonic": "FRINTA",
+      "source_file": "frinta_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e264000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinta_float.xml",
+      "source_sha256": "1c4121554a7a023cfa30fafd1c85ae93b4677dd5bd5cd16eaec3e51dd6d1b3dc",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTA",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e264020",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2643ff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties away from zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTA_asimdmisc_R",
+      "mnemonic": "FRINTA",
+      "source_file": "frinta_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2e218800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinta_advsimd.xml",
+      "source_sha256": "247194109944ebd8e1fcc641823f0f9b10a33e6e551e2df77bf25ee6f5e2c31c",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTA",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e218820",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e218bff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e218820",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e218bff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e618820",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e618bff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties away from zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTA_asimdmiscfp16_R",
+      "mnemonic": "FRINTA",
+      "source_file": "frinta_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e798800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinta_advsimd.xml",
+      "source_sha256": "247194109944ebd8e1fcc641823f0f9b10a33e6e551e2df77bf25ee6f5e2c31c",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTA",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e798820",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e798bff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e798820",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e798bff",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties away from zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTI_D_floatdp1",
+      "mnemonic": "FRINTI",
+      "source_file": "frinti_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e67c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinti_float.xml",
+      "source_sha256": "b4c049d32627435d68f0edcdb31cd5b4ff7b0f6abad0f5621fa000a848a6c2f8",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTI",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e67c020",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e67c3ff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTI_H_floatdp1",
+      "mnemonic": "FRINTI",
+      "source_file": "frinti_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee7c000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinti_float.xml",
+      "source_sha256": "b4c049d32627435d68f0edcdb31cd5b4ff7b0f6abad0f5621fa000a848a6c2f8",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTI",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee7c020",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee7c3ff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTI_S_floatdp1",
+      "mnemonic": "FRINTI",
+      "source_file": "frinti_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e27c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinti_float.xml",
+      "source_sha256": "b4c049d32627435d68f0edcdb31cd5b4ff7b0f6abad0f5621fa000a848a6c2f8",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTI",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e27c020",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e27c3ff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTI_asimdmisc_R",
+      "mnemonic": "FRINTI",
+      "source_file": "frinti_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2ea19800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinti_advsimd.xml",
+      "source_sha256": "ddc099a5553d993fd36c47312ed38c5d5e29a837b8453b31ec8e8f664ed3b07b",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTI",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ea19820",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2ea19bff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ea19820",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ea19bff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ee19820",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ee19bff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTI_asimdmiscfp16_R",
+      "mnemonic": "FRINTI",
+      "source_file": "frinti_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2ef99800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frinti_advsimd.xml",
+      "source_sha256": "ddc099a5553d993fd36c47312ed38c5d5e29a837b8453b31ec8e8f664ed3b07b",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTI",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ef99820",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2ef99bff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ef99820",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ef99bff",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTM_D_floatdp1",
+      "mnemonic": "FRINTM",
+      "source_file": "frintm_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e654000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintm_float.xml",
+      "source_sha256": "7a955eb8796686d5e258be2fd7b27e6c8175c7b482294eec844c4a86e8e48a39",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTM",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e654020",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6543ff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward negative infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTM_H_floatdp1",
+      "mnemonic": "FRINTM",
+      "source_file": "frintm_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee54000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintm_float.xml",
+      "source_sha256": "7a955eb8796686d5e258be2fd7b27e6c8175c7b482294eec844c4a86e8e48a39",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTM",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee54020",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee543ff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward negative infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTM_S_floatdp1",
+      "mnemonic": "FRINTM",
+      "source_file": "frintm_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e254000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintm_float.xml",
+      "source_sha256": "7a955eb8796686d5e258be2fd7b27e6c8175c7b482294eec844c4a86e8e48a39",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTM",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e254020",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2543ff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward negative infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTM_asimdmisc_R",
+      "mnemonic": "FRINTM",
+      "source_file": "frintm_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0e219800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintm_advsimd.xml",
+      "source_sha256": "67d32969308a63ae66d4da183707b7b814c5d83906d6314504d779c5bc4d2d4c",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTM",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e219820",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e219bff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e219820",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e219bff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e619820",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e619bff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward negative infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTM_asimdmiscfp16_R",
+      "mnemonic": "FRINTM",
+      "source_file": "frintm_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0e799800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintm_advsimd.xml",
+      "source_sha256": "67d32969308a63ae66d4da183707b7b814c5d83906d6314504d779c5bc4d2d4c",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTM",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e799820",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e799bff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e799820",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e799bff",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward negative infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTN_D_floatdp1",
+      "mnemonic": "FRINTN",
+      "source_file": "frintn_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e644000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintn_float.xml",
+      "source_sha256": "09c8aaeedd14434e3ae5ffa7110ab8340189c4d53ecab18f76c2293e2a8ec9f6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTN",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e644020",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6443ff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties to even suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTN_H_floatdp1",
+      "mnemonic": "FRINTN",
+      "source_file": "frintn_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee44000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintn_float.xml",
+      "source_sha256": "09c8aaeedd14434e3ae5ffa7110ab8340189c4d53ecab18f76c2293e2a8ec9f6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTN",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee44020",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee443ff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties to even suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTN_S_floatdp1",
+      "mnemonic": "FRINTN",
+      "source_file": "frintn_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e244000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintn_float.xml",
+      "source_sha256": "09c8aaeedd14434e3ae5ffa7110ab8340189c4d53ecab18f76c2293e2a8ec9f6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTN",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e244020",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2443ff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties to even suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTN_asimdmisc_R",
+      "mnemonic": "FRINTN",
+      "source_file": "frintn_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0e218800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintn_advsimd.xml",
+      "source_sha256": "cc98cbf9242cb2d6c5b8891414084e783a5fe63c4f23221b22f5869f8768362f",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTN",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e218820",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e218bff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e218820",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e218bff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e618820",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e618bff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties to even suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTN_asimdmiscfp16_R",
+      "mnemonic": "FRINTN",
+      "source_file": "frintn_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0e798800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintn_advsimd.xml",
+      "source_sha256": "cc98cbf9242cb2d6c5b8891414084e783a5fe63c4f23221b22f5869f8768362f",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTN",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e798820",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e798bff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e798820",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e798bff",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding nearest with ties to even suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTP_D_floatdp1",
+      "mnemonic": "FRINTP",
+      "source_file": "frintp_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e64c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintp_float.xml",
+      "source_sha256": "ff0988c911e722fd45a9fcc7536b203ee824969d8abfc2a914cb12eefd6882b6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTP",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e64c020",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e64c3ff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward positive infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTP_H_floatdp1",
+      "mnemonic": "FRINTP",
+      "source_file": "frintp_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee4c000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintp_float.xml",
+      "source_sha256": "ff0988c911e722fd45a9fcc7536b203ee824969d8abfc2a914cb12eefd6882b6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTP",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee4c020",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee4c3ff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward positive infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTP_S_floatdp1",
+      "mnemonic": "FRINTP",
+      "source_file": "frintp_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e24c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintp_float.xml",
+      "source_sha256": "ff0988c911e722fd45a9fcc7536b203ee824969d8abfc2a914cb12eefd6882b6",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTP",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e24c020",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e24c3ff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward positive infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTP_asimdmisc_R",
+      "mnemonic": "FRINTP",
+      "source_file": "frintp_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0ea18800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintp_advsimd.xml",
+      "source_sha256": "000394d7992f45bd66e9224dd67b65cc8e59d0aeab4ae48dc6417ecd9886f6dd",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTP",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ea18820",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ea18bff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea18820",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea18bff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ee18820",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ee18bff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward positive infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTP_asimdmiscfp16_R",
+      "mnemonic": "FRINTP",
+      "source_file": "frintp_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0ef98800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintp_advsimd.xml",
+      "source_sha256": "000394d7992f45bd66e9224dd67b65cc8e59d0aeab4ae48dc6417ecd9886f6dd",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTP",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ef98820",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ef98bff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ef98820",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ef98bff",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward positive infinity suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTX_D_floatdp1",
+      "mnemonic": "FRINTX",
+      "source_file": "frintx_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e674000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintx_float.xml",
+      "source_sha256": "aafd2a692f5c0711cc5679ab645818c1a488844c615f55066f961c29d63a7dfd",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTX",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e674020",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6743ff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding raises IXC for fractional finite inputs and preserves architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTX_H_floatdp1",
+      "mnemonic": "FRINTX",
+      "source_file": "frintx_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee74000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintx_float.xml",
+      "source_sha256": "aafd2a692f5c0711cc5679ab645818c1a488844c615f55066f961c29d63a7dfd",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTX",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee74020",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee743ff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding raises IXC for fractional finite inputs and preserves architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTX_S_floatdp1",
+      "mnemonic": "FRINTX",
+      "source_file": "frintx_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e274000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintx_float.xml",
+      "source_sha256": "aafd2a692f5c0711cc5679ab645818c1a488844c615f55066f961c29d63a7dfd",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTX",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e274020",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e2743ff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding raises IXC for fractional finite inputs and preserves architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTX_asimdmisc_R",
+      "mnemonic": "FRINTX",
+      "source_file": "frintx_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x2e219800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintx_advsimd.xml",
+      "source_sha256": "e23e5a7a38a12c80e3c919a441bcd5ec104b10561d50ce0a325a88152d1d0a0b",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTX",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e219820",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e219bff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e219820",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e219bff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e619820",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e619bff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding raises IXC for fractional finite inputs and preserves architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTX_asimdmiscfp16_R",
+      "mnemonic": "FRINTX",
+      "source_file": "frintx_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e799800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintx_advsimd.xml",
+      "source_sha256": "e23e5a7a38a12c80e3c919a441bcd5ec104b10561d50ce0a325a88152d1d0a0b",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTX",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e799820",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e799bff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e799820",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e799bff",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "FPCR-selected integral rounding raises IXC for fractional finite inputs and preserves architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTZ_D_floatdp1",
+      "mnemonic": "FRINTZ",
+      "source_file": "frintz_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e65c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintz_float.xml",
+      "source_sha256": "270877938b4704a6a3fd97144ad86350df04b33cd21db6160cbea3b106bbd72b",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTZ",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e65c020",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e65c3ff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTZ_H_floatdp1",
+      "mnemonic": "FRINTZ",
+      "source_file": "frintz_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1ee5c000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintz_float.xml",
+      "source_sha256": "270877938b4704a6a3fd97144ad86350df04b33cd21db6160cbea3b106bbd72b",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTZ",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee5c020",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1ee5c3ff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTZ_S_floatdp1",
+      "mnemonic": "FRINTZ",
+      "source_file": "frintz_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e25c000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintz_float.xml",
+      "source_sha256": "270877938b4704a6a3fd97144ad86350df04b33cd21db6160cbea3b106bbd72b",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FRINTZ",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e25c020",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e25c3ff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTZ_asimdmisc_R",
+      "mnemonic": "FRINTZ",
+      "source_file": "frintz_advsimd.xml",
+      "encoding_mask": "0xbfbffc00",
+      "encoding_value": "0x0ea19800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintz_advsimd.xml",
+      "source_sha256": "38e463e8d11f6f6ef419408b326e0c3009fe9615f46d3be71c195c4d7007fcdc",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTZ",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ea19820",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ea19bff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea19820",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea19bff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ee19820",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ee19bff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FRINTZ_asimdmiscfp16_R",
+      "mnemonic": "FRINTZ",
+      "source_file": "frintz_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0ef99800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/frintz_advsimd.xml",
+      "source_sha256": "38e463e8d11f6f6ef419408b326e0c3009fe9615f46d3be71c195c4d7007fcdc",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FRINTZ",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/rounding.rs",
+        "crates/stela-compiler/src/aarch64/simd/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ef99820",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ef99bff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ef99820",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ef99bff",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "round_integral_numerical"
+      ],
+      "review": "Exact June canonical forms, width/shape allocation and bounded-range distinctions are reviewed. Direct original completion remains distinct from unchanged helper exits and precise refusals; successful Rust completion, status, caller MXCSR, cache and budget evidence must be current before ledger credit.",
+      "scope": "Instruction-selected rounding toward zero suppresses fractional IXC while preserving architectural signaling-NaN status. All allocated scalar/vector arrangements and aliases use ordinary V0\u2013V31. Scalar NEP merges original Vd; vectors ignore NEP and 64-bit writes clear upper 64 bits. Signed zero, NaN processing and input flushing retain architectural effects; H uses IEEE half, observes FZ16 and ignores AHP. AH suppresses input-denormal status during unpacking. Enabled FP/AdvSIMD/FP16/AFP/FRINTTS, AArch64, non-streaming profile; all retained numerical exception enables refuse before effects. Sources and old destination are staged and destination/FPSR commit transactionally, preserving NZCV, RAM and caller MXCSR. Normal baseline mappings use compact integer recipes; checked SSE4.1 ROUND replaces eligible vector H and S/D rounding, while scalar H retains the integer recipe. Exact fallback uses the immutable-source-validated integer core. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, Apple hardware, application or OS execution is established.",
       "status": "implemented"
     }
   ]

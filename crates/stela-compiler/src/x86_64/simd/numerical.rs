@@ -74,6 +74,7 @@ pub(super) enum Condition {
     AboveOrEqual = 0x83,
     Zero = 0x84,
     NotZero = 0x85,
+    Above = 0x87,
 }
 
 #[repr(u8)]
@@ -100,8 +101,9 @@ pub(super) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
     patch
 }
 pub(super) fn resolve(code: &mut [u8], patch: usize, target: usize) {
-    let distance =
-        i32::try_from(target - patch - size_of::<i32>()).expect("bounded numerical branch");
+    let target = i64::try_from(target).expect("numerical branch target fits i64");
+    let next = i64::try_from(patch + size_of::<i32>()).expect("numerical branch source fits i64");
+    let distance = i32::try_from(target - next).expect("bounded numerical branch");
     code[patch..patch + size_of::<i32>()].copy_from_slice(&distance.to_le_bytes());
 }
 pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {

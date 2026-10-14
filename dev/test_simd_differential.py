@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import State, state_dict, seed_extended_state
@@ -14,6 +15,129 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_round_integral_forms_and_every_arrangement_match_pinned_encoding_facts(self):
+        functions = suite.round_integral_functions()
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (304, 304))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 47)
+        self.assertEqual(len({suite.round_integral_shape(op) for op in functions}), 76)
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(decoded[0].mnemonic, op['name'])
+            self.assertEqual((op['word'] & 31, op['word'] >> 5 & 31), (op['d'], op['n']))
+            if op['bounded_bits']:
+                self.assertNotEqual(op['lane'], 2)
+        for arguments in (('frint32z', 2, 2, True), ('frintn', 8, 8, False), ('frintx', 4, 16, True), ('frintn', 4, 4, True, 32)):
+            with self.assertRaises(ValueError):
+                suite.round_integral_operation(*arguments)
+
+    def test_round_integral_exact_values_cover_post_round_range_and_signed_neighbors(self):
+        for lane in (2, 4, 8):
+            values = dict(suite.round_integral_values(lane))
+            self.assertEqual((len(values), len(set(values.values()))), (54, 54))
+            sign = 1 << (lane * 8 - 1)
+            self.assertEqual(values['zero_negative'], sign)
+            self.assertEqual(values['half_negative'], values['half_positive'] | sign)
+            self.assertEqual(values['half_below_positive'] + 1, values['half_positive'])
+            self.assertEqual(values['half_above_positive'] - 1, values['half_positive'])
+        for name in ('frint32x', 'frint64z'):
+            for lane in (4, 8):
+                op = suite.round_integral_operation(name, lane, lane, True)
+                bounds = dict(suite.round_integral_bound_values(op))
+                expected = 12 if name.startswith('frint32') and lane == 8 else 6
+                self.assertEqual(len(bounds), expected)
+                self.assertEqual(bounds['bound_below_positive'] + 1, bounds['bound_exact_positive'])
+                self.assertEqual(bounds['bound_above_positive'] - 1, bounds['bound_exact_positive'])
+                if expected == 12:
+                    self.assertIn('bound_half_below_negative', bounds)
+                    self.assertIn('bound_half_above_positive', bounds)
+
+    def test_round_integral_scalar_merges_old_destination_and_vector64_clears_upper(self):
+        op = suite.round_integral_operation('frintx', 4, 4, True)
+        initial = State()
+        initial.fpcr = suite.NUMERICAL_NEP
+        initial.v[0][:] = [0x1234567800000000, 0x1234]
+        initial.v[1][:] = [0xabcdef0000000000, 0xabcd]
+        original = State.from_buffer_copy(initial)
+        original.v[0][0] |= 0x3f800000
+        suite.validate_round_integral_original_effects(initial, original, op)
+        original.v[0][1] = initial.v[1][1]
+        with self.assertRaises(AssertionError):
+            suite.validate_round_integral_original_effects(initial, original, op)
+        initial.fpcr = 0
+        original.v[0][:] = [0x3f800000, 0]
+        suite.validate_round_integral_original_effects(initial, original, op)
+        vector = suite.round_integral_operation('frintn', 4, 8, False)
+        original.v[0][1] = 1
+        with self.assertRaises(AssertionError):
+            suite.validate_round_integral_original_effects(initial, original, vector)
+
+    def test_round_integral_corpus_keeps_controls_enables_sticky_and_mixed_status_scope(self):
+        functions, records = suite.round_integral_corpus()
+        self.assertEqual(len(records), 27281)
+        imported, enable_forms = [], set()
+        for index, record in enumerate(records):
+            op = functions[record['function']]
+            initial = State.from_buffer_copy(record['initial'])
+            unsupported = bool(initial.fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)
+            imported.append(dict(record, case=index, operation=op, unsupported=unsupported))
+            if unsupported:
+                enable_forms.add((op['canonical_id'], initial.fpcr))
+            if record['label'] == 'mixed_3_0' and op['bounded_bits']:
+                raw = struct.pack('<2Q', *initial.v[op['n']])
+                values = dict(suite.round_integral_values(op['lane']))
+                self.assertEqual(int.from_bytes(raw[:op['lane']], 'little'), values['infinity_positive'])
+                self.assertEqual(int.from_bytes(raw[op['lane']:2 * op['lane']], 'little'), values['half_positive'])
+        self.assertEqual(len(enable_forms), 47 * 7)
+        selected = suite.round_integral_runtime_cases(imported)
+        self.assertEqual(len(selected), 714)
+        self.assertEqual(suite.round_integral_helpers(imported, set()), [])
+        self.assertLessEqual(len(suite.round_integral_helpers(imported)), 26)
+        selected_labels = {record['label'] for record in selected}
+        self.assertIn('ah_round_half_negative', selected_labels)
+        self.assertIn('round_bound_half_below_negative', selected_labels)
+        self.assertIn('value_bound_exact_negative', selected_labels)
+        self.assertEqual({State.from_buffer_copy(r['initial']).fpsr for r in records if r['label'] == 'sticky_status'},
+                         {1, 1 << 4, 1 << 27, suite.FP_REGISTER_MASKS['fpsr']})
+
+    def test_fullframe_family_limits_identify_integral_rounding_scope(self):
+        families = suite.FULL_FRAME_NUMERICAL_COHORTS
+        self.assertTrue(all(isinstance(family['limits'], str) and family['limits'] for family in families.values()))
+        self.assertEqual(len({family['limits'] for family in families.values()}), len(families))
+        limits = families[suite.ROUND_INTEGRAL_FOCUS]['limits']
+        self.assertIn('H/S/D integral rounding', limits)
+        self.assertIn('bounded 32/64-bit rounding', limits)
+        self.assertIn('retained-enable refusals', limits)
+        self.assertNotIn('JSCVT', limits)
+        self.assertNotIn('conversion', limits)
+
+    def test_round_integral_fullframe_descriptor_and_frozen_serialization_are_reused(self):
+        family = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.ROUND_INTEGRAL_FOCUS]
+        self.assertEqual(family['forms'], 47)
+        self.assertIs(family['loader'], suite.load_round_integral_oracle)
+        op = suite.round_integral_operation('frintn', 4, 4, True)
+        initial = suite.round_integral_state(op, 0, [dict(suite.round_integral_values(4))['half_positive']])
+        record = {'function': 0, 'function_index': 0, 'label': 'half', 'initial': bytes(initial),
+                  'initial_state_sha256': suite.digest(bytes(initial))}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            def write_plan(path, value):
+                path.write_text(json.dumps(value))
+                return path
+            with patch.object(suite, 'write_evidence', side_effect=write_plan), patch.object(suite, 'ROOT', directory):
+                suite.prepare_full_frame_numerical_oracle(directory, [op], [record], suite.ROUND_INTEGRAL_FOCUS)
+                frozen = (directory / 'inputs.bin').read_bytes()
+                self.assertEqual(len(frozen), 800)
+                self.assertEqual(frozen[8:792], bytes(initial))
+                suite.prepare_full_frame_numerical_oracle(directory, [op], [record], suite.ROUND_INTEGRAL_FOCUS)
+                changed = dict(record, initial=bytes(784))
+                with self.assertRaises(AssertionError):
+                    suite.prepare_full_frame_numerical_oracle(directory, [op], [changed], suite.ROUND_INTEGRAL_FOCUS)
+
     def test_comparison_minmax_forms_shapes_and_fixed_encodings_are_complete(self):
         functions = suite.comparison_minmax_functions()
         self.assertEqual(len(functions), 2590)
