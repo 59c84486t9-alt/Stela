@@ -23,6 +23,15 @@ pub(crate) fn validate_target(
             required: crate::TargetCpu::AtomicLoad16,
         });
     }
+    if let Operation::Atomic(operand) = &instruction.operation
+        && atomic::requires_cx16(operand)
+        && !target.supports(crate::TargetCpu::Cx16)
+    {
+        return Err(UnsupportedReason::HostCapabilityRequired {
+            address: instruction.pc,
+            required: crate::TargetCpu::Cx16,
+        });
+    }
     Ok(())
 }
 mod atomic;
@@ -44,6 +53,7 @@ mod pc_relative;
 mod prefetch;
 mod register_offset;
 mod simd;
+mod tag_arithmetic;
 mod unprivileged;
 
 fn offset(register: Register) -> Option<u32> {
@@ -472,7 +482,8 @@ fn emit_instruction(
         Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
         Operation::MemoryNonTemporal(operand) => non_temporal::emit(code, &operand),
         Operation::MemoryUnprivileged(operand) => unprivileged::emit(code, &operand),
-        Operation::Atomic(operand) => atomic::emit(code, &operand),
+        Operation::TagArithmetic(operand) => tag_arithmetic::emit(code, &operand),
+        Operation::Atomic(operand) => atomic::emit(code, &operand, target),
         Operation::Ordered(operand) => ordered::emit(code, &operand, target),
         Operation::Prefetch(operand) => prefetch::emit(code, &operand),
         Operation::LogicalImmediate {

@@ -17,6 +17,7 @@ pub mod pc_relative;
 pub mod prefetch;
 pub mod register_offset;
 pub mod simd;
+pub mod tag_arithmetic;
 pub mod unprivileged;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +203,7 @@ pub enum Operation {
     Flags(flags::Operand),
     IntegerMath(integer_math::Operand),
     IntegerMinMax(integer_minmax::Operand),
+    TagArithmetic(tag_arithmetic::Operand),
     IntegerUnary(integer_unary::Operand),
     Literal(literal::Operand),
     MemoryRegisterOffset(register_offset::Operand),
@@ -412,6 +414,8 @@ impl Lifter for Decoder {
             Operation::IntegerUnary(decoded)
         } else if let Some(decoded) = integer_minmax::decode(word) {
             Operation::IntegerMinMax(decoded)
+        } else if let Some(decoded) = tag_arithmetic::decode(word) {
+            Operation::TagArithmetic(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = FloatingPointOperation::decode(word) {
@@ -932,7 +936,17 @@ mod tests {
             }
         ));
         assert!(Decoder.lift(GuestAddress(0), 0x52c00000).is_err()); // undefined W32 MOVZ shift 32
-        assert!(Decoder.lift(GuestAddress(0), 0x91800000).is_err()); // reserved add-immediate bit
+        // ADDG occupies a distinct class; its SP roles must not become ADD-immediate.
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0x918003ff).unwrap().operation,
+            Operation::TagArithmetic(tag_arithmetic::Operand {
+                destination: Register::Sp,
+                kind: tag_arithmetic::Kind::Offset {
+                    source: Register::Sp,
+                    ..
+                },
+            })
+        ));
         assert!(Decoder.lift(GuestAddress(0), 0x0b008000).is_err()); // W32 shift 32
         assert!(Decoder.lift(GuestAddress(0), 0x0bc00000).is_err()); // reserved arithmetic ROR
         assert!(Decoder.lift(GuestAddress(0), 0x0a008000).is_err()); // W32 logical shift 32

@@ -61,7 +61,9 @@ static void capture(int number, siginfo_t *info, void *context) {
 /* Fixed atomic evidence cases; no production runtime or arbitrary scheduler. */
 enum { ATOMIC_RAM_BYTES = 8192, ATOMIC_MAX_THREADS = 4, ATOMIC_MAX_ITERATIONS = 256,
        ATOMIC_HISTORY = 0, ATOMIC_TICKETS = 1, ATOMIC_CAS = 2, ATOMIC_SWAP = 3,
-       ATOMIC_LITMUS = 4, ATOMIC_ATTEMPTS_PER_INCREMENT = 32 };
+       ATOMIC_LITMUS = 4, ATOMIC_ATTEMPTS_PER_INCREMENT = 32,
+       ATOMIC_SCALAR_MAX_BYTES = sizeof(uint64_t), ATOMIC_PAIR_BYTES = 2 * sizeof(uint64_t),
+       BITS_PER_BYTE = 8 };
 #define ATOMIC_PLAN_MAGIC UINT64_C(0x314e414c504d5441)
 #define ATOMIC_RESULT_MAGIC UINT64_C(0x31544c53524d5441)
 struct atomic_plan {
@@ -103,7 +105,9 @@ static void *atomic_worker(void *opaque) {
     unsigned thread = argument->thread;
     struct guest_state *current = &context->states[thread];
     void (*function)(struct guest_state *) = (void (*)(struct guest_state *))(context->code + context->plan.offsets[thread]);
-    uint64_t mask = context->plan.width == 8 ? UINT64_MAX : (UINT64_C(1) << (context->plan.width * 8)) - 1;
+    /* Only scalar CAS counters consume this mask. Pair histories can use 128 bits;
+       never shift a 64-bit value by their width, even on that unused path. */
+    uint64_t mask = context->plan.width < ATOMIC_SCALAR_MAX_BYTES ? (UINT64_C(1) << (context->plan.width * BITS_PER_BYTE)) - 1 : UINT64_MAX;
     size_t calls = 0;
     for (unsigned iteration = 0; iteration < context->plan.iterations; iteration++) {
         unsigned gate = context->plan.kind == ATOMIC_LITMUS ? iteration + 1 : 1;
@@ -145,7 +149,8 @@ static int atomic_concurrency(const char *native_path, const char *plan_path) {
     struct atomic_plan *plan = &context->plan;
     if (plan->magic != ATOMIC_PLAN_MAGIC || plan->kind > ATOMIC_LITMUS || plan->threads < 2 || plan->threads > ATOMIC_MAX_THREADS ||
         plan->entries != plan->threads || !plan->iterations || plan->iterations > ATOMIC_MAX_ITERATIONS || plan->flags > 1 ||
-        (plan->width != 1 && plan->width != 2 && plan->width != 4 && plan->width != 8) ||
+        (plan->width != 1 && plan->width != 2 && plan->width != 4 && plan->width != 8 &&
+         !(plan->width == ATOMIC_PAIR_BYTES && plan->kind == ATOMIC_HISTORY)) ||
         (plan->kind == ATOMIC_HISTORY && plan->iterations * plan->threads > 16)) return 32;
     file = fopen(native_path, "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 33;

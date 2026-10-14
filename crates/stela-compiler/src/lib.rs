@@ -49,6 +49,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/integer_unary.rs"),
     include_str!("aarch64/integer_minmax.rs"),
     include_str!("x86_64/integer_minmax.rs"),
+    include_str!("aarch64/tag_arithmetic.rs"),
+    include_str!("x86_64/tag_arithmetic.rs"),
     include_str!("aarch64/literal.rs"),
     include_str!("x86_64/literal.rs"),
     include_str!("aarch64/pc_relative.rs"),
@@ -59,6 +61,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/atomic.rs"),
     include_str!("x86_64/atomic.rs"),
     include_str!("x86_64/atomic/compare_exchange.rs"),
+    include_str!("x86_64/atomic/compare_exchange_pair.rs"),
     include_str!("x86_64/atomic/read_modify_write.rs"),
     include_str!("aarch64/ordered.rs"),
     include_str!("x86_64/ordered.rs"),
@@ -386,6 +389,49 @@ mod tests {
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
             assert!(compile(&source, GuestAddress(0)).is_ok());
+        }
+    }
+
+    #[test]
+    fn pair_compare_exchange_requires_only_cx16_for_doubleword_pairs() {
+        const CASP_WORD: u32 = 0x08207c82; // casp w0,w1,w2,w3,[x4]
+        const CASP_DOUBLEWORD: u32 = 0x48207c82;
+        const RET: u32 = 0xd65f03c0;
+        for order in [0, 1 << 22, 1 << 15, (1 << 22) | (1 << 15)] {
+            for (word, requires_cx16) in [(CASP_WORD, false), (CASP_DOUBLEWORD, true)] {
+                let source: Vec<u8> = [word | order, RET]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect();
+                for target in [
+                    TargetCpu::Baseline,
+                    TargetCpu::AtomicLoad16,
+                    TargetCpu::Cx16,
+                ] {
+                    let permitted = !requires_cx16 || target.supports(TargetCpu::Cx16);
+                    let leaf = compile_for_target(&source, GuestAddress(0), target);
+                    let block = block::compile_for_target(
+                        &source,
+                        GuestAddress(0),
+                        block::BlockProfile::default(),
+                        target,
+                    );
+                    assert_eq!(leaf.is_ok(), permitted);
+                    assert_eq!(block.is_ok(), permitted);
+                    if !permitted {
+                        assert!(leaf.unwrap_err().0.contains("HostCapabilityRequired"));
+                        assert!(block.unwrap_err().0.contains("HostCapabilityRequired"));
+                    } else {
+                        const LOCK_CMPXCHG8B_R8: &[u8] = &[0xf0, 0x41, 0x0f, 0xc7, 0x08];
+                        let uses_cx8 = leaf
+                            .unwrap()
+                            .x86_64_code
+                            .windows(LOCK_CMPXCHG8B_R8.len())
+                            .any(|body| body == LOCK_CMPXCHG8B_R8);
+                        assert_eq!(uses_cx8, !requires_cx16 && target.supports(TargetCpu::Cx8));
+                    }
+                }
+            }
         }
     }
 

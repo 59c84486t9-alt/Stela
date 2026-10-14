@@ -311,33 +311,10 @@ def inventory():
 
 
 def linearization_allowed(history, initial_ram, ram_address=RAM_ADDRESS, final_ram=None):
-    """Bounded exhaustive serializations respecting observed real-time edges."""
-    if len(history) > 16:
-        raise ValueError('Atomic linearization history exceeds16 operations')
-    ranges = []
-    for row in history:
-        state = State.from_buffer_copy(bytes.fromhex(row['initial_state_hex']))
-        op = row['operation']
-        start = (state.sp if op['rn'] == 31 else state.x[op['rn']]) - row.get('ram_address', ram_address)
-        ranges.append((start, start + op['element_bytes']))
-    lower, upper = (min(start for start, _ in ranges), max(end for _, end in ranges)) if ranges else (0, 0)
-    if not 0 <= lower <= upper <= len(initial_ram) or upper - lower > 256:
-        raise ValueError('Linearization history exceeds bounded byte window')
-    rejected = set()
-    def search(remaining, ram):
-        if not remaining: return final_ram is None or ram == final_ram
-        key = remaining, ram[lower:upper]
-        if key in rejected: return False
-        for index in remaining:
-            row = history[index]
-            if any(history[other]['end'] < row['begin'] for other in remaining if other != index): continue
-            initial = State.from_buffer_copy(bytes.fromhex(row['initial_state_hex']))
-            state, updated, fault = expected(row['operation'], initial, ram, row.get('ram_address', ram_address))
-            if fault or bytes(state).hex() != row['final_state_hex']: continue
-            if search(tuple(other for other in remaining if other != index), updated): return True
-        rejected.add(key)
-        return False
-    return search(tuple(range(len(history))), bytes(initial_ram))
+    """Preserve the scalar history API through the shared bounded solver."""
+    from simd_fixtures.memory_history import linearization_allowed as solve
+    return solve(history, initial_ram, ram_address, final_ram, expected_operation=expected,
+                 effective_address=lambda op, state: state.sp if op['rn'] == 31 else state.x[op['rn']])
 
 
 def ordinary_transfer(loading, rt, rn):

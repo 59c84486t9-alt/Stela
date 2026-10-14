@@ -4,6 +4,10 @@
 const CPUID_BASIC_FEATURES: u32 = 1;
 #[cfg(target_arch = "x86_64")]
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
+#[cfg(target_arch = "x86_64")]
+const CPUID_CX16: u32 = 1 << 13;
+#[cfg(target_arch = "x86_64")]
+const CPUID_CX8: u32 = 1 << 8;
 
 /// Explicit host requirements bind generated code and persistent cache identity.
 /// SSE tiers are nested; every other capability is independent.
@@ -18,6 +22,8 @@ pub struct TargetCpu {
     aes: bool,
     sha: bool,
     atomic_load16: bool,
+    cx8: bool,
+    cx16: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,6 +48,8 @@ impl TargetCpu {
         aes: false,
         sha: false,
         atomic_load16: false,
+        cx8: false,
+        cx16: false,
     };
     pub const Ssse3: Self = Self {
         tier: SseTier::Ssse3,
@@ -70,6 +78,10 @@ impl TargetCpu {
     /// Aligned16 atomic loads, enumerated by AVX hardware support. Lowering uses
     /// legacy SSE2 instructions, independently of OS-enabled AVX register state.
     pub const AtomicLoad16: Self = Self::Baseline.with_atomic_load16();
+    /// CMPXCHG8B, independently enumerated for the W-pair optimized recipe.
+    pub const Cx8: Self = Self::Baseline.with_cx8();
+    /// CMPXCHG16B, independent of aligned16 load atomicity and AVX state.
+    pub const Cx16: Self = Self::Baseline.with_cx16();
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -104,6 +116,12 @@ impl TargetCpu {
             ..self
         }
     }
+    pub const fn with_cx8(self) -> Self {
+        Self { cx8: true, ..self }
+    }
+    pub const fn with_cx16(self) -> Self {
+        Self { cx16: true, ..self }
+    }
     /// True only when every required feature is present in this target.
     pub fn supports(self, required: Self) -> bool {
         self.tier >= required.tier
@@ -115,19 +133,22 @@ impl TargetCpu {
             && (!required.aes || self.aes)
             && (!required.sha || self.sha)
             && (!required.atomic_load16 || self.atomic_load16)
+            && (!required.cx16 || self.cx16)
+            && (!required.cx8 || self.cx8)
     }
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
+            let basic = std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES);
             Self {
                 popcnt: std::is_x86_feature_detected!("popcnt"),
                 bmi1: std::is_x86_feature_detected!("bmi1"),
                 aes: std::is_x86_feature_detected!("aes"),
                 sha: std::is_x86_feature_detected!("sha"),
+                cx16: basic.ecx & CPUID_CX16 != 0,
+                cx8: basic.edx & CPUID_CX8 != 0,
                 // Hardware atomicity, rather than permission to execute VEX.
-                atomic_load16: std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx
-                    & CPUID_AVX_HARDWARE
-                    != 0,
+                atomic_load16: basic.ecx & CPUID_AVX_HARDWARE != 0,
                 ..Self::for_features_with_vex(
                     std::is_x86_feature_detected!("ssse3"),
                     std::is_x86_feature_detected!("sse4.1"),
@@ -194,6 +215,8 @@ impl TargetCpu {
             (self.aes, "+aes"),
             (self.sha, "+sha"),
             (self.atomic_load16, "+atomic-load16"),
+            (self.cx8, "+cx8"),
+            (self.cx16, "+cx16"),
         ] {
             if enabled {
                 id.push_str(suffix);
@@ -226,6 +249,8 @@ impl std::str::FromStr for TargetCpu {
         // Strip each optional suffix once, in reverse canonical order. Any
         // duplicate, unknown or reordered suffix remains and fails tier parsing.
         for (suffix, enabled) in [
+            ("+cx16", &mut target.cx16),
+            ("+cx8", &mut target.cx8),
             ("+atomic-load16", &mut target.atomic_load16),
             ("+sha", &mut target.sha),
             ("+aes", &mut target.aes),
@@ -265,7 +290,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 8] = [
+    const FEATURES: [TargetCpu; 10] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -274,11 +299,13 @@ mod tests {
         TargetCpu::Aes,
         TargetCpu::Sha,
         TargetCpu::AtomicLoad16,
+        TargetCpu::Cx8,
+        TargetCpu::Cx16,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         TIERS.into_iter().flat_map(|(tier, _, _)| {
-            (0..256).map(move |bits| TargetCpu {
+            (0..1024).map(move |bits| TargetCpu {
                 pclmulqdq: bits & 1 != 0,
                 fma: bits & 2 != 0,
                 f16c: bits & 4 != 0,
@@ -287,6 +314,8 @@ mod tests {
                 aes: bits & 32 != 0,
                 sha: bits & 64 != 0,
                 atomic_load16: bits & 128 != 0,
+                cx8: bits & 256 != 0,
+                cx16: bits & 512 != 0,
                 ..tier
             })
         })
@@ -328,7 +357,7 @@ mod tests {
             let suffix = id.strip_prefix(canonical).unwrap();
             assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
         }
-        assert_eq!(ids.len(), 1024);
+        assert_eq!(ids.len(), 4096);
         assert_eq!(
             TargetCpu::Sse42
                 .with_sha()
@@ -369,6 +398,10 @@ mod tests {
             "baseline+fma+pclmulqdq",
             "baseline+sha+ssse3",
             "baseline+POPCNT",
+            "baseline+cx16+atomic-load16",
+            "baseline+cx16+sha",
+            "baseline+cx16+cx8",
+            "baseline+cx8+atomic-load16",
         ] {
             assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
         }
@@ -381,6 +414,8 @@ mod tests {
             "aes",
             "sha",
             "atomic-load16",
+            "cx16",
+            "cx8",
         ] {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
                 let duplicate = format!("{tier}+{suffix}+{suffix}");
@@ -401,6 +436,8 @@ mod tests {
                 host.aes,
                 host.sha,
                 host.atomic_load16,
+                host.cx8,
+                host.cx16,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);
@@ -497,6 +534,14 @@ mod tests {
                 (
                     TargetCpu::AtomicLoad16,
                     std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
+                ),
+                (
+                    TargetCpu::Cx16,
+                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_CX16 != 0,
+                ),
+                (
+                    TargetCpu::Cx8,
+                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).edx & CPUID_CX8 != 0,
                 ),
             ] {
                 assert_eq!(target.supports(required), detected);

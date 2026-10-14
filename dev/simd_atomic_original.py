@@ -42,6 +42,7 @@ MPIDR_AFFINITY_MASK = 0xff00ffffff
 SETUP_BAD_EL = 1
 SETUP_CPU_ON_FAILED = 2
 FOCUS = 'atomic_memory_smp'
+PAIR_FOCUS = 'atomic_pair_memory_smp'
 DEPENDENCIES = ('dev/simd_atomic_original.py', 'dev/simd_original.py',
                 'dev/differential.py', 'dev/simd_fixtures/atomic_memory.py',
                 'dev/a64_checklist.py')
@@ -62,6 +63,20 @@ def default_pairs(trials=256):
             for case in [*selected, *witness]]
 
 
+def pair_default_pairs(trials=256):
+    """Reviewed CASP pair histories; full outcome validation belongs to the runner."""
+    from simd_fixtures import atomic_pair_memory
+    if type(trials) is not int or not 1 <= trials <= MAX_TRIALS:
+        raise ValueError('Original CASP SMP trial count exceeds fixed bounds')
+    cases = atomic_pair_memory.original_concurrency_cases()
+    if len(cases) != MAX_PAIRS:
+        raise AssertionError('Original CASP SMP reviewed pair inventory changed')
+    return [{**case, 'trials': trials,
+             'initial': [bytes(atomic_memory.relocate_state(initial, original.MEMORY_RAM_ADDRESS))
+                         for initial in case['initial']]}
+            for case in cases]
+
+
 def _state_bytes(value):
     result = bytes.fromhex(value) if isinstance(value, str) else bytes(value)
     if len(result) != original.STATE_BYTES:
@@ -69,8 +84,13 @@ def _state_bytes(value):
     return result
 
 
-def input_files(pairs):
+def input_files(pairs, focus=FOCUS):
     """Seal exact absolute-address inputs; no guest pointer rewriting occurs."""
+    if focus not in (FOCUS, PAIR_FOCUS):
+        raise ValueError('Original SMP focus is not a reviewed atomic family')
+    pair_family = None
+    if focus == PAIR_FOCUS:
+        from simd_fixtures import atomic_pair_memory as pair_family
     if not 1 <= len(pairs) <= MAX_PAIRS:
         raise ValueError('Original SMP observer requires one to eight program pairs')
     plan, programs, inputs, memory = [], [], bytearray(), bytearray()
@@ -89,11 +109,17 @@ def input_files(pairs):
         ram = bytes(pair['memory'])
         if len(states) != PE_COUNT or len(pair_programs) != PE_COUNT or len(ram) != original.MEMORY_RAM_BYTES:
             raise ValueError('Original SMP pair needs two programs/States and 8192 RAM bytes')
+        if focus == PAIR_FOCUS and (any(len(program) != 1 for program in pair_programs)
+                or not any(op['kind'] == pair_family.FOCUS for program in pair_programs for op in program)):
+            raise ValueError('Original CASP SMP requires single-operation pair histories containing CASP')
         for pe, program in enumerate(pair_programs):
             if not 1 <= len(program) <= MAX_PROGRAM_WORDS:
                 raise ValueError('Original SMP program length exceeds fixed bounds')
             for op in program:
-                if op['kind'] not in (atomic_memory.FOCUS, 'atomic_litmus_transfer'):
+                kinds = (atomic_memory.FOCUS, 'atomic_litmus_transfer')
+                if focus == PAIR_FOCUS:
+                    kinds += (pair_family.FOCUS,)
+                if op['kind'] not in kinds:
                     raise ValueError('Original SMP accepts only reviewed atomic/ordered litmus words')
                 if type(op['word']) is not int or not 0 <= op['word'] < 1 << 32:
                     raise ValueError('Original SMP subject word is not u32')
@@ -106,11 +132,14 @@ def input_files(pairs):
                 if op.get('operation') != 'dmb':
                     state = State.from_buffer_copy(states[pe])
                     address = state.sp if op['rn'] == 31 else state.x[op['rn']]
-                    width = op['element_bytes']
+                    is_pair = pair_family is not None and op['kind'] == pair_family.FOCUS
+                    width = op['total_bytes'] if is_pair else op['element_bytes']
                     if not original.MEMORY_RAM_ADDRESS <= address <= original.MEMORY_RAM_ADDRESS + len(ram) - width:
                         raise ValueError('Original SMP inputs must contain absolute owned-RAM bases')
                     if address % atomic_memory.SCA_BYTES + width > atomic_memory.SCA_BYTES:
                         raise ValueError('Original SMP success input crosses the declared SCA granule')
+                    if is_pair and op['rn'] == 31 and address % atomic_memory.SCA_BYTES:
+                        raise ValueError('Original CASP SMP success input requires aligned SP')
             programs.append({'operations': program})
         for _ in range(trials):
             for pe, state in enumerate(states):
@@ -130,7 +159,8 @@ def input_files(pairs):
         raise ValueError('Original SMP input/template/control/output ranges overlap or exceed RAM')
     source = b''.join(b''.join(struct.pack('<I', op['word']) for op in function['operations'])
                       + struct.pack('<I', original.RET_WORD) for function in programs)
-    inspection = atomic_memory.validate_source_words(source, programs, ('ldr', 'str'))
+    validator = pair_family if focus == PAIR_FOCUS else atomic_memory
+    inspection = validator.validate_source_words(source, programs, ('ldr', 'str'))
     files = {'pair-plan.json': original.json_bytes(plan), 'inputs.bin': bytes(inputs),
              'memory.bin': bytes(memory), 'canonical-source.arm64': source}
     envelope = {'pairs': len(plan), 'trials': total, 'input_stride': PAIR_INPUT_BYTES,
@@ -327,18 +357,19 @@ def _check_bindings(source_bindings):
             raise AssertionError('Frozen original SMP source changed: ' + name)
 
 
-def prepare(directory, pairs, source_bindings):
+def prepare(directory, pairs, source_bindings, focus=FOCUS):
     """Prepare sealed inputs/assembly/ELF; caller grants tool execution explicitly."""
     directory = Path(directory).resolve()
     directory.relative_to(ROOT)
     _check_bindings(source_bindings)
-    files, plan, _ = input_files(pairs)
+    files, plan, _ = input_files(pairs, focus)
     source = assembly(plan).encode()
     qemu, clang, lld, bindings = original.tools_and_bindings()
-    bindings.update({'focus': FOCUS, 'shared_original_producer_sha256': bindings['producer_sha256'],
+    dependencies = DEPENDENCIES + (('dev/simd_fixtures/atomic_pair_memory.py',) if focus == PAIR_FOCUS else ())
+    bindings.update({'focus': focus, 'shared_original_producer_sha256': bindings['producer_sha256'],
                      'producer_sha256': original.sha(Path(__file__).read_bytes()),
                      'source_receipts': source_bindings,
-                     'observer_dependencies': {name: original.sha((ROOT / name).read_bytes()) for name in DEPENDENCIES},
+                     'observer_dependencies': {name: original.sha((ROOT / name).read_bytes()) for name in dependencies},
                      'inputs': {name: {'sha256': original.sha(data), 'bytes': len(data)} for name, data in files.items()},
                      'input_stride': PAIR_INPUT_BYTES, 'record_stride': PAIR_RECORD_BYTES,
                      'control_address': CONTROL_ADDRESS, 'control_layout': CONTROL,
@@ -472,7 +503,7 @@ def validate_results(destination, plan, subjects):
 
 def capture(prepared, directory):
     destination, qemu, bindings, plan, subjects = prepared
-    if destination.parent != Path(directory).resolve() or bindings['focus'] != FOCUS:
+    if destination.parent != Path(directory).resolve() or bindings['focus'] not in (FOCUS, PAIR_FOCUS):
         raise AssertionError('Original SMP preparation/capture configuration differs')
     _check_bindings(bindings['source_receipts'])
     _check_bindings(bindings['observer_dependencies'])
@@ -504,7 +535,8 @@ def capture(prepared, directory):
     original.write_new(destination / 'observations.json', original.json_bytes(observations))
     files = {p.name: {'sha256': original.sha(p.read_bytes()), 'bytes': p.stat().st_size}
              for p in sorted(destination.iterdir()) if p.is_file() and p.name != 'receipt.json'}
-    receipt = {'kind': 'atomic_ordered_original_two_pe_full_frame_qemu',
+    receipt = {'kind': ('atomic_pair_original_two_pe_full_frame_qemu' if bindings['focus'] == PAIR_FOCUS
+                        else 'atomic_ordered_original_two_pe_full_frame_qemu'),
                'passed_transport_and_architectural_frame_checks': True,
                'directory': str(destination.relative_to(ROOT)),
                'pairs': len(plan), 'trials': sum(pair['trials'] for pair in plan),

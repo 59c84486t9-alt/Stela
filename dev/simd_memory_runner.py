@@ -17,17 +17,21 @@ import time
 
 from differential import ROOT, BASE, State, state_dict, parse_fault_record, move
 from evidence import write_evidence
-from simd_fixtures import structure_memory as family, ordinary_memory, atomic_memory
+from simd_fixtures import structure_memory as family, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory
 import simd_original
 
 BATCH_FUNCTIONS = 256
 FOCUS = family.FOCUS
+ATOMIC_FAMILIES = (atomic_memory, atomic_pair_memory, ordered_unscaled_memory)
 ATOMIC_ORACLE_REVIEW = ROOT / '.stela/research/atomic-implementation/contracts/unicorn-signed-minmax/review-receipt.json'
 ATOMIC_SMP_POINTER = ROOT / '.stela/research/atomic-implementation/smp/oracle/receipt.json'
+PAIR_SMP_POINTER = ROOT / '.stela/research/casp-implementation/smp/oracle/receipt.json'
 ORACLE_DIRECTORY = ROOT / '.stela/research/structured-memory-implementation/fixtures/oracle'
-FAMILIES = {FOCUS: family, ordinary_memory.FOCUS: ordinary_memory, atomic_memory.FOCUS: atomic_memory}
+FAMILIES = {FOCUS: family, ordinary_memory.FOCUS: ordinary_memory, atomic_memory.FOCUS: atomic_memory, atomic_pair_memory.FOCUS: atomic_pair_memory, ordered_unscaled_memory.FOCUS: ordered_unscaled_memory}
 ORACLE_DIRECTORIES = {FOCUS: ORACLE_DIRECTORY, ordinary_memory.FOCUS: ROOT / '.stela/research/ordinary-memory/fixtures/oracle',
-                      atomic_memory.FOCUS: ROOT / '.stela/research/atomic-implementation/fixtures/oracle'}
+                      atomic_memory.FOCUS: ROOT / '.stela/research/atomic-implementation/fixtures/oracle',
+                      atomic_pair_memory.FOCUS: ROOT / '.stela/research/casp-implementation/fixtures/oracle',
+                      ordered_unscaled_memory.FOCUS: ROOT / '.stela/research/ordered-unscaled-implementation/fixtures/oracle'}
 
 
 def family_module(focus):
@@ -40,8 +44,14 @@ def dependencies(engine, family=family):
     paths = [Path(engine.__file__), Path(__file__), Path(family.__file__), Path(simd_original.__file__),
              ROOT / 'dev/differential.py', ROOT / 'dev/evidence.py', ROOT / 'dev/native-memory-faults.c',
              ROOT / 'dev/test_simd_fixtures.py']
-    if family in (ordinary_memory, atomic_memory):
+    if family in (ordinary_memory, *ATOMIC_FAMILIES):
         paths += [ROOT / 'dev/memory-faults.py', ROOT / 'dev/simd_fixtures/structure_memory.py', ROOT / 'dev/a64_checklist.py']
+    if family in ATOMIC_FAMILIES:
+        paths += [ROOT / 'dev/simd_fixtures/memory_history.py']
+    if family in (atomic_pair_memory, ordered_unscaled_memory):
+        paths += [Path(atomic_memory.__file__)]
+    if family is atomic_pair_memory:
+        paths += [ROOT / 'dev/simd_atomic_original.py']
     if family is atomic_memory:
         paths += [ROOT / 'dev/simd_atomic_original.py', ATOMIC_ORACLE_REVIEW]
         review = json.loads(ATOMIC_ORACLE_REVIEW.read_bytes())
@@ -91,10 +101,10 @@ def load_original(engine, pointer, focus=FOCUS):
     stride = memory_plan['record_bytes']
     if len(results) != simd_original.HEADER_BYTES + len(cases) * stride:
         raise AssertionError('Original memory results framing differs')
-    if family is atomic_memory:
+    if family in ATOMIC_FAMILIES:
         if not producer.get('atomic_features'):
             raise AssertionError('Original atomic feature readbacks required')
-        simd_original.validate_atomic_features(results)
+        simd_original.validate_atomic_features(results, focus=focus)
     records, controls = [], Counter()
     memory = family.memory_template()
     for index, case in enumerate(cases):
@@ -174,9 +184,61 @@ def execute_batches(engine, batches):
             'caller_mxcsr_preservation_comparisons': len(selected_records)}
 
 
+
+NORMAL_RBX_SENTINEL = 0xca5f16ab1c0ffee7
+PUSH_RBX, POP_RBX, HOST_RET = b'\x53', b'\x5b', b'\xc3'
+MOV_RBX_IMM64, CALL_REL32, MOV_RAX_RBX = b'\x48\xbb', b'\xe8', b'\x48\x89\xd8'
+CALL_REL32_BYTES = len(CALL_REL32) + struct.calcsize('<i')
+
+
+def normal_return_rbx_wrapper(native, entry, sentinel=NORMAL_RBX_SENTINEL):
+    """Call the exact compiled leaf with ABI stack alignment and observe RBX."""
+    if not 0 <= entry < len(native) or not 0 <= sentinel <= (1 << 64) - 1:
+        raise ValueError('Invalid normal-return ABI entry/sentinel')
+    setup = PUSH_RBX + MOV_RBX_IMM64 + struct.pack('<Q', sentinel)
+    finish = MOV_RAX_RBX + POP_RBX + HOST_RET
+    body_start = len(setup) + CALL_REL32_BYTES + len(finish)
+    displacement = body_start + entry - (len(setup) + CALL_REL32_BYTES)
+    prefix = setup + CALL_REL32 + struct.pack('<i', displacement) + finish
+    return prefix + native, len(prefix)
+
+
+def verify_pair_normal_abi(engine, batches, oracle, target_id):
+    """Separate normal-return host preservation, never fault-resumption evidence."""
+    selected = {}
+    for record in oracle['records']:
+        if record['compare_mode'] in ('match', 'low_mismatch'):
+            selected.setdefault((record['function'], record['compare_mode']), record)
+    counts, wrappers, observations = Counter(), [], []
+    with fixed_private_ram(atomic_pair_memory) as ram_pointer:
+        for batch in batches:
+            for local, entry in enumerate(batch['offsets']):
+                function = batch['function_indices'][local]
+                wrapped, prefix_bytes = normal_return_rbx_wrapper(batch['native'], entry)
+                wrappers.append({'function': function, 'native_sha256': engine.digest(batch['native']),
+                    'entry': entry, 'wrapper_prefix_hex': wrapped[:prefix_bytes].hex(), 'wrapped_sha256': engine.digest(wrapped)})
+                with engine.executable(wrapped) as address:
+                    call = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.POINTER(State))(address)
+                    for mode in ('match', 'low_mismatch'):
+                        record = selected[function, mode]
+                        state = State.from_buffer_copy(record['initial'])
+                        ctypes.memmove(ram_pointer, atomic_pair_memory.memory_template(), atomic_pair_memory.RAM_BYTES)
+                        returned = call(ctypes.byref(state))
+                        ram = ctypes.string_at(ram_pointer, atomic_pair_memory.RAM_BYTES)
+                        observations.append({'function': function, 'case': record['case'], 'mode': mode, 'returned_rbx': returned,
+                            'actual_state_hex': bytes(state).hex(), 'actual_ram_sha256': engine.digest(ram)})
+                        if returned != NORMAL_RBX_SENTINEL or bytes(state) != record['expected'] or ram != record['expected_ram']:
+                            path = write_evidence(ROOT / f'.stela/casp-normal-abi-{target_id}-failure.json', observations)
+                            raise AssertionError('CASP normal-return host ABI/State/RAM mismatch: ' + str(path))
+                        counts['normal_return_rbx_checks'] += 1
+    path = write_evidence(ROOT / f'.stela/casp-normal-abi-{target_id}-records.json', {'wrappers': wrappers, 'observations': observations})
+    return {**counts, 'functions': len(wrappers), 'sentinel': NORMAL_RBX_SENTINEL,
+        'records': {'path': str(path.relative_to(ROOT)), 'sha256': engine.digest(path.read_bytes())},
+        'limits': 'Actual compiled leaf called with a seeded host RBX and checked complete guest State/RAM on normal return. Faulting execution terminates; no host fault-context restoration or resumption claim.'}
+
 def runtime_checks(engine, cli, directory, compiler, target, target_id, oracle, family=family, selected_functions=None):
     """Canonical forms through actual owned-memory dispatcher/cache."""
-    if family is atomic_memory:
+    if family in ATOMIC_FAMILIES:
         representatives = {}
         for record in oracle['records']:
             op = record['operation']
@@ -377,7 +439,8 @@ def ordinary_original_fault(oracle, source, initial, ram_address, page_size, rea
 def verify_declined(engine, cli, directory, family):
     records = []
     for index, case in enumerate(family.declined_encodings()):
-        commands = ('compile-leaf', 'compile-block') if case['reason'] == 'AtomicLoad16_host_capability' else ('compile-leaf',)
+        capability = case['reason'] in ('AtomicLoad16_host_capability', 'Cx16_host_capability')
+        commands = ('compile-leaf', 'compile-block') if capability else ('compile-leaf',)
         for command in commands:
             path, output = directory / f'declined-{index}.arm64', directory / f'declined-{index}-{command}.native'
             source = struct.pack('<II', case['word'], engine.RET)
@@ -386,15 +449,15 @@ def verify_declined(engine, cli, directory, family):
                                         '--cpu-target', 'baseline', '--output-dir', str(output)], capture_output=True, text=True, timeout=30)
             if completed.returncode == 0 or (output / 'native.bin').exists():
                 raise AssertionError('Declined memory input emitted native code: ' + str(case))
-            if case['reason'] == 'AtomicLoad16_host_capability' and 'HostCapabilityRequired' not in completed.stderr:
+            if capability and 'HostCapabilityRequired' not in completed.stderr:
                 raise AssertionError('Ordered baseline decline lost capability reason: ' + completed.stderr)
             records.append({**case, 'command': command, 'source_sha256': engine.digest(source), 'error': completed.stderr.strip()})
     return {'declined_before_execution': len(records), 'records': records}
 
 
 def verify_faults(engine, cli, directory, compiler, target, target_id, family=family):
-    if family is atomic_memory:
-        return verify_atomic_faults(engine, cli, directory, compiler, target, target_id)
+    if family in ATOMIC_FAMILIES:
+        return verify_atomic_faults(engine, cli, directory, compiler, target, target_id, family)
     observer = directory / (family.FOCUS + '-fault-observer')
     subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', str(ROOT / 'dev/native-memory-faults.c'), '-o', str(observer)], check=True)
     records, counts = [], Counter()
@@ -589,11 +652,14 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
     family = family_module(focus)
     pointer = Path(pointer) if pointer else ORACLE_DIRECTORIES[focus] / 'receipt.json'
     oracle = load_original(engine, pointer, focus)
-    smp = load_atomic_smp_original(engine, Path(atomic_smp_pointer) if atomic_smp_pointer else ATOMIC_SMP_POINTER) if family is atomic_memory else None
+    smp_pointer = Path(atomic_smp_pointer) if atomic_smp_pointer else PAIR_SMP_POINTER if family is atomic_pair_memory else ATOMIC_SMP_POINTER
+    smp = load_atomic_smp_original(engine, smp_pointer, family) if family in (atomic_memory, atomic_pair_memory) else None
     sources, cli_sha, started = dependencies(engine, family), engine.digest(cli.read_bytes()), time.monotonic()
     cpu = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
-    if family is atomic_memory and not cpu.get('atomic_load16'):
+    if family in (atomic_memory, ordered_unscaled_memory) and not cpu.get('atomic_load16'):
         raise AssertionError('Full atomic proof requires checked AtomicLoad16 host capability; baseline is a bounded subset')
+    if family is atomic_pair_memory and (not cpu.get('cx16') or 'cx16' not in cpu['detected_target'].split('+')[1:]):
+        raise AssertionError('Full CASP proof requires independent checked Cx16 capability and target identity')
     selections = [('baseline', 'x86_64-baseline')]
     if cpu['detected_target'] != 'x86_64-baseline':
         selections.append(('native', cpu['detected_target']))
@@ -604,14 +670,14 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
             directory.mkdir()
             batches, artifacts = [], []
             selected_functions = [index for index, op in enumerate(oracle['functions'])
-                                  if family is not atomic_memory or family.supported_on_profile(op, target)]
+                                  if family not in ATOMIC_FAMILIES or family.supported_on_profile(op, target if target == 'baseline' else target_id)]
             for start in range(0, len(selected_functions), BATCH_FUNCTIONS):
                 indices = selected_functions[start:start + BATCH_FUNCTIONS]
                 operations = [oracle['functions'][index] for index in indices]
                 batch = engine.compile_batch(cli, directory, [{'operations': [op]} for op in operations], start,
                     cpu_target=target, target_id=target_id, guest_base=BASE + start * 8,
                     allowed_mnemonics={op['name'] for op in operations},
-                    **({'source_validator': family.validate_source_words} if family in (ordinary_memory, atomic_memory) else {}))
+                    **({'source_validator': family.validate_source_words} if family in (ordinary_memory, *ATOMIC_FAMILIES) else {}))
                 batch.update(cohort=focus, function_base=start, function_indices=indices, oracle_path=str(pointer))
                 if compiler is not None and compiler != batch['compiler']:
                     raise AssertionError('Structured memory compiler changed')
@@ -629,20 +695,22 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
             runtime = runtime_checks(engine, cli, directory, compiler, target, target_id, oracle, family, set(selected_functions))
             profiles.append({'target_cpu': target_id, 'raw_native': raw, 'runtime': runtime, 'native_artifacts': artifacts, 'optional_opcodes_used': sorted(used),
                              **({'selected_functions': len(selected_functions), 'selected_canonical_forms': len({oracle['functions'][i]['canonical_id'] for i in selected_functions}),
-                                 'capability_declined_functions': len(oracle['functions']) - len(selected_functions)} if family is atomic_memory else {})})
+                                 'capability_declined_functions': len(oracle['functions']) - len(selected_functions)} if family in ATOMIC_FAMILIES else {})})
             faults.append(verify_faults(engine, cli, directory, compiler, target, target_id, family))
-            if family is atomic_memory:
-                profiles[-1]['concurrency'] = verify_atomic_concurrency(engine, cli, directory, compiler, target, target_id)
+            if family in ATOMIC_FAMILIES:
+                profiles[-1]['concurrency'] = verify_atomic_concurrency(engine, cli, directory, compiler, target, target_id, family)
+            if family is atomic_pair_memory:
+                profiles[-1]['normal_host_abi'] = verify_pair_normal_abi(engine, batches, oracle, target_id)
         calibration = calibrated_originals(engine) if family.FOCUS == FOCUS else {
             'actual_QEMU_original_fault_observations': 0,
             'limits': 'Structured-memory calibration is not atomic-memory evidence. Actual mapped-access Unicorn frames are separately retained in faults.' if family is atomic_memory else 'Structured-memory calibration is not ordinary-memory evidence. Actual ordinary mapped-access Unicorn frames are separately retained in faults.'}
-        declines = verify_declined(engine, cli, Path(temporary), family) if family in (ordinary_memory, atomic_memory) else None
+        declines = verify_declined(engine, cli, Path(temporary), family) if family in (ordinary_memory, *ATOMIC_FAMILIES) else None
     if family is atomic_memory:
         model_identity = profiles[0]['concurrency']['ordering_model']
         if (any(profile['concurrency']['ordering_model'] != model_identity for profile in profiles)
                 or engine.digest((ROOT / model_identity['path']).read_bytes()) != model_identity['sha256']):
             raise AssertionError('Reviewed atomic ordering model changed during verification')
-    if smp is not None and load_atomic_smp_original(engine, Path(atomic_smp_pointer) if atomic_smp_pointer else ATOMIC_SMP_POINTER) != smp:
+    if smp is not None and load_atomic_smp_original(engine, smp_pointer, family) != smp:
         raise AssertionError('Original SMP evidence changed during verification')
     if engine.digest(cli.read_bytes()) != cli_sha or dependencies(engine, family) != sources:
         raise AssertionError('Structured memory executable or source changed during verification')
@@ -658,7 +726,7 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
         **({'declined_encodings': declines} if declines is not None else {}),
         **({'original_smp': smp} if smp is not None else {}),
         'verification_wall_seconds': time.monotonic() - started,
-        'limits': ('Declared EL0 shared coherent Normal-WB/LSE2/SCA16 cohort; individual original semantics, native/source fault checks and bounded native/original concurrent outcomes remain separate evidence. No complete memory-model, production concurrent runtime, guest exception delivery, Apple hardware, application or performance claim.' if family is atomic_memory else 'Declared private little-endian RAM/nonstreaming AdvSIMD profile. Success primary originals and native/source-policy faults are separate evidence. No guest exception delivery, concurrency, Apple hardware, application or performance credit.')}
+        'limits': ('CASP complete individual State/RAM, runtime/cache, faults, normal-return host ABI and separate bounded native/two-PE original byte histories in EL0 Normal-WB/LSE2/SCA16. No host fault resumption, whole-program concurrent runtime, complete memory-model or performance claim.' if family is atomic_pair_memory else 'Unscaled acquire/release complete State/RAM, runtime/cache, faults and bounded native byte histories in EL0 Normal-WB/LSE2/SCA16/LRCPC2. No original concurrent ordering, model-completeness or guest exception delivery claim.' if family is ordered_unscaled_memory else 'Declared EL0 shared coherent Normal-WB/LSE2/SCA16 cohort; individual original semantics, native/source fault checks and bounded native/original concurrent outcomes remain separate evidence. No complete memory-model, production concurrent runtime, guest exception delivery, Apple hardware, application or performance claim.' if family is atomic_memory else 'Declared private little-endian RAM/nonstreaming AdvSIMD profile. Success primary originals and native/source-policy faults are separate evidence. No guest exception delivery, concurrency, Apple hardware, application or performance credit.')}
     path = write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     return path, report
 
@@ -737,14 +805,14 @@ def atomic_narrow_signed_oracle_difference(op, case, initial, memory, ram_addres
             and original_ram == alternative_ram)
 
 
-def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
+def verify_atomic_faults(engine, cli, directory, compiler, target, target_id, family=atomic_memory):
     import importlib.util
     import unicorn
-    oracle_review, review_identity = atomic_oracle_review(engine)
+    oracle_review, review_identity = atomic_oracle_review(engine) if family is atomic_memory else (None, None)
     library_path = Path(importlib.import_module('unicorn.unicorn_py3.unicorn').uclib._name).resolve()
     library_data = library_path.read_bytes()
     library_identity = {'path': str(library_path.relative_to(ROOT)), 'sha256': engine.digest(library_data), 'bytes': len(library_data)}
-    if (unicorn.__version__ != oracle_review['engine_version']
+    if oracle_review is not None and (unicorn.__version__ != oracle_review['engine_version']
             or library_identity['sha256'] != oracle_review['installed_library']['sha256']
             or library_identity['bytes'] != oracle_review['installed_library']['bytes']):
         raise AssertionError('Actual loaded Unicorn differs from reviewed atomic oracle')
@@ -761,18 +829,18 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
     spec = importlib.util.spec_from_file_location('atomic_original_faults', ROOT / 'dev/memory-faults.py')
     oracle = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(oracle)
-    shapes, counts, records = atomic_memory.shapes(), Counter(), []
-    selected = [case for case in atomic_memory.fault_selection(target != 'baseline')
-                if atomic_memory.supported_on_profile(atomic_memory.fault_operation(shapes[case['function']], case), target)]
-    operations = {atomic_memory.fault_operation(shapes[case['function']], case)['word']:
-                  atomic_memory.fault_operation(shapes[case['function']], case) for case in selected}
+    shapes, counts, records = family.shapes(), Counter(), []
+    selected = [case for case in family.fault_selection(target != 'baseline' and family is atomic_memory)
+                if family.supported_on_profile(family.fault_operation(shapes[case['function']], case), target if target == 'baseline' else target_id)]
+    operations = {family.fault_operation(shapes[case['function']], case)['word']:
+                  family.fault_operation(shapes[case['function']], case) for case in selected}
     compiled, words = {}, list(operations)
     for start in range(0, len(words), BATCH_FUNCTIONS):
         group = words[start:start + BATCH_FUNCTIONS]
         programs = [{'operations': [{'kind': 'prefix', 'word': move(2, 1, 7, 99)}, operations[word]]} for word in group]
         batch = engine.compile_batch(cli, directory, programs, 'atomic-fault-' + str(start), cpu_target=target,
             target_id=target_id, allowed_mnemonics={'mov', 'movz', *[operations[word]['name'] for word in group]},
-            source_validator=atomic_memory.validate_source_words)
+            source_validator=family.validate_source_words)
         if batch['compiler'] != compiler: raise AssertionError('Atomic fault compiler changed')
         for local, word in enumerate(group):
             first = batch['offsets'][local]
@@ -784,15 +852,16 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
             path.write_bytes(native)
             compiled[word] = source, native, mapping, path
     for index, case in enumerate(selected):
-        op = atomic_memory.fault_operation(shapes[case['function']], case)
+        op = family.fault_operation(shapes[case['function']], case)
         source, native, mapping, path = compiled[op['word']]
-        initial = atomic_memory.initial_state(op, index, 512, operand=0, compare=0)
+        initial = (family.fault_initial_state(op, case, index) if hasattr(family, 'fault_initial_state')
+                   else family.initial_state(op, index, 512, operand=0, compare=0))
         initial.fpcr, initial.fpsr = 0x03c00000, 0x0800001f
-        if case.get('compare_matches') and op['rs'] != 31:
+        if family is atomic_memory and case.get('compare_matches') and op['rs'] != 31:
             initial.x[op['rs']] = int.from_bytes(b'\xa5' * op['element_bytes'], 'little')
         initial_path = directory / 'atomic-fault-state.bin'
         initial_path.write_bytes(bytes(initial))
-        arguments = [str(observer), str(path), case['protection'], str(op['rn']), str(-case.get('address_offset', 0))]
+        arguments = [str(observer), str(path), case['protection'], str(op['rn']), str(op.get('offset', 0) - case.get('address_offset', 0))]
         if case['protection'] == 'mapped': arguments.append(str(case['low_offset']))
         elif case['protection'] == 'structure_crossing': arguments.append(str(case['cut']))
         arguments += ['--initial-state', str(initial_path)]
@@ -800,21 +869,23 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
             completed = subprocess.run(arguments, capture_output=True, timeout=10)
         except subprocess.TimeoutExpired as error:
             raw = retain_ordinary_fault_bytes(engine, source, native, error.stdout or b'',
-                {**case, 'timeout': True, 'stderr_hex': (error.stderr or b'').hex()}, mapping, atomic_memory.FOCUS)
+                {**case, 'timeout': True, 'stderr_hex': (error.stderr or b'').hex()}, mapping, family.FOCUS)
             raise AssertionError('Atomic native fault observer timed out: ' + str(raw)) from error
         data = completed.stdout
         raw = retain_ordinary_fault_bytes(engine, source, native, data,
-            {**case, 'returncode': completed.returncode, 'stderr_hex': completed.stderr.hex()}, mapping, atomic_memory.FOCUS)
+            {**case, 'returncode': completed.returncode, 'stderr_hex': completed.stderr.hex()}, mapping, family.FOCUS)
         if completed.returncode:
             raise AssertionError('Atomic native fault observer failed: ' + str(raw))
         (code_address, ram_address, page_size), initial, (number, pc, native_address), actual, ram = parse_fault_record(data)
         staged = State.from_buffer_copy(initial)
         staged.x[7] = 99
-        expected, expected_ram, fault = atomic_memory.expected(op, staged, b'\xa5' * page_size,
+        expected, expected_ram, fault = family.expected(op, staged, b'\xa5' * page_size,
             ram_address, readonly=case['protection'] == 'readonly')
         policy_fault = fault and fault['kind'] in ('sp_alignment', 'sca_alignment')
-        requested = initial.sp if op['rn'] == 31 else initial.x[op['rn']]
-        snapshot_read = (op['operation'] in ('ldar', 'ldapr') and op['element_bytes'] > 1 and op['rn'] != 31
+        requested = (family.effective_address(op, initial) if hasattr(family, 'effective_address')
+                     else initial.sp if op['rn'] == 31 else initial.x[op['rn']])
+        snapshot_read = (family.snapshot_read(op, initial) if hasattr(family, 'snapshot_read') else
+                         op['operation'] in ('ldar', 'ldapr') and op['element_bytes'] > 1 and op['rn'] != 31
                          and (requested & 7) + op['element_bytes'] > 8 and (requested & 15) + op['element_bytes'] <= 16)
         expected_native_address = requested & ~15 if snapshot_read else fault['address'] if fault else None
         offset = pc - code_address
@@ -827,7 +898,7 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
             raise AssertionError('Atomic native/source boundary mismatch: ' + str(case) + ' raw=' + str(raw))
         original, original_ram, faults, event, controls = atomic_original_observation(
             oracle, source, initial, ram_address, page_size, case['protection'] == 'readonly', library_identity)
-        raw_original = write_evidence(ROOT / f'.stela/atomic-{target_id}-original-fault-{index}.json', {
+        raw_original = write_evidence(ROOT / f'.stela/{"atomic" if family is atomic_memory else family.FOCUS}-{target_id}-original-fault-{index}.json', {
             'case': case, 'operation': op, 'native_raw': raw, 'oracle_review': review_identity, 'initial_state_hex': bytes(initial).hex(),
             'original_state_hex': bytes(original).hex(), 'original_ram_hex': original_ram.hex(),
             'faults': faults, 'event': event, 'controls': controls})
@@ -837,14 +908,14 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
         elif event['error'] and not faults:
             classification = 'oracle_exception_limitation'
         elif fault and event['completed']:
-            permitted_state, permitted_ram, permitted_fault = atomic_memory.expected(
+            permitted_state, permitted_ram, permitted_fault = family.expected(
                 op, staged, b'\xa5' * page_size, ram_address, readonly=False)
             if permitted_fault or bytes(original) != bytes(permitted_state) or original_ram != permitted_ram:
                 raise AssertionError('Unexplained completed atomic original frame: ' + str(raw_original))
             classification = 'oracle_missing_atomic_write_permission_check'
         elif equal:
             classification = 'original_native_full_state_RAM_equal'
-        elif atomic_narrow_signed_oracle_difference(op, case, staged, b'\xa5' * page_size, ram_address,
+        elif oracle_review is not None and atomic_narrow_signed_oracle_difference(op, case, staged, b'\xa5' * page_size, ram_address,
                 expected, expected_ram, original, original_ram, event, faults, controls, oracle_review):
             classification = oracle_review['classification']['name']
         else:
@@ -855,7 +926,7 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
         records.append({'case': case, 'operation': op, 'classification': classification,
             **({'oracle_alternative': {'comparison': 'unsigned_element', 'complete_State_equal': True,
                 'complete_RAM_equal': True, 'signed_source_RAM_equal': False}}
-               if classification == oracle_review['classification']['name'] else {}),
+               if oracle_review is not None and classification == oracle_review['classification']['name'] else {}),
             'initial_state_hex': bytes(initial).hex(), 'native_state_hex': bytes(actual).hex(), 'native_ram_hex': ram.hex(),
             'native_signal': number, 'requested_guest_address': requested, 'actual_native_fault_address': native_address,
             'selected_snapshot_read': snapshot_read, 'native_fault_offset': offset if number else None,
@@ -863,13 +934,13 @@ def verify_atomic_faults(engine, cli, directory, compiler, target, target_id):
                 'path': str(raw_original.relative_to(ROOT)), 'sha256': engine.digest(raw_original.read_bytes())}})
     if engine.digest(library_path.read_bytes()) != library_identity['sha256']:
         raise AssertionError('Loaded atomic oracle library changed during observation')
-    path = write_evidence(ROOT / f'.stela/simd-atomic_memory-{target_id}-fault-records.json', records)
+    path = write_evidence(ROOT / f'.stela/simd-{family.FOCUS}-{target_id}-fault-records.json', records)
     return {**counts, 'target_cpu': target_id, 'native_observer': observer_identity,
-            'oracle_review': {**review_identity, 'source_files': oracle_review['source_files'],
-                'witness': oracle_review['witness'], 'witness_files': oracle_review['witness_files']},
+            **({'oracle_review': {**review_identity, 'source_files': oracle_review['source_files'],
+                'witness': oracle_review['witness'], 'witness_files': oracle_review['witness_files']}} if oracle_review is not None else {}),
             'actual_oracle_library': library_identity, 'actual_oracle_features': controls['decoded_features'],
             'records': {'path': str(path.relative_to(ROOT)), 'sha256': engine.digest(path.read_bytes())},
-            'limits': 'Native/source full state/RAM equality. SP/SCA UD2 are policy checks. Supplementary Unicorn MAX has AT=0/no FEAT_LSE2, so it cannot establish selected primary-QEMU LSE2/SCA16 unaligned semantics. Exact reviewed signed narrow min/max differences and actual mapped-access exceptions/completions receive no equality credit; no guest ESR/FAR delivery claim.'}
+            'limits': ('Native/source full state/RAM equality. SP/SCA UD2 are policy checks. Supplementary Unicorn MAX has AT=0/no FEAT_LSE2, so it cannot establish selected primary-QEMU LSE2/SCA16 unaligned semantics. Exact reviewed signed narrow min/max differences and actual mapped-access exceptions/completions receive no equality credit; no guest ESR/FAR delivery claim.' if family is atomic_memory else family.FOCUS + ' native/source full State/RAM and policy checks; actual mapped-access Unicorn observations retained independently. AT0 lacks selected LSE2/SCA16 unaligned semantics. No scalar min/max classification or prior concurrency evidence applies; no guest ESR/FAR delivery claim.')}
 
 
 def atomic_ordering_model(engine):
@@ -885,10 +956,21 @@ def atomic_ordering_model(engine):
 
 
 
-def validate_atomic_smp_trial(case, final_states, ram, model):
+def validate_atomic_smp_trial(case, final_states, ram, model, family=atomic_memory):
     """Check every State/RAM byte against the reviewed outcomes or two orders."""
     if len(final_states) != 2 or any(len(state) != 784 for state in final_states) or len(ram) != 8192:
         raise AssertionError('Original SMP model input framing differs')
+    if family is atomic_pair_memory:
+        if any(len(program) != 1 for program in case['programs']):
+            raise AssertionError('Original CASP requires one whole operation per PE')
+        for order in ((0, 1), (1, 0)):
+            memory, finals = case['memory'], list(case['initial'])
+            for thread in order:
+                state, memory, fault = family.history_expected(case['programs'][thread][0], State.from_buffer_copy(case['initial'][thread]), memory, family.RAM_ADDRESS)
+                if fault: raise AssertionError('Original CASP success history model faulted')
+                finals[thread] = bytes(state)
+            if finals == final_states and memory == ram: return list(order)
+        raise AssertionError('Original CASP full States/RAM have no exact source serialization')
     if case['kind'] == 4:
         relative = next(item for item in atomic_memory.concurrency_cases() if item['id'] == case['id'])
         atomic_memory.validate_litmus_case(relative, model)
@@ -922,19 +1004,20 @@ def validate_atomic_smp_trial(case, final_states, ram, model):
     raise AssertionError('Original SMP cross8 full States/RAM have no exact serialization')
 
 
-def load_atomic_smp_original(engine, pointer):
+def load_atomic_smp_original(engine, pointer, family=atomic_memory):
     """Consume immutable two-PE transport; independently judge source outcomes."""
     import simd_atomic_original as smp
     pointer_data, pointer_sha = engine.numerical_json(pointer)
     receipt_path = ROOT / pointer_data['receipt']['path']
     producer, receipt_sha = engine.numerical_json(receipt_path, pointer_data['receipt']['sha256'])
     directory = ROOT / producer['directory']
-    pairs = smp.default_pairs()
-    expected_files, plan, _ = smp.input_files(pairs)
-    model, model_identity = atomic_ordering_model(engine)
-    if (pointer_data.get('kind') != smp.FOCUS + '_original_oracle_capture_pointer'
-            or producer.get('kind') != 'atomic_ordered_original_two_pe_full_frame_qemu'
-            or producer.get('focus') != smp.FOCUS or not producer.get('passed_transport_and_architectural_frame_checks')
+    focus = smp.PAIR_FOCUS if family is atomic_pair_memory else smp.FOCUS
+    pairs = smp.pair_default_pairs() if family is atomic_pair_memory else smp.default_pairs()
+    expected_files, plan, _ = smp.input_files(pairs, focus=focus)
+    model, model_identity = atomic_ordering_model(engine) if family is atomic_memory else (None, None)
+    if (pointer_data.get('kind') != focus + '_original_oracle_capture_pointer'
+            or producer.get('kind') != ('atomic_pair_original_two_pe_full_frame_qemu' if family is atomic_pair_memory else 'atomic_ordered_original_two_pe_full_frame_qemu')
+            or producer.get('focus') != focus or not producer.get('passed_transport_and_architectural_frame_checks')
             or pointer_data['directory'] != producer['directory'] or receipt_path.parent != directory
             or pointer_data['files'] != producer['files'] or receipt_path.stat().st_size != pointer_data['receipt']['bytes']
             or producer['pairs'] != 8 or producer['trials'] != 2048 or producer['pes'] != 2
@@ -976,39 +1059,40 @@ def load_atomic_smp_original(engine, pointer):
         case = cases[row['pair']]
         begin = 1024 + row['record_index'] * 10240
         ram = results[begin + 2048:begin + 10240]
-        outcome = validate_atomic_smp_trial(case, [bytes.fromhex(state) for state in row['final_state_hex']], ram, model)
+        outcome = validate_atomic_smp_trial(case, [bytes.fromhex(state) for state in row['final_state_hex']], ram, model, family)
         histograms.setdefault(case['id'], Counter())[tuple(outcome)] += 1
     return {'pointer': {'path': str(Path(pointer).relative_to(ROOT)), 'sha256': pointer_sha},
         'receipt': {'path': str(receipt_path.relative_to(ROOT)), 'sha256': receipt_sha},
         'producer': producer, 'ordering_model': model_identity,
-        'complete_state_checks': 4096, 'complete_RAM_checks': 2048, 'ordering_trials': 1792,
-        'cross8_exact_serialization_trials': 256,
+        'complete_state_checks': 4096, 'complete_RAM_checks': 2048,
+        **({'exact_pair_serialization_trials': 2048} if family is atomic_pair_memory else
+           {'ordering_trials': 1792, 'cross8_exact_serialization_trials': 256}),
         'outcomes': {key: [{'values': list(values), 'count': count} for values, count in sorted(hist.items())]
                      for key, hist in histograms.items()},
-        'limits': 'Actual two-PE EL0 Normal-MMU QEMU originals. Seven restricted source-model memberships and one exact byte-history case; finite outcomes/frequencies are not complete memory-model proof or hardware performance.'}
+        'limits': ('Actual two-PE EL0 Normal-MMU CASP/scalar originals; exact complete-State/byte serializations for8 reviewed overlapping atomic pairs. Finite observations do not prove complete memory-model behavior or hardware performance.' if family is atomic_pair_memory else 'Actual two-PE EL0 Normal-MMU QEMU originals. Seven restricted source-model memberships and one exact byte-history case; finite outcomes/frequencies are not complete memory-model proof or hardware performance.')}
 
 
-def verify_atomic_concurrency(engine, cli, directory, compiler, target, target_id):
-    cases = [case for case in atomic_memory.concurrency_cases()
-             if all(atomic_memory.supported_on_profile(op, target) for program in case['programs']
-                    for op in program if op['kind'] == atomic_memory.FOCUS)]
-    model, model_identity = atomic_ordering_model(engine)
-    allowed = model['allowed_outcomes']
+def verify_atomic_concurrency(engine, cli, directory, compiler, target, target_id, family=atomic_memory):
+    cases = [case for case in family.concurrency_cases()
+             if all(family.supported_on_profile(op, target if target == 'baseline' else target_id) for program in case['programs']
+                    for op in program if op['kind'] == family.FOCUS)]
+    model, model_identity = atomic_ordering_model(engine) if family is atomic_memory else (None, None)
+    allowed = model['allowed_outcomes'] if model is not None else {}
     observer = directory / 'atomic-fault-observer'
     counts, transcripts = Counter(), []
     for index, case in enumerate(cases):
-        atomic_memory.validate_litmus_case(case, model)
+        if model is not None: atomic_memory.validate_litmus_case(case, model)
         programs = [{'operations': program} for program in case['programs']]
         batch = engine.compile_batch(cli, directory, programs, 'atomic-concurrent-' + str(index),
             cpu_target=target, target_id=target_id, allowed_mnemonics={op['name'] for program in case['programs'] for op in program},
-            source_validator=atomic_memory.validate_source_words)
+            source_validator=family.validate_source_words)
         if batch['compiler'] != compiler: raise AssertionError('Atomic concurrency compiler changed')
         accounting = native_binary_accounting(engine, batch)
-        batch['cohort'] = atomic_memory.FOCUS + '-concurrency'
+        batch['cohort'] = family.FOCUS + '-concurrency'
         artifact = engine.retain_native_binary_evidence(batch, accounting, [])
         native_path, plan_path = directory / 'atomic-concurrent.bin', directory / 'atomic-concurrent-plan.bin'
         native_path.write_bytes(batch['native'])
-        plan = atomic_memory.concurrency_plan(case, batch['offsets'])
+        plan = family.concurrency_plan(case, batch['offsets'])
         plan_path.write_bytes(plan)
         try:
             completed = subprocess.run([str(observer), '--atomic-concurrency', str(native_path), str(plan_path)],
@@ -1016,11 +1100,11 @@ def verify_atomic_concurrency(engine, cli, directory, compiler, target, target_i
         except subprocess.TimeoutExpired as error:
             raw = retain_ordinary_fault_bytes(engine, batch['source'], batch['native'], error.stdout or b'',
                 {'id': case['id'], 'plan_hex': plan.hex(), 'timeout': True, 'stderr_hex': (error.stderr or b'').hex()},
-                batch['manifest']['source_map'], atomic_memory.FOCUS + '-concurrency')
+                batch['manifest']['source_map'], family.FOCUS + '-concurrency')
             raise AssertionError('Bounded atomic worker timed out: ' + str(raw)) from error
         raw = retain_ordinary_fault_bytes(engine, batch['source'], batch['native'], completed.stdout,
             {'id': case['id'], 'plan_hex': plan.hex(), 'returncode': completed.returncode,
-             'stderr_hex': completed.stderr.hex()}, batch['manifest']['source_map'], atomic_memory.FOCUS + '-concurrency')
+             'stderr_hex': completed.stderr.hex()}, batch['manifest']['source_map'], family.FOCUS + '-concurrency')
         if completed.returncode: raise AssertionError('Atomic concurrent worker failed: ' + str(raw))
         data = completed.stdout
         if len(data) < 72: raise AssertionError('Truncated concurrent header: ' + str(raw))
@@ -1067,7 +1151,7 @@ def verify_atomic_concurrency(engine, cli, directory, compiler, target, target_i
         ram_snapshots = data[final_offset + threads * 784:]
         final_ram = ram_snapshots[-8192:]
         if case['kind'] == 0:
-            if not atomic_memory.linearization_allowed(rows, case['memory'], ram_address, final_ram):
+            if not family.linearization_allowed(rows, case['memory'], ram_address, final_ram):
                 raise AssertionError('Concurrent RMW history has no source linearization: ' + str(raw))
             counts['linearized_histories'] += 1
         elif case['kind'] in (1, 2, 3):
@@ -1123,7 +1207,7 @@ def verify_atomic_concurrency(engine, cli, directory, compiler, target, target_i
         transcripts.append({'id': case['id'], 'threads': threads, 'iterations': iterations, 'alias': case['alias'],
             'records': rows, 'raw_record': raw, 'native_artifact': artifact,
             **({'outcomes': [{'values': list(values), 'count': amount} for values, amount in sorted(outcomes.items())]} if case['kind'] == 4 else {})})
-    path = write_evidence(ROOT / f'.stela/simd-atomic_memory-{target_id}-concurrency-records.json', transcripts)
+    path = write_evidence(ROOT / f'.stela/simd-{family.FOCUS}-{target_id}-concurrency-records.json', transcripts)
     return {**counts, 'cases': len(cases), 'target_cpu': target_id, 'ordering_model': model_identity,
         'records': {'path': str(path.relative_to(ROOT)), 'sha256': engine.digest(path.read_bytes())},
         'limits': 'Actual translated bodies on separate pthread States and one shared backing, including virtual aliases. Bounded histories/outcome membership only; finite absence and outcome frequencies are not memory-model completeness or application performance.'}

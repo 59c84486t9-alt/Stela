@@ -67,6 +67,16 @@ MEMORY_CONTROL_HEADER_OFFSET = len(CPU_REGISTERS) * 8
 ELF_EXECINSTR = 1 << 2
 ATOMIC_FEATURE_HEADER_OFFSET = MEMORY_CONTROL_HEADER_OFFSET + len(MEMORY_CONTROLS) * 8
 ATOMIC_FOCUS = 'atomic_memory'
+ATOMIC_PAIR_FOCUS = 'atomic_pair_memory'
+ORDERED_UNSCALED_FOCUS = 'ordered_unscaled_memory'
+ATOMIC_FEATURE_FOCUSES = (ATOMIC_FOCUS, ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS)
+TAG_ARITHMETIC_FOCUS = 'tag_arithmetic'
+TAG_ATA0 = 1 << 42
+TAG_TCF0_MASK = 3 << 38
+TAG_UNDEFINED_ESR = 1 << 25  # EC=Unknown, IL=32; no additional syndrome bits.
+TAG_SCTLR = (MEMORY_SCTLR & ~1) | TAG_ATA0
+TAG_CONTROLS = {'SCTLR_EL1': TAG_SCTLR, 'GCR_EL1': 0}
+TAG_CONTROL_HEADER_OFFSET = len(CPU_REGISTERS) * 8
 LAYOUT = {'x': 0, 'sp': 248, 'spsr': 256, 'fpcr': 264, 'fpsr': 272,
           'esr': 280, 'elr': 288, 'current_el': 296, 'cpacr': 304,
           'marker': 312, 'v': 320, 'pre_fpcr': 832, 'pre_fpsr': 840}
@@ -215,19 +225,37 @@ def validate_memory_controls(results):
 
 
 
-def validate_atomic_features(results):
+def validate_atomic_features(results, focus=ATOMIC_FOCUS):
     registers = dict(zip(CPU_REGISTERS, struct.unpack_from('<9Q', results)))
     mmfr2 = struct.unpack_from('<Q', results, ATOMIC_FEATURE_HEADER_OFFSET)[0]
     fields = {'LSE_Atomic': registers['ID_AA64ISAR0_EL1'] >> 20 & 15,
               'LRCPC': registers['ID_AA64ISAR1_EL1'] >> 20 & 15, 'LSE2_AT': mmfr2 >> 32 & 15}
     if not (fields['LSE_Atomic'] in (2, 3) and fields['LRCPC'] in (1, 2, 3) and fields['LSE2_AT'] == 1):
         raise AssertionError('Original atomic feature profile unavailable: ' + str(fields))
+    if focus == ORDERED_UNSCALED_FOCUS and fields['LRCPC'] < 2:
+        raise AssertionError('Original ordered-unscaled requires actual FEAT_LRCPC2')
+    if focus not in ATOMIC_FEATURE_FOCUSES:
+        raise AssertionError('Unknown atomic original feature focus: ' + str(focus))
     validate_memory_controls(results)
     if MEMORY_SCTLR & ((1 << 1) | (1 << 6)):
         raise AssertionError('Atomic original requires A=0,nAA=0')
     return {'fields': fields, 'ID_AA64MMFR2_EL1': hex(mmfr2),
             'profile': 'EL0_Normal_WB_LSE2_A0_nAA0_SCA16',
             'limits': 'Feature and MMU controls are actual readbacks. The original implementation SCA granule is not inferred from feature ID alone. SA0 remains0; native SP policy faults are separate.'}
+
+
+def validate_tag_features(results):
+    registers = dict(zip(CPU_REGISTERS, struct.unpack_from('<9Q', results)))
+    controls = dict(zip(TAG_CONTROLS, struct.unpack_from('<2Q', results, TAG_CONTROL_HEADER_OFFSET)))
+    mte = registers['ID_AA64PFR1_EL1'] >> 8 & 15
+    if mte not in (2, 3) or controls != TAG_CONTROLS or registers['CurrentEL'] != 4:
+        raise AssertionError('Original tag arithmetic feature/control profile unavailable: ' + str((mte, controls)))
+    if not controls['SCTLR_EL1'] & TAG_ATA0 or controls['SCTLR_EL1'] & TAG_TCF0_MASK:
+        raise AssertionError('Original tag arithmetic requires ATA0=1 and TCF0=0')
+    return {'MTE': mte, 'controls': {name: hex(value) for name, value in controls.items()},
+            'profile': 'EL0_MTE2_ATA0_1_TCF0_0_GCR_Exclude0_register_only',
+            'limits': 'Actual QEMU feature/control readbacks only; no allocation-tag memory access, tag checking, IRG randomness or Apple hardware credit.'}
+
 
 def validate_memory_text(sections):
     for section in sections:
@@ -237,21 +265,31 @@ def validate_memory_text(sections):
 
 
 def assembly(words, count, memory=None, focus=None):
-    lines = ['.arch armv8.7-a+fp16+sve', '.text', '.global _start', '_start:',
+    architecture = '.arch armv8.7-a+fp16+sve' + ('+memtag' if focus == TAG_ARITHMETIC_FOCUS else '')
+    lines = [architecture, '.text', '.global _start', '_start:',
              'adrp x0,vectors', 'add x0,x0,:lo12:vectors', 'msr vbar_el1,x0', 'isb']
     lines += mov('x0', FP_ACCESS_ENABLED) + ['msr cpacr_el1,x0', 'isb']
     if memory is not None:
         lines += memory_setup()
+    if focus == TAG_ARITHMETIC_FOCUS:
+        if memory is not None:
+            raise AssertionError('Tag arithmetic original is a separate register-only profile')
+        for register, value in TAG_CONTROLS.items():
+            lines += mov('x0', value) + [f'msr {register},x0']
+        lines += ['isb']
     lines += mov('x1', OUTPUT_ADDRESS - HEADER_BYTES)
     for index, register in enumerate(CPU_REGISTERS):
         lines += [f'mrs x0,{register}', f'str x0,[x1,#{index * 8}]']
     if memory is not None:
         for index, register in enumerate(MEMORY_CONTROLS):
             lines += [f'mrs x0,{register}', f'str x0,[x1,#{MEMORY_CONTROL_HEADER_OFFSET + index * 8}]']
-    if focus == ATOMIC_FOCUS:
+    if focus in ATOMIC_FEATURE_FOCUSES:
         if memory is None:
             raise AssertionError('Atomic original requires Normal-memory controls')
         lines += ['mrs x0,ID_AA64MMFR2_EL1', f'str x0,[x1,#{ATOMIC_FEATURE_HEADER_OFFSET}]']
+    if focus == TAG_ARITHMETIC_FOCUS:
+        for index, register in enumerate(TAG_CONTROLS):
+            lines += [f'mrs x0,{register}', f'str x0,[x1,#{TAG_CONTROL_HEADER_OFFSET + index * 8}]']
     lines += mov('x0', SCRATCH_ADDRESS)
     for offset, value in ((0, INPUT_ADDRESS), (8, OUTPUT_ADDRESS), (16, count)):
         lines += mov('x1', value) + [f'str x1,[x0,#{offset}]']
@@ -372,11 +410,24 @@ def prepare(directory, focus, source_bindings):
             raise AssertionError("Frozen original source binding changed: " + name)
     files, functions, cases, inputs, words = load_corpus(directory)
     memory = memory_plan(directory)
-    source = assembly(words, len(cases), memory, focus if focus == ATOMIC_FOCUS else None).encode()
+    if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS):
+        if memory is None or any(operation(function)['kind'] != focus for function in functions):
+            raise AssertionError('New memory original requires its exact family corpus and RAM plan')
+        for function in functions:
+            memory_destinations(operation(function))
+    if focus == TAG_ARITHMETIC_FOCUS:
+        if memory is not None:
+            raise AssertionError('Tag arithmetic original must not include a RAM plan')
+        for function in functions:
+            tag_destinations(operation(function))
+    source = assembly(words, len(cases), memory, focus if focus in (*ATOMIC_FEATURE_FOCUSES, TAG_ARITHMETIC_FOCUS) else None).encode()
     qemu, clang, lld, bindings = tools_and_bindings()
     bindings['focus'] = focus
     if memory is not None:
         bindings['memory_plan'] = memory
+    if focus == TAG_ARITHMETIC_FOCUS:
+        bindings['tag_arithmetic_controls'] = TAG_CONTROLS
+        bindings['tag_arithmetic_control_header_offset'] = TAG_CONTROL_HEADER_OFFSET
     bindings['source_receipts'] = source_bindings
     bindings['observer_dependencies'] = {'dev/differential.py': sha((ROOT / 'dev/differential.py').read_bytes())}
     bindings['inputs'] = {name: {'sha256': sha(data), 'bytes': len(data)} for name, data in files.items()}
@@ -405,9 +456,10 @@ def prepare(directory, focus, source_bindings):
     return destination, qemu, bindings, functions, cases, inputs, subjects
 
 
-def execute(destination, qemu, count):
+def execute(destination, qemu, count, focus=None):
     memory = memory_plan(destination)
-    command = [str(qemu), '-machine', 'virt,secure=off,virtualization=off', '-cpu', CPU_MODEL,
+    machine = 'virt,secure=off,virtualization=off' + (',mte=on' if focus == TAG_ARITHMETIC_FOCUS else '')
+    command = [str(qemu), '-machine', machine, '-cpu', CPU_MODEL,
                '-accel', 'tcg', '-m', MEMORY_QEMU_RAM_SIZE if memory is not None else '512M',
                '-display', 'none', '-serial', 'none',
                '-monitor', 'none', '-nic', 'none', '-kernel', str(destination / 'guest.elf'),
@@ -498,7 +550,17 @@ def memory_destinations(op):
         gprs = [op['rn']] if op['mode'] != 'offset' and op['rn'] != 31 else []
         vectors = [(op['rt'] + slot) % 32 for slot in range(op['runs'] * op['structures'])] if op['loading'] else []
         return set(gprs), set(vectors), op['mode'] != 'offset' and op['rn'] == 31
-    if op['kind'] not in ('ordinary_memory', ATOMIC_FOCUS) or not 0 <= op['total_bytes'] <= (8 if op['kind'] == ATOMIC_FOCUS else 32):
+    if op['kind'] == ATOMIC_PAIR_FOCUS:
+        from simd_fixtures import atomic_pair_memory
+        expected = atomic_pair_memory.operation(op['element_bytes'], op['order'], op['rs'], op['rt'], op['rn'])
+        if {key: value for key, value in op.items() if key != 'source_hex'} != expected:
+            raise AssertionError('Original CASP metadata differs from actual pure family')
+    elif op['kind'] == ORDERED_UNSCALED_FOCUS:
+        from simd_fixtures import ordered_unscaled_memory
+        expected = ordered_unscaled_memory.operation(op['canonical_id'], op['rt'], op['rn'], op['offset'])
+        if {key: value for key, value in op.items() if key != 'source_hex'} != expected:
+            raise AssertionError('Original ordered-unscaled metadata differs from actual pure family')
+    elif op['kind'] not in ('ordinary_memory', ATOMIC_FOCUS) or not 0 <= op['total_bytes'] <= (8 if op['kind'] == ATOMIC_FOCUS else 32):
         raise AssertionError('Invalid memory observer family/footprint')
     destinations = []
     for name, bound in (('written_gprs', 31), ('written_vectors', 32)):
@@ -510,13 +572,32 @@ def memory_destinations(op):
     return *destinations, False
 
 
+def tag_destinations(op):
+    from simd_fixtures import tag_arithmetic
+    expected = tag_arithmetic.operation(op['name'], op['d'], op['n'], op['m'],
+                                        op['address_offset'], op['tag_offset'], op['soft_bits'])
+    if {key: value for key, value in op.items() if key != 'source_hex'} != expected:
+        raise AssertionError('Original tag arithmetic metadata differs from actual pure family')
+    gprs = {op['d']} if op['d'] != 31 else set()
+    sp = op['name'] in ('addg', 'subg') and op['d'] == 31
+    nzcv = op['name'] == 'subps'
+    if (op['kind'] != TAG_ARITHMETIC_FOCUS or op['written_gprs'] != sorted(gprs)
+            or any(type(register) is not int for register in op['written_gprs'])
+            or op['written_vectors'] != [] or type(op['writes_sp']) is not bool or type(op['writes_nzcv']) is not bool
+            or op['writes_sp'] != sp or op['writes_nzcv'] != nzcv):
+        raise AssertionError('Original tag arithmetic destination/flag declaration differs')
+    return gprs, set(), sp, nzcv
+
+
 def validate_results(destination, functions, cases, inputs, subjects, focus=None):
     results = (destination / 'results.bin').read_bytes()
     memory = memory_plan(destination)
     stride = memory['record_bytes'] if memory is not None else RECORD_BYTES
     assert len(results) == HEADER_BYTES + len(cases) * stride
     memory_controls = validate_memory_controls(results) if memory is not None else None
+    tag_features = validate_tag_features(results) if focus == TAG_ARITHMETIC_FOCUS else None
     controls, trap_observations, status_deltas = {}, [], {}
+    tag_undefined_cases = []
     for index in range(len(cases)):
         input_offset = index * INPUT_STRIDE
         function_index = struct.unpack_from('<Q', inputs, input_offset)[0]
@@ -529,26 +610,48 @@ def validate_results(destination, functions, cases, inputs, subjects, focus=None
         assert pre_fpcr == requested_fpcr & QEMU_FPCR_MASK, (index, 'pre_fpcr')
         assert pre_fpsr == requested_fpsr & QEMU_FPSR_MASK, (index, 'pre_fpsr')
         op = operation(functions[function_index])
-        written_gprs, written_vectors, written_sp = memory_destinations(op) if memory is not None else (set(), set(), False)
+        writes_nzcv = False
+        if focus == TAG_ARITHMETIC_FOCUS:
+            written_gprs, written_vectors, written_sp, writes_nzcv = tag_destinations(op)
+        else:
+            written_gprs, written_vectors, written_sp = memory_destinations(op) if memory is not None else (set(), set(), False)
         for register in range(31):
             if register not in written_gprs:
                 assert record[register * 8:register * 8 + 8] == initial[register * 8:register * 8 + 8], (index, 'unchanged_gpr', register)
         if not written_sp:
             assert observed['sp'] == struct.unpack_from('<Q', initial, 248)[0], (index, 'sp')
         initial_nzcv = struct.unpack_from('<I', initial, 256)[0]
-        assert observed['spsr'] == (initial_nzcv & NZCV_MASK) | PSTATE_EL0T_MASKED, (index, 'spsr_unchanged')
+        if writes_nzcv:
+            assert observed['spsr'] & ~NZCV_MASK == PSTATE_EL0T_MASKED, (index, 'non_nzcv_spsr_unchanged')
+        else:
+            assert observed['spsr'] == (initial_nzcv & NZCV_MASK) | PSTATE_EL0T_MASKED, (index, 'spsr_unchanged')
         assert observed['fpcr'] == pre_fpcr, (index, 'fpcr_unchanged')
         assert observed['fpsr'] & pre_fpsr == pre_fpsr, (index, 'sticky_fpsr')
         assert observed['fpsr'] & FPSR_QC == pre_fpsr & FPSR_QC, (index, 'qc_unchanged')
         assert observed['fpsr'] & ~QEMU_FPSR_MASK == 0, (index, 'reserved_fpsr')
-        assert observed['esr'] >> 26 == 0x15 and observed['esr'] & 65535 == SVC_IMMEDIATE, (index, 'genuine_svc')
-        assert observed['elr'] == subjects[function_index]['expected_elr'], (index, 'elr')
+        tag_undefined = (focus == TAG_ARITHMETIC_FOCUS and op['name'] in ('addg', 'subg')
+                         and op['soft_bits'] != 0 and observed['esr'] == TAG_UNDEFINED_ESR)
+        if tag_undefined:
+            assert observed['elr'] == subjects[function_index]['instruction_pc'], (index, 'tag_undefined_elr')
+            assert record[:248] == initial[:248], (index, 'tag_undefined_all_gprs')
+            assert observed['sp'] == struct.unpack_from('<Q', initial, 248)[0], (index, 'tag_undefined_sp')
+            assert observed['spsr'] == (initial_nzcv & NZCV_MASK) | PSTATE_EL0T_MASKED, (index, 'tag_undefined_nzcv')
+            assert record[320:832] == initial[264:776], (index, 'tag_undefined_all_vectors')
+            assert observed['fpcr'] == pre_fpcr and observed['fpsr'] == pre_fpsr, (index, 'tag_undefined_fp_controls')
+            unchanged = bytearray(initial)
+            struct.pack_into('<II', unchanged, 776, pre_fpcr, pre_fpsr)
+            tag_undefined_cases.append({'case_index': index, 'function_index': function_index,
+                'word': integer(op['word']), 'esr': observed['esr'], 'elr': observed['elr'],
+                'state_sha256': sha(unchanged)})
+        else:
+            assert observed['esr'] >> 26 == 0x15 and observed['esr'] & 65535 == SVC_IMMEDIATE, (index, 'genuine_svc')
+            assert observed['elr'] == subjects[function_index]['expected_elr'], (index, 'elr')
         assert observed['current_el'] == 4 and observed['cpacr'] == FP_ACCESS_ENABLED, (index, 'access')
         assert observed['marker'] == COMPLETED_MARKER, (index, 'marker')
         op = operation(functions[function_index])
         word = integer(op['word'])
         destination_register = op.get('d')
-        if memory is not None:
+        if memory is not None or focus == TAG_ARITHMETIC_FOCUS:
             assert observed['fpsr'] == pre_fpsr, (index, 'movement_fpsr')
             for register in set(range(32)) - written_vectors:
                 assert record[320 + register * 16:336 + register * 16] == initial[264 + register * 16:280 + register * 16], (index, 'non_destination_v', register)
@@ -575,7 +678,11 @@ def validate_results(destination, functions, cases, inputs, subjects, focus=None
             trap_observations.append({'case': index, 'function_index': function_index,
                                       'requested_fpcr': requested_fpcr, 'pre_fpcr': pre_fpcr,
                                       'post_fpcr': observed['fpcr'], 'classification': 'requested_trap_enables_raz_wi'})
-    return {**({'atomic_features': validate_atomic_features(results)} if focus == ATOMIC_FOCUS else {}),
+    return {**({'atomic_features': validate_atomic_features(results, focus)} if focus in ATOMIC_FEATURE_FOCUSES else {}),
+            **({'tag_arithmetic_features': tag_features} if tag_features is not None else {}),
+            **({'tag_soft_fixed_undefined_cases': tag_undefined_cases,
+                'tag_soft_fixed_original_choice': 'ADDG/SUBG nonzero should-be-zero op3 may be UNDEFINED under pinned Arm C2-362/K1-16812. Exact original ESR/subject ELR and unchanged full frames are retained; execute-as-zero native policy receives no original equality credit. The exact linked next SVC bytes remain validated even when UNDEFINED prevents reaching them.'}
+               if focus == TAG_ARITHMETIC_FOCUS else {}),
             **({'memory_controls': memory_controls} if memory is not None else {}),
             'cpu_registers': dict(zip(CPU_REGISTERS, map(hex, struct.unpack_from('<9Q', results)))),
             'fpcr_requested_readbacks': {key: sorted(value) for key, value in controls.items()},
@@ -594,7 +701,7 @@ def capture(prepared, directory, focus):
             assert sha((destination / name).read_bytes()) == info['sha256'], name
     else:
         if not (destination / 'results.bin').exists():
-            execute(destination, qemu, len(cases))
+            execute(destination, qemu, len(cases), focus)
         observations = validate_results(destination, functions, cases, inputs, subjects, focus)
         files = {path.name: {'sha256': sha(path.read_bytes()), 'bytes': path.stat().st_size}
                  for path in sorted(destination.iterdir()) if path.is_file() and path.name != 'receipt.json'}
@@ -607,8 +714,11 @@ def capture(prepared, directory, focus):
                    'snapshot_layout': LAYOUT, 'files': files,
                    'checks': ['Each exact original SIMD instruction runs at EL0t with all 31 GPRs, SP_EL0, 32 full vectors, NZCV, FPCR and FPSR restored from the retained input.',
                               'A genuine SVC follows the subject; the EL1 handler snapshots all GPRs before transport clobbers and all vectors before transport resumes.',
-                              'All GPRs/SP, NZCV and non-destination vectors are unchanged. Scalars merge the declared original destination/left source under NEP or clear inactive bits; vector64 upper clears. QC and sticky flags preserve.',
-                              'Actual preinstruction FPCR/FPSR readbacks, genuine SVC ESR, exact linked subject/SVC bytes and ELR identify every execution.'],
+                              ('Only declared GPR/SP results and SUBPS NZCV may change; all vectors, FP controls/status and remaining GPR/SP/PSTATE bits preserve.' if focus == TAG_ARITHMETIC_FOCUS else
+                               'Only the actual pure family declared load/compare GPR destinations may change; SP, NZCV, vectors and FP controls/status preserve.' if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS) else
+                               'All GPRs/SP, NZCV and non-destination vectors are unchanged. Scalars merge the declared original destination/left source under NEP or clear inactive bits; vector64 upper clears. QC and sticky flags preserve.'),
+                              ('Actual preinstruction FPCR/FPSR readbacks and exact linked subject/next-SVC bytes identify every tag case. Successful executions have genuine SVC ESR/ELR; classified nonzero soft-field UNDEFINED cases have exact exception ESR/subject ELR and unchanged full frames.' if focus == TAG_ARITHMETIC_FOCUS else
+                               'Actual preinstruction FPCR/FPSR readbacks, genuine SVC ESR, exact linked subject/SVC bytes and ELR identify every execution.')],
                    'limits': ['Original QEMU emulator observations only; no native execution, mathematical result-model validation, Apple hardware proof, or performance credit.',
                               'Canonical function identity is original SIMD word plus RET through the unused per-function return register. This EL0 fixture executes the unchanged SIMD word followed by SVC; the original RET is not executed.',
                               'QEMU trap enables are RAZ/WI. Exact requested and actual controls are retained; no FP trap-delivery credit is claimed.',
@@ -646,9 +756,12 @@ if __name__ == '__main__':
     group.add_argument('--capture', action='store_true')
     arguments = parser.parse_args()
     source_bindings = json.loads(arguments.source_bindings.read_bytes())
-    if arguments.focus == 'atomic_memory_smp':
+    if arguments.focus in ('atomic_memory_smp', 'atomic_pair_memory_smp'):
         import simd_atomic_original as smp
-        prepared = smp.prepare(arguments.directory, smp.default_pairs(), source_bindings)
+        if arguments.focus == 'atomic_pair_memory_smp':
+            prepared = smp.prepare(arguments.directory, smp.pair_default_pairs(), source_bindings, focus=arguments.focus)
+        else:
+            prepared = smp.prepare(arguments.directory, smp.default_pairs(), source_bindings)
         if arguments.capture:
             path = smp.capture(prepared, arguments.directory)
             publish_pointer(arguments.directory.resolve(), path, arguments.focus, json.loads(path.read_bytes()))

@@ -32,6 +32,7 @@ ORIGINAL_INPUT_STRIDE = 800
 ORIGINAL_RECORD_BYTES = 1024
 ORIGINAL_STATE_BYTES = 784
 RETURN_REGISTER = 30
+UNDEFINED_INSTRUCTION_ESR = 0x02000000
 VECTOR_REGISTER_BITS = 5
 VECTOR_LEFT_SHIFT = 5
 VECTOR_LEFT_MASK = ((1 << VECTOR_REGISTER_BITS) - 1) << VECTOR_LEFT_SHIFT
@@ -51,7 +52,8 @@ def fixture_corpus(family):
         raise AssertionError('Each original word needs one fixture function')
     if {op['canonical_id'] for op in operations} != set(family.CANONICAL_FORMS):
         raise AssertionError('Fixture canonical form inventory differs')
-    operations = [dict(op, merge=op.get('merge', 'none')) for op in operations]
+    operations = [dict(op) if op.get('output_kind') == 'gpr' else dict(op, merge=op.get('merge', 'none'))
+                  for op in operations]
     records = []
     for index, case in enumerate(cases):
         initial = case['initial']
@@ -102,7 +104,24 @@ def expected_state(family, operation, initial):
     if not isinstance(expected, State):
         raise AssertionError('Fixture model must return a complete State')
     untouched = State.from_buffer_copy(expected)
-    untouched.v[operation['d']][:] = initial.v[operation['d']]
+    if operation.get('output_kind', 'vector') == 'gpr':
+        written = operation.get('written_gprs')
+        if (not isinstance(written, list)
+                or any(type(index) is not int or not 0 <= index < RETURN_REGISTER + 1 for index in written)
+                or len(written) != len(set(written))
+                or type(operation.get('writes_sp')) is not bool
+                or type(operation.get('writes_nzcv')) is not bool):
+            raise AssertionError('Invalid register fixture destination metadata')
+        if hasattr(family, 'validate_effects'):
+            family.validate_effects(operation)
+        for index in written:
+            untouched.x[index] = initial.x[index]
+        if operation['writes_sp']:
+            untouched.sp = initial.sp
+        if operation['writes_nzcv']:
+            untouched.nzcv = initial.nzcv
+    else:
+        untouched.v[operation['d']][:] = initial.v[operation['d']]
     if bytes(untouched) != bytes(initial):
         raise AssertionError('Integer crypto model changed fields outside its destination')
     return expected
@@ -133,7 +152,7 @@ def load_original(engine, family, pointer_path):
     expected_inputs = b''.join(struct.pack('<Q', case['function']) + case['initial'] + bytes(8) for case in cases)
     if inputs != expected_inputs or len(results) != (len(cases) + 1) * ORIGINAL_RECORD_BYTES:
         raise AssertionError('Captured inputs/frame count differ from fixture corpus')
-    records, readbacks = [], Counter()
+    records, readbacks, undefined_cases = [], Counter(), []
     for index, case in enumerate(cases):
         op = operations[case['function']]
         initial = State.from_buffer_copy(case['initial'])
@@ -141,24 +160,34 @@ def load_original(engine, family, pointer_path):
         original = engine.full_frame_numerical_original_state(initial, snapshot)
         esr, elr, current_el, cpacr, marker = struct.unpack_from('<5Q', snapshot, engine.VECTOR_NUMERICAL_EXCEPTION_OFFSET)
         fpcr, fpsr = struct.unpack_from('<2Q', snapshot, engine.VECTOR_NUMERICAL_READBACK_OFFSET)
-        if (esr >> 26 != engine.FP_REGISTER_EC_SVC or current_el != 4
+        soft_variant = (family.FOCUS == 'tag_arithmetic' and op['name'] in ('addg', 'subg')
+                        and op['soft_bits'] != 0)
+        undefined = soft_variant and esr == UNDEFINED_INSTRUCTION_ESR
+        subject_pc = elr if undefined else elr - 8
+        if (not undefined and esr >> 26 != engine.FP_REGISTER_EC_SVC or current_el != 4
                 or cpacr != engine.VECTOR_NUMERICAL_CPACR_FPEN or marker != engine.VECTOR_NUMERICAL_ORIGINAL_MARKER
-                or engine.fp_register_elf_word(elf, elr - 8) != op['word']
-                or engine.fp_register_elf_word(elf, elr - 4) != engine.FP_REGISTER_SVC
+                or engine.fp_register_elf_word(elf, subject_pc) != op['word']
+                or engine.fp_register_elf_word(elf, subject_pc + 4) != engine.FP_REGISTER_SVC
                 or fpcr != initial.fpcr & engine.FP_REGISTER_QEMU_MASKS['fpcr']
                 or fpsr != initial.fpsr & engine.FP_REGISTER_QEMU_MASKS['fpsr']):
             raise AssertionError('Original subject/access/control evidence differs')
         mathematical = expected_state(family, op, initial)
-        observed_controls = State.from_buffer_copy(mathematical)
+        observed_controls = State.from_buffer_copy(initial if undefined else mathematical)
         observed_controls.fpcr, observed_controls.fpsr = fpcr, fpsr
         if bytes(original) != bytes(observed_controls):
             raise AssertionError(json.dumps({'case':index, 'operation':op, 'primary':state_dict(original),
                 'expected_observed_controls':state_dict(observed_controls), 'initial':state_dict(initial)}))
+        if undefined:
+            undefined_cases.append(index)
         policy = (fpcr, fpsr) != (initial.fpcr, initial.fpsr)
-        initial.x[RETURN_REGISTER] = original.x[RETURN_REGISTER] = mathematical.x[RETURN_REGISTER] = engine.STOP
+        if op.get('output_kind', 'vector') != 'gpr':
+            initial.x[RETURN_REGISTER] = original.x[RETURN_REGISTER] = mathematical.x[RETURN_REGISTER] = engine.STOP
         records.append({**case, 'initial':bytes(initial), 'expected':bytes(mathematical), 'primary_expected':bytes(original),
-            'operation':op, 'equality_basis':'requested_storage_policy' if policy else 'direct_original'})
+            'operation':op, 'equality_basis':('soft_fixed_execute_as_policy' if undefined else
+                'requested_storage_policy' if policy else 'direct_original')})
         readbacks[(case['initial'][-8:].hex(), fpcr, fpsr)] += 1
+    if undefined_cases != [row['case_index'] for row in producer.get('tag_soft_fixed_undefined_cases', [])]:
+        raise AssertionError('Original soft-fixed UNDEF observations differ from producer receipt')
     return {'functions':operations, 'records':records, 'producer':producer, 'receipt_sha256':receipt_sha,
         'pointer_sha256':pointer_sha, 'control_readbacks':[{'requested_storage_hex':requested, 'fpcr':fpcr, 'fpsr':fpsr, 'cases':count}
             for (requested, fpcr, fpsr), count in sorted(readbacks.items())]}
@@ -208,7 +237,8 @@ def execute_batches(engine, batches):
                         invoke(record, masks | status | mode << engine.NUMERICAL_MXCSR_ROUND_SHIFT)
                         counts['mxcsr_checks'] += 1
     return {'complete_native_state_comparisons':len(oracle['records']), 'direct_original_math_native_comparisons':counts['direct_original'],
-        'requested_storage_native_policy_comparisons':counts['requested_storage_policy'], 'caller_mxcsr_preservation_comparisons':counts['mxcsr_checks'],
+        'requested_storage_native_policy_comparisons':counts['requested_storage_policy'],
+        'soft_fixed_execute_as_native_policy_comparisons':counts['soft_fixed_execute_as_policy'], 'caller_mxcsr_preservation_comparisons':counts['mxcsr_checks'],
         'state_corpus_sha256':digest.hexdigest(), 'architectural_state_bytes':ctypes.sizeof(State),
         'limits':'All native/model bytes compare. Direct original equality excludes requested storage absent from captured FPCR/FPSR readbacks; those raw originals stay unchanged. Leaf RET is harness-owned. No numerical helper/refusal or supplementary Unicorn success is inferred.'}
 
@@ -222,6 +252,17 @@ def apply_operations(family, operations, initial):
 
 def runtime_checks(engine, family, oracle, cli, directory, compiler, target, target_id):
     selected = [record for record in oracle['records'] if record.get('runtime')]
+    if any(record['operation'].get('output_kind') == 'gpr' for record in selected):
+        normalized = []
+        for record in selected:
+            op = record['operation']
+            if RETURN_REGISTER in (op.get('n'), op.get('m'), op.get('d')):
+                raise AssertionError('Register fixture runtime RET normalization aliases an operand')
+            initial = State.from_buffer_copy(record['initial'])
+            initial.x[RETURN_REGISTER] = engine.STOP
+            normalized.append({**record, 'initial': bytes(initial),
+                               'expected': bytes(expected_state(family, op, initial))})
+        selected = normalized
     if not 0 < len(selected) <= MAXIMUM_RUNTIME_CASES:
         raise AssertionError('Invalid runtime fixture selection')
     memory_address, memory = 0x240000000000, engine.NUMERICAL_GUARD * 16
@@ -325,7 +366,8 @@ def run(engine, cli, focus, pointer=None):
                 operations = oracle['functions'][start:start + BATCH_FUNCTIONS]
                 programs = [{'operations':[op]} for op in operations]
                 batch = engine.compile_batch(cli, directory, programs, start, cpu_target=target, target_id=target_id,
-                    guest_base=BASE + start * 8, allowed_mnemonics={op['name'] for op in operations})
+                    guest_base=BASE + start * 8, allowed_mnemonics={op['name'] for op in operations},
+                    **({'source_validator': family.validate_source_words} if hasattr(family, 'validate_source_words') else {}))
                 batch.update(cohort=focus, function_base=start, oracle_path=str(pointer))
                 if compiler is not None and batch['compiler'] != compiler:
                     raise AssertionError('Compiler changed during fixture preparation')
@@ -351,13 +393,14 @@ def run(engine, cli, focus, pointer=None):
         'compiler_source_sha256':compiler, 'compiler_executable_sha256':cli_sha,
         'harness_source_sha256':shared[str(Path(engine.__file__).relative_to(ROOT))], 'shared_sources_sha256':shared,
         'original_oracle_receipt_sha256':oracle['receipt_sha256'], 'original_producer':oracle['producer'],
-        'input_derivation':'Only X30 becomes STOP for actual runtime guest RET; original inputs/capture frames remain immutable. Leaf native RET is harness-owned. All other imported state bytes remain unchanged.',
+        'input_derivation':('Register-output raw native frames retain all original inputs, including X30. Runtime representatives exclude X30 operands; only their X30 becomes STOP for guest RET. Other families retain established X30 normalization. Original captures remain immutable; leaf native RET is harness-owned.'),
         'control_readbacks':oracle['control_readbacks'], 'profiles':profiles, 'verification_wall_seconds':time.monotonic() - started,
         'complete_native_state_comparisons':sum(profile['raw_native']['complete_native_state_comparisons'] for profile in profiles),
         'direct_original_math_native_comparisons':sum(profile['raw_native']['direct_original_math_native_comparisons'] for profile in profiles),
         'requested_storage_native_policy_comparisons':sum(profile['raw_native']['requested_storage_native_policy_comparisons'] for profile in profiles),
+        'soft_fixed_execute_as_native_policy_comparisons':sum(profile['raw_native']['soft_fixed_execute_as_native_policy_comparisons'] for profile in profiles),
         'native_mxcsr_preservation_comparisons':sum(profile['raw_native']['caller_mxcsr_preservation_comparisons'] for profile in profiles),
         'runtime_complete_state_comparisons':sum(profile['runtime']['complete_state_comparisons'] for profile in profiles),
-        'limits':'Enabled nonstreaming integer/crypto SIMD only. Full784B primary/model/native equality is distinct from requested FP storage unavailable in original readbacks. No numerical FP-enable refusals, model-only originals, joined-original, disabled-feature/access, Apple-hardware, process/OS or performance claim.'}
+        'limits':'Declared nonstreaming register-only instruction profiles. Soft-fixed ADDG/SUBG UNDEF observations are a permitted source choice; execute-as-zero native policy comparisons receive no original equality credit. Full784B primary/model/native equality is distinct from requested FP storage unavailable in original readbacks. No numerical FP-enable refusals, model-only originals, joined-original, disabled-feature/access, Apple-hardware, process/OS or performance claim.'}
     path = write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     return path, report

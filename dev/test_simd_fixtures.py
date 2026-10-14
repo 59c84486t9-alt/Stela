@@ -12,13 +12,463 @@ from contextlib import nullcontext
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import ROOT, BASE, State, seed_extended_state
-from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory, atomic_memory
+from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory, tag_arithmetic
 import simd_fixture_runner as runner
 import simd_original
 import simd_memory_runner
 import hashlib
 
 engine = importlib.import_module('simd-differential')
+
+class TagArithmeticAdapterTests(unittest.TestCase):
+    @staticmethod
+    def feature_header():
+        header = bytearray(simd_original.HEADER_BYTES)
+        registers = [0] * len(simd_original.CPU_REGISTERS)
+        registers[0], registers[4] = 4, 2 << 8
+        struct.pack_into('<9Q', header, 0, *registers)
+        struct.pack_into('<2Q', header, simd_original.TAG_CONTROL_HEADER_OFFSET, *simd_original.TAG_CONTROLS.values())
+        return header
+
+    @staticmethod
+    def frame(initial, final, subject_pc=0x8000, undefined=False):
+        result = bytearray(simd_original.RECORD_BYTES)
+        result[:256] = bytes(final)[:256]
+        result[320:832] = bytes(final)[264:776]
+        fpcr, fpsr = initial.fpcr & simd_original.QEMU_FPCR_MASK, initial.fpsr & simd_original.QEMU_FPSR_MASK
+        fields = {'sp': final.sp, 'spsr': final.nzcv | simd_original.PSTATE_EL0T_MASKED,
+            'fpcr': fpcr, 'fpsr': fpsr, 'pre_fpcr': fpcr, 'pre_fpsr': fpsr,
+            'esr': simd_original.TAG_UNDEFINED_ESR if undefined else (0x15 << 26) | (1 << 25) | simd_original.SVC_IMMEDIATE,
+            'elr': subject_pc if undefined else subject_pc + 8, 'current_el': 4,
+            'cpacr': simd_original.FP_ACCESS_ENABLED, 'marker': simd_original.COMPLETED_MARKER}
+        for name, value in fields.items(): struct.pack_into('<Q', result, simd_original.LAYOUT[name], value)
+        return result
+
+    def test_actual_GPR_corpus_has_no_vector_merge_or_X30_normalization(self):
+        operations, records = runner.fixture_corpus(tag_arithmetic)
+        original_operations, original_cases = tag_arithmetic.corpus()
+        self.assertEqual(operations, original_operations)
+        self.assertTrue(all(op['output_kind'] == 'gpr' and 'merge' not in op for op in operations))
+        self.assertEqual([record['initial'] for record in records], [case['initial'] for case in original_cases])
+        self.assertTrue(any(State.from_buffer_copy(record['initial']).x[30] != engine.STOP for record in records))
+        self.assertEqual({op['canonical_id'] for op in operations}, set(tag_arithmetic.CANONICAL_FORMS))
+
+    def test_expected_State_allows_only_encoded_GPR_SP_and_SUBPS_flags(self):
+        family = tag_arithmetic
+        initial = family.initial_state(0, 0)
+        for name in family.FORMS:
+            for destination in (0, 30, 31):
+                op = family.operation(name, d=destination, n=30)
+                result = runner.expected_state(family, op, initial)
+                self.assertEqual(bytes(result), bytes(family.expected(op, initial)))
+                permitted = set(op['written_gprs'])
+                for register in set(range(31)) - permitted: self.assertEqual(result.x[register], initial.x[register])
+                if not op['writes_sp']: self.assertEqual(result.sp, initial.sp)
+                if not op['writes_nzcv']: self.assertEqual(result.nzcv, initial.nzcv)
+        op = family.operation('addg')
+        for field, value in (('word', op['word'] ^ 1), ('d', 3), ('n', 4), ('written_gprs', [2]),
+                             ('writes_sp', True), ('writes_nzcv', True), ('written_vectors', [0])):
+            with self.assertRaises(AssertionError): runner.expected_state(family, {**op, field: value}, initial)
+        correct = family.expected(op, initial)
+        for offset in (8 * 4, 248, 256, 260, 264, 776, 780):
+            damaged = bytearray(bytes(correct))
+            damaged[offset] ^= 1
+            with patch.object(family, 'expected', return_value=State.from_buffer_copy(damaged)):
+                with self.assertRaises(AssertionError): runner.expected_state(family, op, initial)
+
+    def test_tag_feature_controls_and_typed_effect_metadata_reject_mutations(self):
+        header = self.feature_header()
+        self.assertEqual(simd_original.validate_tag_features(header)['MTE'], 2)
+        for offset, value in ((4 * 8, 1 << 8), (4 * 8, 4 << 8), (0, 0),
+                (simd_original.TAG_CONTROL_HEADER_OFFSET, simd_original.TAG_SCTLR & ~simd_original.TAG_ATA0),
+                (simd_original.TAG_CONTROL_HEADER_OFFSET, simd_original.TAG_SCTLR | 1 << 38),
+                (simd_original.TAG_CONTROL_HEADER_OFFSET + 8, 1)):
+            changed = bytearray(header)
+            struct.pack_into('<Q', changed, offset, value)
+            with self.assertRaises(AssertionError): simd_original.validate_tag_features(changed)
+        for name in tag_arithmetic.FORMS:
+            for d in (0, 30, 31):
+                op = tag_arithmetic.operation(name, d=d)
+                self.assertEqual(simd_original.tag_destinations(op), (set(op['written_gprs']), set(), op['writes_sp'], op['writes_nzcv']))
+                for key, value in (('word', op['word'] ^ 1), ('d', (d + 1) % 32), ('n', 7),
+                        ('canonical_id', 'wrong'), ('output_kind', 'vector'), ('writes_sp', 1),
+                        ('writes_sp', not op['writes_sp']), ('writes_nzcv', not op['writes_nzcv']), ('written_gprs', [1, 1])):
+                    with self.assertRaises(AssertionError): simd_original.tag_destinations({**op, key: value})
+                role = 'tag_offset' if name in ('addg', 'subg') else 'm'
+                with self.assertRaises(AssertionError): simd_original.tag_destinations({**op, role: 3})
+
+    def test_only_exact_nonzero_ADDG_SUBG_UNDEF_preserves_full_frame(self):
+        initial = tag_arithmetic.initial_state(0, 0)
+        initial.x[30] = 0x76543210abcdef01
+        inputs = struct.pack('<Q', 0) + bytes(initial) + bytes(8)
+        subjects = [{'instruction_pc': 0x8000, 'expected_elr': 0x8008}]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            def check(op, frame):
+                (directory / 'results.bin').write_bytes(self.feature_header() + frame)
+                return simd_original.validate_results(directory, [op], [{}], inputs, subjects, tag_arithmetic.FOCUS)
+            for name in ('addg', 'subg'):
+                for soft in (1, 2, 3):
+                    op = tag_arithmetic.operation(name, soft_bits=soft)
+                    frame = self.frame(initial, initial, undefined=True)
+                    observed = check(op, frame)['tag_soft_fixed_undefined_cases']
+                    self.assertEqual([row['case_index'] for row in observed], [0])
+                    self.assertEqual(observed[0]['word'], op['word'])
+                    for offset in (0, 248, 256, 264, 272, 320):
+                        damaged = bytearray(frame)
+                        damaged[offset] ^= 1
+                        with self.assertRaises(AssertionError): check(op, damaged)
+                    for field, value in (('esr', simd_original.TAG_UNDEFINED_ESR | 1), ('elr', 0x8004),
+                            ('spsr', initial.nzcv | simd_original.PSTATE_EL0T_MASKED | 1 << 28)):
+                        damaged = bytearray(frame)
+                        struct.pack_into('<Q', damaged, simd_original.LAYOUT[field], value)
+                        with self.assertRaises(AssertionError): check(op, damaged)
+            sp_op = tag_arithmetic.operation('addg', d=31, soft_bits=1)
+            sp_frame = self.frame(initial, initial, undefined=True)
+            check(sp_op, sp_frame)
+            struct.pack_into('<Q', sp_frame, simd_original.LAYOUT['sp'], initial.sp ^ 1)
+            with self.assertRaises(AssertionError): check(sp_op, sp_frame)
+            for name in tag_arithmetic.FORMS:
+                op = tag_arithmetic.operation(name)
+                with self.assertRaises(AssertionError): check(op, self.frame(initial, initial, undefined=True))
+                normal = self.frame(initial, tag_arithmetic.expected(op, initial))
+                self.assertEqual(check(op, normal)['tag_soft_fixed_undefined_cases'], [])
+                struct.pack_into('<Q', normal, simd_original.LAYOUT['elr'], 0x800c)
+                with self.assertRaises(AssertionError): check(op, normal)
+
+    def test_load_original_preserves_real_X30_and_classifies_case_index(self):
+        initial = tag_arithmetic.initial_state(0, 0)
+        initial.x[30], initial.fpcr, initial.fpsr = 0x76543210abcdef01, 0, 0
+        (ROOT / '.stela').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / '.stela') as temporary:
+            directory = Path(temporary)
+            for undefined in (False, True):
+                op = tag_arithmetic.operation('addg', n=30, soft_bits=1) if undefined else tag_arithmetic.operation('subp', n=30)
+                case = {'function': 0, 'runtime': True, 'initial': bytes(initial)}
+                family = SimpleNamespace(FOCUS=tag_arithmetic.FOCUS, CANONICAL_FORMS=(op['canonical_id'],),
+                    functions=lambda: [op], corpus=lambda: ([op], [case]), expected=tag_arithmetic.expected,
+                    validate_effects=tag_arithmetic.validate_effects)
+                operations, cases = runner.fixture_corpus(family)
+                final = initial if undefined else tag_arithmetic.expected(op, initial)
+                values = {'functions.json': simd_original.json_bytes([{**operations[0], 'source_hex': struct.pack('<II', op['word'], engine.RET).hex()}]),
+                    'cases.json': simd_original.json_bytes([{key: value for key, value in cases[0].items() if key != 'initial'}]),
+                    'inputs.bin': struct.pack('<Q', 0) + bytes(initial) + bytes(8),
+                    'results.bin': self.feature_header() + self.frame(initial, final, undefined=undefined), 'guest.elf': b'fixture-ELF'}
+                for name, data in values.items(): (directory / name).write_bytes(data)
+                files = {name: {'sha256': engine.digest(data), 'bytes': len(data)} for name, data in values.items()}
+                producer = {'passed_transport_and_architectural_frame_checks': True, 'cases': 1, 'directory': str(directory.relative_to(ROOT)),
+                    'files': files, 'tag_soft_fixed_undefined_cases': [{'case_index': 0}] if undefined else []}
+                receipt_path, pointer_path = directory / 'producer.json', directory / 'pointer.json'
+                def publish():
+                    receipt_path.write_bytes(simd_original.json_bytes(producer))
+                    pointer_path.write_bytes(simd_original.json_bytes({'directory': producer['directory'],
+                        'receipt': {'path': str(receipt_path.relative_to(ROOT)), 'sha256': engine.digest(receipt_path.read_bytes())}}))
+                publish()
+                def word_at(elf, address): return op['word'] if address == 0x8000 else engine.FP_REGISTER_SVC
+                with patch.object(engine, 'fp_register_elf_word', side_effect=word_at):
+                    loaded = runner.load_original(engine, family, pointer_path)['records'][0]
+                    self.assertEqual(State.from_buffer_copy(loaded['initial']).x[30], initial.x[30])
+                    self.assertEqual(State.from_buffer_copy(loaded['expected']).x[30], initial.x[30])
+                    self.assertEqual(State.from_buffer_copy(loaded['primary_expected']).x[30], initial.x[30])
+                    self.assertEqual(loaded['equality_basis'], 'soft_fixed_execute_as_policy' if undefined else 'direct_original')
+                    if undefined:
+                        producer['tag_soft_fixed_undefined_cases'] = [{'case_index': 1}]
+                        publish()
+                        with self.assertRaises(AssertionError): runner.load_original(engine, family, pointer_path)
+
+
+class AtomicPairMemoryFixtureTests(unittest.TestCase):
+    def test_allocated_eight_forms_all_pair_roles_bases_and_independent_decode(self):
+        family = atomic_pair_memory
+        operations = family.functions()
+        self.assertEqual(len(family.CANONICAL_FORMS), 8)
+        self.assertEqual(len(operations), 3464)
+        source = b''.join(struct.pack('<II', op['word'], engine.RET) for op in operations)
+        result = family.validate_source_words(source, [{'operations': [op]} for op in operations], set())
+        self.assertEqual(result['capstone_decode_fallback_words'], 0)
+        for canonical in family.CANONICAL_FORMS:
+            rows = [op for op in operations if op['canonical_id'] == canonical]
+            self.assertEqual({(op['rs'], op['rt']) for op in rows}, {(rs, rt) for rs in range(0, 32, 2) for rt in range(0, 32, 2)})
+            self.assertEqual({op['rn'] for op in rows}, set(range(32)))
+            for register in range(0, 32, 2):
+                for rt in (register, (register + 2) % 32):
+                    self.assertTrue({register, register + 1, rt, rt + 1, 31} <=
+                        {op['rn'] for op in rows if op['rs'] == register and op['rt'] == rt})
+            for op in rows:
+                self.assertEqual(op['word'] & family.CASP_CLASS_MASK, family.CASP_CLASS)
+                self.assertEqual(op['compare'], [op['rs'], op['rs'] + 1])
+                self.assertEqual(op['source'], [op['rt'], op['rt'] + 1])
+                self.assertEqual(op['written_gprs'], [r for r in op['compare'] if r != 31])
+        corrupted = {**operations[0], 'compare': [0, 3]}
+        with self.assertRaises(AssertionError):
+            family.validate_source_words(struct.pack('<II', corrupted['word'], engine.RET), [{'operations': [corrupted]}], set())
+
+    def test_full_corpus_matches_independent_packed_pair_math_and_all_flags(self):
+        family = atomic_pair_memory
+        operations, cases = family.corpus()
+        memory, flags, positions, modes = family.memory_template(), {}, {}, set()
+        self.assertEqual(len(cases), 10592)
+        self.assertEqual(len(memory), 8192)
+        for case in cases:
+            op, initial = operations[case['function']], State.from_buffer_copy(case['initial'])
+            width, position = op['element_bytes'], case['position']
+            mask = (1 << (width * 8)) - 1
+            incoming = [0 if register == 31 else initial.x[register] & mask for register in op['compare']]
+            replacement = [0 if register == 31 else initial.x[register] & mask for register in op['source']]
+            old = [int.from_bytes(memory[position + half * width:position + (half + 1) * width], 'little') for half in range(2)]
+            expected = State.from_buffer_copy(bytes(initial))
+            for register, value in zip(op['compare'], old):
+                if register != 31: expected.x[register] = value
+            expected_ram = bytearray(memory)
+            if incoming == old:
+                expected_ram[position:position + width * 2] = b''.join(value.to_bytes(width, 'little') for value in replacement)
+            actual, ram, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            self.assertEqual(bytes(actual), bytes(expected))
+            self.assertEqual(ram, bytes(expected_ram))
+            self.assertEqual(case['compare_matches'], incoming == old)
+            self.assertEqual(len(bytes(actual)), 784)
+            flags.setdefault(op['canonical_id'], set()).add(initial.nzcv >> 28)
+            positions.setdefault(width, set()).add(position % 16)
+            modes.add(case['compare_mode'])
+        self.assertEqual(modes, {'match', 'low_mismatch', 'high_mismatch'})
+        self.assertTrue(all(values == set(range(16)) for values in flags.values()))
+        self.assertEqual(positions, {4: set(range(9)), 8: {0}})
+
+    def test_pair_model_atomic_faults_permissions_alignment_and_ZR(self):
+        family = atomic_pair_memory
+        for width in family.WIDTHS:
+            op = family.operation(width)
+            total = op['total_bytes']
+            initial = family.initial_state(op, 0, 16)
+            memory = family.memory_template()[:64]
+            for matches in (True, False):
+                current = State.from_buffer_copy(bytes(initial))
+                if not matches: current.x[0] ^= 1
+                actual, ram, fault = family.expected(op, current, memory, readonly=True)
+                self.assertEqual(fault['kind'], 'memory')
+                self.assertEqual(bytes(actual), bytes(current))
+                self.assertEqual(ram, memory)
+            for offset in range(16):
+                current = State.from_buffer_copy(bytes(initial))
+                current.x[5] = family.RAM_ADDRESS + 16 + offset
+                actual, ram, fault = family.expected(op, current, memory)
+                self.assertEqual(fault is None, offset + total <= 16)
+                if fault:
+                    self.assertEqual(fault['kind'], 'sca_alignment')
+                    self.assertEqual(bytes(actual), bytes(current))
+                    self.assertEqual(ram, memory)
+            for accessible in range(16, 16 + total):
+                actual, ram, fault = family.expected(op, initial, memory, accessible=accessible)
+                self.assertEqual(fault['kind'], 'memory')
+                self.assertEqual(bytes(actual), bytes(initial))
+                self.assertEqual(ram, memory)
+            sp_op = family.operation(width, rs=30, rt=30, rn=31)
+            current = family.initial_state(sp_op, 0, 16, compare=(1, 0))
+            current.sp = family.RAM_ADDRESS + 1
+            actual, ram, fault = family.expected(sp_op, current, memory, accessible=0)
+            self.assertEqual(fault['kind'], 'sp_alignment')
+            self.assertEqual(bytes(actual), bytes(current))
+            memory = bytearray(64)
+            memory[16:16 + width] = (1).to_bytes(width, 'little')
+            current.sp = family.RAM_ADDRESS + 16
+            actual, ram, fault = family.expected(sp_op, current, memory)
+            self.assertIsNone(fault)
+            self.assertEqual(actual.x[30], 1)
+            self.assertEqual(actual.sp, current.sp)
+            self.assertEqual(ram, bytes(memory))
+
+    def test_independent_Cx16_and_all_odd_first_declines(self):
+        family = atomic_pair_memory
+        for op in family.shapes():
+            self.assertEqual(family.supported_on_profile(op, 'x86_64-baseline'), op['total_bytes'] == 8)
+            self.assertEqual(family.supported_on_profile(op, 'x86_64-baseline+atomic-load16'), op['total_bytes'] == 8)
+            self.assertTrue(family.supported_on_profile(op, 'x86_64-baseline+cx16'))
+            self.assertTrue(family.supported_on_profile(op, 'x86_64-baseline+atomic-load16+cx16'))
+            for register in range(1, 32, 2):
+                for field in ('rs', 'rt'):
+                    with self.assertRaises(ValueError): family.operation(op['element_bytes'], op['order'], **{field: register})
+        declined = family.declined_encodings()
+        self.assertEqual(len(declined), 260)
+        self.assertEqual(sum(row['reason'] == 'Cx16_host_capability' for row in declined), 4)
+        self.assertEqual(simd_memory_runner.family_module(family.FOCUS), family)
+        for case in family.fault_selection():
+            op = family.fault_operation(family.shapes()[case['function']], case)
+            state = family.fault_initial_state(op, case, 0)
+            self.assertEqual(len(bytes(state)), 784)
+            if case['protection'] == 'readonly' and op['rs'] != 30:
+                width, mask = op['element_bytes'], (1 << (op['element_bytes'] * 8)) - 1
+                old = int.from_bytes(b'\xa5' * width, 'little')
+                values = [state.x[register] & mask for register in op['compare']]
+                self.assertEqual(values == [old, old], case['compare_matches'])
+
+    def test_pair_bounded_histories_and_original_two_orders_reject_torn_state_RAM(self):
+        import simd_atomic_original as smp
+        family = atomic_pair_memory
+        self.assertEqual(len(family.concurrency_cases()), 20)
+        pairs = smp.pair_default_pairs(trials=1)
+        self.assertEqual(len(pairs), 8)
+        files, plan, _ = smp.input_files(pairs, focus=smp.PAIR_FOCUS)
+        self.assertEqual((len(files['inputs.bin']), len(files['memory.bin']), len(plan)), (8 * 1600, 8 * 8192, 8))
+        for case in pairs:
+            for order in ((0, 1), (1, 0)):
+                memory, finals, rows = case['memory'], list(case['initial']), []
+                for thread in order:
+                    initial, op = State.from_buffer_copy(case['initial'][thread]), case['programs'][thread][0]
+                    final, memory, fault = family.history_expected(op, initial, memory)
+                    self.assertIsNone(fault)
+                    finals[thread] = bytes(final)
+                    rows.append({'operation': op, 'initial_state_hex': bytes(initial).hex(), 'final_state_hex': bytes(final).hex(), 'begin': 0, 'end': 1})
+                self.assertTrue(family.linearization_allowed(rows, case['memory'], final_ram=memory))
+                simd_memory_runner.validate_atomic_smp_trial(case, finals, memory, None, family)
+                damaged = list(finals)
+                state = State.from_buffer_copy(damaged[0])
+                state.x[1] ^= 1
+                damaged[0] = bytes(state)
+                with self.assertRaises(AssertionError):
+                    simd_memory_runner.validate_atomic_smp_trial(case, damaged, memory, None, family)
+                damaged_ram = memory[:-1] + bytes([memory[-1] ^ 1])
+                self.assertFalse(family.linearization_allowed(rows, case['memory'], final_ram=damaged_ram))
+                with self.assertRaises(AssertionError):
+                    simd_memory_runner.validate_atomic_smp_trial(case, finals, damaged_ram, None, family)
+                with self.assertRaises(ValueError): family.linearization_allowed(rows * 9, case['memory'])
+        for case in family.concurrency_cases():
+            self.assertEqual(len(family.concurrency_plan(case, [0, 1])), 11392)
+            self.assertEqual(case['kind'], 0)
+            for kind in range(1, 5):
+                with self.assertRaises(ValueError): family.concurrency_plan({**case, 'kind': kind}, [0, 1])
+            self.assertLessEqual(case['threads'] * case['iterations'], 16)
+            self.assertTrue(all(30 not in op.get('written_gprs', []) for program in case['programs'] for op in program))
+
+    def test_pair_observer_metadata_and_normal_return_ABI_wrapper_call(self):
+        from capstone import CS_ARCH_X86, CS_MODE_64
+        family = atomic_pair_memory
+        for shape in family.shapes():
+            for first in (0, 30):
+                op = family.operation(shape['element_bytes'], shape['order'], rs=first, rt=first, rn=31)
+                self.assertEqual(simd_original.memory_destinations(op), (set(op['written_gprs']), set(), False))
+                with self.assertRaises(AssertionError): simd_original.memory_destinations({**op, 'total_bytes': 4})
+                with self.assertRaises(AssertionError): simd_original.memory_destinations({**op, 'written_gprs': [0, 0]})
+        native, entry = b'\x90\x90\xc3', 1
+        wrapped, prefix = simd_memory_runner.normal_return_rbx_wrapper(native, entry)
+        decoded = list(Cs(CS_ARCH_X86, CS_MODE_64).disasm(wrapped[:prefix], 0))
+        self.assertEqual([instruction.mnemonic for instruction in decoded], ['push', 'movabs', 'call', 'mov', 'pop', 'ret'])
+        self.assertEqual(decoded[2].op_str, hex(prefix + entry))
+        self.assertEqual(wrapped[prefix:], native)
+        self.assertEqual(struct.unpack_from('<Q', wrapped, 3)[0], simd_memory_runner.NORMAL_RBX_SENTINEL)
+        self.assertEqual(prefix, 21)
+        for invalid in (-1, len(native)):
+            with self.assertRaises(ValueError): simd_memory_runner.normal_return_rbx_wrapper(native, invalid)
+
+    def test_previous_scalar_SMP_inputs_and_observer_assembly_remain_frozen(self):
+        import simd_atomic_original as smp
+        files, plan, _ = smp.input_files(smp.default_pairs())
+        expected = {'pair-plan.json': 'ffa787a4df09921c77ec7b211864378f30eacd8667f8584b12bdc650a95b523a',
+            'inputs.bin': '8b90f6223c91854c75a24b0411c99c0796e7495631842235ff3421152aa7c6b6',
+            'memory.bin': '60724f0a65a0171b5731feb83d63ab905826b3dd0572b1ae8aea2daac30c9317',
+            'canonical-source.arm64': 'e81affb6ca4f7c54c7a7238ef3922c3854387aadc50538559a878bcece1e6687',
+            'input-plan.json': '04932bf8cc90f54372f50c94adf7fa6381f3573f3b85d4b9c8d72e177ae29e9b'}
+        self.assertEqual({name: engine.digest(data) for name, data in files.items()}, expected)
+        self.assertEqual(engine.digest(smp.assembly(plan).encode()), 'a6d7f8b519a5a4a70d3db87c2a7310a57db1f9b9fe600b513f117d2d768f605e')
+
+    def test_previous_scalar_atomic_corpus_bytes_remain_frozen(self):
+        operations, cases = atomic_memory.corpus()
+        compact = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        self.assertEqual(engine.digest(compact(operations)), 'deb705b7dbe00812fd1f351e55f14a1ce01bee1dd22bb9216d887764ccb52f43')
+        self.assertEqual(engine.digest(compact([{k: v for k, v in case.items() if k != 'initial'} for case in cases])),
+                         '0714d3ed93c040d3c953ed712419fbc664eb545ee22894a57328dab211b706c8')
+        inputs = b''.join(struct.pack('<Q', case['function']) + case['initial'] + bytes(8) for case in cases)
+        self.assertEqual(engine.digest(inputs), '8794a4922ad5ed983d50213d28b827995e4a4fc1658c46cbbf00a57e76759b5f')
+        self.assertEqual(engine.digest(atomic_memory.memory_template()), '89e65d5009df72c2afc3e63ed9dc8d1ec6be190814a229732bc2b2be926c4e59')
+
+
+class OrderedUnscaledFixtureTests(unittest.TestCase):
+    def test_full_forms_words_models_and_actual_target_filter(self):
+        family = ordered_unscaled_memory
+        operations, cases = family.corpus()
+        self.assertEqual((len(family.CANONICAL_FORMS), len(operations), len(cases)), (13, 1808, 2202))
+        source = b''.join(struct.pack('<II', op['word'], engine.RET) for op in operations)
+        self.assertEqual(family.validate_source_words(source, [{'operations': [op]} for op in operations], set())['capstone_decode_fallback_words'], 0)
+        self.assertEqual(sum(family.supported_on_profile(op, 'baseline') for op in operations), 1067)
+        self.assertTrue(all(family.supported_on_profile(op, 'x86_64-baseline+atomic-load16') for op in operations))
+        flags, offsets = {}, set()
+        memory = family.memory_template()
+        for case in cases:
+            op, initial = operations[case['function']], State.from_buffer_copy(case['initial'])
+            actual, ram, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            position, width = family.effective_address(op, initial) - family.RAM_ADDRESS, op['element_bytes']
+            expected, expected_ram = State.from_buffer_copy(bytes(initial)), bytearray(memory)
+            if op['loading']:
+                value = int.from_bytes(memory[position:position + width], 'little', signed=op['signed'])
+                if op['rt'] != 31: expected.x[op['rt']] = value & ((1 << op['output_bits']) - 1)
+            else:
+                value = 0 if op['rt'] == 31 else initial.x[op['rt']] & ((1 << (width * 8)) - 1)
+                expected_ram[position:position + width] = value.to_bytes(width, 'little')
+            self.assertEqual(bytes(actual), bytes(expected))
+            self.assertEqual(ram, bytes(expected_ram))
+            flags.setdefault(op['canonical_id'], set()).add(initial.nzcv >> 28)
+            offsets.add(op['offset'])
+            self.assertNotIn('rs', op)
+        self.assertTrue(all(values == set(range(16)) for values in flags.values()))
+        self.assertTrue({-256, -1, 0, 1, 255} <= offsets)
+        self.assertEqual(simd_memory_runner.family_module(family.FOCUS), family)
+
+    def test_all_thirteen_ordered_histories_use_actual_EA_aliases_and_complete_bytes(self):
+        family = ordered_unscaled_memory
+        cases = family.concurrency_cases()
+        self.assertEqual(len(cases), 13)
+        baseline = [case for case in cases if all(family.supported_on_profile(op, 'baseline') for program in case['programs'] for op in program)]
+        self.assertEqual(len(baseline), 4)
+        self.assertEqual(sum(case['alias'] for case in cases), 6)
+        for case in cases:
+            self.assertEqual(len(family.concurrency_plan(case, [0, 1])), 11392)
+            states, bases = [], []
+            for thread, raw in enumerate(case['initial']):
+                base = family.RAM_ADDRESS + (0x100000 if case['alias'] and thread & 1 else 0)
+                bases.append(base)
+                states.append(atomic_memory.relocate_state(raw, base))
+            memory, rows = case['memory'], []
+            for iteration in range(case['iterations']):
+                for thread in range(case['threads']):
+                    op, initial = case['programs'][thread][0], State.from_buffer_copy(bytes(states[thread]))
+                    final, memory, fault = family.history_expected(op, initial, memory, bases[thread])
+                    self.assertIsNone(fault)
+                    rows.append({'operation': op, 'initial_state_hex': bytes(initial).hex(), 'final_state_hex': bytes(final).hex(),
+                                 'ram_address': bases[thread], 'begin': len(rows) * 2, 'end': len(rows) * 2 + 1})
+                    states[thread] = final
+            self.assertTrue(family.linearization_allowed(rows, case['memory'], final_ram=memory))
+            damaged = [dict(row) for row in rows]
+            altered = State.from_buffer_copy(bytes.fromhex(damaged[0]['final_state_hex']))
+            altered.nzcv ^= 1 << 28
+            damaged[0]['final_state_hex'] = bytes(altered).hex()
+            self.assertFalse(family.linearization_allowed(damaged, case['memory'], final_ram=memory))
+            self.assertFalse(family.linearization_allowed(rows, case['memory'], final_ram=memory[:-1] + bytes([memory[-1] ^ 1])))
+            self.assertTrue(all(row['operation']['offset'] in (-17, 17) for row in rows))
+
+    def test_SP_offset_snapshot_and_source_fault_order(self):
+        family = ordered_unscaled_memory
+        for canonical, _, width, output_bits, _, _ in family.FORMS:
+            if width == 1 or not output_bits: continue
+            for offset in (9 - width, -7 - width):
+                op = family.operation(canonical, rn=31, offset=offset)
+                initial = family.initial_state(op, 0, 512 + offset % 16)
+                self.assertTrue(family.snapshot_read(op, initial))
+                self.assertFalse(family.supported_on_profile(op, 'x86_64-baseline'))
+                self.assertTrue(family.supported_on_profile(op, 'x86_64-baseline+atomic-load16'))
+                self.assertEqual(family.effective_address(op, initial) & ~15, family.RAM_ADDRESS + 512)
+                self.assertEqual(simd_original.memory_destinations(op), ({1}, set(), False))
+            op = family.operation(canonical, rn=31, offset=-1)
+            initial = State()
+            initial.sp = family.RAM_ADDRESS + 1
+            state, ram, fault = family.expected(op, initial, bytes(64), accessible=0)
+            self.assertEqual(fault['kind'], 'sp_alignment')
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(ram, bytes(64))
+            initial.sp = family.RAM_ADDRESS + 16
+            state, ram, fault = family.expected(op, initial, bytes(64), accessible=0)
+            self.assertEqual(fault['kind'], 'sca_alignment')
+
 
 class AtomicMemoryFixtureTests(unittest.TestCase):
     def test_exact173_forms_register_roles_and_source_alias_decode(self):
@@ -142,6 +592,11 @@ class AtomicMemoryFixtureTests(unittest.TestCase):
         struct.pack_into('<Q', header, simd_original.ATOMIC_FEATURE_HEADER_OFFSET, 1 << 32)
         result = simd_original.validate_atomic_features(header)
         self.assertEqual(result['fields'], {'LSE_Atomic': 2, 'LRCPC': 1, 'LSE2_AT': 1})
+        self.assertEqual(simd_original.validate_atomic_features(header, focus=atomic_pair_memory.FOCUS), result)
+        with self.assertRaises(AssertionError): simd_original.validate_atomic_features(header, focus=ordered_unscaled_memory.FOCUS)
+        ordered_header = bytearray(header)
+        struct.pack_into('<Q', ordered_header, 3 * 8, 2 << 20)
+        self.assertEqual(simd_original.validate_atomic_features(ordered_header, focus=ordered_unscaled_memory.FOCUS)['fields']['LRCPC'], 2)
         for offset in (3 * 8, 8 * 8, simd_original.ATOMIC_FEATURE_HEADER_OFFSET):
             changed = bytearray(header)
             changed[offset:offset + 8] = bytes(8)

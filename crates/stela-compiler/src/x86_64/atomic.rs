@@ -1,4 +1,4 @@
-//! Exact-width scalar atomic updates; RDX holds the checked guest address.
+//! Shared atomic staging/guards; RDX initially holds the checked guest address.
 use super::{load, offset, store};
 use crate::aarch64::{
     Register,
@@ -6,6 +6,7 @@ use crate::aarch64::{
 };
 
 mod compare_exchange;
+mod compare_exchange_pair;
 mod read_modify_write;
 
 const BYTE_BYTES: u8 = 1;
@@ -13,6 +14,7 @@ const HALFWORD_BYTES: u8 = 2;
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 const ATOMIC_GRANULE_BYTES: u8 = 16;
+const DOUBLEWORD_PAIR_BYTES: u8 = 2 * QWORD_BYTES;
 const ATOMIC_GRANULE_MASK: u8 = ATOMIC_GRANULE_BYTES - 1;
 const TEST_AL_IMM8: &[u8] = &[0xa8];
 const JE_REL8: u8 = 0x74;
@@ -21,6 +23,7 @@ const UD2: &[u8] = &[0x0f, 0x0b];
 const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
 const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
 const CMP_CL_IMM8: &[u8] = &[0x80, 0xf9];
+const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
 const LOCK: u8 = 0xf0;
 const OPERAND_SIZE_PREFIX: u8 = 0x66;
@@ -52,10 +55,16 @@ pub(super) enum ValueRegister {
     R8,
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn requires_cx16(operand: &Operand) -> bool {
+    matches!(operand.kind, Kind::CompareExchangePair { .. })
+        && operand.bytes == DOUBLEWORD_PAIR_BYTES
+}
+
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     address(code, operand.base, operand.bytes);
     match operand.kind {
         Kind::CompareExchange { .. } => compare_exchange::emit(code, operand),
+        Kind::CompareExchangePair { .. } => compare_exchange_pair::emit(code, operand, target),
         Kind::ReadModifyWrite { .. } => read_modify_write::emit(code, operand),
     }
 }
@@ -63,20 +72,38 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 /// SP is checked first. LSE2 accesses must fit the selected aligned 16-byte granule.
 /// RAX/RCX are scratch, RDX receives the address, and guest state is untouched.
 pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8) {
+    address_offset(code, base, bytes, 0);
+}
+
+/// Check the original SP before applying the signed displacement. The SCA
+/// boundary belongs to the effective address; known aligned SP needs no runtime
+/// boundary test. The zero-displacement recipe retains its established bytes.
+pub(super) fn address_offset(code: &mut Vec<u8>, base: Register, bytes: u8, displacement: i32) {
     load(code, base);
     if base == Register::Sp {
         code.extend(TEST_AL_IMM8);
         code.push(ATOMIC_GRANULE_MASK);
         code.extend([JE_REL8, UD2.len() as u8]);
         code.extend(UD2);
-    } else if bytes != BYTE_BYTES {
-        code.extend(MOV_ECX_EAX);
-        code.extend(AND_ECX_IMM8);
-        code.push(ATOMIC_GRANULE_MASK);
-        code.extend(CMP_CL_IMM8);
-        code.push(ATOMIC_GRANULE_BYTES - bytes);
-        code.extend([JBE_REL8, UD2.len() as u8]);
-        code.extend(UD2);
+    }
+    if displacement != 0 {
+        code.extend(ADD_RAX_IMM32);
+        code.extend(displacement.to_le_bytes());
+    }
+    if bytes != BYTE_BYTES {
+        if base != Register::Sp {
+            code.extend(MOV_ECX_EAX);
+            code.extend(AND_ECX_IMM8);
+            code.push(ATOMIC_GRANULE_MASK);
+            code.extend(CMP_CL_IMM8);
+            code.push(ATOMIC_GRANULE_BYTES - bytes);
+            code.extend([JBE_REL8, UD2.len() as u8]);
+            code.extend(UD2);
+        } else if displacement.rem_euclid(i32::from(ATOMIC_GRANULE_BYTES))
+            > i32::from(ATOMIC_GRANULE_BYTES - bytes)
+        {
+            code.extend(UD2);
+        }
     }
     code.extend(MOV_RDX_RAX);
 }

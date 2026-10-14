@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v31",
+  "registry_version": "apple-silicon-reviewed-forms-v32",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -32,11 +32,11 @@
   ],
   "profile": {
     "id": "direct-private-ram-leaf-v2",
-    "description": "Implemented means complete reviewed encoding-form semantics in the bounded ARM64 leaf profile. Ordinary transfers retain private-RAM scope; the explicitly scoped scalar atomic/ordered cohort uses coherent shared Normal-WB RAM. Partial means operands, control flow or required semantics remain restricted. Aliases have no separate entries.",
+    "description": "Implemented means complete reviewed encoding-form semantics in the bounded ARM64 leaf profile. Ordinary transfers retain private-RAM scope; the explicitly scoped atomic/ordered cohorts use coherent shared Normal-WB RAM. Register-only MTE arithmetic uses its declared fixed ATA0/TCF0/GCR controls. Partial means operands, control flow or required semantics remain restricted. Aliases have no separate entries.",
     "outside_scope": [
       "full guest exception delivery and asynchronous state reconstruction",
       "MMU/privilege/interrupt/device semantics",
-      "PAC/tagged pointer representation",
+      "tagged-address dereference, allocation-tag RAM and pointer-authentication key integration",
       "complete ARM memory-model and production concurrent-runtime semantics",
       "full application ABI and macOS boot"
     ]
@@ -733,6 +733,111 @@
         "original_smp.complete_RAM_checks": 2048,
         "original_smp.ordering_trials": 1792,
         "original_smp.cross8_exact_serialization_trials": 256
+      }
+    },
+    "atomic_pair_memory": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-atomic_pair_memory-differential-report.json",
+      "kind": "simd_atomic_pair_memory_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd-differential.py",
+        "dev/simd_memory_runner.py",
+        "dev/simd_fixtures/atomic_pair_memory.py",
+        "dev/simd_original.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/native-memory-faults.c",
+        "dev/test_simd_fixtures.py",
+        "dev/memory-faults.py",
+        "dev/simd_fixtures/structure_memory.py",
+        "dev/a64_checklist.py",
+        "dev/simd_fixtures/memory_history.py",
+        "dev/simd_fixtures/atomic_memory.py",
+        "dev/simd_atomic_original.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_RAM_comparisons",
+        "native_source_policy_fault_checks"
+      ],
+      "required_measurements": {
+        "canonical_forms": 8,
+        "functions": 3464,
+        "state_bytes": 784,
+        "ram_bytes": 8192,
+        "success_cases": 10592,
+        "fault_cases": 424,
+        "declined_encodings.declined_before_execution": 264,
+        "original_smp.complete_state_checks": 4096,
+        "original_smp.complete_RAM_checks": 2048,
+        "original_smp.exact_pair_serialization_trials": 2048
+      }
+    },
+    "ordered_unscaled_memory": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-ordered_unscaled_memory-differential-report.json",
+      "kind": "simd_ordered_unscaled_memory_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd-differential.py",
+        "dev/simd_memory_runner.py",
+        "dev/simd_fixtures/ordered_unscaled_memory.py",
+        "dev/simd_original.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/native-memory-faults.c",
+        "dev/test_simd_fixtures.py",
+        "dev/memory-faults.py",
+        "dev/simd_fixtures/structure_memory.py",
+        "dev/a64_checklist.py",
+        "dev/simd_fixtures/memory_history.py",
+        "dev/simd_fixtures/atomic_memory.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_RAM_comparisons",
+        "native_source_policy_fault_checks"
+      ],
+      "required_measurements": {
+        "canonical_forms": 13,
+        "functions": 1808,
+        "state_bytes": 784,
+        "ram_bytes": 8192,
+        "success_cases": 2202,
+        "fault_cases": 700,
+        "declined_encodings.declined_before_execution": 27
+      }
+    },
+    "tag_arithmetic": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-tag_arithmetic-differential-report.json",
+      "kind": "simd_tag_arithmetic_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd-differential.py",
+        "dev/simd_fixture_runner.py",
+        "dev/simd_fixtures/tag_arithmetic.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_original.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 5,
+        "functions": 2301,
+        "original_producer.state_bytes": 784,
+        "original_full_frame_captures": 3829,
+        "complete_native_state_comparisons": 7658,
+        "direct_original_math_native_comparisons": 6786,
+        "requested_storage_native_policy_comparisons": 764,
+        "soft_fixed_execute_as_native_policy_comparisons": 108
       }
     }
   },
@@ -45974,6 +46079,1349 @@
         "crates/stela-compiler/src/x86_64/atomic.rs",
         "crates/stela-compiler/src/x86_64/atomic/read_modify_write.rs"
       ]
+    },
+    {
+      "id": "ADDG_64_addsub_immtags",
+      "mnemonic": "ADDG",
+      "category": "base_integer_system",
+      "source_file": "addg.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x91800000",
+      "features": [
+        {
+          "feature": "FEAT_MTE",
+          "name": "v8Ap5"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/addg.xml",
+      "source_sha256": "f9c542f2b42eb732737df886a7d3cffc9e58f1ed44c826d9d9af3021c217daa9",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "tag_arithmetic"
+      ],
+      "scope": "Enabled FEAT_MTE2 nonstreaming register-only ADDG/SUBG/GMI/SUBP/SUBPS with fixed ATA0=1, TCF0=0 and GCR.Exclude=0. All allocated immediates, GPR/SP/ZR roles, aliases, 56-bit signed pointer subtraction, tag arithmetic and SUBPS NZCV effects. Nonzero should-be-zero ADDG/SUBG op3 selects the source-permitted execute-as-zero behavior; original QEMU UNDEF and requested FP storage differences are retained separately and receive no original equality credit. No guest RAM access, allocation-tag storage, IRG randomness, tag-check faults, tagged host dereference, disabled-feature/access behavior or Apple hardware conformance is inferred.",
+      "smoke_samples": [
+        {
+          "word": "0x918000a0",
+          "expected_mnemonics": [
+            "addg"
+          ]
+        },
+        {
+          "word": "0x918003e7",
+          "expected_mnemonics": [
+            "addg"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
+    },
+    {
+      "id": "CASPAL_CP32_comswappr",
+      "mnemonic": "CASPAL",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x0860fc00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x0860fca2",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        },
+        {
+          "word": "0x087efffe",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        },
+        {
+          "word": "0x0860fc22",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASPAL_CP64_comswappr",
+      "mnemonic": "CASPAL",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4860fc00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x4860fca2",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        },
+        {
+          "word": "0x487efffe",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        },
+        {
+          "word": "0x4860fc22",
+          "expected_mnemonics": [
+            "caspal"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASPA_CP32_comswappr",
+      "mnemonic": "CASPA",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x08607c00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x08607ca2",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        },
+        {
+          "word": "0x087e7ffe",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        },
+        {
+          "word": "0x08607c22",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASPA_CP64_comswappr",
+      "mnemonic": "CASPA",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x48607c00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x48607ca2",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        },
+        {
+          "word": "0x487e7ffe",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        },
+        {
+          "word": "0x48607c22",
+          "expected_mnemonics": [
+            "caspa"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASPL_CP32_comswappr",
+      "mnemonic": "CASPL",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x0820fc00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x0820fca2",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        },
+        {
+          "word": "0x083efffe",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        },
+        {
+          "word": "0x0820fc22",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASPL_CP64_comswappr",
+      "mnemonic": "CASPL",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4820fc00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x4820fca2",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        },
+        {
+          "word": "0x483efffe",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        },
+        {
+          "word": "0x4820fc22",
+          "expected_mnemonics": [
+            "caspl"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASP_CP32_comswappr",
+      "mnemonic": "CASP",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x08207c00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x08207ca2",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        },
+        {
+          "word": "0x083e7ffe",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        },
+        {
+          "word": "0x08207c22",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "CASP_CP64_comswappr",
+      "mnemonic": "CASP",
+      "category": "base_integer_system",
+      "source_file": "casp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x48207c00",
+      "features": [
+        {
+          "feature": "FEAT_LSE",
+          "name": "v8Ap1"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/casp.xml",
+      "source_sha256": "870709bcf213da3ce6d414c924ffcddb144b61630101c32f27b302b02c1b69fd",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "atomic_pair_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LSE/LSE2, A=0/nAA=0 and a 16-byte SCA granule, disabled tags/checked pointers and enabled incoming SP alignment policy. All W/X pairs, orders, even first-register roles, second-register ZR, pair/base aliases and compare-result writes. W pairs support baseline packed64 CAS; same compare/source W pairs use locked XADD of zero, and distinct W pairs with neither second member ZR may select independently checked Cx8. X pairs require independently checked Cx16 and full 16-byte alignment under this profile. Exact failed-compare write permissions and fault-before-register-commit. Bounded native histories and separate two-PE original serializations do not establish complete Arm memory-model, production concurrent runtime, host fault resumption or guest exception delivery.",
+      "smoke_samples": [
+        {
+          "word": "0x48207ca2",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        },
+        {
+          "word": "0x483e7ffe",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        },
+        {
+          "word": "0x48207c22",
+          "expected_mnemonics": [
+            "casp"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs",
+        "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs"
+      ]
+    },
+    {
+      "id": "GMI_64G_dp_2src",
+      "mnemonic": "GMI",
+      "category": "base_integer_system",
+      "source_file": "gmi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac01400",
+      "features": [
+        {
+          "feature": "FEAT_MTE",
+          "name": "v8Ap5"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/gmi.xml",
+      "source_sha256": "cc74bd64bba5f4b0ed365780834f29861958d251a716297f3f9d3e83cbcdd2d9",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "tag_arithmetic"
+      ],
+      "scope": "Enabled FEAT_MTE2 nonstreaming register-only ADDG/SUBG/GMI/SUBP/SUBPS with fixed ATA0=1, TCF0=0 and GCR.Exclude=0. All allocated immediates, GPR/SP/ZR roles, aliases, 56-bit signed pointer subtraction, tag arithmetic and SUBPS NZCV effects. Nonzero should-be-zero ADDG/SUBG op3 selects the source-permitted execute-as-zero behavior; original QEMU UNDEF and requested FP storage differences are retained separately and receive no original equality credit. No guest RAM access, allocation-tag storage, IRG randomness, tag-check faults, tagged host dereference, disabled-feature/access behavior or Apple hardware conformance is inferred.",
+      "smoke_samples": [
+        {
+          "word": "0x9ac014a0",
+          "expected_mnemonics": [
+            "gmi"
+          ]
+        },
+        {
+          "word": "0x9ac017e7",
+          "expected_mnemonics": [
+            "gmi"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURB_32_ldapstl_unscaled",
+      "mnemonic": "LDAPURB",
+      "category": "base_integer_system",
+      "source_file": "ldapurb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x19400000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapurb.xml",
+      "source_sha256": "896a10766a65c7c81f4dcf598446f6eb5d5af5b82634354f1563e1946aaf892a",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x194000a1",
+          "expected_mnemonics": [
+            "ldapurb"
+          ]
+        },
+        {
+          "word": "0x195003ff",
+          "expected_mnemonics": [
+            "ldapurb"
+          ]
+        },
+        {
+          "word": "0x194ff0e7",
+          "expected_mnemonics": [
+            "ldapurb"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURH_32_ldapstl_unscaled",
+      "mnemonic": "LDAPURH",
+      "category": "base_integer_system",
+      "source_file": "ldapurh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x59400000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapurh.xml",
+      "source_sha256": "37595e3d0ad26b6d34b7eb5b81144d88f5dda922b7ebc29be0f8aa6677473b62",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x594000a1",
+          "expected_mnemonics": [
+            "ldapurh"
+          ]
+        },
+        {
+          "word": "0x595003ff",
+          "expected_mnemonics": [
+            "ldapurh"
+          ]
+        },
+        {
+          "word": "0x594ff0e7",
+          "expected_mnemonics": [
+            "ldapurh"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURSB_32_ldapstl_unscaled",
+      "mnemonic": "LDAPURSB",
+      "category": "base_integer_system",
+      "source_file": "ldapursb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x19c00000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapursb.xml",
+      "source_sha256": "c7b45a45b624b9f2025ae16df18cdd48bf41546f608506821c39ea020cdda7ce",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x19c000a1",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        },
+        {
+          "word": "0x19d003ff",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        },
+        {
+          "word": "0x19cff0e7",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURSB_64_ldapstl_unscaled",
+      "mnemonic": "LDAPURSB",
+      "category": "base_integer_system",
+      "source_file": "ldapursb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x19800000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapursb.xml",
+      "source_sha256": "c7b45a45b624b9f2025ae16df18cdd48bf41546f608506821c39ea020cdda7ce",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x198000a1",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        },
+        {
+          "word": "0x199003ff",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        },
+        {
+          "word": "0x198ff0e7",
+          "expected_mnemonics": [
+            "ldapursb"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURSH_32_ldapstl_unscaled",
+      "mnemonic": "LDAPURSH",
+      "category": "base_integer_system",
+      "source_file": "ldapursh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x59c00000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapursh.xml",
+      "source_sha256": "80c043017cf5997ecd769c865457e9243000c7611e6d22fa02807cd6fb7d5788",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x59c000a1",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        },
+        {
+          "word": "0x59d003ff",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        },
+        {
+          "word": "0x59cff0e7",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURSH_64_ldapstl_unscaled",
+      "mnemonic": "LDAPURSH",
+      "category": "base_integer_system",
+      "source_file": "ldapursh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x59800000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapursh.xml",
+      "source_sha256": "80c043017cf5997ecd769c865457e9243000c7611e6d22fa02807cd6fb7d5788",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x598000a1",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        },
+        {
+          "word": "0x599003ff",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        },
+        {
+          "word": "0x598ff0e7",
+          "expected_mnemonics": [
+            "ldapursh"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPURSW_64_ldapstl_unscaled",
+      "mnemonic": "LDAPURSW",
+      "category": "base_integer_system",
+      "source_file": "ldapursw.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x99800000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapursw.xml",
+      "source_sha256": "7d52826d85632d0973132e248cf7fd1f8d55c3dd209c98e99e51e305b0f67cb0",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x998000a1",
+          "expected_mnemonics": [
+            "ldapursw"
+          ]
+        },
+        {
+          "word": "0x999003ff",
+          "expected_mnemonics": [
+            "ldapursw"
+          ]
+        },
+        {
+          "word": "0x998ff0e7",
+          "expected_mnemonics": [
+            "ldapursw"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPUR_32_ldapstl_unscaled",
+      "mnemonic": "LDAPUR",
+      "category": "base_integer_system",
+      "source_file": "ldapur_gen.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x99400000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapur_gen.xml",
+      "source_sha256": "33852e29e86bcc4b0b164daaabd3d53b4a4131283fabd2b26bb5275b63d9a95a",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x994000a1",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        },
+        {
+          "word": "0x995003ff",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        },
+        {
+          "word": "0x994ff0e7",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDAPUR_64_ldapstl_unscaled",
+      "mnemonic": "LDAPUR",
+      "category": "base_integer_system",
+      "source_file": "ldapur_gen.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9400000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldapur_gen.xml",
+      "source_sha256": "33852e29e86bcc4b0b164daaabd3d53b4a4131283fabd2b26bb5275b63d9a95a",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0xd94000a1",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        },
+        {
+          "word": "0xd95003ff",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        },
+        {
+          "word": "0xd94ff0e7",
+          "expected_mnemonics": [
+            "ldapur"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLURB_32_ldapstl_unscaled",
+      "mnemonic": "STLURB",
+      "category": "base_integer_system",
+      "source_file": "stlurb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x19000000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stlurb.xml",
+      "source_sha256": "31ee546dfee24a67554039a64ea91abc80fb557bab73c407892c8de05dbc4587",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x190000a1",
+          "expected_mnemonics": [
+            "stlurb"
+          ]
+        },
+        {
+          "word": "0x191003ff",
+          "expected_mnemonics": [
+            "stlurb"
+          ]
+        },
+        {
+          "word": "0x190ff0e7",
+          "expected_mnemonics": [
+            "stlurb"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLURH_32_ldapstl_unscaled",
+      "mnemonic": "STLURH",
+      "category": "base_integer_system",
+      "source_file": "stlurh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x59000000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stlurh.xml",
+      "source_sha256": "6308e2b008ad3d7bd346b8b0e47dba12ce9abef80fc7c447ad4ef848d196d10d",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x590000a1",
+          "expected_mnemonics": [
+            "stlurh"
+          ]
+        },
+        {
+          "word": "0x591003ff",
+          "expected_mnemonics": [
+            "stlurh"
+          ]
+        },
+        {
+          "word": "0x590ff0e7",
+          "expected_mnemonics": [
+            "stlurh"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLUR_32_ldapstl_unscaled",
+      "mnemonic": "STLUR",
+      "category": "base_integer_system",
+      "source_file": "stlur_gen.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x99000000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stlur_gen.xml",
+      "source_sha256": "98bf00f0af8e2194bf6d3e502aee1e6b352b69cbaf35960de6425c5ec1fbc8cc",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0x990000a1",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        },
+        {
+          "word": "0x991003ff",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        },
+        {
+          "word": "0x990ff0e7",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLUR_64_ldapstl_unscaled",
+      "mnemonic": "STLUR",
+      "category": "base_integer_system",
+      "source_file": "stlur_gen.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9000000",
+      "features": [
+        {
+          "feature": "FEAT_LRCPC2",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stlur_gen.xml",
+      "source_sha256": "98bf00f0af8e2194bf6d3e502aee1e6b352b69cbaf35960de6425c5ec1fbc8cc",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "ordered_unscaled_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LRCPC2/LSE2, A=0/nAA=0,16-byte SCA granule and enabled incoming SP alignment. All signed imm9 displacements, B/H/W/X accesses, signed and unsigned result widths, SP/ZR and base/data aliases. RCpc acquire loads and release stores; generic-base multibyte loads and SP-displaced loads that can cross8 within16 require independently checked AtomicLoad16. Byte and statically safe within8 loads retain baseline support. Effective addresses crossing the SCA granule take the explicit source-policy boundary. No guest exception delivery, complete Arm ordering or implicit widening of existing ordinary-memory concurrency guarantees.",
+      "smoke_samples": [
+        {
+          "word": "0xd90000a1",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        },
+        {
+          "word": "0xd91003ff",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        },
+        {
+          "word": "0xd90ff0e7",
+          "expected_mnemonics": [
+            "stlur"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "SUBG_64_addsub_immtags",
+      "mnemonic": "SUBG",
+      "category": "base_integer_system",
+      "source_file": "subg.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xd1800000",
+      "features": [
+        {
+          "feature": "FEAT_MTE",
+          "name": "v8Ap5"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subg.xml",
+      "source_sha256": "2679e2b5a6f37e1e7b157b65937a51a9e0eb7a517ae1f66019437e09afe791b8",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "tag_arithmetic"
+      ],
+      "scope": "Enabled FEAT_MTE2 nonstreaming register-only ADDG/SUBG/GMI/SUBP/SUBPS with fixed ATA0=1, TCF0=0 and GCR.Exclude=0. All allocated immediates, GPR/SP/ZR roles, aliases, 56-bit signed pointer subtraction, tag arithmetic and SUBPS NZCV effects. Nonzero should-be-zero ADDG/SUBG op3 selects the source-permitted execute-as-zero behavior; original QEMU UNDEF and requested FP storage differences are retained separately and receive no original equality credit. No guest RAM access, allocation-tag storage, IRG randomness, tag-check faults, tagged host dereference, disabled-feature/access behavior or Apple hardware conformance is inferred.",
+      "smoke_samples": [
+        {
+          "word": "0xd18000a0",
+          "expected_mnemonics": [
+            "subg"
+          ]
+        },
+        {
+          "word": "0xd18003e7",
+          "expected_mnemonics": [
+            "subg"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
+    },
+    {
+      "id": "SUBPS_64S_dp_2src",
+      "mnemonic": "SUBPS",
+      "category": "base_integer_system",
+      "source_file": "subps.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0xbac00000",
+      "features": [
+        {
+          "feature": "FEAT_MTE",
+          "name": "v8Ap5"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subps.xml",
+      "source_sha256": "e287a2451d1833ceae0c9741f1f942dbea2f1ebbd7a58a0fe2e0985378831a41",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "tag_arithmetic"
+      ],
+      "scope": "Enabled FEAT_MTE2 nonstreaming register-only ADDG/SUBG/GMI/SUBP/SUBPS with fixed ATA0=1, TCF0=0 and GCR.Exclude=0. All allocated immediates, GPR/SP/ZR roles, aliases, 56-bit signed pointer subtraction, tag arithmetic and SUBPS NZCV effects. Nonzero should-be-zero ADDG/SUBG op3 selects the source-permitted execute-as-zero behavior; original QEMU UNDEF and requested FP storage differences are retained separately and receive no original equality credit. No guest RAM access, allocation-tag storage, IRG randomness, tag-check faults, tagged host dereference, disabled-feature/access behavior or Apple hardware conformance is inferred.",
+      "smoke_samples": [
+        {
+          "word": "0xbac000a0",
+          "expected_mnemonics": [
+            "subps"
+          ]
+        },
+        {
+          "word": "0xbac003e7",
+          "expected_mnemonics": [
+            "subps"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
+    },
+    {
+      "id": "SUBP_64S_dp_2src",
+      "mnemonic": "SUBP",
+      "category": "base_integer_system",
+      "source_file": "subp.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac00000",
+      "features": [
+        {
+          "feature": "FEAT_MTE",
+          "name": "v8Ap5"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subp.xml",
+      "source_sha256": "61e096c1ca014f458bbdf6bddb89a3aedd0cdd86e74b90abaf81dbf888515f15",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "tag_arithmetic"
+      ],
+      "scope": "Enabled FEAT_MTE2 nonstreaming register-only ADDG/SUBG/GMI/SUBP/SUBPS with fixed ATA0=1, TCF0=0 and GCR.Exclude=0. All allocated immediates, GPR/SP/ZR roles, aliases, 56-bit signed pointer subtraction, tag arithmetic and SUBPS NZCV effects. Nonzero should-be-zero ADDG/SUBG op3 selects the source-permitted execute-as-zero behavior; original QEMU UNDEF and requested FP storage differences are retained separately and receive no original equality credit. No guest RAM access, allocation-tag storage, IRG randomness, tag-check faults, tagged host dereference, disabled-feature/access behavior or Apple hardware conformance is inferred.",
+      "smoke_samples": [
+        {
+          "word": "0x9ac000a0",
+          "expected_mnemonics": [
+            "subp"
+          ]
+        },
+        {
+          "word": "0x9ac003e7",
+          "expected_mnemonics": [
+            "subp"
+          ]
+        }
+      ],
+      "review": "Final source/mapping review, full original/model/native effects and relevant concurrent evidence, strict current-source bindings and fresh native-target emission probes. Private joined root gate SHA256 2311216efa08c72ce10158b5b8d9b3e64c00c4a8893fb3c08d114a441f39a7b6; report identity is retained by the staged admission receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -46014,6 +47462,8 @@
     "crates/stela-compiler/src/x86_64/integer_unary.rs",
     "crates/stela-compiler/src/aarch64/integer_minmax.rs",
     "crates/stela-compiler/src/x86_64/integer_minmax.rs",
+    "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/tag_arithmetic.rs",
     "crates/stela-compiler/src/aarch64/literal.rs",
     "crates/stela-compiler/src/x86_64/literal.rs",
     "crates/stela-compiler/src/aarch64/pc_relative.rs",
@@ -46024,6 +47474,7 @@
     "crates/stela-compiler/src/aarch64/atomic.rs",
     "crates/stela-compiler/src/x86_64/atomic.rs",
     "crates/stela-compiler/src/x86_64/atomic/compare_exchange.rs",
+    "crates/stela-compiler/src/x86_64/atomic/compare_exchange_pair.rs",
     "crates/stela-compiler/src/x86_64/atomic/read_modify_write.rs",
     "crates/stela-compiler/src/aarch64/ordered.rs",
     "crates/stela-compiler/src/x86_64/ordered.rs",

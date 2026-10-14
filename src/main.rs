@@ -891,6 +891,8 @@ fn run() -> Result<()> {
                     "detected_target": TargetCpu::detect().id(),
                     "baseline": TargetCpu::Baseline.id(),
                     "atomic_load16": TargetCpu::detect().supports(TargetCpu::AtomicLoad16),
+                    "cx16": TargetCpu::detect().supports(TargetCpu::Cx16),
+                    "cx8": TargetCpu::detect().supports(TargetCpu::Cx8),
                     "simd_opcodes": opcodes,
                     "simd_immediate_shifts": shifts,
                     "scope": "Named legacy SIMD output forms; scalar encoding recipes remain in x86_64 modules. Catalog membership is not input ISA coverage.",
