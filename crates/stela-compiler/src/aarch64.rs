@@ -3,6 +3,7 @@ use crate::{GuestAddress, Lifter, UnsupportedReason};
 pub mod atomic;
 pub mod bitfield;
 pub mod conditional_select;
+pub mod constrained;
 pub mod crc;
 pub mod flags;
 pub mod floating;
@@ -401,6 +402,10 @@ impl Lifter for Decoder {
         let operation = if word == 0xd65f03c0 {
             Operation::Return
         } else if word == 0xd503201f {
+            Operation::Nop
+        } else if let Some(_reason) = constrained::decode(word) {
+            // Pinned constrained outcomes select NOP under the declared FP-present,
+            // unguarded-page/BTYPE=0 profile, before FP enablement or memory effects.
             Operation::Nop
         } else if let Some(decoded) = pc_relative::decode(pc, word) {
             Operation::PcRelative(decoded)
@@ -879,31 +884,75 @@ mod tests {
     }
 
     #[test]
-    fn pair_neighbors_and_unpredictable_operands_are_rejected() {
+    fn constrained_memory_operands_select_nop_before_ordinary_decoders() {
+        use constrained::ConstrainedUnpredictable::{
+            LoadWritebackOverlap, PairLoadDestinationOverlap, StoreWritebackOverlap,
+        };
+        let pc = GuestAddress(0x20_0000);
+        for (word, reason) in [
+            (0xa8400000, PairLoadDestinationOverlap), // LDNP x0,x0,[x0]
+            (0xa8407fff, PairLoadDestinationOverlap), // LDNP xzr,xzr,[sp]
+            (0x6d400000, PairLoadDestinationOverlap), // LDP d0,d0,[x0]
+            (0xa9400000, PairLoadDestinationOverlap), // LDP x0,x0,[x0]
+            (0xa9407fff, PairLoadDestinationOverlap), // LDP xzr,xzr,[sp]
+            (0xa8c00000, LoadWritebackOverlap),       // WB overlap precedes duplicate destinations
+            (0xa8c10400, LoadWritebackOverlap),       // LDP post-index overlaps first destination
+            (0xa9c10420, LoadWritebackOverlap),       // LDP pre-index overlaps second destination
+            (0xa8810400, StoreWritebackOverlap),      // STP post-index overlaps first source
+            (0xa9810420, StoreWritebackOverlap),      // STP pre-index overlaps second source
+            (0xf8400c00, LoadWritebackOverlap),       // pre-index LDR base/target overlap
+            (0xf8400400, LoadWritebackOverlap),       // post-index LDR base/target overlap
+            (0xf8000c00, StoreWritebackOverlap),      // pre-index STR base/target overlap
+            (0xf8000400, StoreWritebackOverlap),      // post-index STR base/target overlap
+        ] {
+            assert_eq!(constrained::decode(word), Some(reason), "{word:#x}");
+            assert_eq!(
+                Decoder.lift(pc, word).unwrap(),
+                Instruction {
+                    pc,
+                    operation: Operation::Nop
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn pair_reserved_neighbors_and_ordinary_register_roles_are_preserved() {
         for word in [
-            0xa8400000, // LDNP with identical destinations
-            0xa8407fff, // LDNP xzr,xzr,[sp] still has identical destinations
-            0x6d400000, // SIMD LDP d0,d0,[x0] has duplicate V destinations
             0xe9400400, // unallocated integer pair opcode
             0x69000400, // STGP allocation-tag store must not become plain STP
-            0xa9400000, // LDP with identical destinations
-            0xa9407fff, // LDP xzr,xzr,[sp] still has identical destinations
-            0xa8c10400, // LDP post-index overlaps first destination
-            0xa9c10420, // LDP pre-index overlaps second destination
-            0xa8810400, // STP post-index overlaps first source
-            0xa9810420, // STP pre-index overlaps second source
         ] {
+            assert_eq!(constrained::decode(word), None);
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
         }
-        assert!(Decoder.lift(GuestAddress(0), 0xa9400400).is_ok()); // offset LDP can overwrite base
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0xa9400400).unwrap().operation,
+            Operation::MemoryPair {
+                transfer: MemoryTransfer::Load { .. },
+                ..
+            }
+        )); // offset LDP can overwrite base
         for word in [0xa8400400, 0xa8000400] {
             assert!(matches!(
                 Decoder.lift(GuestAddress(0), word).unwrap().operation,
                 Operation::MemoryNonTemporal(_)
             ));
         }
-        assert!(Decoder.lift(GuestAddress(0), 0xa9000000).is_ok()); // STP same source twice is defined
-        assert!(Decoder.lift(GuestAddress(0), 0xa9bf7fff).is_ok()); // STP xzr,xzr,[sp,#-16]!
+        for word in [0xa9000000, 0xa9bf7fff] {
+            assert_eq!(constrained::decode(word), None);
+            assert!(matches!(
+                Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                Operation::MemoryPair {
+                    transfer: MemoryTransfer::Store,
+                    ..
+                }
+            ));
+        } // Duplicate store sources are valid; SP and ZR are independent roles.
+        assert_eq!(constrained::decode(0x6cc00400), None);
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0x6cc00400).unwrap().operation,
+            Operation::Simd(simd::Operand::MemoryPair { load: true, .. })
+        )); // LDP d0,d1,[x0],#0 has independent vector and base banks.
         assert!(matches!(
             Decoder.lift(GuestAddress(0), 0xad0183e0).unwrap().operation,
             Operation::Simd(simd::Operand::MemoryPair { load: false, .. })
@@ -911,15 +960,11 @@ mod tests {
     }
 
     #[test]
-    fn memory_neighbors_and_unpredictable_writeback_fail_closed() {
+    fn memory_reserved_neighbors_and_ordinary_writeback_roles_are_preserved() {
         for word in [
             0xb9c00000, // unallocated signed word -> W32
             0xf9c00000, // unallocated signed doubleword
             0x3cc00800, // SIMD unprivileged/reserved mode
-            0xf8400c00, // pre-index LDR with base/target overlap
-            0xf8400400, // post-index LDR with base/target overlap
-            0xf8000c00, // pre-index STR with base/target overlap
-            0xf8000400, // post-index STR with base/target overlap
         ] {
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
         }
@@ -936,9 +981,20 @@ mod tests {
             ));
         }
         // The same register as base and destination is defined without writeback.
-        assert!(Decoder.lift(GuestAddress(0), 0xf9400000).is_ok());
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0xf9400000).unwrap().operation,
+            Operation::Memory { .. }
+        ));
         // Rt=31 is ZR, Rn=31 is SP; they do not overlap.
-        assert!(Decoder.lift(GuestAddress(0), 0xf8400fff).is_ok());
+        assert_eq!(constrained::decode(0xf8400fff), None);
+        assert!(matches!(
+            Decoder.lift(GuestAddress(0), 0xf8400fff).unwrap().operation,
+            Operation::Memory {
+                data: Register::Zero,
+                base: Register::Sp,
+                ..
+            }
+        ));
         // SIMD Rt0 is V0, independent of the X0 address/writeback register.
         assert!(matches!(
             Decoder.lift(GuestAddress(0), 0x3c400c00).unwrap().operation,

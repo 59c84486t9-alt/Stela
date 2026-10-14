@@ -64,7 +64,7 @@ def pair(width=8, loading=True, vector=False, rt=1, rt2=2, rn=5, offset=0):
     if len(matches) != 1 or offset % width or not -64 <= offset // width <= 63:
         raise ValueError('Invalid non-temporal pair width/scaled imm7')
     if loading and rt == rt2:
-        raise ValueError('Duplicate non-temporal load destination is outside profile')
+        raise ValueError('Duplicate load destination belongs to the selected-policy cohort')
     _, _, letter, fixed = matches[0]
     name = 'ldnp' if loading else 'stnp'
     destinations = [rt, rt2] if loading else []
@@ -111,7 +111,7 @@ def shapes():
 
 
 CANONICAL_FORMS = tuple(sorted(op['canonical_id'] for op in shapes()))
-PARTIAL_FORMS = tuple(canonical for canonical in CANONICAL_FORMS if canonical.startswith('LDNP_'))
+CONSTRAINED_LOAD_FORMS = tuple(canonical for canonical in CANONICAL_FORMS if canonical.startswith('LDNP_'))
 
 
 def functions():
@@ -339,20 +339,28 @@ def fault_cases():
     return fault_selection()
 
 
-def declined_encodings():
+def constrained_load_encodings():
+    """Exact allocated overlaps for the separate selected-NOP policy proof."""
     result = []
     for width, vector, _, _ in PAIR_WIDTHS:
         for register in range(32):
             op = pair(width, True, vector, register, (register + 1) % 32)
-            result.append({'reason': 'duplicate_ldnp_destination', 'canonical_id': op['canonical_id'],
+            result.append({'constraint': 'Unpredictable_LDPOVERLAP',
+                           'selected_choice': 'source_permitted_selected_nop', 'canonical_id': op['canonical_id'],
                            'word': op['word'] & ~(31 << 10) | register << 10})
     return result
 
 
+def declined_encodings():
+    return []
+
+
 def inventory():
     ops, cases = corpus()
-    return {'canonical_forms': len(CANONICAL_FORMS), 'fully_implemented_forms': 22,
-            'partial_duplicate_load_forms': list(PARTIAL_FORMS),
+    return {'canonical_forms': len(CANONICAL_FORMS), 'fully_implemented_forms': len(CANONICAL_FORMS),
+            'constrained_operand_cohort': {'forms': list(CONSTRAINED_LOAD_FORMS),
+                'inputs': len(constrained_load_encodings()), 'selected_choice': 'source_permitted_selected_nop',
+                'equality_basis': 'Separate source-permitted policy proof; not direct original equality.'},
             'shape_index_arrangements': dict(Counter(op['layout'] for op in shapes())),
             'functions': len(ops), 'success_cases': len(cases), 'fault_cases': len(fault_cases()),
             'ram_bytes': RAM_BYTES, 'state_bytes': STATE_BYTES}

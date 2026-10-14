@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v33",
+  "registry_version": "apple-silicon-reviewed-forms-v34",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -874,6 +874,60 @@
         "fault_cases": 342,
         "declined_encodings.declined_before_execution": 6
       }
+    },
+    "constrained_memory": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/native-3/evidence-report.json",
+      "kind": "constrained_memory_arm_original_vs_native_policy",
+      "require_current_executable": true,
+      "comparison_field": "selected_Nop_complete_State_RAM_comparisons",
+      "required_positive_counts": [
+        "native_source_policy_noaccess_comparisons",
+        "normal_body_byte_State_RAM_bridges",
+        "block_complete_State_RAM_exit_comparisons",
+        "genuine_original_native_input_comparisons",
+        "direct_original_full_State_RAM_equal"
+      ],
+      "required_measurements": {
+        "canonical_forms": 53,
+        "new_partial_form_closures": 14,
+        "legacy_classes_audited": 39,
+        "selected_Nop_complete_State_RAM_comparisons": 15481,
+        "native_source_policy_noaccess_comparisons": 460,
+        "normal_body_byte_State_RAM_bridges": 106,
+        "block_complete_State_RAM_exit_comparisons": 16,
+        "genuine_original_native_input_comparisons": 239,
+        "direct_original_full_State_RAM_equal": 23,
+        "retained_source_permitted_outcome_differences": 216,
+        "state_bytes": 784,
+        "ram_bytes": 8192,
+        "current_complete_binary_and_map_lineage_batches": 66
+      },
+      "required_shared_sources": [
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/verify/native.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/verify/fixture.py",
+        "dev/differential.py",
+        "dev/simd-differential.py",
+        "dev/simd_memory_runner.py",
+        "dev/native-memory-faults.c",
+        "dev/simd_fixtures/ordinary_memory.py",
+        "dev/simd_fixtures/structure_memory.py",
+        "dev/simd_original.py",
+        "dev/a64_checklist.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/fixtures/generate.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/forms.json",
+        ".stela/research/coverage-race/nonstreaming/scalar-boundary/scalar_boundary.py",
+        ".stela/research/coverage-race/nonstreaming/scalar-boundary/scalar-form-facts.json",
+        "dev/simd_fixtures/__init__.py",
+        "dev/evidence.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/verify/originals.py",
+        "crates/stela-compiler/src/aarch64/constrained.rs",
+        ".stela/research/coverage-race/nonstreaming/pair-partial/fixtures/original-producer/probe-56-zero-inputs/062b15bdd1f3cad34d7ee8e77a2d438b4423cbc2c955530fec3aa4b06307d46d/original.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/original/inputs-79/8b6b1ff345b88ecc4b211d4d6bde8c1f2940a0b92a1a4b1c094d9484c7760e8e/original.py",
+        ".stela/research/coverage-race/nonstreaming/scalar-boundary/original-inputs/ce6e302b19555022591d7f8393d7849bb7b58460196ad0ecd55f73d26b653fcc/original.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/verify/wrap_evidence.py",
+        ".stela/research/coverage-race/nonstreaming/pair-boundary-v2/verify/body_lineage.py"
+      ]
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -2891,11 +2945,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -2905,8 +2961,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDPSW_64_ldstpair_post",
@@ -2932,11 +2988,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -2946,8 +3004,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDPSW_64_ldstpair_pre",
@@ -2973,11 +3031,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -2987,8 +3047,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_32_ldstpair_off",
@@ -3014,11 +3074,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3028,8 +3090,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_32_ldstpair_post",
@@ -3055,11 +3117,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3069,8 +3133,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_32_ldstpair_pre",
@@ -3096,11 +3160,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3110,8 +3176,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_64_ldstpair_off",
@@ -3137,11 +3203,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3151,8 +3219,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_64_ldstpair_post",
@@ -3178,11 +3246,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3192,8 +3262,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDP_64_ldstpair_pre",
@@ -3219,11 +3289,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3233,8 +3305,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD then LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRB_32BL_ldst_regoff",
@@ -3342,11 +3414,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3356,8 +3430,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRB_32_ldst_immpre",
@@ -3381,11 +3455,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3395,8 +3471,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRB_32_ldst_pos",
@@ -3459,11 +3535,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3473,8 +3551,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRH_32_ldst_immpre",
@@ -3498,11 +3576,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3512,8 +3592,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRH_32_ldst_pos",
@@ -3700,11 +3780,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3714,8 +3796,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSB_32_ldst_immpre",
@@ -3739,11 +3821,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3753,8 +3837,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSB_32_ldst_pos",
@@ -3901,11 +3985,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3915,8 +4001,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSB_64_ldst_immpre",
@@ -3940,11 +4026,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -3954,8 +4042,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSB_64_ldst_pos",
@@ -4018,11 +4106,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4032,8 +4122,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSH_32_ldst_immpre",
@@ -4057,11 +4147,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4071,8 +4163,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSH_32_ldst_pos",
@@ -4175,11 +4267,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4189,8 +4283,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSH_64_ldst_immpre",
@@ -4214,11 +4308,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4228,8 +4324,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSH_64_ldst_pos",
@@ -4332,11 +4428,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4346,8 +4444,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSW_64_ldst_immpre",
@@ -4371,11 +4469,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4385,8 +4485,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDRSW_64_ldst_pos",
@@ -4491,11 +4591,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4505,8 +4607,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDR_32_ldst_immpre",
@@ -4532,11 +4634,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4546,8 +4650,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDR_32_ldst_pos",
@@ -4655,11 +4759,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4669,8 +4775,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDR_64_ldst_immpre",
@@ -4696,11 +4802,13 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
-        "crates/stela-compiler/src/x86_64.rs"
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -4710,8 +4818,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPLD selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "LDR_64_ldst_pos",
@@ -6429,12 +6537,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6444,8 +6554,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STP_32_ldstpair_pre",
@@ -6471,12 +6581,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6486,8 +6598,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STP_64_ldstpair_off",
@@ -6555,12 +6667,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6570,8 +6684,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STP_64_ldstpair_pre",
@@ -6597,12 +6711,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "integer_pairs"
+        "integer_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6612,8 +6728,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STRB_32BL_ldst_regoff",
@@ -6723,12 +6839,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6738,8 +6856,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STRB_32_ldst_immpre",
@@ -6763,12 +6881,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6778,8 +6898,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STRB_32_ldst_pos",
@@ -6843,12 +6963,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6858,8 +6980,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STRH_32_ldst_immpre",
@@ -6883,12 +7005,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -6898,8 +7022,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STRH_32_ldst_pos",
@@ -7006,12 +7130,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -7021,8 +7147,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STR_32_ldst_immpre",
@@ -7048,12 +7174,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -7063,8 +7191,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STR_32_ldst_pos",
@@ -7174,12 +7302,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -7189,8 +7319,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STR_64_ldst_immpre",
@@ -7216,12 +7346,14 @@
       "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "scalar_memory"
+        "scalar_memory",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
-        "crates/stela-compiler/src/x86_64/memory_store.rs"
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
       "smoke_samples": [
         {
@@ -7231,8 +7363,8 @@
           ]
         }
       ],
-      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only.",
-      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Reject constrained-unpredictable operand overlaps. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile."
+      "review": "Encoding form reviewed against decoder/emitter and linked original-ARM versus native-x86 differential suite; smoke checks emission only. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Private ordinary little-endian RAM; untagged/authenticated addresses, enabled SP alignment checks. Native fault boundaries only; architectural exception delivery, MMIO, concurrent atomicity and full system memory semantics outside profile. WBOVERLAPST selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile."
     },
     {
       "id": "STR_64_ldst_pos",
@@ -10512,31 +10644,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x6d4007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x6d407fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10573,31 +10701,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x6cc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x6cc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10634,31 +10758,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x6dc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x6dc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10695,31 +10815,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0xad4007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0xad407fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10756,31 +10872,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0xacc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0xacc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10817,31 +10929,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0xadc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0xadc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10878,31 +10986,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x2d4007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x2d407fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -10939,31 +11043,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x2cc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x2cc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -11000,31 +11100,27 @@
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldp_fpsimd.xml",
       "source_file": "ldp_fpsimd.xml",
       "source_sha256": "511d2a1e7c0b64045f4600219892e6116e684d96eb990f92fafd912017fcf9e4",
-      "status": "partial",
+      "status": "implemented",
       "profile": "direct-private-ram-leaf-v2",
       "evidence_groups": [
-        "simd_pairs"
+        "simd_pairs",
+        "constrained_memory"
       ],
       "compiler_sources": [
         "crates/stela-compiler/src/aarch64.rs",
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd.rs"
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ],
-      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Duplicate LDP destinations decline.",
-      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. LDP duplicate vector destinations includingV31 are explicitly declined. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported.",
+      "review": "Exact June 2026 canonical encoding and operands reviewed. Current original ARM, independent byte math and native x86 full-state/RAM comparisons pass. Pair fault-policy checks retain 16 Unicorn second-load state differences explicitly; they are not hardware-conformance or full-state-agreement evidence. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
+      "scope": "Enabled FP/AdvSIMD and private ordinary little-endian RAM. S/D/Q signed7 scaled offset/pre/post addressing; independent vector and X/SP banks, V31 ordinary, scalar loads clear upper vector bits. STP duplicate sources are valid. Both pair loads stage before either guest destination changes; two stores expose first completed element if second faults, and basewriteback follows both. No concurrent128/256-bit atomicity, Qelementcrosspagefaultrollback, guestexceptiondelivery, MMIO, SVE/SME or tagged/PAC address claim. Fault-state preservation is an explicit staged native private-RAM policy:16 second-element load faults show a retained first-vector-only difference from Unicorn2.1.4. They are not full-state oracle equality or Apple-hardware validation; guest architectural exception delivery remains unsupported. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
       "smoke_samples": [
         {
           "word": "0x2dc007e0",
           "expected_mnemonics": [
             "ldp"
           ]
-        }
-      ],
-      "rejected_samples": [
-        {
-          "word": "0x2dc07fff",
-          "reason": "Instruction"
         }
       ]
     },
@@ -36746,19 +36842,14 @@
           ]
         }
       ],
-      "rejected_samples": [
-        {
-          "word": "0x284000a0",
-          "reason": "Instruction"
-        }
-      ],
       "profile": "direct-private-ram-leaf-v2",
-      "status": "partial",
+      "status": "implemented",
       "evidence_groups": [
-        "ordinary_memory"
+        "ordinary_memory",
+        "constrained_memory"
       ],
-      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
-      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. No shared-memory atomicity or guest exception delivery claim. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
       "compiler_sources": [
         "crates/stela-compiler/src/lib.rs",
         "crates/stela-compiler/src/target.rs",
@@ -36769,7 +36860,8 @@
         "crates/stela-compiler/src/x86_64/non_temporal.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
         "crates/stela-compiler/src/x86_64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ]
     },
     {
@@ -36797,19 +36889,14 @@
           ]
         }
       ],
-      "rejected_samples": [
-        {
-          "word": "0xa84000a0",
-          "reason": "Instruction"
-        }
-      ],
       "profile": "direct-private-ram-leaf-v2",
-      "status": "partial",
+      "status": "implemented",
       "evidence_groups": [
-        "ordinary_memory"
+        "ordinary_memory",
+        "constrained_memory"
       ],
-      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
-      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. No shared-memory atomicity or guest exception delivery claim. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
       "compiler_sources": [
         "crates/stela-compiler/src/lib.rs",
         "crates/stela-compiler/src/target.rs",
@@ -36820,7 +36907,8 @@
         "crates/stela-compiler/src/x86_64/non_temporal.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
         "crates/stela-compiler/src/x86_64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ]
     },
     {
@@ -36853,19 +36941,14 @@
           ]
         }
       ],
-      "rejected_samples": [
-        {
-          "word": "0x6c4000a0",
-          "reason": "Instruction"
-        }
-      ],
       "profile": "direct-private-ram-leaf-v2",
-      "status": "partial",
+      "status": "implemented",
       "evidence_groups": [
-        "ordinary_memory"
+        "ordinary_memory",
+        "constrained_memory"
       ],
-      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
-      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. No shared-memory atomicity or guest exception delivery claim. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
       "compiler_sources": [
         "crates/stela-compiler/src/lib.rs",
         "crates/stela-compiler/src/target.rs",
@@ -36876,7 +36959,8 @@
         "crates/stela-compiler/src/x86_64/non_temporal.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
         "crates/stela-compiler/src/x86_64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ]
     },
     {
@@ -36909,19 +36993,14 @@
           ]
         }
       ],
-      "rejected_samples": [
-        {
-          "word": "0xac4000a0",
-          "reason": "Instruction"
-        }
-      ],
       "profile": "direct-private-ram-leaf-v2",
-      "status": "partial",
+      "status": "implemented",
       "evidence_groups": [
-        "ordinary_memory"
+        "ordinary_memory",
+        "constrained_memory"
       ],
-      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
-      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. No shared-memory atomicity or guest exception delivery claim. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
       "compiler_sources": [
         "crates/stela-compiler/src/lib.rs",
         "crates/stela-compiler/src/target.rs",
@@ -36932,7 +37011,8 @@
         "crates/stela-compiler/src/x86_64/non_temporal.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
         "crates/stela-compiler/src/x86_64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ]
     },
     {
@@ -36965,19 +37045,14 @@
           ]
         }
       ],
-      "rejected_samples": [
-        {
-          "word": "0x2c4000a0",
-          "reason": "Instruction"
-        }
-      ],
       "profile": "direct-private-ram-leaf-v2",
-      "status": "partial",
+      "status": "implemented",
       "evidence_groups": [
-        "ordinary_memory"
+        "ordinary_memory",
+        "constrained_memory"
       ],
-      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
-      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. No shared-memory atomicity or guest exception delivery claim. LDPOVERLAP selects the source-permitted NOP outcome before operation-level access and writeback, under FP-present, unguarded-page/BTYPE=0 controls; common decode checks remain required outside this fixed profile.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt. Fresh constrained-memory native/original-input evidence retains permitted outcome differences without normalization; normal transfer evidence remains unchanged.",
       "compiler_sources": [
         "crates/stela-compiler/src/lib.rs",
         "crates/stela-compiler/src/target.rs",
@@ -36988,7 +37063,8 @@
         "crates/stela-compiler/src/x86_64/non_temporal.rs",
         "crates/stela-compiler/src/aarch64/simd.rs",
         "crates/stela-compiler/src/x86_64/simd.rs",
-        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+        "crates/stela-compiler/src/x86_64/simd/memory.rs",
+        "crates/stela-compiler/src/aarch64/constrained.rs"
       ]
     },
     {
@@ -47905,6 +47981,7 @@
     "crates/stela-compiler/src/x86_64/sme/length.rs",
     "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
+    "crates/stela-compiler/src/aarch64/constrained.rs",
     "crates/stela-compiler/src/x86_64.rs",
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/block/thread.rs",

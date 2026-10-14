@@ -978,7 +978,7 @@ class OrdinaryMemoryFixtureTests(unittest.TestCase):
         family = ordinary_memory
         facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
         self.assertEqual(len(family.CANONICAL_FORMS), 27)
-        self.assertEqual(len(family.PARTIAL_FORMS), 5)
+        self.assertEqual(len(family.CONSTRAINED_LOAD_FORMS), 5)
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         operations = family.functions()
         self.assertEqual(len(operations), len({op['word'] for op in operations}))
@@ -1139,17 +1139,20 @@ class OrdinaryMemoryFixtureTests(unittest.TestCase):
             self.assertEqual(bytes(state), bytes(initial))
             self.assertEqual(ram, bytes(64))
 
-    def test_illegal_encodings_and_explicit_partial_destination_declines(self):
+    def test_illegal_encodings_and_separate_constrained_destination_cohort(self):
         family = ordinary_memory
         for width, vector, _, _ in family.PAIR_WIDTHS:
             for register in range(32):
                 with self.assertRaises(ValueError):
                     family.pair(width, True, vector, register, register)
-        declines = family.declined_encodings()
-        self.assertEqual(len(declines), 160)
-        self.assertEqual({case['canonical_id'] for case in declines}, set(family.PARTIAL_FORMS))
-        for case in declines:
+        constrained = family.constrained_load_encodings()
+        self.assertEqual(family.declined_encodings(), [])
+        self.assertEqual(len(constrained), 160)
+        self.assertEqual({case['canonical_id'] for case in constrained}, set(family.CONSTRAINED_LOAD_FORMS))
+        for case in constrained:
             self.assertEqual(case['word'] & 31, case['word'] >> 10 & 31)
+            self.assertEqual(case['constraint'], 'Unpredictable_LDPOVERLAP')
+            self.assertEqual(case['selected_choice'], 'source_permitted_selected_nop')
         for option in (0, 1, 4, 5):
             with self.assertRaises(ValueError):
                 family.prefetch('register', option=option)

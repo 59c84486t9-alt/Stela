@@ -505,12 +505,15 @@ def pair_fault_cases():
     return cases
 
 
+def constrained_pair_encodings():
+    """Selected-policy inputs, separate from the exact-original pair corpus."""
+    return [{'constraint': 'Unpredictable_LDPOVERLAP', 'selected_choice': 'source_permitted_selected_nop',
+             'word': pair_encoding(width, True, register, register, 0, 0, mode)}
+            for width in PAIR_WIDTHS for mode in PAIR_MODES for register in (0, 7, 31)]
+
+
 def declined_pair_encodings():
     result = []
-    for width in PAIR_WIDTHS:
-        for mode in PAIR_MODES:
-            for register in (0, 7, 31):
-                result.append({'reason': 'constrained_duplicate_load', 'word': pair_encoding(width, True, register, register, 0, 0, mode)})
     for mode in PAIR_MODES:
         result.append({'reason': 'reserved_opc', 'word': (pair_encoding(16, True, 0, 1, 0, 0, mode) & ~(3 << 30)) | (3 << 30)})
     return result

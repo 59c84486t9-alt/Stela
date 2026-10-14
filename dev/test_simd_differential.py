@@ -2023,7 +2023,7 @@ class SimdDifferentialTests(unittest.TestCase):
                 self.assertEqual((expected.fpcr, expected.fpsr, expected.nzcv, expected.reserved),
                                  (initial.fpcr, initial.fpsr, initial.nzcv, initial.reserved))
 
-    def test_duplicate_pair_stores_preserve_both_elements_and_duplicate_loads_decline_math(self):
+    def test_duplicate_pair_stores_and_separate_constrained_load_policy(self):
         for width in suite.PAIR_WIDTHS:
             for register in (0, 31):
                 state = State()
@@ -2036,10 +2036,15 @@ class SimdDifferentialTests(unittest.TestCase):
                 self.assertEqual(bytes(expected), bytes(state))
                 with self.assertRaises(ValueError):
                     suite.mathematical([suite.pair_op(width, True, register, register, 0, 0, 'offset')], state, memory, 0x8000)
-        self.assertEqual(len(suite.declined_pair_encodings()), 30)
+        declined = suite.declined_pair_encodings()
+        self.assertEqual(len(declined), 3)
+        self.assertEqual({case['reason'] for case in declined}, {'reserved_opc'})
+        constrained = suite.constrained_pair_encodings()
+        self.assertEqual(len(constrained), 27)
         for register in (0, 7, 31):
-            self.assertTrue(any(case['reason'] == 'constrained_duplicate_load' and case['word'] & 31 == register
-                                for case in suite.declined_pair_encodings()))
+            self.assertTrue(any(case['constraint'] == 'Unpredictable_LDPOVERLAP' and case['word'] & 31 == register
+                                for case in constrained))
+        self.assertEqual({case['selected_choice'] for case in constrained}, {'source_permitted_selected_nop'})
 
     def test_pair_fault_profiles_require_sp_for_sp_policy_and_complete_first_elements(self):
         cases = suite.pair_fault_cases()

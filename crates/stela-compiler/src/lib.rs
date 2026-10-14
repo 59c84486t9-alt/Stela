@@ -35,6 +35,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/sme/length.rs"),
     include_str!("target.rs"),
     include_str!("aarch64.rs"),
+    include_str!("aarch64/constrained.rs"),
     include_str!("x86_64.rs"),
     include_str!("block.rs"),
     include_str!("block/thread.rs"),
