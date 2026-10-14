@@ -2,3 +2,4 @@
 
 pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_logic;
+pub(crate) mod sign;

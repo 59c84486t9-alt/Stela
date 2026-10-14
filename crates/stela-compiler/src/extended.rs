@@ -1,7 +1,7 @@
 //! Context-backed leaf compilation with immutable scalable specialization.
 //!
 //! The profile admits streaming integer logic/arithmetic, SME length arithmetic and
-//! existing pure GPR/control mappings. Other effects remain explicit declines.
+//! floating sign operations and existing pure GPR/control mappings. Other effects remain explicit declines.
 
 use std::collections::BTreeMap;
 
@@ -14,6 +14,7 @@ use crate::{
         sve::{
             integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
+            sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -86,6 +87,7 @@ impl ScalableProfile {
 enum Decoded {
     Ordinary(Instruction),
     IntegerLogic(integer_logic::Operand),
+    Sign(sign::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     Length(length::Operand),
 }
@@ -159,6 +161,18 @@ fn decode(
             )));
         }
         return Ok(Decoded::IntegerArithmetic(operand));
+    }
+    if let Some(decoded) = sign::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!("reserved streaming sign encoding at {:#x}", pc.0))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::Sign(operand));
     }
     if let Some(operand) = length::decode(word) {
         return Ok(Decoded::Length(operand));
@@ -244,6 +258,9 @@ pub fn compile_for_profile(
             }
             Decoded::IntegerArithmetic(operand) => {
                 x86_64::sve::integer_arithmetic::emit(&mut code, operand, profile.length, target);
+            }
+            Decoded::Sign(operand) => {
+                x86_64::sve::sign::emit(&mut code, &operand, profile.length, target);
             }
             Decoded::Length(operand) => {
                 x86_64::sme::length::emit(&mut code, &operand, profile.length);
@@ -377,6 +394,47 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn sign_operations_require_streaming_without_za() {
+        const FABS_HALF: u32 = 0x045c_a020;
+        const FNEG_DOUBLE: u32 = 0x04dd_bfff;
+        const RESERVED_SIGN_SIZE: u32 = 0x041c_a020;
+        for bytes in [16, 32, 64, 128, 256] {
+            for svcr in 0..=3 {
+                let profile = ScalableProfile::new(
+                    VectorLength::from_bytes(bytes).unwrap(),
+                    ScalableMode::from_svcr(svcr).unwrap(),
+                );
+                let source = words(&[FABS_HALF, FNEG_DOUBLE, RET_X30]);
+                let result =
+                    compile_for_profile(&source, GuestAddress(0), profile, TargetCpu::Baseline);
+                if profile.mode().streaming() {
+                    let native = result.unwrap();
+                    assert_eq!(
+                        native.source_map[0],
+                        (GuestAddress(0), CONTEXT_WRAPPER_BYTES)
+                    );
+                    assert_eq!(native.source_map[1].0, GuestAddress(4));
+                    assert!(native.source_map[1].1 > native.source_map[0].1);
+                } else {
+                    assert!(result.unwrap_err().0.contains("streaming mode required"));
+                }
+            }
+        }
+        assert!(crate::compile(&words(&[FABS_HALF, RET_X30]), GuestAddress(0)).is_err());
+        assert!(
+            compile_for_profile(
+                &words(&[RESERVED_SIGN_SIZE, RET_X30]),
+                GuestAddress(0),
+                profile(16, true),
+                TargetCpu::Baseline
+            )
+            .unwrap_err()
+            .0
+            .contains("reserved streaming sign")
+        );
     }
 
     #[test]

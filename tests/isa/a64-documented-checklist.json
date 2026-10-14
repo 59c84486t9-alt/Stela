@@ -2138,11 +2138,11 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 1567,
+    "implemented": 1569,
     "partial": 19,
-    "unsupported": 2746,
+    "unsupported": 2744,
     "total": 4332,
-    "implementation_percentage": 36.172668513388736,
+    "implementation_percentage": 36.21883656509695,
     "categories": {
       "base_integer_system": {
         "implemented": 525,
@@ -2159,12 +2159,12 @@
         "implemented": 3
       },
       "sve": {
-        "implemented": 74,
-        "unsupported": 1315
+        "implemented": 76,
+        "unsupported": 1313
       }
     }
   },
-  "compiler_source_sha256": "3be51a10859cb9ee78511362a8a763ae23cc2e95c552e58a01769c1877807b8f",
+  "compiler_source_sha256": "ad667eb7823cbce9e67e531ca6af3ca87977a56d81ecc32d825e322a74b968c5",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -4654,7 +4654,7 @@
     {"id":"f2cvtl_mz2_z8_","instruction_id":"f1cvtl_mz2_z8","mnemonic":"F2CVTL","category":"sme","source_file":"f1cvtl_mz2_z8.xml","encoding_mask":"0xfffffc01","encoding_value":"0xc1a6e001","features":[{"feature":"FEAT_SME2 && FEAT_FP8","name":"v9Ap3 && v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"f2cvtlt_z_z8_b2h","instruction_id":"f1cvtlt_z_z8","mnemonic":"F2CVTLT","category":"sve","source_file":"f1cvtlt_z_z8.xml","encoding_mask":"0xfffffc00","encoding_value":"0x65093400","features":[{"feature":"(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8","name":"(v9Ap0 || v9Ap3) && v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"fabd_z_p_zz_","instruction_id":"fabd_z_p_zz","mnemonic":"FABD","category":"sve","source_file":"fabd_z_p_zz.xml","encoding_mask":"0xff3fe000","encoding_value":"0x65088000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
-    {"id":"fabs_z_p_z_m","instruction_id":"fabs_z_p_z","mnemonic":"FABS","category":"sve","source_file":"fabs_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x041ca000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
+    {"id":"fabs_z_p_z_m","instruction_id":"fabs_z_p_z","mnemonic":"FABS","category":"sve","source_file":"fabs_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x041ca000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"apple-sme2-streaming-v1","status":"implemented","scope":"Declared enabled FP/SME2 streaming context leaf; Half/Single/Double, all SVL16/32/64/128/256, ZA independent. First element predicate bit selects merge; all Z/P indices and aliases. AH0 clears/toggles sign, AH1 preserves original NaN bits including signaling payloads; no numerical exceptions. FPCR/FPSR/NZCV, unrelated architectural storage and caller MXCSR preserved. Raw leaf caller owns access/feature/control provenance and storage bounds. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware, application or OS claim."}]},
     {"id":"fabs_z_p_z_z","instruction_id":"fabs_z_p_z","mnemonic":"FABS","category":"sve","source_file":"fabs_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x040ca000","features":[{"feature":"FEAT_SVE2p2 || FEAT_SME2p2","name":"v9Ap6 || v9Ap6"}],"status":"unsupported","profiles":[]},
     {"id":"facge_p_p_zz_","instruction_id":"facge_p_p_zz","mnemonic":"FACGE","category":"sve","source_file":"facge_p_p_zz.xml","encoding_mask":"0xff20e010","encoding_value":"0x6500c010","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"facgt_p_p_zz_","instruction_id":"facge_p_p_zz","mnemonic":"FACGT","category":"sve","source_file":"facge_p_p_zz.xml","encoding_mask":"0xff20e010","encoding_value":"0x6500e010","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
@@ -4986,7 +4986,7 @@
     {"id":"fmul_z_zzi_h","instruction_id":"fmul_z_zzi","mnemonic":"FMUL","category":"sve","source_file":"fmul_z_zzi.xml","encoding_mask":"0xffa0fc00","encoding_value":"0x64202000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"fmul_z_zzi_s","instruction_id":"fmul_z_zzi","mnemonic":"FMUL","category":"sve","source_file":"fmul_z_zzi.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x64a02000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"fmulx_z_p_zz_","instruction_id":"fmulx_z_p_zz","mnemonic":"FMULX","category":"sve","source_file":"fmulx_z_p_zz.xml","encoding_mask":"0xff3fe000","encoding_value":"0x650a8000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
-    {"id":"fneg_z_p_z_m","instruction_id":"fneg_z_p_z","mnemonic":"FNEG","category":"sve","source_file":"fneg_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x041da000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
+    {"id":"fneg_z_p_z_m","instruction_id":"fneg_z_p_z","mnemonic":"FNEG","category":"sve","source_file":"fneg_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x041da000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"apple-sme2-streaming-v1","status":"implemented","scope":"Declared enabled FP/SME2 streaming context leaf; Half/Single/Double, all SVL16/32/64/128/256, ZA independent. First element predicate bit selects merge; all Z/P indices and aliases. AH0 clears/toggles sign, AH1 preserves original NaN bits including signaling payloads; no numerical exceptions. FPCR/FPSR/NZCV, unrelated architectural storage and caller MXCSR preserved. Raw leaf caller owns access/feature/control provenance and storage bounds. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware, application or OS claim."}]},
     {"id":"fneg_z_p_z_z","instruction_id":"fneg_z_p_z","mnemonic":"FNEG","category":"sve","source_file":"fneg_z_p_z.xml","encoding_mask":"0xff3fe000","encoding_value":"0x040da000","features":[{"feature":"FEAT_SVE2p2 || FEAT_SME2p2","name":"v9Ap6 || v9Ap6"}],"status":"unsupported","profiles":[]},
     {"id":"fnmad_z_p_zzz_","instruction_id":"fnmad_z_p_zzz","mnemonic":"FNMAD","category":"sve","source_file":"fnmad_z_p_zzz.xml","encoding_mask":"0xff20e000","encoding_value":"0x6520c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"fnmla_z_p_zzz_","instruction_id":"fnmla_z_p_zzz","mnemonic":"FNMLA","category":"sve","source_file":"fnmla_z_p_zzz.xml","encoding_mask":"0xff20e000","encoding_value":"0x65204000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
