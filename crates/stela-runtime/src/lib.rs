@@ -265,6 +265,10 @@ mod tests {
                 tier.with_pclmulqdq(),
                 tier.with_fma(),
                 tier.with_pclmulqdq().with_fma(),
+                tier.with_f16c(),
+                tier.with_pclmulqdq().with_f16c(),
+                tier.with_fma().with_f16c(),
+                tier.with_pclmulqdq().with_fma().with_f16c(),
             ]
         }) {
             let leaf = prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?;

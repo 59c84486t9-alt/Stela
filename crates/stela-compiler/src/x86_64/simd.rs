@@ -21,6 +21,7 @@ mod reductions;
 mod rounding;
 mod saturating;
 mod shifts;
+mod sqrt;
 
 fn vector_offset(vector: u8) -> u32 {
     (std::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
@@ -165,7 +166,8 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
         },
         FloatingPointOperation::Comparison(_)
         | FloatingPointOperation::MinMax(_)
-        | FloatingPointOperation::Rounding(_) => false,
+        | FloatingPointOperation::Rounding(_)
+        | FloatingPointOperation::SquareRoot(_) => false,
     }
 }
 
@@ -188,6 +190,9 @@ pub(super) fn emit_numerical(
         crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
         crate::aarch64::FloatingPointOperation::Rounding(operand) => {
             rounding::emit(code, operand, pc, target)
+        }
+        crate::aarch64::FloatingPointOperation::SquareRoot(operand) => {
+            sqrt::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;

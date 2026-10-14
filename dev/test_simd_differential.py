@@ -1,12 +1,13 @@
 """Independent encoding/coverage and SIMD byte-oracle regression checks."""
 import ctypes
+from contextlib import nullcontext
 import importlib
 import json
 from pathlib import Path
 import struct
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import State, state_dict, seed_extended_state
@@ -15,11 +16,137 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_numerical_and_fp_register_workers_visit_every_caller_mxcsr_environment(self):
+        initial = State()
+        initial.x[30] = suite.STOP
+        operation = suite.sqrt_numerical_operation(4, 4, True)
+        record = {'function': 0, 'operation': operation, 'initial': bytes(initial), 'expected': bytes(initial),
+                  'unsupported': False, 'case': 0, 'producer': 'unit_control_flow'}
+        batch = {'source': struct.pack('<II', operation['word'], suite.RET), 'native': b'', 'offsets': [0]}
+        requested = []
+        def wrapper(state, address, mxcsr, exit_pointer):
+            observed = ctypes.cast(exit_pointer, ctypes.POINTER(suite.NumericalNativeExit)).contents
+            observed.kind, observed.next_pc = suite.NUMERICAL_RETURN_EXIT, suite.STOP
+            observed.mxcsr_before = observed.mxcsr_after = mxcsr
+            requested.append(mxcsr)
+        machine = Mock()
+        machine.reg_read.return_value = suite.STOP
+        expected = {masks | status | mode << suite.NUMERICAL_MXCSR_ROUND_SHIFT
+                    for masks in (0, suite.NUMERICAL_MXCSR_ALL_MASKS)
+                    for status in (0, suite.NUMERICAL_MXCSR_ALL_STATUS) for mode in range(4)}
+        with patch.object(suite, 'executable', side_effect=lambda _: nullcontext(0)), \
+                patch.object(suite.ctypes, 'CFUNCTYPE', return_value=lambda _: wrapper), \
+                patch.object(suite, 'Uc', return_value=machine), \
+                patch.object(suite, 'initialize_arm'), \
+                patch.object(suite, 'capture_arm', return_value=initial), \
+                patch.object(suite, 'load_fp_register_oracle', return_value={'records': [record]}), \
+                patch.object(suite, 'fp_register_policy_cases', return_value=[]):
+            numerical = suite.execute_numerical_batches([batch], {'records': [record]})
+            self.assertEqual(numerical['caller_mxcsr_preservation_comparisons'], 16)
+            self.assertEqual(set(requested[1:]), expected)
+            self.assertEqual(len(requested), 17)
+            requested.clear()
+            registers = suite.execute_fp_register_batches([batch])
+            self.assertEqual(registers['caller_mxcsr_preservation_comparisons'], 16)
+            self.assertEqual(set(requested[1:]), expected)
+            self.assertEqual(len(requested), 17)
+
+    def test_sqrt_forms_arrangements_and_alias_words_match_primary_facts(self):
+        functions = suite.sqrt_numerical_functions()
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (32, 32))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 5)
+        self.assertEqual(len({suite.numerical_unary_shape(op) for op in functions}), 8)
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(decoded[0].mnemonic, 'fsqrt')
+            self.assertEqual((op['word'] & 31, op['word'] >> 5 & 31), (op['d'], op['n']))
+        for arguments in ((8, 8, False), (4, 16, True), (2, 4, False), (4, 4, True, 32)):
+            with self.assertRaises(ValueError):
+                suite.sqrt_numerical_operation(*arguments)
+
+    def test_sqrt_near_midpoint_inputs_straddle_exact_squared_boundaries(self):
+        for lane, fraction, bias in ((2, 10, 15), (4, 23, 127), (8, 52, 1023)):
+            values = dict(suite.sqrt_numerical_values(lane))
+            self.assertEqual((len(values), len(set(values.values()))), (72, 72))
+            self.assertEqual(values['four_below_positive'] + 1, values['four_positive'])
+            self.assertEqual(values['four_above_positive'] - 1, values['four_positive'])
+            midpoints = suite.sqrt_numerical_midpoints(lane)
+            roots = (1 << fraction, (1 << fraction) + 1, 3 << (fraction - 1), (1 << (fraction + 1)) - 2)
+            for index, root in enumerate(roots):
+                lower, upper = midpoints[index * 2][1], midpoints[index * 2 + 1][1]
+                self.assertEqual(upper, lower + 1)
+                scaled = []
+                for raw in (lower, upper):
+                    significand = (1 << fraction) | raw & ((1 << fraction) - 1)
+                    exponent = (raw >> fraction) - bias
+                    scaled.append(significand << (exponent + fraction + 2))
+                midpoint_squared = (2 * root + 1) ** 2
+                self.assertLess(scaled[0], midpoint_squared)
+                self.assertGreater(scaled[1], midpoint_squared)
+
+    def test_sqrt_reuses_unary_old_destination_merge_and_inactive_lane_contract(self):
+        scalar = suite.sqrt_numerical_operation(2, 2, True)
+        initial = suite.numerical_unary_state(scalar, 0, [1], suite.NUMERICAL_NEP)
+        result = State.from_buffer_copy(initial)
+        result.v[0][0] = result.v[0][0] & ~0xffff | 0x0c00
+        suite.validate_numerical_unary_original_effects(initial, result, scalar)
+        result.v[0][1] = initial.v[1][1]
+        with self.assertRaises(AssertionError):
+            suite.validate_numerical_unary_original_effects(initial, result, scalar)
+        vector = suite.sqrt_numerical_operation(4, 8, False)
+        source = suite.numerical_unary_state(vector, 0, [0x3f800000, 0x40000000])
+        self.assertEqual(source.v[1][1], 0xff800005ff800005)
+        cleared = State.from_buffer_copy(source)
+        cleared.v[0][:] = [0, 0]
+        suite.validate_numerical_unary_original_effects(source, cleared, vector)
+        cleared.v[0][1] = 1
+        with self.assertRaises(AssertionError):
+            suite.validate_numerical_unary_original_effects(source, cleared, vector)
+
+    def test_sqrt_corpus_controls_precise_enables_and_runtime_budget_are_bounded(self):
+        functions, records = suite.sqrt_numerical_corpus()
+        self.assertEqual(len(records), 11123)
+        enables, modes, imported = set(), set(), []
+        for index, record in enumerate(records):
+            op = functions[record['function']]
+            initial = State.from_buffer_copy(record['initial'])
+            unsupported = bool(initial.fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)
+            imported.append(dict(record, operation=op, unsupported=unsupported))
+            if unsupported:
+                enables.add((op['canonical_id'], initial.fpcr))
+            if record['label'] == 'control_minsubnormal_negative':
+                modes.add((suite.numerical_unary_shape(op), initial.fpcr))
+            self.assertEqual(record['case'], index)
+            self.assertEqual(record['initial_state_sha256'], suite.digest(record['initial']))
+        self.assertEqual(len(enables), 35)
+        self.assertEqual(len(modes), 8 * 12 * 4)
+        selected = suite.sqrt_numerical_runtime_cases(imported)
+        self.assertEqual(len(selected), 243)
+        self.assertLessEqual(len(selected) + len(suite.sqrt_numerical_helpers(imported)) * 6, 425)
+        self.assertEqual(suite.sqrt_numerical_helpers(imported, set()), [])
+        self.assertIn('control_minsubnormal_positive', {r['label'] for r in selected})
+        self.assertIn('control_minsubnormal_negative', {r['label'] for r in selected})
+
+    def test_sqrt_descriptor_declares_own_scope_and_unary_refactor_preserves_frint_inputs(self):
+        family = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.SQRT_NUMERICAL_FOCUS]
+        self.assertEqual(family['forms'], 5)
+        self.assertIs(family['loader'], suite.load_sqrt_numerical_oracle)
+        self.assertIn('H/S/D square root', family['limits'])
+        self.assertNotIn('integral rounding', family['limits'])
+        _, records = suite.round_integral_corpus()
+        inputs = b''.join(struct.pack('<Q', record['function']) + record['initial'] + bytes(8) for record in records)
+        self.assertEqual(suite.digest(inputs), '68e82a2ff491450e478f65eb2d59f3d6ed3b743fe1550eba2020280ff4ce4249')
+
     def test_round_integral_forms_and_every_arrangement_match_pinned_encoding_facts(self):
         functions = suite.round_integral_functions()
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (304, 304))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 47)
-        self.assertEqual(len({suite.round_integral_shape(op) for op in functions}), 76)
+        self.assertEqual(len({suite.numerical_unary_shape(op) for op in functions}), 76)
         facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for op in functions:
@@ -37,7 +164,7 @@ class SimdDifferentialTests(unittest.TestCase):
 
     def test_round_integral_exact_values_cover_post_round_range_and_signed_neighbors(self):
         for lane in (2, 4, 8):
-            values = dict(suite.round_integral_values(lane))
+            values = dict(suite.numerical_unary_values(lane))
             self.assertEqual((len(values), len(set(values.values()))), (54, 54))
             sign = 1 << (lane * 8 - 1)
             self.assertEqual(values['zero_negative'], sign)
@@ -64,17 +191,17 @@ class SimdDifferentialTests(unittest.TestCase):
         initial.v[1][:] = [0xabcdef0000000000, 0xabcd]
         original = State.from_buffer_copy(initial)
         original.v[0][0] |= 0x3f800000
-        suite.validate_round_integral_original_effects(initial, original, op)
+        suite.validate_numerical_unary_original_effects(initial, original, op)
         original.v[0][1] = initial.v[1][1]
         with self.assertRaises(AssertionError):
-            suite.validate_round_integral_original_effects(initial, original, op)
+            suite.validate_numerical_unary_original_effects(initial, original, op)
         initial.fpcr = 0
         original.v[0][:] = [0x3f800000, 0]
-        suite.validate_round_integral_original_effects(initial, original, op)
+        suite.validate_numerical_unary_original_effects(initial, original, op)
         vector = suite.round_integral_operation('frintn', 4, 8, False)
         original.v[0][1] = 1
         with self.assertRaises(AssertionError):
-            suite.validate_round_integral_original_effects(initial, original, vector)
+            suite.validate_numerical_unary_original_effects(initial, original, vector)
 
     def test_round_integral_corpus_keeps_controls_enables_sticky_and_mixed_status_scope(self):
         functions, records = suite.round_integral_corpus()
@@ -89,7 +216,7 @@ class SimdDifferentialTests(unittest.TestCase):
                 enable_forms.add((op['canonical_id'], initial.fpcr))
             if record['label'] == 'mixed_3_0' and op['bounded_bits']:
                 raw = struct.pack('<2Q', *initial.v[op['n']])
-                values = dict(suite.round_integral_values(op['lane']))
+                values = dict(suite.numerical_unary_values(op['lane']))
                 self.assertEqual(int.from_bytes(raw[:op['lane']], 'little'), values['infinity_positive'])
                 self.assertEqual(int.from_bytes(raw[op['lane']:2 * op['lane']], 'little'), values['half_positive'])
         self.assertEqual(len(enable_forms), 47 * 7)
@@ -120,7 +247,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(family['forms'], 47)
         self.assertIs(family['loader'], suite.load_round_integral_oracle)
         op = suite.round_integral_operation('frintn', 4, 4, True)
-        initial = suite.round_integral_state(op, 0, [dict(suite.round_integral_values(4))['half_positive']])
+        initial = suite.numerical_unary_state(op, 0, [dict(suite.numerical_unary_values(4))['half_positive']])
         record = {'function': 0, 'function_index': 0, 'label': 'half', 'initial': bytes(initial),
                   'initial_state_sha256': suite.digest(bytes(initial))}
         with tempfile.TemporaryDirectory() as temporary:

@@ -2,6 +2,7 @@
 mod comparison;
 mod minmax;
 mod rounding;
+mod sqrt;
 
 use stela_compiler::{
     GuestState,
@@ -71,6 +72,7 @@ pub(crate) fn complete(
             }
             FloatingPointOperation::MinMax(operand) => return minmax::complete(state, operand),
             FloatingPointOperation::Rounding(operand) => return rounding::complete(state, operand),
+            FloatingPointOperation::SquareRoot(operand) => return sqrt::complete(state, operand),
         };
     // Snapshot every source before evaluating any lane, including an indexed
     // source outside a vector64 destination's active lanes.
@@ -101,7 +103,8 @@ pub(crate) fn complete(
             FloatingPointOperation::Conversion(_)
             | FloatingPointOperation::Comparison(_)
             | FloatingPointOperation::MinMax(_)
-            | FloatingPointOperation::Rounding(_) => {
+            | FloatingPointOperation::Rounding(_)
+            | FloatingPointOperation::SquareRoot(_) => {
                 unreachable!("non-arithmetic numerical family dispatched above")
             }
         };

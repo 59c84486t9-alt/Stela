@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -2707,7 +2707,7 @@ def execute_numerical_batches(batches, oracle=None):
         for record in oracle['records']:
             path = invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
             counts[path] += 1
-            if path == 'helper' and batches[0].get('cohort') in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS):
+            if path == 'helper' and batches[0].get('cohort') in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
                 helper_cases.append(record['case'])
             if path == 'inline' and record.get('control_policy_success'):
                 counts['inline_policy'] += 1
@@ -3075,7 +3075,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -3351,8 +3351,8 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
                 or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
             raise AssertionError(f'Full-frame original instruction/EL0/control evidence changed: {index}')
         untouched = State.from_buffer_copy(original)
-        if focus == ROUND_INTEGRAL_FOCUS:
-            validate_round_integral_original_effects(initial, original, operation)
+        if focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
+            validate_numerical_unary_original_effects(initial, original, operation)
             untouched.v[operation['d']][:] = initial.v[operation['d']]
         elif focus == COMPARISON_MINMAX_FOCUS:
             validate_comparison_minmax_original_effects(initial, original, operation)
@@ -4514,13 +4514,13 @@ ROUND_INTEGRAL_VECTOR_BASES = {'frintn': 0x0e218800, 'frintp': 0x0ea18800,
     'frintm': 0x0e219800, 'frintz': 0x0ea19800, 'frinta': 0x2e218800,
     'frintx': 0x2e219800, 'frinti': 0x2ea19800, 'frint32z': 0x0e21e800,
     'frint32x': 0x2e21e800, 'frint64z': 0x0e21f800, 'frint64x': 0x2e21f800}
-ROUND_INTEGRAL_ROLES = ((0, 1), (1, 1), (31, 31), (31, 30))
-ROUND_INTEGRAL_CONTROLS = (NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_FZ, NUMERICAL_FZ16,
+NUMERICAL_UNARY_ROLES = ((0, 1), (1, 1), (31, 31), (31, 30))
+NUMERICAL_UNARY_CONTROLS = (NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_FZ, NUMERICAL_FZ16,
     NUMERICAL_DN, CONVERSION_AHP, NUMERICAL_NEP, NUMERICAL_AH | NUMERICAL_FIZ,
     NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_DN,
     NUMERICAL_FIZ | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_FIZ | NUMERICAL_FZ)
 ROUND_INTEGRAL_CASES = 27281
-ROUND_INTEGRAL_ROUND_SHIFT = 22
+NUMERICAL_ROUND_SHIFT = 22
 ROUND_INTEGRAL_HALF_VECTOR_OFFSET = 0x00580000
 
 
@@ -4550,15 +4550,15 @@ def round_integral_functions():
         shapes = [(lane, lane, True) for lane in ((4, 8) if bounded else (2, 4, 8))]
         shapes += [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES if not bounded or lane != 2]
         for lane, width, scalar in shapes:
-            functions.extend(round_integral_operation(name, lane, width, scalar, d, n) for d, n in ROUND_INTEGRAL_ROLES)
+            functions.extend(round_integral_operation(name, lane, width, scalar, d, n) for d, n in NUMERICAL_UNARY_ROLES)
     return functions
 
 
-def round_integral_shape(operation):
+def numerical_unary_shape(operation):
     return tuple(operation[key] for key in ('name', 'lane', 'bytes', 'scalar'))
 
 
-def round_integral_values(lane):
+def numerical_unary_values(lane):
     fraction, bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[lane]
     sign, infinity = 1 << (lane * 8 - 1), (bias * 2 + 1) << fraction
     positive = [('zero', 0)]
@@ -4596,7 +4596,7 @@ def round_integral_bound_values(operation):
     return values
 
 
-def round_integral_state(operation, index, values, control=0, sticky=0):
+def numerical_unary_state(operation, index, values, control=0, sticky=0):
     initial = State()
     rng = random.Random(0x524f554e44494e54 + index)
     initial.x[:] = [rng.getrandbits(64) for _ in range(31)]
@@ -4607,7 +4607,7 @@ def round_integral_state(operation, index, values, control=0, sticky=0):
     if len(values) != count:
         raise ValueError('Incorrect integral rounding source lane count')
     bits = lane * 8
-    poison = dict(round_integral_values(lane))['snan_negative']
+    poison = dict(numerical_unary_values(lane))['snan_negative']
     packed = sum(poison << (position * bits) for position in range(16 // lane))
     for position, value in enumerate(values):
         if not 0 <= value < 1 << bits:
@@ -4621,12 +4621,12 @@ def round_integral_state(operation, index, values, control=0, sticky=0):
 def round_integral_corpus():
     functions, records, enable_forms = round_integral_functions(), [], set()
     def append(function, label, values, control=0, sticky=0):
-        initial = round_integral_state(functions[function], len(records), values, control, sticky)
+        initial = numerical_unary_state(functions[function], len(records), values, control, sticky)
         records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
             'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
-    for function in range(0, len(functions), len(ROUND_INTEGRAL_ROLES)):
+    for function in range(0, len(functions), len(NUMERICAL_UNARY_ROLES)):
         op = functions[function]
-        values, count = round_integral_values(op['lane']), op['source_lane_count']
+        values, count = numerical_unary_values(op['lane']), op['source_lane_count']
         catalog = dict(values)
         bounds = round_integral_bound_values(op)
         for label, value in values + bounds:
@@ -4634,12 +4634,12 @@ def round_integral_corpus():
         ties = [(label, value) for label, value in values if label.split('_')[0] in ('half', 'onehalf', 'twohalf')]
         # Fourteen signed values: exact ties and immediate neighbors of half/onehalf.
         ties = [(label, value) for label, value in ties if not label.startswith(('twohalf_below', 'twohalf_above'))]
-        for control in (mode << ROUND_INTEGRAL_ROUND_SHIFT for mode in range(4)):
+        for control in (mode << NUMERICAL_ROUND_SHIFT for mode in range(4)):
             for label, value in ties + bounds:
                 append(function, 'round_' + label, [value] * count, control)
         controlled = [(label, catalog[label]) for stem in ('qnan', 'snan', 'minsubnormal', 'maxsubnormal', 'half')
             for label in (stem + '_positive', stem + '_negative')]
-        for control in ROUND_INTEGRAL_CONTROLS:
+        for control in NUMERICAL_UNARY_CONTROLS:
             for label, value in controlled:
                 append(function, 'control_' + label, [value] * count, control)
         for ah in (NUMERICAL_AH, NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_FIZ):
@@ -4647,12 +4647,12 @@ def round_integral_corpus():
                 for stem in ('half', 'onehalf', 'minsubnormal'):
                     for suffix in ('_positive', '_negative'):
                         label = stem + suffix
-                        append(function, 'ah_round_' + label, [catalog[label]] * count, ah | mode << ROUND_INTEGRAL_ROUND_SHIFT)
+                        append(function, 'ah_round_' + label, [catalog[label]] * count, ah | mode << NUMERICAL_ROUND_SHIFT)
         if op['canonical_id'] not in enable_forms:
             enable_forms.add(op['canonical_id'])
             for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
                 append(function, 'trap_enable_readback_only', [catalog['half_positive']] * count, control)
-        for role in range(1, len(ROUND_INTEGRAL_ROLES)):
+        for role in range(1, len(NUMERICAL_UNARY_ROLES)):
             for label, control in (('snan_positive', 0), ('half_negative', NUMERICAL_NEP),
                     ('minsubnormal_negative', NUMERICAL_AH | NUMERICAL_FIZ), ('qnan_negative', NUMERICAL_DN)):
                 append(function + role, 'alias_' + label, [catalog[label]] * count, control)
@@ -4679,14 +4679,14 @@ def load_round_integral_oracle(path=ROUND_INTEGRAL_ORACLE):
     return load_full_frame_numerical_oracle(path, round_integral_functions(), ROUND_INTEGRAL_CASES, ROUND_INTEGRAL_FOCUS)
 
 
-def validate_round_integral_original_effects(initial, original, operation):
+def validate_numerical_unary_original_effects(initial, original, operation):
     if operation['scalar']:
         lane, destination = operation['lane'], operation['d']
         merge = struct.pack('<2Q', *initial.v[destination]) if initial.fpcr & NUMERICAL_NEP else bytes(16)
         if struct.pack('<2Q', *original.v[destination])[lane:] != merge[lane:]:
-            raise AssertionError('Integral rounding scalar inactive bits violated old-Vd NEP merge')
+            raise AssertionError('Unary numerical scalar inactive bits violated old-Vd NEP merge')
     elif operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
-        raise AssertionError('Integral rounding vector64 did not clear upper64')
+        raise AssertionError('Unary numerical vector64 did not clear upper64')
 
 
 def round_integral_runtime_cases(records):
@@ -4694,7 +4694,7 @@ def round_integral_runtime_cases(records):
     for record in records:
         op, label = record['operation'], record['label']
         initial = State.from_buffer_copy(record['initial'])
-        form, shape = op['canonical_id'], round_integral_shape(op)
+        form, shape = op['canonical_id'], numerical_unary_shape(op)
         if record['unsupported']:
             selected.setdefault(('enable', form if initial.fpcr == NUMERICAL_TRAP_ENABLE_MASK else initial.fpcr), record)
         elif label == 'value_half_negative':
@@ -4733,6 +4733,167 @@ def round_integral_helpers(records, case_ids=None):
     return list(selected.values())
 
 
+SQRT_NUMERICAL_FOCUS = 'sqrt_numerical'
+SQRT_NUMERICAL_ORACLE = ROOT / '.stela/research/sqrt/oracle/receipt.json'
+SQRT_SCALAR_BASE = 0x1e21c000
+SQRT_VECTOR_BASE = 0x2ea1f800
+SQRT_HALF_VECTOR_BASE = 0x2ef9f800
+SQRT_NUMERICAL_CASES = 11123
+SQRT_RANDOM_SEED = 0x5351525443415345
+
+
+def sqrt_numerical_operation(lane, width, scalar, d=0, n=1):
+    if (lane not in (2, 4, 8) or any(not 0 <= register < 32 for register in (d, n))
+            or scalar and width != lane or not scalar and (lane, width) not in VECTOR_NUMERICAL_SHAPES):
+        raise ValueError('Unallocated square-root arrangement')
+    if scalar:
+        word = SQRT_SCALAR_BASE | {2: 3, 4: 0, 8: 1}[lane] << 22
+        canonical = 'FSQRT_' + {2: 'H', 4: 'S', 8: 'D'}[lane] + '_floatdp1'
+    else:
+        word = (SQRT_HALF_VECTOR_BASE if lane == 2 else SQRT_VECTOR_BASE | int(lane == 8) << 22) | int(width == 16) << 30
+        canonical = 'FSQRT_asimdmisc' + ('fp16' if lane == 2 else '') + '_R'
+    return {'name': 'fsqrt', 'lane': lane, 'bytes': width, 'scalar': scalar, 'd': d, 'n': n,
+        'word': word | n << 5 | d, 'canonical_id': canonical,
+        'source_lane_count': 1 if scalar else width // lane, 'output_kind': 'vector',
+        'merge': 'old_destination_if_nep' if scalar else 'none', 'cohort_family': 'sqrt'}
+
+
+def sqrt_numerical_functions():
+    shapes = [(lane, lane, True) for lane in (2, 4, 8)]
+    shapes += [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES]
+    return [sqrt_numerical_operation(lane, width, scalar, d, n)
+            for lane, width, scalar in shapes for d, n in NUMERICAL_UNARY_ROLES]
+
+
+def sqrt_numerical_values(lane):
+    values = numerical_unary_values(lane)
+    sign = 1 << (lane * 8 - 1)
+    four = conversion_exact_positive_bits(lane, 4, 0)
+    positive = [('square_' + str(number), conversion_exact_positive_bits(lane, number, 0))
+                for number in (9, 16, 25, 49, 64)]
+    positive += [('four_below', four - 1), ('four', four), ('four_above', four + 1),
+                 ('three', conversion_exact_positive_bits(lane, 3, 0))]
+    return values + [(label + suffix, bits | signed) for label, bits in positive
+                     for suffix, signed in (('_positive', 0), ('_negative', sign))]
+
+
+def sqrt_numerical_midpoints(lane):
+    """Neighboring representable inputs around exact squared root midpoints."""
+    fraction = {2: 10, 4: 23, 8: 52}[lane]
+    values = []
+    for index, root in enumerate((1 << fraction, (1 << fraction) + 1,
+                                 3 << (fraction - 1), (1 << (fraction + 1)) - 2)):
+        numerator, exponent = (root * 2 + 1) ** 2, -2 * fraction - 2
+        shift = numerator.bit_length() - 1 - fraction
+        floor = conversion_exact_positive_bits(lane, numerator >> shift, exponent + shift)
+        if floor is None or numerator & ((1 << shift) - 1) == 0:
+            raise AssertionError('Squared root midpoint must lie between representable inputs')
+        values.extend(((f'midpoint_{index}_below', floor), (f'midpoint_{index}_above', floor + 1)))
+    return values
+
+
+def sqrt_numerical_corpus():
+    functions, records, enable_forms = sqrt_numerical_functions(), [], set()
+    def append(function, label, values, control=0, sticky=0):
+        initial = numerical_unary_state(functions[function], len(records), values, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    rng = random.Random(SQRT_RANDOM_SEED)
+    for function in range(0, len(functions), len(NUMERICAL_UNARY_ROLES)):
+        op = functions[function]
+        values, count = sqrt_numerical_values(op['lane']), op['source_lane_count']
+        catalog = dict(values)
+        for mode in range(4):
+            for label, value in values + sqrt_numerical_midpoints(op['lane']):
+                append(function, 'value_' + label, [value] * count, mode << NUMERICAL_ROUND_SHIFT)
+        controlled = [(label, catalog[label]) for stem in ('qnan', 'snan', 'minsubnormal', 'maxsubnormal',
+                      'minnormal', 'zero', 'infinity', 'two') for label in (stem + '_positive', stem + '_negative')]
+        for control in NUMERICAL_UNARY_CONTROLS:
+            for mode in range(4):
+                for label, value in controlled:
+                    append(function, 'control_' + label, [value] * count, control | mode << NUMERICAL_ROUND_SHIFT)
+        for role in range(1, len(NUMERICAL_UNARY_ROLES)):
+            for control in (0, NUMERICAL_NEP, NUMERICAL_AH, NUMERICAL_FZ16):
+                for label in ('one_positive', 'two_positive', 'snan_negative', 'minsubnormal_negative'):
+                    append(function + role, 'alias_' + label, [catalog[label]] * count, control)
+        if not op['scalar']:
+            for control in (0, NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_FZ, NUMERICAL_FZ16, NUMERICAL_AH | NUMERICAL_FZ):
+                for pattern, label in enumerate(('qnan_negative', 'snan_positive', 'two_negative',
+                                                'minsubnormal_negative', 'minsubnormal_positive', 'infinity_positive')):
+                    for position in range(count):
+                        active = [catalog['two_positive'] if element % 2 == 0 else catalog['square_9_positive'] for element in range(count)]
+                        active[position] = catalog[label]
+                        append(function, f'mixed_{pattern}_{position}', active, control)
+        for sticky in (1 << 4, 1, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+            for control in (0, NUMERICAL_AH):
+                for label in ('one_positive', 'two_positive', 'two_negative', 'minsubnormal_positive'):
+                    append(function, 'sticky_' + label, [catalog[label]] * count, control, sticky)
+        if op['canonical_id'] not in enable_forms:
+            enable_forms.add(op['canonical_id'])
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_enable_readback_only', [catalog['two_positive']] * count, control)
+        random_values = [rng.getrandbits(op['lane'] * 8) for _ in range(32)]
+        for mode in range(4):
+            for index, value in enumerate(random_values):
+                append(function, f'bounded_random_{index}', [value] * count, mode << NUMERICAL_ROUND_SHIFT)
+    if len(records) != SQRT_NUMERICAL_CASES:
+        raise AssertionError(f'Square-root corpus exceeded approved scope: {len(records)}')
+    return functions, records
+
+
+def prepare_sqrt_numerical_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *sqrt_numerical_corpus(), SQRT_NUMERICAL_FOCUS)
+
+
+def load_sqrt_numerical_oracle(path=SQRT_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, sqrt_numerical_functions(), SQRT_NUMERICAL_CASES, SQRT_NUMERICAL_FOCUS)
+
+
+def sqrt_numerical_runtime_cases(records):
+    selected = {}
+    directed = ('zero_negative', 'one_positive', 'two_negative', 'infinity_positive',
+                'infinity_negative', 'four_below_positive', 'maxfinite_positive', 'snan_negative')
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        form, shape = op['canonical_id'], numerical_unary_shape(op)
+        if record['unsupported']:
+            selected.setdefault(('enable', form if initial.fpcr == NUMERICAL_TRAP_ENABLE_MASK else initial.fpcr), record)
+        elif label == 'value_two_positive':
+            selected.setdefault(('rounding', shape, initial.fpcr), record)
+        elif label in tuple('value_' + name for name in directed) and initial.fpcr == 0:
+            selected.setdefault(('directed', shape, label), record)
+        elif label in ('value_midpoint_0_below', 'value_midpoint_0_above') and initial.fpcr == 0:
+            selected.setdefault(('near_midpoint', shape, label), record)
+        elif label in ('control_minsubnormal_negative', 'control_qnan_positive') and initial.fpcr in NUMERICAL_UNARY_CONTROLS:
+            selected.setdefault(('control', op['lane'], initial.fpcr, label), record)
+        elif label == 'control_minsubnormal_positive' and initial.fpcr in (NUMERICAL_AH, NUMERICAL_AH | NUMERICAL_FZ,
+                NUMERICAL_FIZ, NUMERICAL_FZ, NUMERICAL_FZ16):
+            selected.setdefault(('positive_denormal', op['lane'], initial.fpcr), record)
+        elif label == 'control_snan_positive' and initial.fpcr in (NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+            selected.setdefault(('signaling_dn', op['lane'], initial.fpcr), record)
+        elif label == 'control_two_positive' and initial.fpcr == NUMERICAL_NEP and op['scalar']:
+            selected.setdefault(('merge', form), record)
+        elif label.startswith('alias_') and initial.fpcr == NUMERICAL_NEP:
+            selected.setdefault(('alias', op['lane'], op['d'], op['n']), record)
+        elif label == 'sticky_two_positive':
+            selected.setdefault(('sticky', form), record)
+        elif label in ('mixed_2_0', 'mixed_4_0') and initial.fpcr == NUMERICAL_AH:
+            selected.setdefault(('mixed', shape, label), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def sqrt_numerical_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (case_ids is not None and record['case'] not in case_ids or initial.fpcr or initial.fpsr
+                or op['d'] != 0 or op['n'] != 1):
+            continue
+        selected.setdefault((op['lane'], op['scalar'], op['bytes']), record)
+    return list(selected.values())
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
     VECTOR_NUMERICAL_FOCUS: {'loader': load_vector_numerical_oracle, 'runtime_cases': vector_numerical_runtime_cases,
         'helpers': vector_numerical_helpers, 'forms': 8,
@@ -4749,6 +4910,9 @@ FULL_FRAME_NUMERICAL_COHORTS = {
     ROUND_INTEGRAL_FOCUS: {'loader': load_round_integral_oracle, 'runtime_cases': round_integral_runtime_cases,
         'helpers': round_integral_helpers, 'forms': 47,
         'limits': 'Enabled nonstreaming scalar/AdvSIMD H/S/D integral rounding, including bounded 32/64-bit rounding, only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, disabled FP access, Apple hardware, application, OS or performance claim.'},
+    SQRT_NUMERICAL_FOCUS: {'loader': load_sqrt_numerical_oracle, 'runtime_cases': sqrt_numerical_runtime_cases,
+        'helpers': sqrt_numerical_helpers, 'forms': 5,
+        'limits': 'Enabled nonstreaming scalar/AdvSIMD H/S/D square root only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, disabled FP access, Apple hardware, application, OS or performance claim.'},
 }
 
 
@@ -4762,7 +4926,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
     fused = focus == FUSED_NUMERICAL_FOCUS
     conversion = focus == CONVERSION_NUMERICAL_FOCUS
     comparison_minmax = focus == COMPARISON_MINMAX_FOCUS
-    rounding = focus == ROUND_INTEGRAL_FOCUS
+    unary = focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS)
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
     source = b''.join(struct.pack('<II', operation['word'], numerical_return_word(operation)) for operation in oracle['functions'])
     source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
@@ -4836,9 +5000,9 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
             if record.get('control_policy_success'):
                 counts['control_policy_success_checks'] += 1
 
-    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if comparison_minmax or rounding
+    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if comparison_minmax or unary
                else family['helpers'](oracle['records']))
-    if not comparison_minmax and not rounding and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
+    if not comparison_minmax and not unary and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
         raise AssertionError('Numerical helper boundary fixture omits an arrangement')
     for record in helpers:
         initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
@@ -4867,19 +5031,19 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         check_original(loop, loop_initial, loop_expected)
         counts['memory_cache_loop_checks'] += 1
 
-        for control in ((NUMERICAL_NEP, 0) if conversion or comparison_minmax or rounding else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
-            reference = record if comparison_minmax or rounding else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
+        for control in ((NUMERICAL_NEP, 0) if conversion or comparison_minmax or unary else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
+            reference = record if comparison_minmax or unary else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
                 and candidate['label'] == record['label'] and State.from_buffer_copy(candidate['initial']).fpcr == control)
             chain_initial = State.from_buffer_copy(reference['initial'])
-            control_register, status_register, clear_register = (20, 21, 22) if conversion or comparison_minmax or rounding else (0, 3, 4)
+            control_register, status_register, clear_register = (20, 21, 22) if conversion or comparison_minmax or unary else (0, 3, 4)
             chain_initial.x[control_register] = control
             chain_initial.fpcr, chain_initial.fpsr = 0, FP_REGISTER_MASKS['fpsr']
             chain_expected = State.from_buffer_copy(reference['expected'])
-            if conversion or comparison_minmax or rounding:
+            if conversion or comparison_minmax or unary:
                 chain_expected.x[control_register] = control
-                if comparison_minmax or rounding:
+                if comparison_minmax or unary:
                     chain_expected.fpcr = control
-                    if rounding and operation['scalar'] and control & NUMERICAL_NEP:
+                    if unary and operation['scalar'] and control & NUMERICAL_NEP:
                         bits = operation['lane'] * 8
                         active_mask = (1 << bits) - 1
                         merged = chain_initial.v[operation['d']][0] | chain_initial.v[operation['d']][1] << 64
@@ -4926,7 +5090,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 'fpcr': NUMERICAL_INVALID_ENABLE, 'enabled_exceptions': 1}:
             raise AssertionError('Interior fused refusal did not preserve exact pending instruction and enable')
         counts['interior_fused_precise_refusal_checks'] += 1
-    transcript_name = f'{focus}-{target_id}' if fused or conversion or comparison_minmax or rounding else focus
+    transcript_name = f'{focus}-{target_id}' if fused or conversion or comparison_minmax or unary else focus
     for name in ('budget_helper_resume_checks', 'disk_cache_checks', 'memory_cache_loop_checks', 'control_status_chain_checks', 'control_policy_success_checks'):
         counts.setdefault(name, 0)
     snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
@@ -4950,7 +5114,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -4995,7 +5159,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
                     raise AssertionError(f'FMA3 opcode/feature guard failed: {target_id} {operation} {fused_mnemonics}')
             raw = bounded_cases(batches)
             raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested trap enables remain intact and their RAZ/WI observations receive no successful native equality credit.'
-            if focus in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS):
+            if focus in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
                 oracle['raw_helper_case_ids'] = set(raw['raw_helper_case_ids'])
             runtime = full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 focus, cpu_target, target_id)
@@ -5042,7 +5206,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -5263,7 +5427,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -5387,7 +5551,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -5400,6 +5564,8 @@ def main():
                         help='Pinned full-frame original comparison/minmax receipt')
     parser.add_argument('--round-integral-oracle', type=Path, default=ROUND_INTEGRAL_ORACLE,
                         help='Pinned full-frame original integral rounding receipt')
+    parser.add_argument('--sqrt-oracle', type=Path, default=SQRT_NUMERICAL_ORACLE,
+                        help='Pinned full-frame original square-root receipt')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -5409,6 +5575,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == SQRT_NUMERICAL_FOCUS:
+        run_full_frame_numerical_cohort(cli, arguments.sqrt_oracle, SQRT_NUMERICAL_FOCUS)
         return
     if arguments.focus == ROUND_INTEGRAL_FOCUS:
         run_full_frame_numerical_cohort(cli, arguments.round_integral_oracle, ROUND_INTEGRAL_FOCUS)

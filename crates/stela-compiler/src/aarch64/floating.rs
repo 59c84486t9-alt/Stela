@@ -6,6 +6,7 @@ pub mod integer;
 pub mod minmax;
 pub mod precision;
 pub mod rounding;
+pub mod sqrt;
 
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,
@@ -58,6 +59,9 @@ impl Format {
             Self::Single => 23,
             Self::Double => 52,
         }
+    }
+    pub(crate) const fn exponent_bias(self) -> u32 {
+        (self.exponent_mask() >> (self.fraction_bits() + 1)) as u32
     }
     const fn sign_mask(self) -> u64 {
         1 << (self.bits() - 1)

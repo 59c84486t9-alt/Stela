@@ -1,5 +1,5 @@
 //! Named x86 SIMD output encodings and their minimum feature requirements.
-//! Intel SDM instruction entries define these legacy SSE forms. Operand fields
+//! Intel SDM instruction entries define these SSE/VEX forms. Operand fields
 //! (ModRM, displacement and immediates) are supplied separately by the emitter.
 use crate::TargetCpu;
 
@@ -93,6 +93,12 @@ catalog! {
     RoundPackedDouble => ("roundpd", Sse41, [0x66,0x0f,0x3a,0x09]),
     RoundScalarSingle => ("roundss", Sse41, [0x66,0x0f,0x3a,0x0a]),
     RoundScalarDouble => ("roundsd", Sse41, [0x66,0x0f,0x3a,0x0b]),
+    SquareRootPackedSingle => ("sqrtps", Baseline, [0x0f,0x51]),
+    SquareRootPackedDouble => ("sqrtpd", Baseline, [0x66,0x0f,0x51]),
+    SquareRootScalarSingle => ("sqrtss", Baseline, [0xf3,0x0f,0x51]),
+    SquareRootScalarDouble => ("sqrtsd", Baseline, [0xf2,0x0f,0x51]),
+    ConvertHalfToSingle => ("vcvtph2ps", F16c, [0xc4,0xe2,0x79,0x13]),
+    ConvertSingleToHalf => ("vcvtps2ph", F16c, [0xc4,0xe3,0x79,0x1d]),
     MoveGprQword => ("movq", Baseline, [0x66,0x48,0x0f,0x6e]),
     MoveAligned => ("movdqa", Baseline, [0x66,0x0f,0x6f]),
     ShuffleDword => ("pshufd", Baseline, [0x66,0x0f,0x70]),

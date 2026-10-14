@@ -115,6 +115,21 @@ pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
 /// Leave flags from (exponent-minimum) versus the exclusive range length.
 /// Below is allocated normal; zero/all-ones exponents fail one unsigned test.
 pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
+    exponent_range_impl(code, format, source, minimum, false);
+}
+
+/// Keep the sign alongside the exponent so every negative input also fails.
+pub(super) fn positive_exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
+    exponent_range_impl(code, format, source, minimum, true);
+}
+
+fn exponent_range_impl(
+    code: &mut Vec<u8>,
+    format: Format,
+    source: u8,
+    minimum: u8,
+    positive_only: bool,
+) {
     code.extend(match (format, source) {
         (Format::Half | Format::Single, 0) => MOVD_EAX_XMM0,
         (Format::Half | Format::Single, 1) => MOVD_EAX_XMM1,
@@ -132,7 +147,12 @@ pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, min
     code.push(format.fraction_bits() as u8);
     let exponent_mask = (1u32 << (format.bits() - format.fraction_bits() - 1)) - 1;
     code.push(AND_EAX_IMM32);
-    code.extend(exponent_mask.to_le_bytes());
+    let field_mask = if positive_only {
+        exponent_mask * 2 + 1
+    } else {
+        exponent_mask
+    };
+    code.extend(field_mask.to_le_bytes());
     code.extend(SUB_EAX_IMM8);
     code.push(minimum);
     code.push(CMP_EAX_IMM32);
@@ -196,22 +216,46 @@ pub(super) fn commit_inexact(code: &mut Vec<u8>) {
     code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
-/// Extract positive exponents into words/dwords and compare an open range.
+/// Extract exponent magnitudes into words/dwords and compare an open range.
 /// Double exponents occupy the low dword of each qword; their high dwords and
 /// inactive S lanes are excluded from the dword sign mask. No numerical FP runs here.
 pub(super) fn vector_exponent_range(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+    vector_exponent_range_impl(code, format, shape, source, false);
+}
+
+/// Reject negative inputs as well as zero and all-ones exponents.
+pub(super) fn vector_positive_exponent_range(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+) {
+    vector_exponent_range_impl(code, format, shape, source, true);
+}
+
+fn vector_exponent_range_impl(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    positive_only: bool,
+) {
     packed(code, Host::MoveAligned, EXPONENT_VECTOR, source);
     let (left, right) = match format {
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
         Format::Double => (ShiftOpcode::LeftQword, ShiftOpcode::RightQword),
         Format::Half => (ShiftOpcode::LeftWord, ShiftOpcode::RightWord),
     };
-    left.emit(code, EXPONENT_VECTOR, SIGN_BITS);
-    right.emit(
-        code,
-        EXPONENT_VECTOR,
-        format.fraction_bits() as u8 + SIGN_BITS,
-    );
+    if positive_only {
+        right.emit(code, EXPONENT_VECTOR, format.fraction_bits() as u8);
+    } else {
+        left.emit(code, EXPONENT_VECTOR, SIGN_BITS);
+        right.emit(
+            code,
+            EXPONENT_VECTOR,
+            format.fraction_bits() as u8 + SIGN_BITS,
+        );
+    }
     packed(
         code,
         Host::MoveAligned,
