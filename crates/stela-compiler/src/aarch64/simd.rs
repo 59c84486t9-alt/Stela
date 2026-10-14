@@ -28,6 +28,7 @@ pub mod sha3;
 pub mod sha512;
 pub mod shifts;
 pub mod sqrt;
+pub mod structure_memory;
 pub mod widening;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub enum Operand {
     Sha512(sha512::Operand),
     Floating(floating::Operand),
     MemoryRegisterOffset(memory::Operand),
+    StructureMemory(structure_memory::Operand),
     Immediate(immediates::Operand),
     Halving(halving::Operand),
     Product(products::Operand),
@@ -120,9 +122,12 @@ pub enum Operand {
 }
 
 /// None denotes another encoding class; Err is an unsupported/reserved member.
-/// Each reviewed family validates its reserved encodings; structures decline.
+/// Each reviewed family validates its reserved encodings.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = structure_memory::decode(word) {
+        return Some(decoded.map(Operand::StructureMemory));
+    }
     if let Some(decoded) = aes::decode(word) {
         return Some(decoded.map(Operand::Aes));
     }
@@ -591,9 +596,13 @@ mod tests {
         }
         assert_eq!(decode(0x3cc00800), Some(Err(()))); // unprivileged/reserved SIMD mode
         assert_eq!(decode(0x3ce00800), Some(Err(()))); // register offset with reserved option 000
-        for word in [0xfd000000 ^ (1 << 26), 0x9c000000, 0x4c407000, 0xc85f7c00] {
+        for word in [0xfd000000 ^ (1 << 26), 0x9c000000, 0xc85f7c00] {
             assert!(decode(word).is_none());
         }
+        assert!(matches!(
+            decode(0x4c407000),
+            Some(Ok(Operand::StructureMemory(_)))
+        ));
     }
 
     #[test]

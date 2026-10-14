@@ -12,11 +12,219 @@ from contextlib import nullcontext
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import ROOT, BASE, State, seed_extended_state
-from simd_fixtures import aes, sha12, sha512, sha3, i8mm
+from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory
 import simd_fixture_runner as runner
 import simd_original
+import simd_memory_runner
+import hashlib
 
 engine = importlib.import_module('simd-differential')
+
+class StructureMemoryFixtureTests(unittest.TestCase):
+    def test_exact150_inventory_1134_shapes_and_independent_decoding(self):
+        shapes = structure_memory.shapes()
+        self.assertEqual(len(shapes), 1134)
+        self.assertEqual({layout: sum(op['layout'] == layout for op in shapes) for layout in ('multiple', 'lane', 'replicate')},
+                         {'multiple': 318, 'lane': 720, 'replicate': 96})
+        self.assertEqual(len(structure_memory.CANONICAL_FORMS), 150)
+        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        operations = structure_memory.functions()
+        self.assertEqual(len({op['word'] for op in operations}), len(operations))
+        for op in operations:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), BASE))
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(decoded[0].mnemonic, op['name'])
+        for canonical in structure_memory.CANONICAL_FORMS:
+            positions = [op for op in operations if op['canonical_id'] == canonical]
+            self.assertEqual({op['rt'] for op in positions}, set(range(32)))
+            self.assertEqual({op['rn'] for op in positions}, set(range(32)))
+            if positions[0]['mode'] == 'register':
+                self.assertEqual({op['rm'] for op in positions}, set(range(31)))
+                self.assertTrue(any(op['rm'] == op['rn'] for op in positions))
+
+    def test_success_inputs_all_alignments_crossings_and_complete_frames(self):
+        operations, cases = structure_memory.corpus()
+        shape_words = {op['word'] for op in structure_memory.shapes()}
+        self.assertEqual(len(cases), 15206)
+        self.assertEqual(len([case for case in cases if case['runtime']]), 150)
+        by_function = {}
+        for case in cases:
+            self.assertEqual(len(case['initial']), 784)
+            by_function.setdefault(case['function'], []).append(case)
+        for function, op in enumerate(operations):
+            selected = by_function[function]
+            if op['word'] in shape_words:
+                self.assertEqual({case['alignment'] for case in selected}, set(range(8)))
+                if op['total_bytes'] > 1:
+                    self.assertTrue(any(case['path'] == 'crossing' for case in selected))
+            for case in selected[:1]:
+                initial = State.from_buffer_copy(case['initial'])
+                expected, ram, fault = structure_memory.expected(op, initial, structure_memory.memory_template())
+                self.assertIsNone(fault)
+                self.assertEqual(len(ram), 8192)
+                self.assertEqual(expected.nzcv, initial.nzcv)
+                self.assertEqual(expected.fpcr, initial.fpcr)
+                self.assertEqual(expected.fpsr, initial.fpsr)
+                self.assertEqual(expected.reserved, initial.reserved)
+
+    def test_explicit_source_and_qemu_fault_partitions_without_normalization(self):
+        op = structure_memory.operation('multiple', structures=2, vector_bytes=8, mode='immediate')
+        initial = structure_memory.initial_state(op, 7, 0)
+        memory = bytes(range(64))
+        source, ram, fault = structure_memory.expected(op, initial, memory, accessible=3)
+        original_prediction, _, _ = structure_memory.expected(op, initial, memory, accessible=3, policy='qemu')
+        first = bytearray(struct.pack('<2Q', *initial.v[31]))
+        second = bytearray(struct.pack('<2Q', *initial.v[0]))
+        first[0:2], second[0:1] = bytes((0, 2)), bytes((1,))
+        first[8:], second[8:] = bytes(8), bytes(8)
+        self.assertEqual(bytes(source.v[31]), first)
+        self.assertEqual(bytes(source.v[0]), second)
+        self.assertEqual(source.x[5], initial.x[5])
+        self.assertEqual(ram, memory)
+        self.assertEqual(fault['ordinal'], 3)
+        self.assertEqual(original_prediction.v[31][1], initial.v[31][1])
+        self.assertNotEqual(bytes(source), bytes(original_prediction))
+        op = structure_memory.operation('multiple', loading=False, structures=2, element_bytes=2)
+        initial = structure_memory.initial_state(op, 8, 0)
+        source, ram, _ = structure_memory.expected(op, initial, memory, accessible=5)
+        _, qemu_ram, _ = structure_memory.expected(op, initial, memory, accessible=5, policy='qemu')
+        expected = bytes(initial.v[31])[:2] + bytes(initial.v[0])[:2] + bytes(initial.v[31])[2:3]
+        self.assertEqual(ram[:5], expected)
+        self.assertEqual(qemu_ram[4:], memory[4:])
+        self.assertEqual(bytes(source), bytes(initial))
+
+    def test_lane_poison_preservation_replicate_exact_footprint_and_alias_increment(self):
+        for width in (1, 2, 4, 8):
+            for index in range(16 // width):
+                op = structure_memory.operation('lane', structures=4, element_bytes=width, index=index)
+                initial = structure_memory.initial_state(op, index + width, 0)
+                memory = bytes(range(64))
+                expected, ram, fault = structure_memory.expected(op, initial, memory)
+                self.assertIsNone(fault)
+                for slot in range(4):
+                    register = (31 + slot) % 32
+                    vector = bytearray(bytes(initial.v[register]))
+                    vector[index * width:(index + 1) * width] = memory[slot * width:(slot + 1) * width]
+                    self.assertEqual(bytes(expected.v[register]), vector)
+                self.assertEqual(ram, memory)
+            op = structure_memory.operation('replicate', structures=4, vector_bytes=8, element_bytes=width)
+            initial = structure_memory.initial_state(op, width, 0)
+            expected, _, fault = structure_memory.expected(op, initial, bytes(range(64)), accessible=3 * width)
+            self.assertIsNotNone(fault)
+            for slot in range(3):
+                chunk = bytes(range(slot * width, (slot + 1) * width))
+                self.assertEqual(bytes(expected.v[(31 + slot) % 32]), chunk * (8 // width) + bytes(8))
+            self.assertEqual(bytes(expected.v[2]), bytes(initial.v[2]))
+        op = structure_memory.operation('lane', mode='register', rn=5, rm=5)
+        initial = structure_memory.initial_state(op, 1, 0)
+        expected, _, _ = structure_memory.expected(op, initial, bytes(range(64)))
+        self.assertEqual(expected.x[5], initial.x[5] * 2)
+        op = structure_memory.operation('lane', rn=31)
+        initial = structure_memory.initial_state(op, 1, 0)
+        initial.sp += 1
+        expected, ram, fault = structure_memory.expected(op, initial, bytes(64))
+        self.assertEqual(fault['kind'], 'sp_alignment')
+        self.assertEqual(bytes(expected), bytes(initial))
+        self.assertEqual(ram, bytes(64))
+
+    def test_optional_memory_observer_default_identity_and_bounded_copy(self):
+        assembly = simd_original.assembly([0x4e284820, 0x0e005820], 2)
+        self.assertEqual(hashlib.sha256(assembly.encode()).hexdigest(),
+                         'fcc2fc835b22f0352e553d497b88ef5c67d7e8e24490bdb695960dfcfeab87c0')
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.assertIsNone(simd_original.memory_plan(directory))
+            memory = structure_memory.memory_template()
+            (directory / 'memory.bin').write_bytes(memory)
+            plan = {'ram_address': structure_memory.RAM_ADDRESS, 'ram_bytes': 8192,
+                    'initial_ram_sha256': hashlib.sha256(memory).hexdigest()}
+            (directory / 'memory-plan.json').write_text(json.dumps(plan))
+            parsed = simd_original.memory_plan(directory)
+            self.assertEqual(parsed['record_bytes'], 9216)
+            extended = simd_original.assembly([structure_memory.shapes()[0]['word']], 1, parsed)
+            self.assertIn('restore_ram:', extended)
+            self.assertIn('snapshot_ram:', extended)
+            self.assertIn('add x1,sp,#1024', extended)
+            self.assertIn('movz x3,#9216', extended)
+            self.assertLess(extended.index('msr SCTLR_EL1,x0'), extended.index('restore_ram:'))
+            self.assertLess(extended.index('memory_code_pages:'), extended.index('msr SCTLR_EL1,x0'))
+            self.assertIn('memory_l1_blocks:', extended)
+            self.assertIn('memory_l2_blocks:', extended)
+            self.assertIn('memory_l3_pages:', extended)
+            for index, register in enumerate(simd_original.MEMORY_CONTROLS):
+                offset = simd_original.MEMORY_CONTROL_HEADER_OFFSET + index * 8
+                self.assertIn(f'mrs x0,{register}\nstr x0,[x1,#{offset}]', extended)
+            plan['ram_address'] += 4096
+            (directory / 'memory-plan.json').write_text(json.dumps(plan))
+            with self.assertRaises(AssertionError):
+                simd_original.memory_plan(directory)
+
+    def test_memory_observer_requires_actual_normal_memory_controls_and_code_bounds(self):
+        header = bytearray(simd_original.HEADER_BYTES)
+        offset = simd_original.MEMORY_CONTROL_HEADER_OFFSET
+        struct.pack_into('<4Q', header, offset, *simd_original.MEMORY_CONTROLS.values())
+        self.assertEqual(simd_original.validate_memory_controls(header),
+                         {name: hex(value) for name, value in simd_original.MEMORY_CONTROLS.items()})
+        for index in range(4):
+            changed = bytearray(header)
+            changed[offset + index * 8] ^= 1
+            with self.assertRaises(AssertionError):
+                simd_original.validate_memory_controls(changed)
+        # ELF64 section fields: name, type, flags, address, offset, size, ...
+        section = (0, 1, simd_original.ELF_EXECINSTR, simd_original.TEXT_ADDRESS, 0,
+                   simd_original.MEMORY_CODE_END - simd_original.TEXT_ADDRESS, 0, 0, 4, 0)
+        simd_original.validate_memory_text([section])
+        for start, size in ((simd_original.TEXT_ADDRESS - 4, 4),
+                            (simd_original.MEMORY_CODE_END - 4, 8)):
+            changed = (*section[:3], start, 0, size, *section[6:])
+            with self.assertRaises(AssertionError):
+                simd_original.validate_memory_text([changed])
+
+    def test_memory_accounting_binds_rip_pools_and_rejects_code_data_overlap(self):
+        # movdqu xmm6,[rip+5]; jmp +16; sixteen mask bytes; ret
+        native = bytes.fromhex('f30f6f3505000000 e910000000') + bytes(range(16)) + b'\xc3'
+        op = structure_memory.operation('multiple')
+        batch = {'native': native, 'source': struct.pack('<II', op['word'], engine.RET),
+                 'instruction_offsets': [0, len(native) - 1], 'functions': [{'operations': [op]}], 'entries': [0]}
+        accounting = simd_memory_runner.native_binary_accounting(engine, batch)
+        self.assertEqual(accounting['constant_pool_bytes'], 16)
+        self.assertEqual(accounting['static_body_native_instructions'], 2)
+        self.assertEqual(accounting['static_native_bytes_including_ret'], len(native))
+        batch['native'] = bytes.fromhex('f30f6f35f8ffffff e910000000') + bytes(range(16)) + b'\xc3'
+        with self.assertRaises(AssertionError):
+            simd_memory_runner.native_binary_accounting(engine, batch)
+
+    def test_illegal_combinations_and_bounded_fault_selection(self):
+        for values in ({'layout': 'multiple', 'structures': 2, 'vector_bytes': 8, 'element_bytes': 8},
+                       {'layout': 'replicate', 'loading': False}, {'layout': 'lane', 'element_bytes': 8, 'index': 2},
+                       {'layout': 'lane', 'mode': 'register', 'rm': 31}):
+            with self.assertRaises(ValueError):
+                structure_memory.operation(**values)
+        selected = simd_memory_runner.native_fault_selection()
+        self.assertLess(len(selected), 1000)
+        first_access = simd_memory_runner.native_fault_selection(first_access_only=True)
+        self.assertEqual(len(first_access), 290)
+        self.assertEqual(first_access, [case for case in selected if case['protection'] != 'structure_crossing'])
+        self.assertEqual({case['protection'] for case in first_access},
+                         {'guard', 'readonly', 'sp_alignment', 'sp_alignment8'})
+        shapes = structure_memory.shapes()
+        self.assertEqual({shapes[case['function']]['canonical_id'] for case in selected}, set(structure_memory.CANONICAL_FORMS))
+        sp = [case for case in selected if case['protection'].startswith('sp_alignment')]
+        self.assertEqual(len(sp), 30)
+        self.assertEqual({(shapes[case['function']]['layout'], shapes[case['function']]['loading'],
+                           shapes[case['function']]['mode'], case['protection']) for case in sp},
+                         {(layout, loading, mode, protection)
+                          for layout, loading in (('multiple', False), ('multiple', True),
+                                                  ('lane', False), ('lane', True), ('replicate', True))
+                          for mode in structure_memory.MODES for protection in ('sp_alignment', 'sp_alignment8')})
+        for case in sp:
+            op = simd_memory_runner.fault_operation(shapes[case['function']], case['rn'])
+            self.assertEqual(op['rn'], 31)
+            self.assertEqual(op['word'] >> 5 & 31, 31)
+
 
 class AesFixtureTests(unittest.TestCase):
     def test_published_substitution_and_column_anchors(self):

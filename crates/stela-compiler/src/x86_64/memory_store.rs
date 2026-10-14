@@ -3,7 +3,7 @@
 //! conservative check on hosts with larger pages; MMIO/concurrency are excluded.
 use super::{AddressMode, Register, isa::ShiftOpcode};
 
-const PROTECTION_GRANULE_BYTES: u32 = 4096;
+pub(super) const PROTECTION_GRANULE_BYTES: u32 = 4096;
 const BYTE_BITS: u8 = 8;
 const HALFWORD_BYTES: u8 = 2;
 const DWORD_BYTES: u8 = 4;

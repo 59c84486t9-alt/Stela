@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Original-only full-state EL0 observer for register-only SIMD fixtures."""
+"""Original-only full-state EL0 observer for SIMD register and RAM fixtures."""
 import argparse
 import hashlib
 import json
@@ -18,6 +18,12 @@ OUTPUT_ADDRESS = 0x49000000
 MARKER_ADDRESS = 0x40070000
 SCRATCH_ADDRESS = 0x40072000
 TEXT_ADDRESS = 0x40080000
+MEMORY_TEMPLATE_ADDRESS = 0x40060000
+QEMU_RAM_END = 0x60000000
+MEMORY_RAM_ADDRESS = 0x140074000
+MEMORY_RAM_BYTES = 8192
+MEMORY_QEMU_RAM_SIZE = '5G'
+MEMORY_QEMU_RAM_END = 0x180000000
 INPUT_STRIDE = 800
 STATE_BYTES = 784
 RECORD_BYTES = 1024
@@ -38,6 +44,27 @@ RET_WORD = 0xd65f03c0
 COMPLETED_MARKER = 0x1234
 CPU_REGISTERS = ('CurrentEL', 'MIDR_EL1', 'ID_AA64PFR0_EL1', 'ID_AA64ISAR1_EL1',
                  'ID_AA64PFR1_EL1', 'ID_AA64ZFR0_EL1', 'ID_AA64MMFR1_EL1', 'ID_AA64ISAR2_EL1', 'ID_AA64ISAR0_EL1')
+MEMORY_L1_ADDRESS = 0x40010000
+MEMORY_L2_ADDRESS = 0x40011000
+MEMORY_L3_ADDRESS = 0x40012000
+MEMORY_PAGE_BYTES = 4096
+MEMORY_TABLE_ENTRIES = 512
+MEMORY_CODE_END = TEXT_ADDRESS + 0x100000
+MEMORY_ACCESS_FLAG = 1 << 10
+MEMORY_EL0_RW = 1 << 6
+MEMORY_READ_ONLY = 1 << 7
+MEMORY_INNER_SHAREABLE = 3 << 8
+MEMORY_VALID_TABLE_PAGE = 3
+MEMORY_VALID_BLOCK = 1
+MEMORY_NORMAL_ATTRIBUTES = MEMORY_ACCESS_FLAG | MEMORY_EL0_RW | MEMORY_INNER_SHAREABLE
+# Same bounded Normal-memory profile as the retained fault calibration, extended
+# to 39-bit VA so the private high RAM has an identity mapping. TTBR1 is disabled.
+MEMORY_TCR = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32)
+MEMORY_SCTLR = 0x30d00801  # RES1, MMU on; caches/alignment/tags/PAUTH off.
+MEMORY_CONTROLS = {'SCTLR_EL1': MEMORY_SCTLR, 'TCR_EL1': MEMORY_TCR,
+                   'MAIR_EL1': 0xff, 'TTBR0_EL1': MEMORY_L1_ADDRESS}
+MEMORY_CONTROL_HEADER_OFFSET = len(CPU_REGISTERS) * 8
+ELF_EXECINSTR = 1 << 2
 LAYOUT = {'x': 0, 'sp': 248, 'spsr': 256, 'fpcr': 264, 'fpsr': 272,
           'esr': 280, 'elr': 288, 'current_el': 296, 'cpacr': 304,
           'marker': 312, 'v': 320, 'pre_fpcr': 832, 'pre_fpsr': 840}
@@ -104,6 +131,14 @@ def load_corpus(directory):
         if 'initial_state_sha256' in case:
             assert case['initial_state_sha256'] == sha(inputs[offset + 8:offset + 8 + STATE_BYTES]), index
         assert inputs[offset + 8 + STATE_BYTES:offset + INPUT_STRIDE] == bytes(8), index
+    memory = memory_plan(directory)
+    if memory is not None:
+        for name in ('memory-plan.json', 'memory.bin'):
+            files[name] = (directory / name).read_bytes()
+        if OUTPUT_ADDRESS + len(cases) * memory['record_bytes'] > QEMU_RAM_END:
+            raise AssertionError('Memory original results exceed QEMU RAM')
+        if INPUT_ADDRESS + len(inputs) > OUTPUT_ADDRESS - HEADER_BYTES:
+            raise AssertionError('Memory original inputs overlap output')
     return files, functions, cases, inputs, words
 
 
@@ -114,17 +149,95 @@ def mov(register, value):
     return lines
 
 
-def assembly(words, count):
+def memory_plan(directory):
+    """Optional bounded two-page private RAM extension; defaults stay unchanged."""
+    path = Path(directory) / 'memory-plan.json'
+    if not path.exists():
+        return None
+    plan = json.loads(path.read_bytes())
+    if set(plan) != {'ram_address', 'ram_bytes', 'initial_ram_sha256'}:
+        raise AssertionError('Memory observer plan fields differ')
+    address, length = plan['ram_address'], plan['ram_bytes']
+    # This high region avoids native executable PAGEZERO while retaining exact
+    # original/native pointer equality. QEMU backs it with lazily allocated RAM.
+    if (address != MEMORY_RAM_ADDRESS or length != MEMORY_RAM_BYTES
+            or address + length > MEMORY_QEMU_RAM_END):
+        raise AssertionError('Memory observer requires the bounded two-page RAM region')
+    data = (Path(directory) / 'memory.bin').read_bytes()
+    if len(data) != length or sha(data) != plan['initial_ram_sha256']:
+        raise AssertionError('Memory observer RAM template identity changed')
+    return {**plan, 'record_bytes': RECORD_BYTES + length}
+
+
+def copy_memory(source, destination, length, label):
+    lines = mov('x0', source) + mov('x1', destination) + mov('x2', length // 16)
+    return lines + [label + ':', 'ldp x3,x4,[x0],#16', 'stp x3,x4,[x1],#16',
+                    'subs x2,x2,#1', 'b.ne ' + label]
+
+
+def memory_setup():
+    """Bounded identity tables for original success RAM; register mode is untouched."""
+    lines = mov('x0', MEMORY_L1_ADDRESS) + mov('x1', 3 * MEMORY_PAGE_BYTES // 8)
+    lines += ['zero_memory_tables:', 'str xzr,[x0],#8', 'subs x1,x1,#1', 'b.ne zero_memory_tables']
+    # Eight 1GiB blocks cover the high RAM; split only the low code/data block.
+    lines += mov('x0', MEMORY_L1_ADDRESS) + mov('x1', MEMORY_NORMAL_ATTRIBUTES | MEMORY_VALID_BLOCK)
+    lines += mov('x2', 8) + mov('x3', 1 << 30)
+    lines += ['memory_l1_blocks:', 'str x1,[x0],#8', 'add x1,x1,x3', 'subs x2,x2,#1', 'b.ne memory_l1_blocks']
+    lines += mov('x0', MEMORY_L1_ADDRESS) + mov('x1', MEMORY_L2_ADDRESS | MEMORY_VALID_TABLE_PAGE) + ['str x1,[x0,#8]']
+    lines += mov('x0', MEMORY_L2_ADDRESS) + mov('x1', 0x40000000 | MEMORY_NORMAL_ATTRIBUTES | MEMORY_VALID_BLOCK)
+    lines += mov('x2', MEMORY_TABLE_ENTRIES)
+    lines += ['memory_l2_blocks:', 'str x1,[x0],#8', 'add x1,x1,#0x200,lsl#12', 'subs x2,x2,#1', 'b.ne memory_l2_blocks']
+    lines += mov('x0', MEMORY_L2_ADDRESS) + mov('x1', MEMORY_L3_ADDRESS | MEMORY_VALID_TABLE_PAGE) + ['str x1,[x0]']
+    lines += mov('x0', MEMORY_L3_ADDRESS) + mov('x1', 0x40000000 | MEMORY_NORMAL_ATTRIBUTES | MEMORY_VALID_TABLE_PAGE)
+    lines += mov('x2', MEMORY_TABLE_ENTRIES)
+    lines += ['memory_l3_pages:', 'str x1,[x0],#8', 'add x1,x1,#1,lsl#12', 'subs x2,x2,#1', 'b.ne memory_l3_pages']
+    # EL1 cannot execute user-writable pages. Protect the whole bounded code
+    # interval while leaving the tables, input, output and RAM template writable.
+    code_offset = ((TEXT_ADDRESS >> 12) & (MEMORY_TABLE_ENTRIES - 1)) * 8
+    lines += mov('x0', MEMORY_L3_ADDRESS + code_offset)
+    lines += mov('x1', TEXT_ADDRESS | MEMORY_NORMAL_ATTRIBUTES | MEMORY_VALID_TABLE_PAGE | MEMORY_READ_ONLY)
+    lines += mov('x2', (MEMORY_CODE_END - TEXT_ADDRESS) // MEMORY_PAGE_BYTES)
+    lines += ['memory_code_pages:', 'str x1,[x0],#8', 'add x1,x1,#1,lsl#12', 'subs x2,x2,#1', 'b.ne memory_code_pages']
+    for register in ('MAIR_EL1', 'TTBR0_EL1', 'TCR_EL1'):
+        lines += mov('x0', MEMORY_CONTROLS[register]) + [f'msr {register},x0']
+    lines += mov('x0', OUTPUT_ADDRESS) + ['mov sp,x0', 'dsb sy', 'isb', 'tlbi vmalle1', 'dsb sy', 'isb']
+    lines += mov('x0', MEMORY_SCTLR) + ['msr SCTLR_EL1,x0', 'isb']
+    return lines
+
+
+def validate_memory_controls(results):
+    actual = dict(zip(MEMORY_CONTROLS, struct.unpack_from('<4Q', results, MEMORY_CONTROL_HEADER_OFFSET)))
+    if actual != MEMORY_CONTROLS:
+        raise AssertionError('Memory observer actual MMU controls differ: ' + str(actual))
+    return {name: hex(value) for name, value in actual.items()}
+
+
+def validate_memory_text(sections):
+    for section in sections:
+        if section[2] & ELF_EXECINSTR and section[5]:
+            if not TEXT_ADDRESS <= section[3] < section[3] + section[5] <= MEMORY_CODE_END:
+                raise AssertionError('Memory original executable section exceeds read-only code mapping')
+
+
+def assembly(words, count, memory=None):
     lines = ['.arch armv8.7-a+fp16+sve', '.text', '.global _start', '_start:',
              'adrp x0,vectors', 'add x0,x0,:lo12:vectors', 'msr vbar_el1,x0', 'isb']
     lines += mov('x0', FP_ACCESS_ENABLED) + ['msr cpacr_el1,x0', 'isb']
+    if memory is not None:
+        lines += memory_setup()
     lines += mov('x1', OUTPUT_ADDRESS - HEADER_BYTES)
     for index, register in enumerate(CPU_REGISTERS):
         lines += [f'mrs x0,{register}', f'str x0,[x1,#{index * 8}]']
+    if memory is not None:
+        for index, register in enumerate(MEMORY_CONTROLS):
+            lines += [f'mrs x0,{register}', f'str x0,[x1,#{MEMORY_CONTROL_HEADER_OFFSET + index * 8}]']
     lines += mov('x0', SCRATCH_ADDRESS)
     for offset, value in ((0, INPUT_ADDRESS), (8, OUTPUT_ADDRESS), (16, count)):
         lines += mov('x1', value) + [f'str x1,[x0,#{offset}]']
-    lines += ['again:'] + mov('x0', SCRATCH_ADDRESS)
+    lines += ['again:']
+    if memory is not None:
+        lines += copy_memory(MEMORY_TEMPLATE_ADDRESS, memory['ram_address'], memory['ram_bytes'], 'restore_ram')
+    lines += mov('x0', SCRATCH_ADDRESS)
     lines += ['ldr x19,[x0]', 'ldr x20,[x0,#8]', 'mov sp,x20',
               'ldr w0,[x19,#784]', 'msr fpcr,x0', 'mrs x0,fpcr', 'str x0,[sp,#832]',
               'ldr w0,[x19,#788]', 'msr fpsr,x0', 'mrs x0,fpsr', 'str x0,[sp,#840]',
@@ -153,9 +266,13 @@ def assembly(words, count):
         lines += [f'mrs x0,{register}', f'str x0,[sp,#{offset}]']
     lines += [f'str q{register},[sp,#{320 + register * 16}]' for register in range(32)]
     lines += mov('x0', COMPLETED_MARKER) + ['str x0,[sp,#312]']
+    if memory is not None:
+        lines += mov('x0', memory['ram_address']) + ['add x1,sp,#1024'] + mov('x2', memory['ram_bytes'] // 16)
+        lines += ['snapshot_ram:', 'ldp x3,x4,[x0],#16', 'stp x3,x4,[x1],#16', 'subs x2,x2,#1', 'b.ne snapshot_ram']
     lines += mov('x0', SCRATCH_ADDRESS)
-    lines += ['ldp x1,x2,[x0]', f'add x1,x1,#{INPUT_STRIDE}',
-              f'add x2,x2,#{RECORD_BYTES}', 'stp x1,x2,[x0]',
+    lines += ['ldp x1,x2,[x0]', f'add x1,x1,#{INPUT_STRIDE}']
+    lines += (mov('x3', memory['record_bytes']) + ['add x2,x2,x3'] if memory is not None else [f'add x2,x2,#{RECORD_BYTES}'])
+    lines += ['stp x1,x2,[x0]',
               'ldr x1,[x0,#16]', 'subs x1,x1,#1', 'str x1,[x0,#16]', 'b.eq finished',
               'adr x0,again', 'msr elr_el1,x0']
     lines += mov('x0', PSTATE_EL1H_MASKED) + ['msr spsr_el1,x0', 'eret', 'finished:']
@@ -185,7 +302,7 @@ def tools_and_bindings():
         'producer_sha256': sha(Path(__file__).read_bytes())}
 
 
-def elf_subjects(path, words, functions):
+def elf_subjects(path, words, functions, memory=None):
     """Read ELF64 symbols/sections directly; inspect the actual linked instruction bytes."""
     data = path.read_bytes()
     assert data[:6] == b'\x7fELF\x02\x01'
@@ -194,6 +311,8 @@ def elf_subjects(path, words, functions):
     assert section_stride == 64
     sections = [struct.unpack_from('<IIQQQQIIQQ', data, section_offset + index * section_stride)
                 for index in range(section_count)]
+    if memory is not None:
+        validate_memory_text(sections)
     symbols = {}
     for section in sections:
         if section[1] != 2:
@@ -231,9 +350,12 @@ def prepare(directory, focus, source_bindings):
         if sha((ROOT / name).read_bytes()) != identity:
             raise AssertionError("Frozen original source binding changed: " + name)
     files, functions, cases, inputs, words = load_corpus(directory)
-    source = assembly(words, len(cases)).encode()
+    memory = memory_plan(directory)
+    source = assembly(words, len(cases), memory).encode()
     qemu, clang, lld, bindings = tools_and_bindings()
     bindings['focus'] = focus
+    if memory is not None:
+        bindings['memory_plan'] = memory
     bindings['source_receipts'] = source_bindings
     bindings['observer_dependencies'] = {'dev/differential.py': sha((ROOT / 'dev/differential.py').read_bytes())}
     bindings['inputs'] = {name: {'sha256': sha(data), 'bytes': len(data)} for name, data in files.items()}
@@ -257,7 +379,7 @@ def prepare(directory, focus, source_bindings):
                    str(destination / 'guest.o'), '-o', str(destination / 'guest.elf')]
         write_new(destination / 'link-command.json', json_bytes(command))
         subprocess.run(command, check=True, env=env)
-    subjects = elf_subjects(destination / 'guest.elf', words, functions)
+    subjects = elf_subjects(destination / 'guest.elf', words, functions, memory)
     write_new(destination / 'subjects.json', json_bytes(subjects))
     return destination, qemu, bindings, functions, cases, inputs, subjects
 
@@ -265,11 +387,15 @@ def prepare(directory, focus, source_bindings):
 def execute(destination, qemu, count):
     with tempfile.TemporaryDirectory(prefix='stela-simd-original-el0-') as temporary:
         endpoint = Path(temporary) / 'qmp'
+        memory = memory_plan(destination)
         command = [str(qemu), '-machine', 'virt,secure=off,virtualization=off', '-cpu', CPU_MODEL,
-                   '-accel', 'tcg', '-m', '512M', '-display', 'none', '-serial', 'none',
+                   '-accel', 'tcg', '-m', MEMORY_QEMU_RAM_SIZE if memory is not None else '512M',
+                   '-display', 'none', '-serial', 'none',
                    '-monitor', 'none', '-nic', 'none', '-kernel', str(destination / 'guest.elf'),
                    '-device', f'loader,file={destination / "inputs.bin"},addr={INPUT_ADDRESS:#x},force-raw=on',
                    '-qmp', f'unix:{endpoint},server=on,wait=off', '-S']
+        if memory is not None:
+            command += ['-device', f'loader,file={destination / "memory.bin"},addr={MEMORY_TEMPLATE_ADDRESS:#x},force-raw=on']
         write_new(destination / 'qemu-command.json', json_bytes(command))
         with (destination / 'stderr.log').open('xb') as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
@@ -310,7 +436,7 @@ def execute(destination, qemu, count):
                         raise AssertionError(f'Original oracle timeout/failure: {marker}')
                     time.sleep(0.02)
                 request('stop')
-                size = HEADER_BYTES + count * RECORD_BYTES
+                size = HEADER_BYTES + count * (memory['record_bytes'] if memory is not None else RECORD_BYTES)
                 request('human-monitor-command', {'command-line': f'pmemsave {OUTPUT_ADDRESS - HEADER_BYTES:#x} {size} "{destination / "results.bin"}"'})
                 request('quit')
                 process.wait(timeout=5)
@@ -326,13 +452,16 @@ def execute(destination, qemu, count):
 
 def validate_results(destination, functions, cases, inputs, subjects):
     results = (destination / 'results.bin').read_bytes()
-    assert len(results) == HEADER_BYTES + len(cases) * RECORD_BYTES
+    memory = memory_plan(destination)
+    stride = memory['record_bytes'] if memory is not None else RECORD_BYTES
+    assert len(results) == HEADER_BYTES + len(cases) * stride
+    memory_controls = validate_memory_controls(results) if memory is not None else None
     controls, trap_observations, status_deltas = {}, [], {}
     for index in range(len(cases)):
         input_offset = index * INPUT_STRIDE
         function_index = struct.unpack_from('<Q', inputs, input_offset)[0]
         initial = inputs[input_offset + 8:input_offset + 8 + STATE_BYTES]
-        record = results[HEADER_BYTES + index * RECORD_BYTES:HEADER_BYTES + (index + 1) * RECORD_BYTES]
+        record = results[HEADER_BYTES + index * stride:HEADER_BYTES + (index + 1) * stride]
         requested_fpcr, requested_fpsr = struct.unpack_from('<II', initial, 776)
         pre_fpcr, pre_fpsr = struct.unpack_from('<QQ', record, LAYOUT['pre_fpcr'])
         observed = {name: struct.unpack_from('<Q', record, offset)[0]
@@ -340,8 +469,11 @@ def validate_results(destination, functions, cases, inputs, subjects):
         assert pre_fpcr == requested_fpcr & QEMU_FPCR_MASK, (index, 'pre_fpcr')
         assert pre_fpsr == requested_fpsr & QEMU_FPSR_MASK, (index, 'pre_fpsr')
         op = operation(functions[function_index])
-        assert record[:248] == initial[:248], (index, 'all_gprs_unchanged')
-        assert observed['sp'] == struct.unpack_from('<Q', initial, 248)[0], (index, 'sp')
+        for register in range(31):
+            if memory is None or op['mode'] == 'offset' or register != op['rn']:
+                assert record[register * 8:register * 8 + 8] == initial[register * 8:register * 8 + 8], (index, 'unchanged_gpr', register)
+        if memory is None or op['mode'] == 'offset' or op['rn'] != 31:
+            assert observed['sp'] == struct.unpack_from('<Q', initial, 248)[0], (index, 'sp')
         initial_nzcv = struct.unpack_from('<I', initial, 256)[0]
         assert observed['spsr'] == (initial_nzcv & NZCV_MASK) | PSTATE_EL0T_MASKED, (index, 'spsr_unchanged')
         assert observed['fpcr'] == pre_fpcr, (index, 'fpcr_unchanged')
@@ -354,7 +486,15 @@ def validate_results(destination, functions, cases, inputs, subjects):
         assert observed['marker'] == COMPLETED_MARKER, (index, 'marker')
         op = operation(functions[function_index])
         word = integer(op['word'])
-        destination_register = op['d']
+        destination_register = op.get('d')
+        if memory is not None:
+            assert op['kind'] == 'structure_memory' and 1 <= op['total_bytes'] <= 64
+            assert observed['fpsr'] == pre_fpsr, (index, 'movement_fpsr')
+            destinations = {(op['rt'] + slot) % 32 for slot in range(op['runs'] * op['structures'])} if op['loading'] else set()
+            for register in set(range(32)) - destinations:
+                assert record[320 + register * 16:336 + register * 16] == initial[264 + register * 16:280 + register * 16], (index, 'non_destination_v', register)
+            controls.setdefault(str(requested_fpcr), set()).add(pre_fpcr)
+            continue
         for register in range(32):
             if op['output_kind'] != 'vector' or register != destination_register:
                 assert record[320 + register * 16:336 + register * 16] == initial[264 + register * 16:280 + register * 16], (index, 'non_destination_v', register)
@@ -376,7 +516,8 @@ def validate_results(destination, functions, cases, inputs, subjects):
             trap_observations.append({'case': index, 'function_index': function_index,
                                       'requested_fpcr': requested_fpcr, 'pre_fpcr': pre_fpcr,
                                       'post_fpcr': observed['fpcr'], 'classification': 'requested_trap_enables_raz_wi'})
-    return {'cpu_registers': dict(zip(CPU_REGISTERS, map(hex, struct.unpack_from('<9Q', results)))),
+    return {**({'memory_controls': memory_controls} if memory is not None else {}),
+            'cpu_registers': dict(zip(CPU_REGISTERS, map(hex, struct.unpack_from('<9Q', results)))),
             'fpcr_requested_readbacks': {key: sorted(value) for key, value in controls.items()},
             'trap_enable_readback_cases': trap_observations, 'observed_new_fpsr_masks': status_deltas}
 
@@ -402,7 +543,7 @@ def capture(prepared, directory, focus):
                    'cases': len(cases), 'functions': len(functions), 'cpu': CPU_MODEL,
                    'directory': str(destination.relative_to(ROOT)), **bindings, **observations,
                    'input_stride': INPUT_STRIDE, 'state_bytes': STATE_BYTES,
-                   'results_header_bytes': HEADER_BYTES, 'results_stride': RECORD_BYTES,
+                   'results_header_bytes': HEADER_BYTES, 'results_stride': bindings.get('memory_plan', {}).get('record_bytes', RECORD_BYTES),
                    'snapshot_layout': LAYOUT, 'files': files,
                    'checks': ['Each exact original SIMD instruction runs at EL0t with all 31 GPRs, SP_EL0, 32 full vectors, NZCV, FPCR and FPSR restored from the retained input.',
                               'A genuine SVC follows the subject; the EL1 handler snapshots all GPRs before transport clobbers and all vectors before transport resumes.',
@@ -411,7 +552,7 @@ def capture(prepared, directory, focus):
                    'limits': ['Original QEMU emulator observations only; no native execution, mathematical result-model validation, Apple hardware proof, or performance credit.',
                               'Canonical function identity is original SIMD word plus RET through the unused per-function return register. This EL0 fixture executes the unchanged SIMD word followed by SVC; the original RET is not executed.',
                               'QEMU trap enables are RAZ/WI. Exact requested and actual controls are retained; no FP trap-delivery credit is claimed.',
-                              'State.reserved is retained input metadata, not an architectural register; general guest RAM effects are not applicable to these register-only subjects.',
+                              ('State.reserved is retained input metadata, not an architectural register. The bounded memory extension retains every8192 RAM byte after every subject; result-model equality belongs to the shared memory runner.' if 'memory_plan' in bindings else 'State.reserved is retained input metadata, not an architectural register; general guest RAM effects are not applicable to these register-only subjects.'),
                               'EL2/EL3/security, streaming modes and access-disabled execution are outside this fixture.']}
         write_new(receipt_path, json_bytes(receipt))
     pointer = {'kind': focus + '_original_oracle_capture_pointer',

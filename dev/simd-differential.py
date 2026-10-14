@@ -41,6 +41,7 @@ from differential import (ROOT, BASE, MASK, State, states, executable, initializ
 from evidence import retain_native_evidence, write_evidence
 from simd_fixtures import FAMILIES as FIXTURE_FAMILIES
 import simd_fixture_runner
+import simd_memory_runner
 
 RET = 0xd65f03c0
 STOP = 0x220000100000
@@ -409,7 +410,9 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        if batches[0].get('cohort') in FIXTURE_FAMILIES:
+        if batches[0].get('cohort') == simd_memory_runner.FOCUS:
+            result = simd_memory_runner.execute_batches(sys.modules[__name__], batches)
+        elif batches[0].get('cohort') in FIXTURE_FAMILIES:
             result = simd_fixture_runner.execute_batches(sys.modules[__name__], batches)
         elif batches[0].get('cohort') == 'scalar_numerical':
             result = execute_numerical_batches(batches)
@@ -7419,7 +7422,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, *FIXTURE_FAMILIES, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS, COMPLEX_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[simd_memory_runner.FOCUS, *REGISTER_COHORTS, *FIXTURE_FAMILIES, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS, COMPLEX_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--fixture-oracle', type=Path, help='Full-frame primary original pointer for an integer/crypto fixture family')
     parser.add_argument('--prepare-fixture-oracle', type=Path, help='Freeze original-only fixture inputs in this directory')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
@@ -7444,6 +7447,9 @@ def main():
     parser.add_argument('--refinement-oracle', type=Path, default=REFINEMENT_NUMERICAL_ORACLE)
     arguments = parser.parse_args()
     if arguments.prepare_fixture_oracle:
+        if arguments.focus == simd_memory_runner.FOCUS:
+            print(json.dumps(simd_memory_runner.prepare_original(sys.modules[__name__], arguments.prepare_fixture_oracle), indent=2))
+            return
         if arguments.focus not in FIXTURE_FAMILIES:
             parser.error('--prepare-fixture-oracle requires an integer/crypto fixture focus')
         prepared = simd_fixture_runner.prepare_original(sys.modules[__name__],
@@ -7453,6 +7459,10 @@ def main():
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
+    if arguments.focus == simd_memory_runner.FOCUS:
+        _, report = simd_memory_runner.run(sys.modules[__name__], cli, arguments.fixture_oracle)
+        print(json.dumps(report, indent=2))
+        return
     if arguments.focus in FIXTURE_FAMILIES:
         _, report = simd_fixture_runner.run(sys.modules[__name__], cli, arguments.focus, arguments.fixture_oracle)
         print(json.dumps(report, indent=2))

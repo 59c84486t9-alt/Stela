@@ -34,6 +34,7 @@ mod sha32;
 mod sha512;
 mod shifts;
 mod sqrt;
+mod structure_memory;
 mod widening;
 
 fn vector_offset(vector: u8) -> u32 {
@@ -294,6 +295,7 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
         Operand::MemoryRegisterOffset(ref operand) => memory::emit_register_offset(code, operand),
+        Operand::StructureMemory(ref operand) => structure_memory::emit(code, operand, target),
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),

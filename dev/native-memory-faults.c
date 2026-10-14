@@ -21,6 +21,7 @@ _Static_assert(offsetof(struct guest_state, fpsr) == 780, "FPSR ABI offset");
 static struct guest_state state;
 static unsigned char *ram;
 static size_t page_size, observed_bytes;
+enum { MAX_STRUCTURE_TRANSFER_BYTES = 64 };
 
 static void output(const void *data, size_t length) {
     const unsigned char *bytes = data;
@@ -103,6 +104,14 @@ int main(int argc, char **argv) {
                 argv[5][0] < '0' || argv[5][0] > '9') return 14;
             distance = (unsigned)value;
         }
+        target -= distance;
+    } else if (!strcmp(argv[2], "structure_crossing")) {
+        if (argc != 6) return 13;
+        char *end = NULL;
+        errno = 0;
+        unsigned long distance = strtoul(argv[5], &end, 10);
+        if (errno || !end || *end || end == argv[5] || distance < 1 || distance > MAX_STRUCTURE_TRANSFER_BYTES ||
+            argv[5][0] < '0' || argv[5][0] > '9') return 14;
         target -= distance;
     } else if (!strcmp(argv[2], "pair_second") || !strcmp(argv[2], "pair_readonly")) {
         if (argc != 6) return 13;
