@@ -65,6 +65,8 @@ MEMORY_CONTROLS = {'SCTLR_EL1': MEMORY_SCTLR, 'TCR_EL1': MEMORY_TCR,
                    'MAIR_EL1': 0xff, 'TTBR0_EL1': MEMORY_L1_ADDRESS}
 MEMORY_CONTROL_HEADER_OFFSET = len(CPU_REGISTERS) * 8
 ELF_EXECINSTR = 1 << 2
+ATOMIC_FEATURE_HEADER_OFFSET = MEMORY_CONTROL_HEADER_OFFSET + len(MEMORY_CONTROLS) * 8
+ATOMIC_FOCUS = 'atomic_memory'
 LAYOUT = {'x': 0, 'sp': 248, 'spsr': 256, 'fpcr': 264, 'fpsr': 272,
           'esr': 280, 'elr': 288, 'current_el': 296, 'cpacr': 304,
           'marker': 312, 'v': 320, 'pre_fpcr': 832, 'pre_fpsr': 840}
@@ -212,6 +214,21 @@ def validate_memory_controls(results):
     return {name: hex(value) for name, value in actual.items()}
 
 
+
+def validate_atomic_features(results):
+    registers = dict(zip(CPU_REGISTERS, struct.unpack_from('<9Q', results)))
+    mmfr2 = struct.unpack_from('<Q', results, ATOMIC_FEATURE_HEADER_OFFSET)[0]
+    fields = {'LSE_Atomic': registers['ID_AA64ISAR0_EL1'] >> 20 & 15,
+              'LRCPC': registers['ID_AA64ISAR1_EL1'] >> 20 & 15, 'LSE2_AT': mmfr2 >> 32 & 15}
+    if not (fields['LSE_Atomic'] in (2, 3) and fields['LRCPC'] in (1, 2, 3) and fields['LSE2_AT'] == 1):
+        raise AssertionError('Original atomic feature profile unavailable: ' + str(fields))
+    validate_memory_controls(results)
+    if MEMORY_SCTLR & ((1 << 1) | (1 << 6)):
+        raise AssertionError('Atomic original requires A=0,nAA=0')
+    return {'fields': fields, 'ID_AA64MMFR2_EL1': hex(mmfr2),
+            'profile': 'EL0_Normal_WB_LSE2_A0_nAA0_SCA16',
+            'limits': 'Feature and MMU controls are actual readbacks. The original implementation SCA granule is not inferred from feature ID alone. SA0 remains0; native SP policy faults are separate.'}
+
 def validate_memory_text(sections):
     for section in sections:
         if section[2] & ELF_EXECINSTR and section[5]:
@@ -219,7 +236,7 @@ def validate_memory_text(sections):
                 raise AssertionError('Memory original executable section exceeds read-only code mapping')
 
 
-def assembly(words, count, memory=None):
+def assembly(words, count, memory=None, focus=None):
     lines = ['.arch armv8.7-a+fp16+sve', '.text', '.global _start', '_start:',
              'adrp x0,vectors', 'add x0,x0,:lo12:vectors', 'msr vbar_el1,x0', 'isb']
     lines += mov('x0', FP_ACCESS_ENABLED) + ['msr cpacr_el1,x0', 'isb']
@@ -231,6 +248,10 @@ def assembly(words, count, memory=None):
     if memory is not None:
         for index, register in enumerate(MEMORY_CONTROLS):
             lines += [f'mrs x0,{register}', f'str x0,[x1,#{MEMORY_CONTROL_HEADER_OFFSET + index * 8}]']
+    if focus == ATOMIC_FOCUS:
+        if memory is None:
+            raise AssertionError('Atomic original requires Normal-memory controls')
+        lines += ['mrs x0,ID_AA64MMFR2_EL1', f'str x0,[x1,#{ATOMIC_FEATURE_HEADER_OFFSET}]']
     lines += mov('x0', SCRATCH_ADDRESS)
     for offset, value in ((0, INPUT_ADDRESS), (8, OUTPUT_ADDRESS), (16, count)):
         lines += mov('x1', value) + [f'str x1,[x0,#{offset}]']
@@ -351,7 +372,7 @@ def prepare(directory, focus, source_bindings):
             raise AssertionError("Frozen original source binding changed: " + name)
     files, functions, cases, inputs, words = load_corpus(directory)
     memory = memory_plan(directory)
-    source = assembly(words, len(cases), memory).encode()
+    source = assembly(words, len(cases), memory, focus if focus == ATOMIC_FOCUS else None).encode()
     qemu, clang, lld, bindings = tools_and_bindings()
     bindings['focus'] = focus
     if memory is not None:
@@ -385,21 +406,29 @@ def prepare(directory, focus, source_bindings):
 
 
 def execute(destination, qemu, count):
+    memory = memory_plan(destination)
+    command = [str(qemu), '-machine', 'virt,secure=off,virtualization=off', '-cpu', CPU_MODEL,
+               '-accel', 'tcg', '-m', MEMORY_QEMU_RAM_SIZE if memory is not None else '512M',
+               '-display', 'none', '-serial', 'none',
+               '-monitor', 'none', '-nic', 'none', '-kernel', str(destination / 'guest.elf'),
+               '-device', f'loader,file={destination / "inputs.bin"},addr={INPUT_ADDRESS:#x},force-raw=on']
+    if memory is not None:
+        command += ['-device', f'loader,file={destination / "memory.bin"},addr={MEMORY_TEMPLATE_ADDRESS:#x},force-raw=on']
+    size = HEADER_BYTES + count * (memory['record_bytes'] if memory is not None else RECORD_BYTES)
+    execute_transport(destination, command, size)
+
+
+def execute_transport(destination, command, output_size, timeout=60):
+    """Run a bounded observer with the shared marker/QMP/raw-memory transport."""
     with tempfile.TemporaryDirectory(prefix='stela-simd-original-el0-') as temporary:
         endpoint = Path(temporary) / 'qmp'
-        memory = memory_plan(destination)
-        command = [str(qemu), '-machine', 'virt,secure=off,virtualization=off', '-cpu', CPU_MODEL,
-                   '-accel', 'tcg', '-m', MEMORY_QEMU_RAM_SIZE if memory is not None else '512M',
-                   '-display', 'none', '-serial', 'none',
-                   '-monitor', 'none', '-nic', 'none', '-kernel', str(destination / 'guest.elf'),
-                   '-device', f'loader,file={destination / "inputs.bin"},addr={INPUT_ADDRESS:#x},force-raw=on',
-                   '-qmp', f'unix:{endpoint},server=on,wait=off', '-S']
-        if memory is not None:
-            command += ['-device', f'loader,file={destination / "memory.bin"},addr={MEMORY_TEMPLATE_ADDRESS:#x},force-raw=on']
+        command = [*command, '-qmp', f'unix:{endpoint},server=on,wait=off', '-S']
         write_new(destination / 'qemu-command.json', json_bytes(command))
         with (destination / 'stderr.log').open('xb') as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
             stream = connection = None
+            request = None
+            marker = None
             try:
                 deadline = time.monotonic() + 15
                 while not endpoint.exists():
@@ -427,7 +456,7 @@ def execute(destination, qemu, count):
 
                 request('qmp_capabilities')
                 request('cont')
-                deadline = time.monotonic() + 60
+                deadline = time.monotonic() + timeout
                 while True:
                     marker = request('human-monitor-command', {'command-line': f'xp /1gx {MARKER_ADDRESS:#x}'})
                     if marker.strip().endswith(f'{COMPLETED_MARKER:#018x}'):
@@ -436,10 +465,21 @@ def execute(destination, qemu, count):
                         raise AssertionError(f'Original oracle timeout/failure: {marker}')
                     time.sleep(0.02)
                 request('stop')
-                size = HEADER_BYTES + count * (memory['record_bytes'] if memory is not None else RECORD_BYTES)
-                request('human-monitor-command', {'command-line': f'pmemsave {OUTPUT_ADDRESS - HEADER_BYTES:#x} {size} "{destination / "results.bin"}"'})
+                request('human-monitor-command', {'command-line': f'pmemsave {OUTPUT_ADDRESS - HEADER_BYTES:#x} {output_size} "{destination / "results.bin"}"'})
                 request('quit')
                 process.wait(timeout=5)
+            except Exception as error:
+                failure = {'error': repr(error), 'last_marker': marker,
+                           'output_size': output_size, 'partial_dump_error': None}
+                if request is not None and process.poll() is None:
+                    try:
+                        request('stop')
+                        request('human-monitor-command', {'command-line':
+                            f'pmemsave {OUTPUT_ADDRESS - HEADER_BYTES:#x} {output_size} "{destination / "results.partial.bin"}"'})
+                    except Exception as dump_error:
+                        failure['partial_dump_error'] = repr(dump_error)
+                write_new(destination / 'failure.json', json_bytes(failure))
+                raise
             finally:
                 if stream is not None:
                     stream.close()
@@ -458,7 +498,7 @@ def memory_destinations(op):
         gprs = [op['rn']] if op['mode'] != 'offset' and op['rn'] != 31 else []
         vectors = [(op['rt'] + slot) % 32 for slot in range(op['runs'] * op['structures'])] if op['loading'] else []
         return set(gprs), set(vectors), op['mode'] != 'offset' and op['rn'] == 31
-    if op['kind'] != 'ordinary_memory' or not 0 <= op['total_bytes'] <= 32:
+    if op['kind'] not in ('ordinary_memory', ATOMIC_FOCUS) or not 0 <= op['total_bytes'] <= (8 if op['kind'] == ATOMIC_FOCUS else 32):
         raise AssertionError('Invalid memory observer family/footprint')
     destinations = []
     for name, bound in (('written_gprs', 31), ('written_vectors', 32)):
@@ -470,7 +510,7 @@ def memory_destinations(op):
     return *destinations, False
 
 
-def validate_results(destination, functions, cases, inputs, subjects):
+def validate_results(destination, functions, cases, inputs, subjects, focus=None):
     results = (destination / 'results.bin').read_bytes()
     memory = memory_plan(destination)
     stride = memory['record_bytes'] if memory is not None else RECORD_BYTES
@@ -535,7 +575,8 @@ def validate_results(destination, functions, cases, inputs, subjects):
             trap_observations.append({'case': index, 'function_index': function_index,
                                       'requested_fpcr': requested_fpcr, 'pre_fpcr': pre_fpcr,
                                       'post_fpcr': observed['fpcr'], 'classification': 'requested_trap_enables_raz_wi'})
-    return {**({'memory_controls': memory_controls} if memory is not None else {}),
+    return {**({'atomic_features': validate_atomic_features(results)} if focus == ATOMIC_FOCUS else {}),
+            **({'memory_controls': memory_controls} if memory is not None else {}),
             'cpu_registers': dict(zip(CPU_REGISTERS, map(hex, struct.unpack_from('<9Q', results)))),
             'fpcr_requested_readbacks': {key: sorted(value) for key, value in controls.items()},
             'trap_enable_readback_cases': trap_observations, 'observed_new_fpsr_masks': status_deltas}
@@ -554,7 +595,7 @@ def capture(prepared, directory, focus):
     else:
         if not (destination / 'results.bin').exists():
             execute(destination, qemu, len(cases))
-        observations = validate_results(destination, functions, cases, inputs, subjects)
+        observations = validate_results(destination, functions, cases, inputs, subjects, focus)
         files = {path.name: {'sha256': sha(path.read_bytes()), 'bytes': path.stat().st_size}
                  for path in sorted(destination.iterdir()) if path.is_file() and path.name != 'receipt.json'}
         receipt = {'kind': focus + '_original_el0_full_frame_qemu',
@@ -574,8 +615,13 @@ def capture(prepared, directory, focus):
                               ('State.reserved is retained input metadata, not an architectural register. The bounded memory extension retains every8192 RAM byte after every subject; result-model equality belongs to the shared memory runner.' if 'memory_plan' in bindings else 'State.reserved is retained input metadata, not an architectural register; general guest RAM effects are not applicable to these register-only subjects.'),
                               'EL2/EL3/security, streaming modes and access-disabled execution are outside this fixture.']}
         write_new(receipt_path, json_bytes(receipt))
+    publish_pointer(directory, receipt_path, focus, receipt)
+    return receipt_path
+
+
+def publish_pointer(directory, receipt_path, focus, receipt):
     pointer = {'kind': focus + '_original_oracle_capture_pointer',
-               'directory': str(destination.relative_to(ROOT)),
+               'directory': str(receipt_path.parent.relative_to(ROOT)),
                'receipt': {'path': str(receipt_path.relative_to(ROOT)),
                            'sha256': sha(receipt_path.read_bytes()), 'bytes': receipt_path.stat().st_size},
                'files': receipt['files']}
@@ -588,7 +634,6 @@ def capture(prepared, directory, focus):
     next_pointer = directory / 'receipt.next.json'
     next_pointer.write_bytes(json_bytes(pointer))
     os.replace(next_pointer, pointer_path)
-    return receipt_path
 
 
 if __name__ == '__main__':
@@ -601,6 +646,18 @@ if __name__ == '__main__':
     group.add_argument('--capture', action='store_true')
     arguments = parser.parse_args()
     source_bindings = json.loads(arguments.source_bindings.read_bytes())
+    if arguments.focus == 'atomic_memory_smp':
+        import simd_atomic_original as smp
+        prepared = smp.prepare(arguments.directory, smp.default_pairs(), source_bindings)
+        if arguments.capture:
+            path = smp.capture(prepared, arguments.directory)
+            publish_pointer(arguments.directory.resolve(), path, arguments.focus, json.loads(path.read_bytes()))
+            print(json.dumps({'receipt': str(path), 'sha256': sha(path.read_bytes())}))
+        else:
+            print(json.dumps({'prepared': str(prepared[0]), 'pairs': len(prepared[3]),
+                              'trials': sum(pair['trials'] for pair in prepared[3]),
+                              'guest_elf_sha256': sha((prepared[0] / 'guest.elf').read_bytes())}))
+        raise SystemExit(0)
     prepared = prepare(arguments.directory, arguments.focus, source_bindings)
     if arguments.capture:
         path = capture(prepared, arguments.directory, arguments.focus)

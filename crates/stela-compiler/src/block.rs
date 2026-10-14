@@ -791,6 +791,10 @@ pub fn compile_for_target(
     target: crate::TargetCpu,
 ) -> Result<CompiledBlock, CompileError> {
     let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+    for instruction in &parsed.instructions {
+        crate::x86_64::validate_target(instruction, target)
+            .map_err(|error| CompileError(format!("{error:?}")))?;
+    }
     let native = crate::x86_64::block::emit_for_target(
         &parsed.instructions,
         parsed.terminal.as_ref(),

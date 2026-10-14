@@ -12,13 +12,440 @@ from contextlib import nullcontext
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import ROOT, BASE, State, seed_extended_state
-from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory
+from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory, atomic_memory
 import simd_fixture_runner as runner
 import simd_original
 import simd_memory_runner
 import hashlib
 
 engine = importlib.import_module('simd-differential')
+
+class AtomicMemoryFixtureTests(unittest.TestCase):
+    def test_exact173_forms_register_roles_and_source_alias_decode(self):
+        family = atomic_memory
+        operations = family.functions()
+        self.assertEqual(len(family.CANONICAL_FORMS), 173)
+        self.assertEqual(len(operations), len({op['word'] for op in operations}))
+        source = b''.join(struct.pack('<II', op['word'], engine.RET) for op in operations)
+        validation = family.validate_source_words(source, [{'operations': [op]} for op in operations], {op['name'] for op in operations})
+        self.assertEqual(validation['capstone_decode_fallback_words'], 0)
+        self.assertEqual(len(validation['decoded_store_aliases']), 256)
+        for canonical in family.CANONICAL_FORMS:
+            selected = [op for op in operations if op['canonical_id'] == canonical]
+            if selected[0]['layout'] == 'barrier':
+                self.assertEqual({op['option'] for op in selected}, set(range(16)))
+                continue
+            self.assertEqual({op['rn'] for op in selected}, set(range(32)))
+            self.assertEqual({op['rt'] for op in selected}, set(range(32)))
+            if selected[0]['layout'] in ('cas', 'rmw'):
+                self.assertEqual({op['rs'] for op in selected}, set(range(32)))
+                for role in ('rs', 'rt', 'rn'):
+                    self.assertTrue(any(op[role] == 31 for op in selected))
+            for op in selected:
+                self.assertEqual(op['word'] >> 5 & 31, op['rn'])
+                self.assertEqual(op['word'] & 31, op['rt'])
+
+    def test_bounded_full_corpus_controls_flags_and_baseline_subset(self):
+        family = atomic_memory
+        operations, cases = family.corpus()
+        self.assertLess(len(operations), 10000)
+        self.assertLess(len(cases), 20000)
+        flags = {}
+        for case in cases:
+            op = operations[case['function']]
+            initial = State.from_buffer_copy(case['initial'])
+            expected, ram, fault = family.expected(op, initial, family.memory_template())
+            self.assertIsNone(fault, (case, op))
+            self.assertEqual(len(case['initial']), 784)
+            self.assertEqual(len(ram), 8192)
+            self.assertEqual((expected.nzcv, expected.reserved, expected.fpcr, expected.fpsr),
+                             (initial.nzcv, initial.reserved, initial.fpcr, initial.fpsr))
+            flags.setdefault(op['canonical_id'], set()).add(initial.nzcv >> 28)
+        self.assertTrue(all(values == set(range(16)) for values in flags.values()))
+        admitted = [op for op in operations if family.supported_on_profile(op, 'baseline')]
+        self.assertEqual(len(admitted), 8292)
+        self.assertEqual({op['canonical_id'] for op in admitted}, set(family.CANONICAL_FORMS))
+        excluded = [op for op in operations if not family.supported_on_profile(op, 'baseline')]
+        self.assertEqual(len(excluded), 240)
+        self.assertTrue(all(op['operation'] in ('ldar', 'ldapr') and op['rn'] != 31 and op['element_bytes'] > 1 for op in excluded))
+
+    def test_CAS_stages_alias_inputs_and_returns_old_without_flags(self):
+        family = atomic_memory
+        for width in family.WIDTHS:
+            mask = (1 << (width * 8)) - 1
+            for rs, rt, rn in ((0, 1, 5), (0, 0, 5), (5, 1, 5), (0, 5, 5), (5, 5, 5), (31, 31, 31)):
+                op = family.operation('cas', width, 'acquire_release', rs, rt, rn)
+                position = family.address_match_position(width) if rs == rn != 31 else family.edge_positions(width)[0]
+                initial = family.initial_state(op, 4, position, operand=mask, compare=0)
+                old = int.from_bytes(family.memory_template()[position:position + width], 'little')
+                state, ram, fault = family.expected(op, initial, family.memory_template())
+                self.assertIsNone(fault)
+                expected = State.from_buffer_copy(initial)
+                if rs != 31: expected.x[rs] = old
+                self.assertEqual(bytes(state), bytes(expected))
+                compare = 0 if rs == 31 else initial.x[rs] & mask
+                value = (0 if rt == 31 else initial.x[rt] & mask) if compare == old else old
+                self.assertEqual(ram[position:position + width], value.to_bytes(width, 'little'))
+                self.assertEqual(ram[:position], family.memory_template()[:position])
+
+    def test_narrow_signed_minmax_and_unchanged_RMW_write_permission(self):
+        family = atomic_memory
+        expected = {'add': 129, 'clear': 128, 'xor': 129, 'set': 129,
+                    'signed_max': 1, 'signed_min': 128, 'unsigned_max': 128, 'unsigned_min': 1, 'swap': 1}
+        for kind, value in expected.items():
+            op = family.operation(kind, 1)
+            state = family.initial_state(op, 1, 0, operand=0xffff000000000001)
+            final, ram, fault = family.expected(op, state, b'\x80' + bytes(31))
+            self.assertIsNone(fault)
+            self.assertEqual(final.x[1], 128)
+            self.assertEqual(ram[0], value)
+            _, ram, fault = family.expected(op, state, b'\x80' + bytes(31), readonly=True)
+            self.assertEqual(fault['kind'], 'memory')
+            self.assertEqual(ram, b'\x80' + bytes(31))
+        for width in (1, 2, 4):
+            mask = (1 << (8 * width)) - 1
+            self.assertEqual(family.rmw_value('add', mask, 1, width), 0)
+            self.assertEqual(family.rmw_value('signed_max', 1 << (8 * width - 1), 1, width), 1)
+
+    def test_SCA16_SP_and_failed_CAS_permissions_precede_effects(self):
+        family = atomic_memory
+        for width in family.WIDTHS:
+            for offset in range(16):
+                op = family.operation('add', width)
+                initial = family.initial_state(op, 0, offset)
+                state, ram, fault = family.expected(op, initial, bytes(64))
+                self.assertEqual(fault is None, offset + width <= 16)
+                if fault:
+                    self.assertEqual(fault['kind'], 'sca_alignment')
+                    self.assertEqual(bytes(state), bytes(initial))
+                    self.assertEqual(ram, bytes(64))
+            op = family.operation('cas', width)
+            initial = family.initial_state(op, 1, 0, operand=0, compare=1)
+            state, ram, fault = family.expected(op, initial, bytes(64), readonly=True)
+            self.assertEqual(fault['kind'], 'memory')
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(ram, bytes(64))
+        op = family.operation('add', 8, rn=31)
+        initial = family.initial_state(op, 2, 0)
+        initial.sp += 15
+        _, _, fault = family.expected(op, initial, bytes(64), accessible=0)
+        self.assertEqual(fault['kind'], 'sp_alignment')
+
+    def test_atomic_feature_header_preserves_default_observer_identity(self):
+        default = simd_original.assembly([0x4e284820, 0x0e005820], 2)
+        self.assertEqual(hashlib.sha256(default.encode()).hexdigest(), 'fcc2fc835b22f0352e553d497b88ef5c67d7e8e24490bdb695960dfcfeab87c0')
+        header = bytearray(1024)
+        registers = [0] * 9
+        registers[3], registers[8] = 1 << 20, 2 << 20
+        struct.pack_into('<9Q', header, 0, *registers)
+        struct.pack_into('<4Q', header, simd_original.MEMORY_CONTROL_HEADER_OFFSET, *simd_original.MEMORY_CONTROLS.values())
+        struct.pack_into('<Q', header, simd_original.ATOMIC_FEATURE_HEADER_OFFSET, 1 << 32)
+        result = simd_original.validate_atomic_features(header)
+        self.assertEqual(result['fields'], {'LSE_Atomic': 2, 'LRCPC': 1, 'LSE2_AT': 1})
+        for offset in (3 * 8, 8 * 8, simd_original.ATOMIC_FEATURE_HEADER_OFFSET):
+            changed = bytearray(header)
+            changed[offset:offset + 8] = bytes(8)
+            with self.assertRaises(AssertionError): simd_original.validate_atomic_features(changed)
+        memory = {'ram_address': atomic_memory.RAM_ADDRESS, 'ram_bytes': 8192, 'record_bytes': 9216}
+        assembly = simd_original.assembly([atomic_memory.operation()['word']], 1, memory, 'atomic_memory')
+        self.assertIn('mrs x0,ID_AA64MMFR2_EL1\nstr x0,[x1,#104]', assembly)
+        self.assertNotIn('ID_AA64MMFR2_EL1', simd_original.assembly([atomic_memory.operation()['word']], 1, memory))
+
+    def test_atomic_declared_destinations_and_fixed_concurrency_plan(self):
+        family = atomic_memory
+        self.assertEqual(simd_original.memory_destinations(family.operation('cas', rs=7)), ({7}, set(), False))
+        self.assertEqual(simd_original.memory_destinations(family.operation('add', rt=31)), (set(), set(), False))
+        for case in family.concurrency_cases():
+            data = family.concurrency_plan(case, list(range(case['threads'])))
+            self.assertEqual(len(data), 11392)
+            self.assertEqual(struct.unpack_from('<Q', data)[0], 0x314e414c504d5441)
+            self.assertEqual(data[64:848], case['initial'][0])
+            self.assertEqual(data[-8192:], case['memory'])
+            self.assertLessEqual(case['threads'], 4)
+            self.assertLessEqual(case['iterations'], 256)
+            for program in case['programs']:
+                self.assertTrue(all(op['rn'] in (5, 6) for op in program if op['layout'] != 'barrier'))
+
+    def test_bounded_linearization_uses_full_states_and_final_RAM(self):
+        family = atomic_memory
+        op = family.operation('add', 8)
+        memory, history = bytes(64), []
+        for index in range(2):
+            initial = family.initial_state(op, index, 0, operand=1)
+            final, memory, _ = family.expected(op, initial, memory)
+            history.append({'operation': op, 'initial_state_hex': bytes(initial).hex(),
+                            'final_state_hex': bytes(final).hex(), 'begin': index * 2, 'end': index * 2 + 1})
+        self.assertTrue(family.linearization_allowed(history, bytes(64), final_ram=memory))
+        self.assertFalse(family.linearization_allowed(history, bytes(64), final_ram=bytes(64)))
+        damaged = [dict(row) for row in history]
+        state = State.from_buffer_copy(bytes.fromhex(damaged[1]['final_state_hex']))
+        state.nzcv ^= 1 << 28
+        damaged[1]['final_state_hex'] = bytes(state).hex()
+        self.assertFalse(family.linearization_allowed(damaged, bytes(64)))
+        with self.assertRaises(ValueError): family.linearization_allowed(history * 9, bytes(64))
+
+    def test_source_SCA_fault_and_snapshot_fault_addresses_remain_distinct(self):
+        family = atomic_memory
+        op = family.operation('ldar', 4)
+        initial = family.initial_state(op, 0, 5)
+        source, _, fault = family.expected(op, initial, bytes(64), accessible=0)
+        self.assertEqual(fault['kind'], 'memory')
+        self.assertEqual(fault['address'], family.RAM_ADDRESS + 5)
+        self.assertEqual((initial.x[5] & ~15), family.RAM_ADDRESS)
+        self.assertEqual(bytes(source), bytes(initial))
+        initial.x[5] = family.RAM_ADDRESS + 15
+        _, _, fault = family.expected(op, initial, bytes(64), accessible=0)
+        self.assertEqual(fault['kind'], 'sca_alignment')
+
+    def test_cross8_ordered_reader_writer_history_is_exact_byte_atomic(self):
+        family = atomic_memory
+        selected = [case for case in family.concurrency_cases() if case['id'].startswith('cross8_')]
+        self.assertEqual(len(selected), 6)
+        for case in selected:
+            writer, reader = [program[0] for program in case['programs']]
+            initial = [family.relocate_state(raw, family.RAM_ADDRESS) for raw in case['initial']]
+            self.assertGreater((initial[0].x[5] & 7) + case['width'], 8)
+            history, ram = [], case['memory']
+            for index, op in ((0, writer), (1, reader)):
+                final, ram, fault = family.expected(op, initial[index], ram)
+                self.assertIsNone(fault)
+                history.append({'operation': op, 'initial_state_hex': bytes(initial[index]).hex(),
+                                'final_state_hex': bytes(final).hex(), 'begin': index, 'end': index + 2})
+            self.assertTrue(family.linearization_allowed(history, case['memory'], final_ram=ram))
+            damaged = [dict(row) for row in history]
+            final = State.from_buffer_copy(bytes.fromhex(damaged[1]['final_state_hex']))
+            final.x[1] ^= 0x100
+            damaged[1]['final_state_hex'] = bytes(final).hex()
+            self.assertFalse(family.linearization_allowed(damaged, case['memory'], final_ram=ram))
+            self.assertFalse(family.supported_on_profile(reader, 'baseline'))
+
+    def test_litmus_ledger_binding_rejects_program_memory_value_and_base_drift(self):
+        family = atomic_memory
+        cases = [case for case in family.concurrency_cases() if case['kind'] == 4]
+        model = {'program_words': {case['allowed_outcomes']: [[op['word'] for op in program] for program in case['programs']] for case in cases}}
+        for case in cases:
+            family.validate_litmus_case(case, model)
+            with self.assertRaises(AssertionError): family.validate_litmus_case({**case, 'memory': b'\x01' + case['memory'][1:]}, model)
+            for register in (0, 5, 6):
+                state = State.from_buffer_copy(case['initial'][0])
+                state.x[register] ^= 1
+                with self.assertRaises(AssertionError): family.validate_litmus_case({**case, 'initial': [bytes(state), case['initial'][1]]}, model)
+            changed = {'program_words': {key: [list(program) for program in programs] for key, programs in model['program_words'].items()}}
+            changed['program_words'][case['allowed_outcomes']][0][0] ^= 1
+            with self.assertRaises(AssertionError): family.validate_litmus_case(case, changed)
+
+    def test_original_fault_opt_in_completion_and_error_framing_defaults_strict(self):
+        from unittest.mock import Mock, call
+        from unicorn import UcError, UC_ERR_EXCEPTION
+        spec = importlib.util.spec_from_file_location('fixture_atomic_original_faults', ROOT / 'dev/memory-faults.py')
+        faults = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(faults)
+        initial = State()
+        machine = Mock()
+        machine.mem_read.return_value = b'\xa5' * 4096
+        machine.reg_read.return_value = BASE + 4
+        source = struct.pack('<II', atomic_memory.operation()['word'], engine.RET)
+        with patch.object(faults, 'Uc', return_value=machine), patch.object(faults, 'initialize_arm'), patch.object(faults, 'capture_arm', return_value=initial):
+            with self.assertRaises(AssertionError): faults.arm_fault(source, initial, 0x8000, 4096, False)
+            machine.ctl_set_cpu_model.assert_not_called()
+            machine.reset_mock()
+            result = faults.arm_fault(source, initial, 0x8000, 4096, False, allow_completion=True, retain_error=True,
+                                      cpu_model=faults.arm.UC_CPU_ARM64_MAX)
+            self.assertEqual(machine.mock_calls[0], call.ctl_set_cpu_model(faults.arm.UC_CPU_ARM64_MAX))
+            self.assertEqual(machine.mock_calls[1], call.mem_map(BASE // 4096 * 4096, 0x10000))
+            self.assertEqual(result[3], {'completed': True, 'error': None})
+            machine.emu_start.side_effect = UcError(UC_ERR_EXCEPTION)
+            result = faults.arm_fault(source, initial, 0x8000, 4096, False, allow_completion=True, retain_error=True)
+            self.assertFalse(result[3]['completed'])
+            self.assertEqual(result[3]['error']['errno'], UC_ERR_EXCEPTION)
+            self.assertEqual(result[3]['error']['pc'], BASE + 4)
+            self.assertEqual(len(result[1]), 4096)
+
+    def test_atomic_oracle_review_validates_retained_source_and_witness_identities(self):
+        root = ROOT / '.stela'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as temporary:
+            directory = Path(temporary)
+            artifact = directory / 'source-and-witness.bin'
+            artifact.write_bytes(b'retained-source-and-witness')
+            identity = {'path': str(artifact.relative_to(ROOT)), 'bytes': artifact.stat().st_size,
+                        'sha256': engine.digest(artifact.read_bytes())}
+            receipt_path = directory / 'review.json'
+            receipt = {'kind': 'reviewed_unicorn_2_1_4_narrow_signed_atomic_minmax_limitation', 'passed': True,
+                'classification': {'operations': ['signed_min', 'signed_max'], 'widths': [1, 2, 4]},
+                'required_control_readbacks': {'ISAR0': 2 << 20}, 'source_files': [identity],
+                'witness': identity, 'witness_files': [identity]}
+            receipt_path.write_bytes(simd_original.json_bytes(receipt))
+            with patch.object(simd_memory_runner, 'ATOMIC_ORACLE_REVIEW', receipt_path):
+                actual, binding = simd_memory_runner.atomic_oracle_review(engine)
+                self.assertEqual(actual, receipt)
+                self.assertEqual(binding['sha256'], engine.digest(receipt_path.read_bytes()))
+                artifact.write_bytes(b'changed-source-and-witness')
+                with self.assertRaises(AssertionError): simd_memory_runner.atomic_oracle_review(engine)
+                receipt_path.write_bytes(simd_original.json_bytes({**receipt, 'passed': False}))
+                with self.assertRaises(AssertionError): simd_memory_runner.atomic_oracle_review(engine)
+
+    def test_signed_narrow_oracle_defect_requires_exact_scope_and_complete_effects(self):
+        review = {'engine_version': 'reviewed-version', 'installed_library': {'sha256': 'reviewed-library'},
+                  'required_control_readbacks': {'ISAR0': 2 << 20, 'cpacr_el1': 0x300000}}
+        controls = {'engine': 'Unicorn', 'version': review['engine_version'], 'installed_library': review['installed_library'],
+                    'cpu': 'MAX', 'pstate': 0, 'final_pstate': 0, **review['required_control_readbacks']}
+        event, case = {'completed': True, 'error': None}, {'protection': 'mapped'}
+        for width in (1, 2, 4):
+            for kind in ('signed_min', 'signed_max'):
+                op = atomic_memory.operation(kind, width)
+                initial = atomic_memory.initial_state(op, 0, 16, operand=0)
+                memory = b'\xa5' * 64
+                expected, signed_ram, fault = atomic_memory.expected(op, initial, memory)
+                self.assertIsNone(fault)
+                alternative = bytearray(memory)
+                alternative[16:16 + width] = ((0 if kind == 'signed_min' else int.from_bytes(b'\xa5' * width, 'little'))).to_bytes(width, 'little')
+                def check(**changes):
+                    arguments = dict(op=op, case=case, initial=initial, memory=memory, ram_address=atomic_memory.RAM_ADDRESS,
+                        expected=expected, expected_ram=signed_ram, original=expected, original_ram=bytes(alternative),
+                        event=event, faults=[], controls=controls, review=review)
+                    arguments.update(changes)
+                    return simd_memory_runner.atomic_narrow_signed_oracle_difference(**arguments)
+                self.assertTrue(check())
+                edge = State.from_buffer_copy(bytes(initial))
+                edge.x[op['rn']] = atomic_memory.RAM_ADDRESS + len(memory) - width
+                edge_state, edge_signed_ram, edge_fault = atomic_memory.expected(op, edge, memory)
+                self.assertIsNone(edge_fault)
+                edge_alternative = bytearray(memory)
+                edge_alternative[-width:] = alternative[16:16 + width]
+                self.assertTrue(check(case={'protection': 'structure_crossing', 'cut': width}, initial=edge,
+                    expected=edge_state, expected_ram=edge_signed_ram, original=edge_state,
+                    original_ram=bytes(edge_alternative)))
+                self.assertFalse(check(case={'protection': 'structure_crossing', 'cut': width - 1}, initial=edge,
+                    expected=edge_state, expected_ram=edge_signed_ram, original=edge_state,
+                    original_ram=bytes(edge_alternative)))
+                outside = State.from_buffer_copy(bytes(edge))
+                outside.x[op['rn']] += width
+                self.assertFalse(check(case={'protection': 'structure_crossing', 'cut': width}, initial=outside))
+                self.assertFalse(check(case={'protection': 'guard'}))
+                self.assertFalse(check(case={'protection': 'readonly'}))
+                self.assertFalse(check(controls={**controls, 'version': 'different'}))
+                self.assertFalse(check(controls={**controls, 'ISAR0': 0}))
+                self.assertFalse(check(controls={**controls, 'pstate': 4}))
+                self.assertFalse(check(controls={**controls, 'final_pstate': 1 << 28}))
+                self.assertFalse(check(controls={**controls, 'installed_library': {'sha256': 'different'}}))
+                self.assertFalse(check(event={'completed': False, 'error': None}))
+                self.assertFalse(check(event={'completed': True, 'error': {'errno': 1}}))
+                self.assertFalse(check(faults=[{'address': atomic_memory.RAM_ADDRESS}]))
+                self.assertFalse(check(original_ram=signed_ram))
+                damaged = bytearray(alternative)
+                damaged[-1] ^= 1
+                self.assertFalse(check(original_ram=bytes(damaged)))
+                damaged_state = State.from_buffer_copy(bytes(expected))
+                damaged_state.nzcv ^= 1 << 28
+                self.assertFalse(check(original=damaged_state))
+                if width > 1:
+                    unaligned = State.from_buffer_copy(bytes(initial))
+                    unaligned.x[op['rn']] += 1
+                    self.assertFalse(check(initial=unaligned))
+                self.assertFalse(check(op={**op, 'element_bytes': 8}))
+                self.assertFalse(check(op={**op, 'operation': 'unsigned_min'}))
+
+    def test_CAS_counter_history_enforces_exact_transition_real_time_order(self):
+        family = atomic_memory
+        event = lambda old, success, begin, end: {'old': old, 'success': success, 'begin': begin, 'end': end}
+        inverse = [event(0, True, 0, 100), event(1, True, 10, 11), event(2, True, 0, 100), event(3, True, 1, 2)]
+        self.assertFalse(family.cas_counter_history_allowed(inverse, 4))
+        successes = [event(0, True, 0, 100), event(1, True, 0, 100)]
+        self.assertFalse(family.cas_counter_history_allowed(successes + [event(2, False, 1, 2), event(1, False, 3, 4)], 2))
+        self.assertFalse(family.cas_counter_history_allowed([event(0, True, 0, 1), event(0, False, 2, 3)], 1))
+        self.assertFalse(family.cas_counter_history_allowed([event(1, False, 0, 1), event(0, True, 2, 3)], 1))
+        allowed = [event(0, False, 0, 1), event(0, True, 2, 3), event(1, False, 4, 7),
+                   event(1, False, 5, 8), event(1, True, 9, 10), event(2, False, 11, 12)]
+        self.assertTrue(family.cas_counter_history_allowed(allowed, 2))
+
+    def test_shared_original_pointer_retains_immutable_receipt_and_previous_pointer(self):
+        root = ROOT / '.stela'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as temporary:
+            directory = Path(temporary)
+            previous = b'{"previous": true}\n'
+            (directory / 'receipt.json').write_bytes(previous)
+            capture = directory / 'immutable-capture'
+            capture.mkdir()
+            receipt_path = capture / 'receipt.json'
+            receipt = {'files': {'results.bin': {'bytes': 3, 'sha256': engine.digest(b'raw')}}}
+            receipt_path.write_bytes(simd_original.json_bytes(receipt))
+            before = receipt_path.read_bytes()
+            simd_original.publish_pointer(directory, receipt_path, 'atomic_memory_smp', receipt)
+            pointer = json.loads((directory / 'receipt.json').read_bytes())
+            self.assertEqual(pointer['directory'], str(capture.relative_to(ROOT)))
+            self.assertEqual(pointer['receipt']['path'], str(receipt_path.relative_to(ROOT)))
+            self.assertEqual(pointer['receipt']['sha256'], engine.digest(before))
+            self.assertEqual(pointer['files'], receipt['files'])
+            self.assertEqual(receipt_path.read_bytes(), before)
+            history = directory / 'pointer-history' / (engine.digest(previous) + '.json')
+            self.assertEqual(history.read_bytes(), previous)
+            first = (directory / 'receipt.json').read_bytes()
+            simd_original.publish_pointer(directory, receipt_path, 'atomic_memory_smp', receipt)
+            self.assertEqual((directory / 'receipt.json').read_bytes(), first)
+            self.assertEqual((directory / 'pointer-history' / (engine.digest(first) + '.json')).read_bytes(), first)
+
+    def test_original_SMP_model_checks_all_State_RAM_bytes_and_both_cross8_orders(self):
+        import simd_atomic_original as smp
+        cases = smp.default_pairs()
+        relative = [case for case in atomic_memory.concurrency_cases() if case['kind'] == 4]
+        model = {'program_words': {case['id']: [[op['word'] for op in program] for program in case['programs']] for case in relative},
+                 'allowed_outcomes': {case['id']: [[0, 1], [1, 0], [1, 1]] for case in relative}}
+        model['allowed_outcomes']['publication_ldar'] = [[0, 0], [0, 1], [1, 1]]
+        model['allowed_outcomes']['publication_ldapr'] = [[0, 0], [0, 1], [1, 1]]
+        for case in cases:
+            if case['kind'] == 4:
+                states = [State.from_buffer_copy(raw) for raw in case['initial']]
+                if case['id'].startswith('publication_'):
+                    states[1].x[1], states[1].x[2] = 1, 1
+                else:
+                    states[0].x[1], states[1].x[1] = 0, 1
+                ram = bytearray(case['memory'])
+                ram[:8] = ram[64:72] = (1).to_bytes(8, 'little')
+                finals = list(map(bytes, states))
+                simd_memory_runner.validate_atomic_smp_trial(case, finals, bytes(ram), model)
+                altered = [bytearray(raw) for raw in finals]
+                altered[0][400] ^= 1
+                with self.assertRaises(AssertionError):
+                    simd_memory_runner.validate_atomic_smp_trial(case, list(map(bytes, altered)), bytes(ram), model)
+                with self.assertRaises(AssertionError):
+                    simd_memory_runner.validate_atomic_smp_trial(case, finals, bytes(ram[:-1]) + b'\1', model)
+                changed_model = {**model, 'allowed_outcomes': {**model['allowed_outcomes'], case['id']: []}}
+                with self.assertRaises(AssertionError):
+                    simd_memory_runner.validate_atomic_smp_trial(case, finals, bytes(ram), changed_model)
+            else:
+                for order in ((0, 1), (1, 0)):
+                    ram, finals = case['memory'], list(case['initial'])
+                    for thread in order:
+                        final, ram, fault = atomic_memory.expected(case['programs'][thread][0], State.from_buffer_copy(case['initial'][thread]), ram)
+                        self.assertIsNone(fault)
+                        finals[thread] = bytes(final)
+                    self.assertEqual(simd_memory_runner.validate_atomic_smp_trial(case, finals, ram, model), list(order))
+                    altered = list(finals)
+                    state = State.from_buffer_copy(altered[1])
+                    state.x[1] ^= 0x100
+                    altered[1] = bytes(state)
+                    with self.assertRaises(AssertionError):
+                        simd_memory_runner.validate_atomic_smp_trial(case, altered, ram, model)
+                    with self.assertRaises(AssertionError):
+                        simd_memory_runner.validate_atomic_smp_trial(case, finals, ram[:-1] + bytes([ram[-1] ^ 1]), model)
+
+    def test_shared_transport_default_command_and_result_bounds(self):
+        destination = Path('/tmp/stela-observer-guard')
+        memory = {'ram_address': atomic_memory.RAM_ADDRESS, 'ram_bytes': 8192, 'record_bytes': 9216}
+        for plan, stride, ram_size in ((None, 1024, '512M'), (memory, 9216, '5G')):
+            with patch.object(simd_original, 'memory_plan', return_value=plan), patch.object(simd_original, 'execute_transport') as transport:
+                simd_original.execute(destination, Path('/mock/qemu'), 3)
+            actual_destination, command, size = transport.call_args.args[:3]
+            self.assertEqual(actual_destination, destination)
+            self.assertEqual(size, 1024 + 3 * stride)
+            self.assertEqual(command[command.index('-machine') + 1], 'virt,secure=off,virtualization=off')
+            self.assertEqual(command[command.index('-cpu') + 1], 'max')
+            self.assertEqual(command[command.index('-m') + 1], ram_size)
+            self.assertIn(f'loader,file={destination / "inputs.bin"},addr=0x41000000,force-raw=on', command)
+            self.assertEqual(any('memory.bin' in str(item) for item in command), plan is not None)
+
 
 class OrdinaryMemoryFixtureTests(unittest.TestCase):
     def test_exact27_pinned_forms_and_independent_decoding(self):

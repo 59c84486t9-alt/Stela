@@ -1,5 +1,10 @@
 //! Host requirements, detection and stable generated-code target identities.
 
+#[cfg(target_arch = "x86_64")]
+const CPUID_BASIC_FEATURES: u32 = 1;
+#[cfg(target_arch = "x86_64")]
+const CPUID_AVX_HARDWARE: u32 = 1 << 28;
+
 /// Explicit host requirements bind generated code and persistent cache identity.
 /// SSE tiers are nested; every other capability is independent.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +17,7 @@ pub struct TargetCpu {
     bmi1: bool,
     aes: bool,
     sha: bool,
+    atomic_load16: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,6 +41,7 @@ impl TargetCpu {
         bmi1: false,
         aes: false,
         sha: false,
+        atomic_load16: false,
     };
     pub const Ssse3: Self = Self {
         tier: SseTier::Ssse3,
@@ -60,6 +67,9 @@ impl TargetCpu {
     pub const Aes: Self = Self::Baseline.with_aes();
     /// Minimum requirements for legacy XMM SHA instructions, independent of SSE tiers.
     pub const Sha: Self = Self::Baseline.with_sha();
+    /// Aligned16 atomic loads, enumerated by AVX hardware support. Lowering uses
+    /// legacy SSE2 instructions, independently of OS-enabled AVX register state.
+    pub const AtomicLoad16: Self = Self::Baseline.with_atomic_load16();
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -88,6 +98,12 @@ impl TargetCpu {
     pub const fn with_sha(self) -> Self {
         Self { sha: true, ..self }
     }
+    pub const fn with_atomic_load16(self) -> Self {
+        Self {
+            atomic_load16: true,
+            ..self
+        }
+    }
     /// True only when every required feature is present in this target.
     pub fn supports(self, required: Self) -> bool {
         self.tier >= required.tier
@@ -98,6 +114,7 @@ impl TargetCpu {
             && (!required.bmi1 || self.bmi1)
             && (!required.aes || self.aes)
             && (!required.sha || self.sha)
+            && (!required.atomic_load16 || self.atomic_load16)
     }
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
@@ -107,6 +124,10 @@ impl TargetCpu {
                 bmi1: std::is_x86_feature_detected!("bmi1"),
                 aes: std::is_x86_feature_detected!("aes"),
                 sha: std::is_x86_feature_detected!("sha"),
+                // Hardware atomicity, rather than permission to execute VEX.
+                atomic_load16: std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx
+                    & CPUID_AVX_HARDWARE
+                    != 0,
                 ..Self::for_features_with_vex(
                     std::is_x86_feature_detected!("ssse3"),
                     std::is_x86_feature_detected!("sse4.1"),
@@ -172,6 +193,7 @@ impl TargetCpu {
             (self.bmi1, "+bmi1"),
             (self.aes, "+aes"),
             (self.sha, "+sha"),
+            (self.atomic_load16, "+atomic-load16"),
         ] {
             if enabled {
                 id.push_str(suffix);
@@ -204,6 +226,7 @@ impl std::str::FromStr for TargetCpu {
         // Strip each optional suffix once, in reverse canonical order. Any
         // duplicate, unknown or reordered suffix remains and fails tier parsing.
         for (suffix, enabled) in [
+            ("+atomic-load16", &mut target.atomic_load16),
             ("+sha", &mut target.sha),
             ("+aes", &mut target.aes),
             ("+bmi1", &mut target.bmi1),
@@ -242,7 +265,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 7] = [
+    const FEATURES: [TargetCpu; 8] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -250,11 +273,12 @@ mod tests {
         TargetCpu::Bmi1,
         TargetCpu::Aes,
         TargetCpu::Sha,
+        TargetCpu::AtomicLoad16,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         TIERS.into_iter().flat_map(|(tier, _, _)| {
-            (0..128).map(move |bits| TargetCpu {
+            (0..256).map(move |bits| TargetCpu {
                 pclmulqdq: bits & 1 != 0,
                 fma: bits & 2 != 0,
                 f16c: bits & 4 != 0,
@@ -262,6 +286,7 @@ mod tests {
                 bmi1: bits & 16 != 0,
                 aes: bits & 32 != 0,
                 sha: bits & 64 != 0,
+                atomic_load16: bits & 128 != 0,
                 ..tier
             })
         })
@@ -303,7 +328,7 @@ mod tests {
             let suffix = id.strip_prefix(canonical).unwrap();
             assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
         }
-        assert_eq!(ids.len(), 512);
+        assert_eq!(ids.len(), 1024);
         assert_eq!(
             TargetCpu::Sse42
                 .with_sha()
@@ -347,7 +372,16 @@ mod tests {
         ] {
             assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
         }
-        for suffix in ["pclmulqdq", "fma", "f16c", "popcnt", "bmi1", "aes", "sha"] {
+        for suffix in [
+            "pclmulqdq",
+            "fma",
+            "f16c",
+            "popcnt",
+            "bmi1",
+            "aes",
+            "sha",
+            "atomic-load16",
+        ] {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
                 let duplicate = format!("{tier}+{suffix}+{suffix}");
                 assert!(duplicate.parse::<TargetCpu>().is_err(), "{duplicate}");
@@ -366,6 +400,7 @@ mod tests {
                 host.bmi1,
                 host.aes,
                 host.sha,
+                host.atomic_load16,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);
@@ -459,6 +494,10 @@ mod tests {
                 (TargetCpu::Bmi1, std::is_x86_feature_detected!("bmi1")),
                 (TargetCpu::Aes, std::is_x86_feature_detected!("aes")),
                 (TargetCpu::Sha, std::is_x86_feature_detected!("sha")),
+                (
+                    TargetCpu::AtomicLoad16,
+                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
+                ),
             ] {
                 assert_eq!(target.supports(required), detected);
             }

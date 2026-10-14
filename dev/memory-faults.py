@@ -15,7 +15,7 @@ import struct
 import subprocess
 import tempfile
 
-from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_MEM_INVALID, UC_PROT_READ
+from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_MEM_INVALID, UC_HOOK_CODE, UC_PROT_READ
 from unicorn import arm64_const as arm
 from differential import initialize_arm, capture_arm, parse_fault_record, compiler_cli, ROOT, BASE, State, ARM_REGISTERS, move
 from evidence import write_evidence
@@ -25,8 +25,10 @@ memory_suite = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(memory_suite)
 
 
-def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly=False, guest_base=BASE):
+def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly=False, guest_base=BASE, allow_completion=False, retain_error=False, cpu_model=None):
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    if cpu_model is not None:
+        machine.ctl_set_cpu_model(cpu_model)
     code_page = guest_base // 4096 * 4096
     machine.mem_map(code_page, 0x10000)
     machine.mem_write(guest_base, source)
@@ -43,15 +45,25 @@ def arm_fault(source, initial, ram_address, page_size, readonly, second_readonly
         faults.append({"access": access, "address": address, "size": size, "pc": machine.reg_read(arm.UC_ARM64_REG_PC)})
         return False
     machine.hook_add(UC_HOOK_MEM_INVALID, fault)
+    if allow_completion:
+        if source[-4:] != struct.pack('<I', 0xd65f03c0):
+            raise ValueError('Completion observer requires exact harness RET')
+        def return_boundary(machine, address, size, _):
+            if address == guest_base + len(source) - 4:
+                machine.emu_stop()
+        machine.hook_add(UC_HOOK_CODE, return_boundary)
+    error = None
     try:
         machine.emu_start(guest_base, guest_base + len(source), count=20)
-    except UcError:
-        if not faults:
+    except UcError as caught:
+        error = {'errno': caught.errno, 'message': str(caught), 'pc': machine.reg_read(arm.UC_ARM64_REG_PC)}
+        if not faults and not retain_error:
             raise
-    if not faults:
+    if not faults and not allow_completion and not (retain_error and error):
         raise AssertionError("ARM reference did not fault")
     final = capture_arm(machine, initial)
-    return final, bytes(machine.mem_read(ram_address, observed_bytes)), faults
+    result = final, bytes(machine.mem_read(ram_address, observed_bytes)), faults
+    return (*result, {'completed': error is None and not faults, 'error': error}) if retain_error else result
 
 
 def cases():

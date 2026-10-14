@@ -8,6 +8,24 @@ use crate::{
 };
 
 pub struct Emitter;
+
+/// Check semantic host requirements before either leaf or block emission.
+pub(crate) fn validate_target(
+    instruction: &Instruction,
+    target: crate::TargetCpu,
+) -> Result<(), UnsupportedReason> {
+    if let Operation::Ordered(operand) = &instruction.operation
+        && ordered::requires_atomic_load16(operand)
+        && !target.supports(crate::TargetCpu::AtomicLoad16)
+    {
+        return Err(UnsupportedReason::HostCapabilityRequired {
+            address: instruction.pc,
+            required: crate::TargetCpu::AtomicLoad16,
+        });
+    }
+    Ok(())
+}
+mod atomic;
 mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
@@ -21,6 +39,7 @@ pub mod isa;
 mod literal;
 mod memory_store;
 mod non_temporal;
+mod ordered;
 mod pc_relative;
 mod prefetch;
 mod register_offset;
@@ -453,6 +472,8 @@ fn emit_instruction(
         Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
         Operation::MemoryNonTemporal(operand) => non_temporal::emit(code, &operand),
         Operation::MemoryUnprivileged(operand) => unprivileged::emit(code, &operand),
+        Operation::Atomic(operand) => atomic::emit(code, &operand),
+        Operation::Ordered(operand) => ordered::emit(code, &operand, target),
         Operation::Prefetch(operand) => prefetch::emit(code, &operand),
         Operation::LogicalImmediate {
             width,
@@ -583,6 +604,7 @@ impl Emitter {
         let code = &mut block.x86_64_code;
         let mut fixups = vec![];
         for instruction in instructions {
+            validate_target(instruction, target)?;
             if matches!(instruction.operation, Operation::FloatingPoint(_)) {
                 return Err(UnsupportedReason::NumericalRuntimeRequired {
                     address: instruction.pc,

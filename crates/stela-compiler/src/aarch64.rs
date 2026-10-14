@@ -1,5 +1,6 @@
 //! Decode architectural operand roles, including SP versus the zero register.
 use crate::{GuestAddress, Lifter, UnsupportedReason};
+pub mod atomic;
 pub mod bitfield;
 pub mod conditional_select;
 pub mod crc;
@@ -11,6 +12,7 @@ pub mod integer_minmax;
 pub mod integer_unary;
 pub mod literal;
 pub mod non_temporal;
+pub mod ordered;
 pub mod pc_relative;
 pub mod prefetch;
 pub mod register_offset;
@@ -205,6 +207,8 @@ pub enum Operation {
     MemoryRegisterOffset(register_offset::Operand),
     MemoryNonTemporal(non_temporal::Operand),
     MemoryUnprivileged(unprivileged::Operand),
+    Atomic(atomic::Operand),
+    Ordered(ordered::Operand),
     Prefetch(prefetch::Operand),
     MemoryPair {
         transfer: MemoryTransfer,
@@ -412,6 +416,10 @@ impl Lifter for Decoder {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = FloatingPointOperation::decode(word) {
             Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = ordered::decode(word) {
+            Operation::Ordered(decoded)
+        } else if let Some(decoded) = atomic::decode(word) {
+            Operation::Atomic(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = non_temporal::decode(word) {
             Operation::MemoryNonTemporal(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = unprivileged::decode(word) {

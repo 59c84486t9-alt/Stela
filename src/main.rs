@@ -890,6 +890,7 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "detected_target": TargetCpu::detect().id(),
                     "baseline": TargetCpu::Baseline.id(),
+                    "atomic_load16": TargetCpu::detect().supports(TargetCpu::AtomicLoad16),
                     "simd_opcodes": opcodes,
                     "simd_immediate_shifts": shifts,
                     "scope": "Named legacy SIMD output forms; scalar encoding recipes remain in x86_64 modules. Catalog membership is not input ISA coverage.",

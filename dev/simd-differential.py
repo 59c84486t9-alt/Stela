@@ -7426,6 +7426,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--focus', choices=[*simd_memory_runner.FAMILIES, *REGISTER_COHORTS, *FIXTURE_FAMILIES, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS, COMPLEX_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--atomic-smp-oracle', type=Path, help='Required two-PE original pointer for atomic memory evidence')
     parser.add_argument('--fixture-oracle', type=Path, help='Full-frame primary original pointer for an integer/crypto fixture family')
     parser.add_argument('--prepare-fixture-oracle', type=Path, help='Freeze original-only fixture inputs in this directory')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
@@ -7463,7 +7464,7 @@ def main():
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
     if arguments.focus in simd_memory_runner.FAMILIES:
-        _, report = simd_memory_runner.run(sys.modules[__name__], cli, arguments.fixture_oracle, arguments.focus)
+        _, report = simd_memory_runner.run(sys.modules[__name__], cli, arguments.fixture_oracle, arguments.focus, arguments.atomic_smp_oracle)
         print(json.dumps(report, indent=2))
         return
     if arguments.focus in FIXTURE_FAMILIES:

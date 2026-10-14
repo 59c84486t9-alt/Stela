@@ -56,6 +56,12 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/register_offset.rs"),
     include_str!("x86_64/register_offset.rs"),
     include_str!("x86_64/memory_store.rs"),
+    include_str!("aarch64/atomic.rs"),
+    include_str!("x86_64/atomic.rs"),
+    include_str!("x86_64/atomic/compare_exchange.rs"),
+    include_str!("x86_64/atomic/read_modify_write.rs"),
+    include_str!("aarch64/ordered.rs"),
+    include_str!("x86_64/ordered.rs"),
     include_str!("aarch64/non_temporal.rs"),
     include_str!("x86_64/non_temporal.rs"),
     include_str!("aarch64/unprivileged.rs"),
@@ -146,6 +152,10 @@ pub struct GuestAddress(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedReason {
+    HostCapabilityRequired {
+        address: GuestAddress,
+        required: TargetCpu,
+    },
     NumericalRuntimeRequired {
         address: GuestAddress,
     },
@@ -344,6 +354,41 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GuestState, fpcr), 776);
         assert_eq!(std::mem::offset_of!(GuestState, fpsr), 780);
     }
+    #[test]
+    fn ordered_load_host_requirements_gate_leaf_and_block_before_output() {
+        for word in [0xc8dffc20_u32, 0xf8bfc020] {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            assert!(
+                compile(&source, GuestAddress(0))
+                    .unwrap_err()
+                    .0
+                    .contains("HostCapabilityRequired")
+            );
+            assert!(compile_for_target(&source, GuestAddress(0), TargetCpu::AtomicLoad16).is_ok());
+            let blocked = block::compile(&source, GuestAddress(0)).unwrap_err();
+            assert!(blocked.0.contains("HostCapabilityRequired"));
+            assert!(
+                block::compile_for_target(
+                    &source,
+                    GuestAddress(0),
+                    block::BlockProfile::default(),
+                    TargetCpu::AtomicLoad16
+                )
+                .is_ok()
+            );
+        }
+        for word in [0xc8dfffe0_u32, 0xf8bfc3e0, 0x08dffc20, 0xc89ffc20] {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            assert!(compile(&source, GuestAddress(0)).is_ok());
+        }
+    }
+
     #[test]
     fn rejects_unknown_instructions_bad_boundaries_and_address_overflow() {
         for words in [
