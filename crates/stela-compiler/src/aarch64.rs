@@ -16,7 +16,10 @@ pub mod ordered;
 pub mod pc_relative;
 pub mod prefetch;
 pub mod register_offset;
+pub mod scalable;
 pub mod simd;
+pub mod sme;
+pub mod sve;
 pub mod tag_arithmetic;
 pub mod unprivileged;
 

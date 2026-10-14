@@ -52,7 +52,10 @@ mod ordered;
 mod pc_relative;
 mod prefetch;
 mod register_offset;
+mod scalable;
 mod simd;
+pub(crate) mod sme;
+pub(crate) mod sve;
 mod tag_arithmetic;
 mod unprivileged;
 
@@ -313,7 +316,7 @@ fn nzcv(code: &mut Vec<u8>, subtract: bool) {
 }
 
 /// Shared semantic emission. Block compilation handles control transfers itself.
-fn emit_instruction(
+pub(crate) fn emit_instruction(
     code: &mut Vec<u8>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,

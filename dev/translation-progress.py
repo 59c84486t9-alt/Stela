@@ -21,6 +21,11 @@ STATUSES = ('implemented', 'partial', 'unsupported')
 RET = 0xd65f03c0
 BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
+SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
+CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
+CONTEXT_ENTRY_PREFIX_BYTES = 13
+SCALABLE_VECTOR_BYTES = (16, 32, 64, 128, 256)
+SCALABLE_GUEST_BASE = 0x10000000
 
 
 def sha256(path):
@@ -56,6 +61,8 @@ def validate_registry(registry):
     profile = registry.get('profile', {}).get('id')
     if not profile or not registry.get('profile', {}).get('outside_scope'):
         raise ValueError('Support needs an explicit bounded execution profile')
+    if profile == SCALABLE_PROFILE:
+        validate_scalable_profile(registry['profile'])
     evidence = registry.get('evidence_groups', {})
     rows = {}
     for row in registry.get('forms', []):
@@ -83,8 +90,13 @@ def validate_registry(registry):
                 repository_path(source)
             for sample in row['smoke_samples']:
                 validate_sample(row, sample)
+                if profile == SCALABLE_PROFILE:
+                    validate_scalable_configuration(sample.get('svl_bytes'), sample.get('svcr'))
             if row['status'] == 'partial' and not row.get('rejected_samples'):
                 raise ValueError('Partial forms need a rejected scope-boundary sample')
+            if profile == SCALABLE_PROFILE:
+                for sample in row.get('rejected_samples', []):
+                    validate_scalable_configuration(sample.get('svl_bytes'), sample.get('svcr'))
         rows[identity] = row
     return rows
 
@@ -126,18 +138,72 @@ def summarize(rows):
                                   'evidence_requirement': 'Stela full Mach-O load and native execution with validated process behavior; leaf fixtures do not qualify.'}}
 
 
+def validate_scalable_configuration(svl_bytes, svcr):
+    if type(svl_bytes) is not int or svl_bytes not in SCALABLE_VECTOR_BYTES:
+        raise ValueError('Scalable probe requires an explicit supported SVL')
+    if type(svcr) is not int or svcr not in (0, 1, 2, 3):
+        raise ValueError('Scalable probe requires an explicit supported SVCR')
+
+
+def validate_scalable_profile(profile):
+    if (profile.get('id') != SCALABLE_PROFILE or profile.get('compiler_command') != 'compile-leaf'
+            or profile.get('abi') != CONTEXT_LEAF_ABI):
+        raise ValueError('Scalable registry must declare the context-leaf compiler profile and ABI')
+    validate_scalable_configuration(profile.get('svl_bytes'), profile.get('svcr'))
+
+
+def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, svcr):
+    if (type(manifest.get('schema_version')) is not int or manifest['schema_version'] != 2 or manifest.get('kind') != 'raw_arm64_leaf_aot'
+            or manifest.get('abi') != CONTEXT_LEAF_ABI):
+        raise ValueError('Compiler scalable probe schema/ABI mismatch')
+    profile = manifest.get('execution_profile', {})
+    if (not isinstance(profile, dict) or profile.get('id') != SCALABLE_PROFILE
+            or type(profile.get('svl_bytes')) is not int or profile['svl_bytes'] != svl_bytes
+            or type(profile.get('svcr')) is not int or profile['svcr'] != svcr):
+        raise ValueError('Compiler scalable probe execution profile mismatch')
+    instructions = len(source_data) // 4
+    if (manifest.get('target_cpu') != 'x86_64-baseline' or type(manifest.get('guest_base')) is not int or manifest['guest_base'] != SCALABLE_GUEST_BASE
+            or type(manifest.get('guest_instructions')) is not int
+            or manifest['guest_instructions'] != instructions
+            or type(manifest.get('native_bytes')) is not int or manifest['native_bytes'] != native_bytes):
+        raise ValueError('Compiler scalable probe source/native metadata mismatch')
+    prefix = manifest.get('entry_prefix_bytes')
+    source_map = manifest.get('source_map')
+    if (type(prefix) is not int or prefix != CONTEXT_ENTRY_PREFIX_BYTES or prefix >= native_bytes
+            or not isinstance(source_map, list) or len(source_map) != instructions):
+        raise ValueError('Compiler scalable probe source map missing or invalid')
+    previous = prefix
+    for index, entry in enumerate(source_map):
+        if (not isinstance(entry, list) or len(entry) != 2
+                or type(entry[0]) is not int or entry[0] != SCALABLE_GUEST_BASE + index * 4
+                or type(entry[1]) is not int or not previous <= entry[1] < native_bytes
+                or (index == 0 and entry[1] != prefix)):
+            raise ValueError('Compiler scalable probe source map boundary mismatch')
+        previous = entry[1]
+
+
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
-                  expected_source_bytes=4):
-    if mode not in ('leaf', 'block', 'service'):
+                  expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None):
+    if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
         raise ValueError('Invalid declared compiler probe boundary')
+    if mode == 'scalable':
+        if guest_profile != SCALABLE_PROFILE:
+            raise ValueError('Unknown scalable guest profile')
+        validate_scalable_configuration(svl_bytes, svcr)
+    elif any(value is not None for value in (guest_profile, svl_bytes, svcr)):
+        raise ValueError('Scalable configuration requires the context compiler lane')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
     output = directory / 'native'
-    command = [str(cli), 'compile-' + ('block' if mode == 'service' else mode), str(source), '--output-dir', str(output)]
+    compiler_mode = 'leaf' if mode == 'scalable' else 'block' if mode == 'service' else mode
+    command = [str(cli), 'compile-' + compiler_mode, str(source), '--output-dir', str(output)]
     if mode != 'leaf':
         command.extend(['--guest-base', '0x10000000'])
+    if mode == 'scalable':
+        command.extend(['--guest-profile', guest_profile, '--svl-bytes', str(svl_bytes),
+                        '--svcr', str(svcr), '--cpu-target', 'baseline'])
     if mode == 'service':
         command.extend(['--software-pauth', '--software-clock'])
     process = run(command,
@@ -150,7 +216,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
     manifest = json.loads(process.stdout)
     source_data = source.read_bytes()
-    if mode != 'leaf':
+    if mode in ('block', 'service'):
         if manifest.get('abi') != (SERVICE_ABI if mode == 'service' else BLOCK_ABI):
             raise ValueError('Compiler block probe ABI mismatch')
         consumed = manifest.get('source_bytes')
@@ -162,13 +228,20 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     native = output / 'native.bin'
     if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
         raise ValueError('Compiler probe native output identity mismatch')
+    if mode == 'scalable':
+        validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr)
     fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
         raise ValueError('Compiler probe fingerprint missing')
+    if mode == 'scalable':
+        digest(fingerprint)
     return {'word': f'0x{word:08x}', 'emitted': True, 'compiler_source_sha256': fingerprint,
             'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
             'native_bytes': native.stat().st_size,
-            **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode} if mode != 'leaf' else {})}
+            **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode}
+               if mode in ('block', 'service') else {}),
+            **({key: manifest[key] for key in ('abi', 'execution_profile', 'source_map', 'entry_prefix_bytes',
+                                               'guest_base', 'target_cpu')} if mode == 'scalable' else {})}
 
 
 def smoke_decoding(decoder, word, identity, canonical_facts=None):
@@ -186,7 +259,16 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None):
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
 
 
-def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None):
+def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None):
+    if mode == 'scalable':
+        validate_scalable_profile(profile or {})
+    def options(sample=None):
+        result = {'mode': mode} if mode != 'leaf' else {}
+        if mode == 'scalable':
+            configuration = profile if sample is None else sample
+            result.update(guest_profile=profile['id'], svl_bytes=configuration['svl_bytes'],
+                          svcr=configuration['svcr'])
+        return result
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
     results = []
@@ -200,10 +282,10 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
             location.mkdir()
-            options = {'mode': mode} if mode != 'leaf' else {}
+            probe_options = options(sample)
             if 'consumed_source_bytes' in sample:
-                options['expected_source_bytes'] = sample['consumed_source_bytes']
-            probe = compile_probe(cli, word, location, **options)
+                probe_options['expected_source_bytes'] = sample['consumed_source_bytes']
+            probe = compile_probe(cli, word, location, **probe_options)
             if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
@@ -213,12 +295,15 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             location = directory / f'{len(results)}-rejected'
             location.mkdir()
             probe = compile_probe(cli, int(sample['word'], 16), location, sample['reason'],
-                                  **({'mode': mode} if mode != 'leaf' else {}))
+                                  **options(sample))
             results.append({'id': identity, 'scope_boundary_sample': index, **probe})
     if fingerprint is None:
         location = directory / 'compiler-identity'
         location.mkdir()
-        fingerprint = compile_probe(cli, RET, location, **({'mode': mode} if mode != 'leaf' else {}))['compiler_source_sha256']
+        probe = compile_probe(cli, RET, location, **options())
+        fingerprint = probe['compiler_source_sha256']
+        if mode == 'scalable':
+            results.append({'compiler_identity_only': True, **probe})
     return fingerprint, results
 
 
@@ -445,6 +530,7 @@ def main():
     parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
     parser.add_argument('--block-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-block-forms.json')
     parser.add_argument('--service-registry', type=Path, default=ROOT / 'tests/isa/a64-service-forms.json')
+    parser.add_argument('--scalable-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-scalable-forms.json')
     parser.add_argument('--checklist', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
     parser.add_argument('--apple-profiles', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
@@ -464,6 +550,10 @@ def main():
     service_data = args.service_registry.read_bytes()
     service_registry = json.loads(service_data)
     service_rows = validate_registry(service_registry)
+    scalable_data = args.scalable_registry.read_bytes()
+    scalable_registry = json.loads(scalable_data)
+    scalable_rows = validate_registry(scalable_registry)
+    validate_scalable_profile(scalable_registry['profile'])
     catalog_data = args.checklist.read_bytes()
     catalog = json.loads(catalog_data)
     canonical_facts = a64_checklist.validate(catalog)
@@ -488,34 +578,45 @@ def main():
         service_directory.mkdir()
         service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory,
                                                      mode='service', canonical_facts=canonical_facts)
-        if block_compiler != compiler or service_compiler != compiler:
-            raise ValueError('Leaf and block compiler identities differ')
+        scalable_directory = Path(temporary) / 'scalable'
+        scalable_directory.mkdir()
+        scalable_compiler, scalable_probes = smoke_forms(
+            args.cli, scalable_rows, scalable_rows, scalable_directory, mode='scalable',
+            canonical_facts=canonical_facts, profile=scalable_registry['profile'])
+        if any(identity != compiler for identity in (block_compiler, service_compiler, scalable_compiler)):
+            raise ValueError('Execution-profile compiler identities differ')
     if args.implementation_only:
-        evidence, block_evidence, service_evidence = {}, {}, {}
-        sources, block_sources, service_sources = [
+        evidence, block_evidence, service_evidence, scalable_evidence = {}, {}, {}, {}
+        sources, block_sources, service_sources, scalable_sources = [
             {path: sha256(ROOT / path) for row in group.values() for path in row['compiler_sources']}
-            for group in (rows, block_rows, service_rows)]
+            for group in (rows, block_rows, service_rows, scalable_rows)]
     else:
         evidence, sources = validate_evidence(registry, rows, compiler)
         block_evidence, block_sources = validate_evidence(block_registry, block_rows, compiler,
                                                           executable_hash=executable_hash)
         service_evidence, service_sources = validate_evidence(service_registry, service_rows, compiler, executable_hash=executable_hash)
-    assessed, documented_summary = a64_checklist.assess(catalog, [registry, block_registry, service_registry])
+        scalable_evidence, scalable_sources = validate_evidence(
+            scalable_registry, scalable_rows, compiler, executable_hash=executable_hash)
+    assessed, documented_summary = a64_checklist.assess(
+        catalog, [registry, block_registry, service_registry, scalable_registry])
     apple_summary = apple_isa.assess(apple_profiles, assessed)
     assessed['compiler_source_sha256'] = compiler
     assessed['assessment_basis'] = 'reviewed_implementation_and_emission_smoke' if args.implementation_only else 'current_native_differential_evidence'
     assessed['last_verified_checkpoint'] = checkpoint
     assessed['evidence_reports'] = [{k: row[k] for k in ('report', 'report_sha256')}
-                                   for group in (evidence, block_evidence, service_evidence) for row in group.values()]
+                                   for group in (evidence, block_evidence, service_evidence, scalable_evidence) for row in group.values()]
     fingerprint_sources = validate_current_compiler(registry, compiler)
-    if validate_current_compiler(block_registry, compiler) != fingerprint_sources:
-        raise ValueError('Leaf and block fingerprint recipes differ')
+    for profile_registry in (block_registry, service_registry, scalable_registry):
+        if validate_current_compiler(profile_registry, compiler) != fingerprint_sources:
+            raise ValueError('Execution-profile fingerprint recipes differ')
     if (sha256(args.cli) != executable_hash or args.registry.read_bytes() != registry_data
             or args.block_registry.read_bytes() != block_data
-            or args.service_registry.read_bytes() != service_data or args.checklist.read_bytes() != catalog_data
+            or args.service_registry.read_bytes() != service_data
+            or args.scalable_registry.read_bytes() != scalable_data or args.checklist.read_bytes() != catalog_data
             or args.apple_profiles.read_bytes() != apple_profiles_data
             or validate_current_compiler(registry, compiler) != fingerprint_sources
-            or validate_current_compiler(block_registry, compiler) != fingerprint_sources):
+            or any(validate_current_compiler(item, compiler) != fingerprint_sources
+                   for item in (block_registry, service_registry, scalable_registry))):
         raise ValueError('Compiler/registry changed during measurement')
     report = {'schema_version': 2, 'kind': 'apple_silicon_translation_progress',
               'implementation_only': args.implementation_only, 'last_verified_checkpoint': checkpoint,
@@ -540,6 +641,14 @@ def main():
               'service_profile_evidence': {'registry_sha256': hashlib.sha256(service_data).hexdigest(),
                   'native_differential_evidence': service_evidence, 'compiler_sources_sha256': service_sources,
                   'compiler_smoke_probes': service_probes},
+              'scalable_profile_evidence': {
+                  'registry_version': scalable_registry['registry_version'],
+                  'registry_sha256': hashlib.sha256(scalable_data).hexdigest(),
+                  'profile': scalable_registry['profile'], 'summary': summarize(scalable_rows),
+                  'counts_are_not_additive': True, 'compiler_sources_sha256': scalable_sources,
+                  'native_differential_evidence': scalable_evidence, 'compiler_smoke_probes': scalable_probes,
+                  'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
+                                     for identity, row in scalable_rows.items()]},
               'block_profile_evidence': {
                   'registry_version': block_registry['registry_version'],
                   'registry_sha256': hashlib.sha256(block_data).hexdigest(),

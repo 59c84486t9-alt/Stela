@@ -419,6 +419,15 @@ enum Command {
         cpu_target: stela_compiler::TargetCpu,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
+        /// Compile for an explicit guest execution profile.
+        #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID])]
+        guest_profile: Option<String>,
+        /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
+        svl_bytes: Option<stela_compiler::aarch64::scalable::VectorLength>,
+        /// Explicit initial SVCR bits: streaming mode is bit0, ZA enable is bit1.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_mode)]
+        svcr: Option<stela_compiler::aarch64::scalable::ScalableMode>,
         #[arg(long)]
         output_dir: PathBuf,
     },
@@ -442,6 +451,22 @@ enum Command {
         #[command(subcommand)]
         command: ProgressCommand,
     },
+}
+
+fn parse_scalable_vector_length(
+    value: &str,
+) -> Result<stela_compiler::aarch64::scalable::VectorLength, String> {
+    let bytes = value.parse::<usize>().map_err(|error| error.to_string())?;
+    stela_compiler::aarch64::scalable::VectorLength::from_bytes(bytes)
+        .ok_or_else(|| "SVL bytes must be one of 16, 32, 64, 128 or 256".into())
+}
+
+fn parse_scalable_mode(
+    value: &str,
+) -> Result<stela_compiler::aarch64::scalable::ScalableMode, String> {
+    let bits = value.parse::<u64>().map_err(|error| error.to_string())?;
+    stela_compiler::aarch64::scalable::ScalableMode::from_svcr(bits)
+        .ok_or_else(|| "SVCR must be in 0..=3".into())
 }
 
 fn parse_address(value: &str) -> Result<u64, String> {
@@ -2029,14 +2054,34 @@ fn run() -> Result<()> {
             input,
             cpu_target,
             guest_base,
+            guest_profile,
+            svl_bytes,
+            svcr,
             output_dir,
         } => {
             let source = std::fs::read(&input)?;
-            let block = stela_compiler::compile_for_target(
-                &source,
-                stela_compiler::GuestAddress(guest_base),
-                cpu_target,
-            )?;
+            let profile = if guest_profile.is_some() {
+                Some(stela_compiler::extended::ScalableProfile::new(
+                    svl_bytes.context("guest profile requires an explicit SVL")?,
+                    svcr.context("guest profile requires an initial SVCR")?,
+                ))
+            } else {
+                None
+            };
+            let block = if let Some(profile) = profile {
+                stela_compiler::extended::compile_for_profile(
+                    &source,
+                    stela_compiler::GuestAddress(guest_base),
+                    profile,
+                    cpu_target,
+                )?
+            } else {
+                stela_compiler::compile_for_target(
+                    &source,
+                    stela_compiler::GuestAddress(guest_base),
+                    cpu_target,
+                )?
+            };
             ensure!(
                 !output_dir.exists(),
                 "output directory exists; choose a new one"
@@ -2046,7 +2091,7 @@ fn run() -> Result<()> {
             }
             std::fs::create_dir(&output_dir)?;
             std::fs::write(output_dir.join("native.bin"), &block.x86_64_code)?;
-            let manifest = serde_json::json!({
+            let mut manifest = serde_json::json!({
                 "schema_version": 1,
                 "kind": "raw_arm64_leaf_aot",
                 "target_cpu":cpu_target.id(),
@@ -2060,6 +2105,17 @@ fn run() -> Result<()> {
                 "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "verified": false,
             });
+            if let Some(profile) = profile {
+                manifest["schema_version"] = serde_json::json!(2);
+                manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_LEAF_ABI);
+                manifest["execution_profile"] = serde_json::json!({
+                    "id": profile.id(),
+                    "svl_bytes": profile.vector_length().bytes(),
+                    "svcr": profile.mode().svcr(),
+                });
+                manifest["entry_prefix_bytes"] =
+                    serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+            }
             write_json(&output_dir.join("manifest.json"), &manifest)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }

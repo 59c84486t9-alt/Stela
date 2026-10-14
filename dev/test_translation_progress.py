@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -430,14 +431,18 @@ class BlockProgressTests(unittest.TestCase):
         self.assertEqual(required['crc_reserved.native_explicit_declines'], 16)
 
     def test_separate_profiles_do_not_inflate_instruction_count(self):
-        root = Path(__file__).resolve().parents[1]
-        leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
-        block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
-        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 635)
-        self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 20)
-        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 434)
-        self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
-        self.assertEqual(len(set(leaf) & set(block)), 9)
+        leaf_registry = fixtures()
+        block_registry = copy.deepcopy(leaf_registry)
+        block_registry['profile']['id'] = 'block-profile'
+        for row in block_registry['forms']:
+            row['profile'] = 'block-profile'
+        leaf = progress.validate_registry(leaf_registry)
+        block = progress.validate_registry(block_registry)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 1)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 1)
+        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 1)
+        self.assertEqual(progress.summarize(block)['reviewed']['partial'], 1)
+        self.assertEqual(set(leaf) & set(block), {'ADC_32_addsub_carry', 'RET_64R_branch_reg'})
         report = {'summary': progress.summarize(leaf), 'measured_at_utc': '2026-10-12T00:00:00Z',
                   'compiler_source_sha256': COMPILER,
                   'block_profile_evidence': {'summary': progress.summarize(block),
@@ -446,14 +451,251 @@ class BlockProgressTests(unittest.TestCase):
                           'traps': {'native_comparisons': 320,
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
-        self.assertIn('| Leaf-profile instruction forms implemented | 635 |', text)
-        self.assertIn('| Block-profile instruction forms implemented | 434 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 1 |', text)
+        self.assertIn('| Block-profile instruction forms implemented | 1 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
-        self.assertIn('| Block-profile forms partially implemented | 2 |', text)
+        self.assertIn('| Block-profile forms partially implemented | 1 |', text)
         self.assertIn('| Native synchronous-trap boundary comparisons | 320 |', text)
         self.assertIn('counts overlap and are not added', text)
         self.assertNotIn('| 171 |', text)
         self.assertNotIn('%', text)
+
+
+
+class ScalableProgressTests(unittest.TestCase):
+    def profile(self):
+        return {'id': progress.SCALABLE_PROFILE, 'compiler_command': 'compile-leaf',
+                'abi': progress.CONTEXT_LEAF_ABI, 'svl_bytes': 16, 'svcr': 3,
+                'outside_scope': ['OS boot']}
+
+    def fake_compiler(self, mutation=None):
+        def fake(command, **kwargs):
+            self.assertEqual(command[1], 'compile-leaf')
+            self.assertEqual(command[command.index('--guest-profile') + 1], progress.SCALABLE_PROFILE)
+            self.assertEqual(command[command.index('--guest-base') + 1], '0x10000000')
+            self.assertEqual(command[command.index('--cpu-target') + 1], 'baseline')
+            source = Path(command[2])
+            output = Path(command[command.index('--output-dir') + 1])
+            output.mkdir()
+            (output / 'native.bin').write_bytes(bytes(13) + b'\xc3\xc3')
+            manifest = {'schema_version': 2, 'kind': 'raw_arm64_leaf_aot',
+                        'abi': progress.CONTEXT_LEAF_ABI, 'target_cpu': 'x86_64-baseline',
+                        'guest_base': progress.SCALABLE_GUEST_BASE, 'guest_instructions': 2,
+                        'execution_profile': {'id': progress.SCALABLE_PROFILE,
+                            'svl_bytes': int(command[command.index('--svl-bytes') + 1]),
+                            'svcr': int(command[command.index('--svcr') + 1])},
+                        'entry_prefix_bytes': 13, 'native_bytes': 15,
+                        'source_map': [[progress.SCALABLE_GUEST_BASE, 13],
+                                       [progress.SCALABLE_GUEST_BASE + 4, 14]],
+                        'source_sha256': progress.sha256(source),
+                        'native_sha256': progress.sha256(output / 'native.bin'),
+                        'compiler_source_sha256': COMPILER}
+            if mutation:
+                mutation(manifest)
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return fake
+
+    def probe(self, directory, **kwargs):
+        return progress.compile_probe('cli', progress.RET, directory, mode='scalable',
+            guest_profile=progress.SCALABLE_PROFILE, **kwargs)
+
+    def test_explicit_uniform_profile_keeps_host_target_separate(self):
+        for length in progress.SCALABLE_VECTOR_BYTES:
+            for svcr in range(4):
+                with self.subTest(length=length, svcr=svcr), tempfile.TemporaryDirectory() as directory:
+                    result = self.probe(Path(directory), svl_bytes=length, svcr=svcr,
+                                        run=self.fake_compiler())
+                self.assertEqual(result['abi'], progress.CONTEXT_LEAF_ABI)
+                self.assertEqual(result['execution_profile'], {
+                    'id': progress.SCALABLE_PROFILE, 'svl_bytes': length, 'svcr': svcr})
+                self.assertEqual(result['target_cpu'], 'x86_64-baseline')
+                self.assertEqual(result['source_map'][0], [progress.SCALABLE_GUEST_BASE, 13])
+
+    def test_context_manifest_accepts_emitted_target_id_instead_of_cli_alias(self):
+        # Metadata from the retained core-integration/actual-ret-1 manifest.
+        # TargetCpu::id canonicalizes the accepted CLI alias "baseline".
+        manifest = {
+            'schema_version': 2, 'kind': 'raw_arm64_leaf_aot',
+            'abi': 'x86_64-sysv-guest-state-v1-context-direct-ram',
+            'target_cpu': 'x86_64-baseline', 'guest_base': 268435456,
+            'guest_instructions': 2, 'native_bytes': 15, 'entry_prefix_bytes': 13,
+            'execution_profile': {'id': 'apple-sme2-streaming-v1', 'svl_bytes': 16, 'svcr': 1},
+            'source_map': [[268435456, 13], [268435460, 14]],
+        }
+        source = bytes.fromhex('c0035fd6c0035fd6')
+        progress.validate_context_manifest(manifest, source, 15, 16, 1)
+        with self.assertRaisesRegex(ValueError, 'source/native metadata mismatch'):
+            progress.validate_context_manifest({**manifest, 'target_cpu': 'baseline'}, source, 15, 16, 1)
+
+    def test_missing_invalid_or_implicit_scalable_controls_never_call_compiler(self):
+        configurations = [(value, 3) for value in (None, False, 0, 48, 512, '16')]
+        configurations += [(16, value) for value in (None, False, -1, 4, '3')]
+        for length, svcr in configurations:
+            with self.subTest(length=length, svcr=svcr), tempfile.TemporaryDirectory() as directory:
+                with patch.object(progress.subprocess, 'run') as run, self.assertRaises(ValueError):
+                    self.probe(Path(directory), svl_bytes=length, svcr=svcr, run=run)
+                run.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'context compiler lane'):
+            progress.compile_probe('cli', progress.RET, Path(directory),
+                guest_profile=progress.SCALABLE_PROFILE, svl_bytes=16, svcr=3)
+
+    def test_context_probe_rejects_legacy_schema_abi_and_wrong_profile(self):
+        mutations = [lambda m: m.update(schema_version=1),
+                     lambda m: m.update(abi=progress.BLOCK_ABI),
+                     lambda m: m.update(abi='x86_64-sysv-guest-state-v3-direct-ram'),
+                     lambda m: m.update(kind='raw_arm64_block_aot'),
+                     lambda m: m.pop('execution_profile'),
+                     lambda m: m.update(execution_profile=None),
+                     lambda m: m['execution_profile'].update(id='future-sme-profile'),
+                     lambda m: m['execution_profile'].update(svl_bytes=32),
+                     lambda m: m['execution_profile'].update(svcr=0),
+                     lambda m: m['execution_profile'].update(svcr=True),
+                     lambda m: m.update(target_cpu='native'),
+                     lambda m: m.update(compiler_source_sha256='z' * 64)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(ValueError):
+                    self.probe(Path(directory), svl_bytes=16, svcr=3,
+                               run=self.fake_compiler(mutation))
+
+    def test_context_source_map_binds_every_guest_instruction_after_wrapper(self):
+        changes = [{'source_map': value} for value in (None, [], [[progress.SCALABLE_GUEST_BASE, 13]],
+                   [[0, 13], [4, 14]], [[progress.SCALABLE_GUEST_BASE, 0], [progress.SCALABLE_GUEST_BASE+4, 14]],
+                   [[progress.SCALABLE_GUEST_BASE, 13], [progress.SCALABLE_GUEST_BASE+4, 15]],
+                   [[progress.SCALABLE_GUEST_BASE, 13], [progress.SCALABLE_GUEST_BASE+4, 12]],
+                   [[progress.SCALABLE_GUEST_BASE, 13], [progress.SCALABLE_GUEST_BASE+4, True]])]
+        changes += [{'entry_prefix_bytes': value} for value in (None, False, 0, 1, 14, 15)]
+        changes += [{'guest_base': 0}, {'guest_instructions': 1}, {'native_bytes': 1},
+                    {'source_sha256': 'a' * 64}, {'native_sha256': 'a' * 64}]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(ValueError):
+                    self.probe(Path(directory), svl_bytes=16, svcr=3,
+                               run=self.fake_compiler(lambda manifest: manifest.update(change)))
+
+    def test_empty_registry_uses_context_ret_identity_without_support_credit(self):
+        registry = json.loads((progress.ROOT / 'tests/isa/apple-silicon-scalable-forms.json').read_text())
+        rows = progress.validate_registry(registry)
+        self.assertEqual(rows, {})
+        self.assertEqual(progress.summarize(rows)['reviewed']['implemented'], 0)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(progress, 'compile_probe', return_value={
+                    'word': '0xd65f03c0', 'compiler_source_sha256': COMPILER}) as probe:
+                compiler, results = progress.smoke_forms('cli', rows, rows, Path(directory),
+                    mode='scalable', profile=registry['profile'])
+        self.assertEqual(compiler, COMPILER)
+        self.assertEqual(results, [{'compiler_identity_only': True,
+                                  'word': '0xd65f03c0', 'compiler_source_sha256': COMPILER}])
+        self.assertEqual(probe.call_args.args[1], progress.RET)
+        self.assertEqual(probe.call_args.kwargs, {'mode': 'scalable',
+            'guest_profile': progress.SCALABLE_PROFILE, 'svl_bytes': 16, 'svcr': 3})
+
+    def test_scalable_registry_and_samples_require_explicit_profile_controls(self):
+        registry = fixtures()
+        registry['profile'] = self.profile()
+        for row in registry['forms']:
+            row['profile'] = progress.SCALABLE_PROFILE
+            for sample in row['smoke_samples'] + row.get('rejected_samples', []):
+                sample.update(svl_bytes=32, svcr=1)
+        progress.validate_registry(registry)
+        for change in ({'abi': progress.BLOCK_ABI}, {'compiler_command': 'compile-scalable'},
+                       {'svl_bytes': 48}, {'svcr': None}):
+            changed = copy.deepcopy(registry)
+            changed['profile'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                progress.validate_registry(changed)
+        for field in ('svl_bytes', 'svcr'):
+            changed = copy.deepcopy(registry)
+            changed['forms'][0]['smoke_samples'][0].pop(field)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                progress.validate_registry(changed)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(progress, 'compile_probe', return_value={
+                    'compiler_source_sha256': COMPILER}) as probe:
+                rows = progress.validate_registry(registry)
+                progress.smoke_forms('cli', rows, rows, Path(directory), mode='scalable',
+                                     profile=registry['profile'])
+        self.assertEqual(probe.call_args.kwargs, {'mode': 'scalable',
+            'guest_profile': progress.SCALABLE_PROFILE, 'svl_bytes': 32, 'svcr': 1})
+
+    def test_four_execution_profiles_still_count_one_canonical_form(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        form = next(row for row in catalog['forms'] if row['id'] == 'RET_64R_branch_reg')
+        row = {**form, 'source_sha256': catalog['source_files_sha256'][form['source_file']],
+               'scope': 'bounded reviewed semantics', 'status': 'implemented'}
+        registries = [{'forms': [{**row, 'profile': profile}]} for profile in (
+            'leaf', 'block', 'service', progress.SCALABLE_PROFILE)]
+        assessed, summary = progress.a64_checklist.assess(catalog, registries)
+        self.assertEqual((summary['implemented'], summary['partial']), (1, 0))
+        self.assertEqual(len(next(form for form in assessed['forms'] if form['id'] == row['id'])['profiles']), 4)
+
+    def test_pipeline_includes_four_registries_and_preserves_verification_basis(self):
+        source_root = progress.ROOT
+        for implementation_only in (False, True):
+            with self.subTest(implementation_only=implementation_only), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'tests/isa').mkdir(parents=True)
+                (root / 'tests/isa/apple-specific-extensions.json').write_text(json.dumps({
+                    'kind': 'apple_specific_extension_ledger', 'inventory_complete': False, 'extensions': []}))
+                (root / 'cli').write_text('mock compiler executable')
+                registries = []
+                for mode in ('leaf', 'block', 'service', 'scalable'):
+                    registry = fixtures()
+                    registry['forms'] = []
+                    if mode == 'block':
+                        registry['profile'].update(id='block', compiler_command='compile-block', abi=progress.BLOCK_ABI)
+                    elif mode == 'service':
+                        registry['profile'].update(id='service', compiler_mode='service', abi=progress.SERVICE_ABI)
+                    elif mode == 'scalable':
+                        registry['profile'] = self.profile()
+                    path = root / (mode + '.json')
+                    path.write_text(json.dumps(registry))
+                    registries.append(path)
+                arguments = ['translation-progress.py', '--registry', str(registries[0]),
+                    '--block-registry', str(registries[1]), '--service-registry', str(registries[2]),
+                    '--scalable-registry', str(registries[3]), '--cli', str(root / 'cli'),
+                    '--checklist', str(source_root / 'tests/isa/a64-documented-checklist.json'),
+                    '--apple-profiles', str(source_root / 'tests/isa/apple-codegen-profiles.json'),
+                    '--output', str(root / 'report.json')]
+                if implementation_only:
+                    arguments.append('--implementation-only')
+                checkpoint = {'implemented': 292, 'total': 3119,
+                              'compiler_source_sha256': 'd' * 64}
+                def smoke(_cli, _forms, _overrides, _directory, **kwargs):
+                    mode = kwargs.get('mode', 'leaf')
+                    return COMPILER, [{'compiler_identity_only': True}] if mode == 'scalable' else []
+                with patch.object(progress, 'ROOT', root), patch.object(sys, 'argv', arguments), \
+                     patch.object(progress, 'previous_checkpoint', return_value=checkpoint), \
+                     patch.object(progress, 'smoke_forms', side_effect=smoke) as probes, \
+                     patch.object(progress, 'validate_evidence', return_value=({}, {})) as evidence, \
+                     patch.object(progress, 'validate_current_compiler', return_value={}) as recipes, \
+                     patch.object(progress, 'write_evidence', return_value=root / 'archive.json') as write, \
+                     patch('builtins.print'):
+                    progress.main()
+                report = write.call_args.args[1]
+                self.assertEqual(probes.call_count, 4)
+                self.assertEqual(probes.call_args.kwargs['mode'], 'scalable')
+                self.assertEqual(probes.call_args.kwargs['profile'], self.profile())
+                self.assertEqual(evidence.call_count, 0 if implementation_only else 4)
+                self.assertEqual(recipes.call_count, 8)
+                self.assertEqual(report['last_verified_checkpoint'], checkpoint if implementation_only else None)
+                self.assertEqual(report['implementation_only'], implementation_only)
+                self.assertEqual(report['documented_isa']['summary']['implemented'], 0)
+                self.assertEqual(report['scalable_profile_evidence']['summary']['reviewed']['implemented'], 0)
+                self.assertEqual(report['scalable_profile_evidence']['profile'], self.profile())
+                self.assertEqual(report['scalable_profile_evidence']['native_differential_evidence'], {})
+                self.assertEqual(report['scalable_profile_evidence']['compiler_smoke_probes'],
+                                 [{'compiler_identity_only': True}])
+                self.assertEqual(report['scalable_profile_evidence']['registry_sha256'],
+                                 progress.sha256(registries[3]))
+
+    def test_unknown_scalable_encoding_still_requires_independent_decoder(self):
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        facts = progress.a64_checklist.validate(catalog)
+        scalable = next(row for row in facts.values() if row['category'] == 'sme')
+        with self.assertRaisesRegex(ValueError, 'Independent decoder declined'):
+            progress.smoke_decoding(decoder, int(scalable['encoding_value'], 16), scalable['id'], facts)
 
 
 class EvidenceTests(unittest.TestCase):

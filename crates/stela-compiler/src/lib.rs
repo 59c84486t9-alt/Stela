@@ -3,6 +3,8 @@
 
 pub mod aarch64;
 pub mod block;
+pub mod context;
+pub mod extended;
 mod target;
 pub mod x86_64;
 
@@ -13,6 +15,18 @@ use serde::{Deserialize, Serialize};
 /// Bind cached code and evidence to compiler implementation and dependencies.
 pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("lib.rs"),
+    include_str!("context.rs"),
+    include_str!("extended.rs"),
+    include_str!("aarch64/scalable.rs"),
+    include_str!("aarch64/sve.rs"),
+    include_str!("aarch64/sve/integer_logic.rs"),
+    include_str!("aarch64/sme.rs"),
+    include_str!("aarch64/sme/length.rs"),
+    include_str!("x86_64/scalable.rs"),
+    include_str!("x86_64/sve.rs"),
+    include_str!("x86_64/sve/integer_logic.rs"),
+    include_str!("x86_64/sme.rs"),
+    include_str!("x86_64/sme/length.rs"),
     include_str!("target.rs"),
     include_str!("aarch64.rs"),
     include_str!("x86_64.rs"),
