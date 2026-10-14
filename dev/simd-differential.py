@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Original ARM, independent byte math and native x86 SIMD data movement.
+"""Original ARM, independent math and native x86 SIMD/FP verification.
 
 Reviewed single B/H/S/D/Q transfers, MOVI D/2D and paired S/D/Q transfers are tested.
 Single-operation leaf mini-functions expose each result in a fresh complete
 state; mixed chains additionally compare final state and RAM. Representative
 block cases execute the original RET and native block exit ABI.
+Scalar numerical blocks use pinned original/core outcomes and actual Rust
+runtime completion; unsupported controls remain distinct from successful runs.
 """
 import argparse
 from collections import Counter
@@ -218,24 +220,24 @@ def mathematical(operations, initial, memory, ram_address):
     return state, bytes(ram)
 
 
-def validate_manifest(manifest, source, native, block, target_cpu=None):
+def validate_manifest(manifest, source, native, block, target_cpu=None, guest_base=BASE):
     if target_cpu is not None and manifest.get("target_cpu") != target_cpu:
         raise AssertionError("SIMD manifest CPU requirements differ from selection")
     if (manifest['schema_version'] != 1 or manifest['abi'] != (BLOCK_ABI if block else LEAF_ABI)
-            or manifest['guest_base'] != BASE or manifest['source_sha256'] != digest(source)
+            or manifest['guest_base'] != guest_base or manifest['source_sha256'] != digest(source)
             or manifest['native_sha256'] != digest(native) or manifest['native_bytes'] != len(native)
             or manifest['verified'] is not False):
         raise AssertionError('SIMD manifest does not bind original/native bytes and ABI')
     consumed = manifest['source_bytes'] if block else manifest['guest_instructions'] * 4
     mapping = manifest['source_map']
-    if (consumed != len(source) or [row[0] for row in mapping] != list(range(BASE, BASE + len(source), 4))
+    if (consumed != len(source) or [row[0] for row in mapping] != list(range(guest_base, guest_base + len(source), 4))
             or any(not 0 <= row[1] < len(native) for row in mapping)
             or any(a[1] >= b[1] for a, b in zip(mapping, mapping[1:]))):
         raise AssertionError('SIMD source map omits or merges original instructions')
     return [row[1] for row in mapping]
 
 
-def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline"):
+def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline", guest_base=BASE):
     words, entries = [], []
     for function in functions:
         entries.append(len(words))
@@ -243,14 +245,14 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
     output = directory / f'native-{index}'
-    manifest = json.loads(subprocess.check_output([str(cli), 'compile-block' if block else 'compile-leaf', str(path), '--guest-base', hex(BASE), '--output-dir', str(output), '--cpu-target', cpu_target], timeout=60))
+    manifest = json.loads(subprocess.check_output([str(cli), 'compile-block' if block else 'compile-leaf', str(path), '--guest-base', hex(guest_base), '--output-dir', str(output), '--cpu-target', cpu_target], timeout=60))
     native = (output / 'native.bin').read_bytes()
-    offsets = validate_manifest(manifest, source, native, block, target_id)
+    offsets = validate_manifest(manifest, source, native, block, target_id, guest_base)
     if not block:
         for entry, function in zip(entries, functions):
             if native[offsets[entry + len(function['operations'])]] != 0xc3:
@@ -394,7 +396,11 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        pipe.send({'result': execute_register_batches(batches) if batches[0].get('cohort') in REGISTER_COHORTS else execute_batches(batches, pipe)})
+        if batches[0].get('cohort') == 'scalar_numerical':
+            result = execute_scalar_numerical_batches(batches)
+        else:
+            result = execute_register_batches(batches) if batches[0].get('cohort') in REGISTER_COHORTS else execute_batches(batches, pipe)
+        pipe.send({'result': result})
     except BaseException as error:
         pipe.send({'error': repr(error)})
     finally:
@@ -2257,6 +2263,487 @@ def retain_native_binary_evidence(batch,accounting,dynamic):
 
 
 
+NUMERICAL_FOCUS = 'scalar_numerical'
+NUMERICAL_FOUNDATION = ROOT / '.stela/research/numerical-fp/receipt.json'
+NUMERICAL_RETURN_EXIT = 4
+NUMERICAL_HELPER_EXIT = 9
+NUMERICAL_EXCEPTION_FLAGS = 0x9f
+NUMERICAL_EXCEPTION_ENABLE_SHIFT = 8
+NUMERICAL_TRAP_ENABLE_MASK = NUMERICAL_EXCEPTION_FLAGS << NUMERICAL_EXCEPTION_ENABLE_SHIFT
+NUMERICAL_NEP = 1 << 2
+NUMERICAL_AH = 1 << 1
+NUMERICAL_FZ16 = 1 << 19
+NUMERICAL_FZ = 1 << 24
+NUMERICAL_ROUND_NEGATIVE = 2 << 22
+NUMERICAL_INVALID_ENABLE = 1 << NUMERICAL_EXCEPTION_ENABLE_SHIFT
+NUMERICAL_MXCSR_ALL_MASKS = 0x1f80
+NUMERICAL_MXCSR_ALL_STATUS = 0x3f
+NUMERICAL_MXCSR_ROUND_SHIFT = 13
+NUMERICAL_CACHE_LOOP_ITERATIONS = 3
+NUMERICAL_ZERO_CARRY_FLAGS = 0x60000000
+NUMERICAL_INPUT_HEADER = struct.calcsize('<Q')
+NUMERICAL_INPUT_STRIDE = NUMERICAL_INPUT_HEADER + ctypes.sizeof(State) + 8
+NUMERICAL_OUTPUT_STRIDE = struct.calcsize('<64Q4I')
+NUMERICAL_GUARD_BYTES = 256
+NUMERICAL_GUARD = bytes(range(256))
+NUMERICAL_ADD_X7_ONE = 0x910004e7
+NUMERICAL_ADD_X8_TWO = 0x91000908
+NUMERICAL_SUBS_X10_ONE = 0xf100054a
+NUMERICAL_CBNZ_X10_BACK_TWO = 0xb5ffffca
+# SysV (state, block, MXCSR, result): install the requested caller environment,
+# invoke the real block, capture its exit and MXCSR, then restore our caller.
+NUMERICAL_MXCSR_WRAPPER = bytes.fromhex(
+    '4883ec18 0fae1c24 89542404 48894c2408 0fae542404 0fae5914 '
+    'ffd6 488b4c2408 488901 48895108 0fae5910 0fae1424 4883c418 c3')
+
+
+class NumericalNativeExit(ctypes.Structure):
+    _fields_ = [('next_pc', ctypes.c_uint64), ('kind', ctypes.c_uint64),
+                ('mxcsr_after', ctypes.c_uint32), ('mxcsr_before', ctypes.c_uint32)]
+
+
+def numerical_json(path, expected_sha256=None):
+    path = Path(path)
+    data = path.read_bytes()
+    if expected_sha256 is not None and digest(data) != expected_sha256:
+        raise AssertionError(f'Numerical evidence identity changed: {path}')
+    return json.loads(data), digest(data)
+
+
+def numerical_capture(path, expected_sha256):
+    receipt, identity = numerical_json(path, expected_sha256)
+    required = {'inputs.bin', 'results.bin', 'cases.json', 'guest.S', 'guest.elf', 'original.py'}
+    if not required <= receipt['files'].keys():
+        raise AssertionError('Numerical capture omits original source, states or output')
+    for name, info in receipt['files'].items():
+        if Path(name).name != name:
+            raise AssertionError('Original capture filename is not one path component')
+        data = (Path(path).parent / name).read_bytes()
+        if digest(data) != info['sha256'] or len(data) != info['bytes']:
+            raise AssertionError(f'Original capture changed: {name}')
+    return receipt, identity
+
+
+def numerical_expected_state(initial, result):
+    if len(result) != NUMERICAL_OUTPUT_STRIDE:
+        raise AssertionError('Truncated numerical original state')
+    values = struct.unpack('<64Q4I', result)
+    if values[-1] != 0x1234:
+        raise AssertionError('Numerical original sentinel missing')
+    expected = State.from_buffer_copy(initial)
+    for register in range(32):
+        expected.v[register][:] = values[register * 2:register * 2 + 2]
+    expected.nzcv, expected.fpcr, expected.fpsr = values[64:67]
+    return expected
+
+
+def load_numerical_oracle(path):
+    """Read historical producers as immutable data, without requiring their
+    archived harness hashes to equal the current harness implementation.
+    """
+    foundation, foundation_hash = numerical_json(path)
+    if foundation.get('kind') != 'numerical_fp_core_foundation_checkpoint' or foundation.get('passed') is not True:
+        raise AssertionError('A passing numerical foundation receipt is required')
+    records, functions, producers, executed_images = [], {}, {}, []
+    pairs = (('original', 'core_comparison'), ('fresh_original', 'fresh_comparison'))
+    for original_name, comparison_name in pairs:
+        reference = foundation['evidence'][original_name]
+        capture_path = ROOT / reference['path']
+        producer, producer_hash = numerical_capture(capture_path, reference['sha256'])
+        comparison_ref = foundation['evidence'][comparison_name]
+        comparison, comparison_hash = numerical_json(ROOT / comparison_ref['path'], comparison_ref['sha256'])
+        if comparison.get('passed') is not True or comparison['original_receipt_sha256'] != producer_hash:
+            raise AssertionError('Numerical core comparison does not bind its original capture')
+        for name, info in comparison['files'].items():
+            data = (ROOT / comparison_ref['path']).parent.joinpath(name).read_bytes()
+            if digest(data) != info['sha256'] or len(data) != info['bytes']:
+                raise AssertionError(f'Numerical core evidence changed: {name}')
+        directory = capture_path.parent
+        executed_images.append((directory / 'guest.elf').read_bytes())
+        cases = json.loads((directory / 'cases.json').read_bytes())
+        inputs, results = (directory / 'inputs.bin').read_bytes(), (directory / 'results.bin').read_bytes()
+        if len(inputs) != len(cases) * NUMERICAL_INPUT_STRIDE or len(results) != len(cases) * NUMERICAL_OUTPUT_STRIDE:
+            raise AssertionError('Numerical corpus record count or state layout changed')
+        producers[original_name] = {'path': str(capture_path.relative_to(ROOT)), 'sha256': producer_hash,
+            'cases': len(cases), 'cpu': producer['cpu'], 'qemu_version': producer['qemu_version'],
+            'historical_shared_sources_sha256': producer['shared_sources_sha256'],
+            'core_comparison_sha256': comparison_hash, 'files': producer['files']}
+        for index, case in enumerate(cases):
+            record = inputs[index * NUMERICAL_INPUT_STRIDE:(index + 1) * NUMERICAL_INPUT_STRIDE]
+            function = struct.unpack_from('<Q', record)[0]
+            initial = State.from_buffer_copy(record[NUMERICAL_INPUT_HEADER:NUMERICAL_INPUT_HEADER + ctypes.sizeof(State)])
+            if function != case['function'] or digest(bytes(initial)) != case['initial_state_sha256']:
+                raise AssertionError('Original numerical metadata does not bind its state')
+            # X30 belongs to the original QEMU transport. This sole derived input
+            # mutation enables an actual guest RET in both native and Unicorn.
+            initial.x[30] = STOP
+            result = results[index * NUMERICAL_OUTPUT_STRIDE:(index + 1) * NUMERICAL_OUTPUT_STRIDE]
+            expected = numerical_expected_state(initial, result)
+            operation = {key: case[key] for key in ('name', 'lane', 'bytes', 'scalar', 'd', 'n', 'm', 'word')}
+            if functions.setdefault(function, operation) != operation:
+                raise AssertionError('Original numerical function changed between producers')
+            unsupported = bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)
+            if not unsupported and expected.fpcr != initial.fpcr:
+                raise AssertionError('Original FPCR readback differs outside classified trap controls')
+            records.append({'producer': original_name, 'case': case['case'], 'parent_case': case.get('parent_case', case['case']),
+                'label': case['label'], 'function': function, 'operation': operation,
+                'initial': bytes(initial), 'expected': bytes(expected), 'unsupported': unsupported})
+    if set(functions) != set(range(84)) or len(records) != foundation['original_core_result_status_comparisons']:
+        raise AssertionError('Numerical foundation function/corpus counts changed')
+    original_words = b''.join(struct.pack('<II', functions[index]['word'], RET) for index in range(84))
+    if any(image.find(original_words) < 0 or image.count(original_words) != 1 for image in executed_images):
+        raise AssertionError('Executed original images do not contain the exact unmodified FP/RET words')
+    return {'records': records, 'functions': [functions[index] for index in range(84)],
+            'foundation_sha256': foundation_hash, 'producers': producers,
+            'input_derivation': 'Only X30 becomes the declared STOP address. Requested trap enables remain intact and test explicit refusal; their QEMU RAZ/WI outcomes receive no successful native equality credit.'}
+
+
+def numerical_native_accounting(batch):
+    decoded = decode_native_stream(batch['native'])
+    operation = batch['functions'][0]['operations'][0]
+    split = batch['instruction_offsets'][1]
+    if split not in {instruction.address for instruction in decoded}:
+        raise AssertionError('Numerical source map splits a native instruction')
+    return {'shape': operation, 'native_bytes': len(batch['native']), 'native_instructions': len(decoded),
+            'fp_body_bytes': split, 'fp_body_instructions': sum(instruction.address < split for instruction in decoded),
+            'guest_ret_native_bytes': len(batch['native']) - split,
+            'static_opcode_histogram': dict(sorted(Counter(native_mnemonic(i.mnemonic) for i in decoded).items())),
+            'limits': 'Static counts include every generated branch path once, including helper side exits; no dynamic instruction, timing or application-performance claim.'}
+
+
+def execute_scalar_numerical_batches(batches):
+    oracle = load_numerical_oracle(batches[0]['oracle_path'])
+    machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+    source = b''.join(batch['source'] for batch in batches)
+    machine.mem_map(BASE, (len(source) + 4095) & ~4095)
+    machine.mem_write(BASE, source)
+    machine.mem_map(STOP, 4096)
+    counts, corpus = Counter(), hashlib.sha256()
+    examples, mxcsr_examples = {}, []
+    with ExitStack() as mappings:
+        addresses = [mappings.enter_context(executable(batch['native'])) for batch in batches]
+        wrapper_address = mappings.enter_context(executable(NUMERICAL_MXCSR_WRAPPER))
+        wrapper = ctypes.CFUNCTYPE(None, ctypes.POINTER(State), ctypes.c_void_p, ctypes.c_uint32,
+                                 ctypes.POINTER(NumericalNativeExit))(wrapper_address)
+        guard = ctypes.create_string_buffer(NUMERICAL_GUARD_BYTES * 2 + ctypes.sizeof(State))
+        state_address = ctypes.addressof(guard) + NUMERICAL_GUARD_BYTES
+        native_state = ctypes.cast(state_address, ctypes.POINTER(State))
+
+        def invoke(record, mxcsr):
+            ctypes.memmove(guard, NUMERICAL_GUARD + record['initial'] + NUMERICAL_GUARD, len(guard))
+            observed = NumericalNativeExit()
+            wrapper(native_state, addresses[record['function']], mxcsr, ctypes.byref(observed))
+            if observed.mxcsr_before != mxcsr or observed.mxcsr_after != mxcsr:
+                raise AssertionError(f'Native numerical path changed caller MXCSR: {record["operation"]}')
+            if guard.raw[:NUMERICAL_GUARD_BYTES] != NUMERICAL_GUARD or guard.raw[-NUMERICAL_GUARD_BYTES:] != NUMERICAL_GUARD:
+                raise AssertionError('Native numerical instruction changed surrounding RAM canaries')
+            actual = ctypes.string_at(state_address, ctypes.sizeof(State))
+            instruction_pc = BASE + record['function'] * 8
+            if observed.kind == NUMERICAL_RETURN_EXIT:
+                if record['unsupported'] or observed.next_pc != STOP or actual != record['expected']:
+                    raise AssertionError(json.dumps({'operation': record['operation'], 'case': record['case'],
+                        'exit': [observed.next_pc, observed.kind], 'actual': state_dict(State.from_buffer_copy(actual)),
+                        'expected': state_dict(State.from_buffer_copy(record['expected']))}))
+                return 'inline'
+            if observed.kind != NUMERICAL_HELPER_EXIT or observed.next_pc != instruction_pc or actual != record['initial']:
+                raise AssertionError(f'Numerical helper exit is imprecise or changed state: {record["operation"]}')
+            return 'unsupported' if record['unsupported'] else 'helper'
+
+        for record in oracle['records']:
+            path = invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
+            counts[path] += 1
+            corpus.update(record['initial']);corpus.update(struct.pack('<I', record['operation']['word']))
+            shape = (record['operation']['name'], record['operation']['lane'], path)
+            examples.setdefault(shape, record)
+            initial = State.from_buffer_copy(record['initial'])
+            if not record['unsupported'] and initial.fpcr & 7 == 0:
+                initialize_arm(machine, initial)
+                machine.emu_start(BASE + record['function'] * 8, STOP, count=3)
+                original = capture_arm(machine, initial)
+                if machine.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(original) != record['expected']:
+                    raise AssertionError(json.dumps({'ordinary_original_case': record['case'], 'operation': record['operation'],
+                        'original': state_dict(original), 'expected': state_dict(State.from_buffer_copy(record['expected']))}))
+                counts['unicorn_complete_state'] += 1
+        for shape, record in sorted(examples.items()):
+            for masks in (0, NUMERICAL_MXCSR_ALL_MASKS):
+                for status in (0, NUMERICAL_MXCSR_ALL_STATUS):
+                    for rounding in range(4):
+                        requested = masks | status | (rounding << NUMERICAL_MXCSR_ROUND_SHIFT)
+                        if invoke(record, requested) != shape[2]:
+                            raise AssertionError('Caller MXCSR changed native numerical path choice')
+                        counts['mxcsr_checks'] += 1
+            mxcsr_examples.append({'name': shape[0], 'lane': shape[1], 'path': shape[2],
+                                   'producer': record['producer'], 'case': record['case']})
+    return {'raw_native_state_and_exit_comparisons': len(oracle['records']),
+            'raw_inline_complete_state_comparisons': counts['inline'],
+            'raw_helper_unchanged_state_comparisons': counts['helper'],
+            'raw_unsupported_unchanged_state_comparisons': counts['unsupported'],
+            'unicorn_original_complete_state_comparisons': counts['unicorn_complete_state'],
+            'caller_mxcsr_preservation_comparisons': counts['mxcsr_checks'],
+            'caller_mxcsr_examples': mxcsr_examples, 'state_corpus_sha256': corpus.hexdigest(),
+            'state_bytes': ctypes.sizeof(State), 'ram_canary_bytes_per_case': NUMERICAL_GUARD_BYTES * 2,
+            'limits': 'Raw helper exits verify unchanged full state and exact instruction PC only; Python never completes them. Actual Rust runtime completion is a separately reported cohort. QEMU GPR/SP transport is supplemented by complete-state Unicorn MAX checks only when AFP controls are zero.'}
+
+
+def numerical_runtime_cases(records):
+    selected = {}
+    # One fresh case per operation/format/control, plus NEP aliases and typed
+    # declines. Avoid repeating the full original corpus through subprocesses.
+    for record in records:
+        initial = State.from_buffer_copy(record['initial'])
+        op = record['operation']
+        if not record['unsupported'] and initial.fpsr == 0:
+            selected.setdefault(('control', op['name'], op['lane'], initial.fpcr), record)
+            if numerical_runtime_semantic_case(record, initial):
+                selected.setdefault(('semantic', op['name'], op['lane'], record['label'], initial.fpcr), record)
+        if not record['unsupported'] and initial.fpcr == NUMERICAL_NEP:
+            selected.setdefault(('alias', record['function']), record)
+        if record['unsupported']:
+            selected.setdefault(('trap_control', initial.fpcr), record)
+            if initial.fpcr == NUMERICAL_TRAP_ENABLE_MASK:
+                selected.setdefault(('trap_form', op['name'], op['lane']), record)
+    return list({(record['producer'], record['case']): record for record in selected.values()}.values())
+
+
+def numerical_runtime_semantic_case(record, initial):
+    """Exercise actual runtime arithmetic/status, beyond the first zero case
+    retained for each control. All values come from the pinned original corpus.
+    """
+    label, control = record['label'], initial.fpcr
+    ordinary = {'one_opposite_one', 'maximum_half', 'minimum_normal_half',
+                'qnan_snan', 'denormal_zero_divisor', 'maximum_maximum', 'normal_boundary_midpoint'}
+    if control == 0:
+        return label in ordinary
+    if control == NUMERICAL_AH:
+        return label in {'qnan_snan', 'denormal_zero_divisor', 'normal_boundary_midpoint'}
+    flush = NUMERICAL_FZ16 if record['operation']['lane'] == 2 else NUMERICAL_FZ
+    if control == flush:
+        return label in {'minimum_normal_half', 'denormal_zero_divisor'}
+    return control == NUMERICAL_ROUND_NEGATIVE and label == 'maximum_maximum'
+
+
+def numerical_report_state(value):
+    state = State()
+    if len(value['x']) != 31 or len(value['v']) != 32 or any(len(vector) != 2 for vector in value['v']):
+        raise AssertionError('Runtime numerical state has an incomplete register bank')
+    state.x[:] = value['x']
+    for index, vector in enumerate(value['v']):
+        state.v[index][:] = vector
+    for name in ('sp', 'nzcv', 'reserved', 'fpcr', 'fpsr'):
+        setattr(state, name, value[name])
+    return state
+
+
+def numerical_runtime_cohort(cli, directory, oracle, compiler):
+    source = b''.join(struct.pack('<II', operation['word'], RET) for operation in oracle['functions'])
+    source_path, state_path = directory / 'runtime.arm64', directory / 'runtime-state.json'
+    source_path.write_bytes(source)
+    ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
+    memory_path = directory / 'runtime-memory.json'
+    memory_path.write_text(json.dumps({'regions': [{'guest_address': ram_address, 'virtual_bytes': len(ram),
+        'initial_bytes': list(ram), 'readable': True, 'writable': True}]}))
+    counts, transcripts = Counter(), []
+    cache = directory / 'runtime-cache'
+    original = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    original.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+    original.mem_map(BASE, 8192)
+    original.mem_map(STOP, 4096)
+
+    def invoke(code, base, entry, initial, budget=8, cache_dir=cache):
+        code_path = source_path if code == source else directory / 'runtime-mixed.arm64'
+        if code_path != source_path:
+            code_path.write_bytes(code)
+        state_path.write_text(json.dumps(state_dict(initial)))
+        report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(code_path),
+            '--guest-base', hex(base), '--entry', hex(entry), '--stop-pc', hex(STOP),
+            '--cpu-target', 'baseline', '--state', str(state_path), '--block-budget', str(budget),
+            '--cache-dir', str(cache_dir), '--memory', str(memory_path),
+            '--read-memory', f'{hex(ram_address)}:{len(ram)}'], timeout=30))
+        if (report['kind'] != 'native_block_run' or report['source_sha256'] != digest(code)
+                or report['compiler_source_sha256'] != compiler or report['target_cpu'] != 'x86_64-baseline'):
+            raise AssertionError('Runtime numerical report is not bound to this source/compiler/target')
+        memory = report['memory']
+        if memory['memory_before'] != memory['memory_after'] or memory['memory_reads'][0]['hex'] != ram.hex():
+            raise AssertionError('Numerical runtime changed owned guest RAM')
+        outcome = report['outcome']
+        for name in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits', 'floating_point_helpers'):
+            if not isinstance(outcome[name], int) or outcome[name] < 0:
+                raise AssertionError(f'Runtime numerical accounting missing {name}')
+            counts[name] += outcome[name]
+        transcripts.append({'entry': entry, 'budget': budget, 'initial_state_sha256': digest(bytes(initial)),
+            'source_sha256': digest(code), 'synthetic_source_hex': code.hex() if code != source else None, 'report': report})
+        counts['invocations'] += 1
+        return report, numerical_report_state(report['state'])
+
+    for record in numerical_runtime_cases(oracle['records']):
+        initial = State.from_buffer_copy(record['initial'])
+        entry = BASE + record['function'] * 8
+        report, actual = invoke(source, BASE, entry, initial)
+        reason = report['outcome']['reason']
+        if record['unsupported']:
+            expected = {'kind': 'floating_point_unsupported', 'instruction_pc': entry,
+                        'fpcr': initial.fpcr, 'enabled_exceptions': (initial.fpcr >> NUMERICAL_EXCEPTION_ENABLE_SHIFT) & NUMERICAL_EXCEPTION_FLAGS}
+            if reason != expected or report['pc'] != entry or bytes(actual) != record['initial']:
+                raise AssertionError(json.dumps({'unsupported_case': record['case'], 'expected_reason': expected, 'report': report}))
+            counts['typed_unsupported_state_checks'] += 1
+        else:
+            if (reason['kind'] != 'stop_address' or report['pc'] != STOP
+                    or bytes(actual) != record['expected'] or report['outcome']['last_exit'] != [STOP, NUMERICAL_RETURN_EXIT]):
+                raise AssertionError(json.dumps({'runtime_case': record['case'], 'producer': record['producer'],
+                    'expected': state_dict(State.from_buffer_copy(record['expected'])), 'report': report}))
+            counts['completed_state_checks'] += 1
+
+    # Each shape has a genuine helper-only zero/zero case. Budget one must stop
+    # after completing that operation, and resume at the real guest RET.
+    resume_cases = {}
+    for record in oracle['records']:
+        initial = State.from_buffer_copy(record['initial'])
+        if record['label'] == 'zero_pp' and initial.fpcr == 0 and initial.fpsr == 0:
+            op = record['operation']
+            resume_cases.setdefault((op['name'], op['lane']), record)
+    if len(resume_cases) != 12:
+        raise AssertionError('Numerical budget corpus omits an arithmetic form')
+    for index, record in enumerate(resume_cases.values()):
+        entry = BASE + record['function'] * 8
+        initial = State.from_buffer_copy(record['initial'])
+        resume_cache = directory / f'resume-cache-{index}'
+        first, intermediate = invoke(source, BASE, entry, initial, budget=1, cache_dir=resume_cache)
+        if (first['outcome']['reason']['kind'] != 'budget_exhausted' or first['pc'] != entry + 4
+                or bytes(intermediate) != record['expected'] or first['outcome']['floating_point_helpers'] != 1):
+            raise AssertionError('Numerical helper budget boundary lost or repeated an instruction')
+        final, actual = invoke(source, BASE, first['pc'], intermediate, budget=1, cache_dir=resume_cache)
+        if (final['outcome']['reason']['kind'] != 'stop_address' or final['pc'] != STOP
+                or bytes(actual) != record['expected'] or final['outcome']['floating_point_helpers'] != 0):
+            raise AssertionError('Numerical budget resume did not execute exactly the guest RET')
+        warm, actual = invoke(source, BASE, entry, initial, cache_dir=resume_cache)
+        if bytes(actual) != record['expected'] or warm['outcome']['disk_cache_hits'] < 2:
+            raise AssertionError('Numerical warm runtime did not reuse both cached blocks')
+        counts['budget_resume_checks'] += 1
+        counts['disk_cache_resume_checks'] += 1
+
+        # Interior helper PCs must retain already committed GPR work and resume
+        # at the following instruction. ADD preserves NZCV and FP state.
+        mixed = struct.pack('<4I', NUMERICAL_ADD_X7_ONE, record['operation']['word'], NUMERICAL_ADD_X8_TWO, RET)
+        mixed_base = BASE + 0x1000 + index * 0x100
+        expected = State.from_buffer_copy(record['expected'])
+        expected.x[7] = (expected.x[7] + 1) & MASK
+        expected.x[8] = (expected.x[8] + 2) & MASK
+        completed, actual = invoke(mixed, mixed_base, mixed_base, initial)
+        if (completed['pc'] != STOP or completed['outcome']['reason']['kind'] != 'stop_address'
+                or bytes(actual) != bytes(expected) or completed['outcome']['floating_point_helpers'] != 1):
+            raise AssertionError('Interior numerical helper lost prefix or suffix effects')
+        original.mem_write(mixed_base, mixed)
+        original.ctl_remove_cache(mixed_base, mixed_base + len(mixed))
+        initialize_arm(original, initial)
+        original.emu_start(mixed_base, STOP, count=8)
+        if original.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(capture_arm(original, initial)) != bytes(expected):
+            raise AssertionError('Original interior fixture differs from complete runtime state')
+        counts['synthetic_original_complete_state_checks'] += 1
+        declined_initial = State.from_buffer_copy(initial)
+        declined_initial.fpcr |= NUMERICAL_INVALID_ENABLE
+        declined_expected = State.from_buffer_copy(declined_initial)
+        declined_expected.x[7] = (declined_expected.x[7] + 1) & MASK
+        declined, actual = invoke(mixed, mixed_base, mixed_base, declined_initial)
+        declined_reason = {'kind': 'floating_point_unsupported', 'instruction_pc': mixed_base + 4,
+                           'fpcr': declined_initial.fpcr, 'enabled_exceptions': 1}
+        if (declined['pc'] != mixed_base + 4 or bytes(actual) != bytes(declined_expected)
+                or declined['outcome']['reason'] != declined_reason):
+            raise AssertionError('Interior numerical refusal changed state at the unsupported instruction')
+        counts['interior_helper_state_checks'] += 1
+        counts['interior_decline_state_checks'] += 1
+        loop = struct.pack('<4I', record['operation']['word'], NUMERICAL_SUBS_X10_ONE,
+                           NUMERICAL_CBNZ_X10_BACK_TWO, RET)
+        loop_initial = State.from_buffer_copy(initial)
+        loop_initial.x[10] = NUMERICAL_CACHE_LOOP_ITERATIONS
+        loop_expected = State.from_buffer_copy(record['expected'])
+        loop_expected.x[10], loop_expected.nzcv = 0, NUMERICAL_ZERO_CARRY_FLAGS
+        loop_report, actual = invoke(loop, mixed_base, mixed_base, loop_initial, budget=16)
+        if (loop_report['pc'] != STOP or bytes(actual) != bytes(loop_expected)
+                or loop_report['outcome']['floating_point_helpers'] != NUMERICAL_CACHE_LOOP_ITERATIONS
+                or loop_report['outcome']['memory_cache_hits'] < 2 * (NUMERICAL_CACHE_LOOP_ITERATIONS - 1)):
+            raise AssertionError('Numerical loop did not preserve repeated helper/cache effects')
+        original.mem_write(mixed_base, loop)
+        original.ctl_remove_cache(mixed_base, mixed_base + len(loop))
+        initialize_arm(original, loop_initial)
+        original.emu_start(mixed_base, STOP, count=16)
+        if original.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(capture_arm(original, loop_initial)) != bytes(loop_expected):
+            raise AssertionError('Original loop fixture differs from complete runtime state')
+        counts['memory_cache_loop_checks'] += 1
+        counts['synthetic_original_complete_state_checks'] += 1
+    if counts['disk_cache_hits'] == 0:
+        raise AssertionError('Numerical runtime evidence never exercised persistent cached code')
+    snapshot = write_evidence(ROOT / '.stela/simd-scalar_numerical-runtime-records.json', transcripts)
+    return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
+            'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())},
+            'limits': 'Actual Rust BlockRuntime completes helpers and executes guest RET. Subprocesses exercise disk reuse; bounded three-iteration guest loops exercise live memory-cache reuse. Synthetic ADD/SUBS/CBNZ fixtures have separate complete-state original Unicorn checks. Original QEMU transports GPR/SP, while ordinary-control original Unicorn checks close that frame subset.'}
+
+
+def run_scalar_numerical_cohort(cli, oracle_path):
+    oracle = load_numerical_oracle(oracle_path)
+    started = time.monotonic()
+    cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
+    shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
+                    'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
+                    'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
+                    'crates/stela-runtime/src/execution.rs')
+    shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
+    batches, artifacts, compiler, checked = [], [], None, []
+    cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
+    with tempfile.TemporaryDirectory(prefix='stela-scalar-numerical-') as temporary:
+        directory = Path(temporary)
+        for index, operation in enumerate(oracle['functions']):
+            batch = compile_batch(cli, directory, [{'operations': [operation]}], index,
+                block=True, guest_base=BASE + index * 8)
+            batch.update(cohort=NUMERICAL_FOCUS, oracle_path=str(oracle_path))
+            if compiler is not None and batch['compiler'] != compiler:
+                raise AssertionError('Numerical compiler changed between block preparations')
+            compiler = batch['compiler']
+            accounting = numerical_native_accounting(batch)
+            retained = retain_native_evidence('simd-scalar_numerical', batch['source'], batch['native'],
+                batch['manifest'], accounting, Path(__file__).read_bytes())
+            batches.append(batch)
+            artifacts.append({'function': index, 'compilation': batch['receipt'], 'accounting': accounting, 'files': retained})
+        optional = {opcode['mnemonic'] for opcode in cpu_info['simd_opcodes'] if opcode['minimum_target'] != 'x86_64-baseline'}
+        if any(optional & artifact['accounting']['static_opcode_histogram'].keys() for artifact in artifacts):
+            raise AssertionError('Baseline numerical output contains an optional host opcode')
+        if cpu_info['detected_target'] != 'x86_64-baseline':
+            for index in (7, 56, 63):  # FADD S, FMUL D, FDIV H, original register roles.
+                probe = compile_batch(cli, directory, [{'operations': [oracle['functions'][index]]}], 1000 + index,
+                    block=True, cpu_target='native', target_id=cpu_info['detected_target'], guest_base=BASE + index * 8)
+                if probe['compiler'] != compiler or probe['native'] != batches[index]['native']:
+                    raise AssertionError('Checked host numerical recipe differs from the baseline policy')
+                checked.append({'function': index, 'target_cpu': cpu_info['detected_target'],
+                                'native_sha256': digest(probe['native']), 'baseline_bytes_identical': True})
+        raw = bounded_cases(batches)
+        runtime = numerical_runtime_cohort(cli, directory, oracle, compiler)
+    if digest(cli.read_bytes()) != cli_hash or digest(Path(__file__).read_bytes()) != harness_hash:
+        raise AssertionError('Numerical executable or harness changed during verification')
+    if any(digest((ROOT / name).read_bytes()) != identity for name, identity in shared_hashes.items()):
+        raise AssertionError('Numerical shared runner changed during verification')
+    typed_checks = runtime['typed_unsupported_state_checks'] + runtime['interior_decline_state_checks']
+    completed_checks = runtime['invocations'] - typed_checks
+    report = {'kind': 'simd_scalar_numerical_arm_vs_native_x86', 'passed': True,
+        'abi': batches[0]['manifest']['abi'], 'state_comparisons': completed_checks,
+        'runtime_complete_state_comparisons': completed_checks,
+        'runtime_typed_unsupported_state_checks': typed_checks,
+        'runtime_budget_resume_checks': runtime['budget_resume_checks'],
+        'runtime_memory_cache_loop_checks': runtime['memory_cache_loop_checks'],
+        'runtime_disk_cache_resume_checks': runtime['disk_cache_resume_checks'],
+        'raw_native_state_and_exit_comparisons': raw['raw_native_state_and_exit_comparisons'],
+        'native_mxcsr_preservation_comparisons': raw['caller_mxcsr_preservation_comparisons'],
+        'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
+        'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
+        'foundation_receipt_sha256': oracle['foundation_sha256'], 'original_producers': oracle['producers'],
+        'input_derivation': oracle['input_derivation'], 'raw_native': raw, 'rust_runtime': runtime,
+        'native_artifacts': artifacts, 'checked_host_emission_identity': checked,
+        'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
+        'verification_wall_seconds': time.monotonic() - started,
+        'limits': 'Numerical scalar block-ABI verification only. Historical QEMU/core provenance remains distinct from current native/runtime provenance. Requested trap controls decline; no trap delivery, Apple hardware, complete application, OS or performance claim.'}
+    write_evidence(ROOT / '.stela/simd-scalar_numerical-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
 def run_register_cohort(cli, focus):
     functions=REGISTER_COHORTS[focus][0]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
@@ -2339,11 +2826,16 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=list(REGISTER_COHORTS), help='Only the focused SIMD register implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
+                        help='Pinned numerical foundation receipt for scalar_numerical')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
+    if arguments.focus == NUMERICAL_FOCUS:
+        run_scalar_numerical_cohort(cli, arguments.numerical_oracle)
+        return
     if arguments.focus:
         run_register_cohort(cli, arguments.focus)
         return

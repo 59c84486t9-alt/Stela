@@ -39,6 +39,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/simd/memory.rs"),
     include_str!("aarch64/simd/floating.rs"),
     include_str!("x86_64/simd/floating.rs"),
+    include_str!("aarch64/simd/arithmetic.rs"),
+    include_str!("x86_64/simd/arithmetic.rs"),
     include_str!("x86_64/isa.rs"),
     include_str!("aarch64/simd/rearrange.rs"),
     include_str!("x86_64/simd/rearrange.rs"),
@@ -253,6 +255,9 @@ pub struct GuestAddress(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedReason {
+    NumericalRuntimeRequired {
+        address: GuestAddress,
+    },
     Instruction {
         address: GuestAddress,
         encoding: u32,

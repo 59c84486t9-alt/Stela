@@ -73,6 +73,7 @@ pub enum AddressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    FloatingPoint(simd::arithmetic::Operand),
     Simd(simd::Operand),
     Bitfield(bitfield::Operand),
     PcRelative(pc_relative::Operand),
@@ -281,6 +282,8 @@ impl Lifter for Decoder {
             Operation::Flags(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = simd::arithmetic::decode(word) {
+            Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = literal::decode(pc, word) {
             Operation::Literal(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::decode(word) {

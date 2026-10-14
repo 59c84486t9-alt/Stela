@@ -6,6 +6,7 @@ pub mod commpage;
 pub mod darwin;
 pub mod dispatch;
 pub mod execution;
+mod floating;
 pub mod mach;
 pub mod memory;
 pub mod pauth;

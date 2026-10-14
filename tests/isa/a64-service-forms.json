@@ -60,6 +60,8 @@
     "crates/stela-compiler/src/x86_64/simd/memory.rs",
     "crates/stela-compiler/src/aarch64/simd/floating.rs",
     "crates/stela-compiler/src/x86_64/simd/floating.rs",
+    "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",

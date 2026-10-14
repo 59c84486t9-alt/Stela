@@ -4,6 +4,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
+pub(super) mod arithmetic;
 mod floating;
 mod halving;
 mod immediates;

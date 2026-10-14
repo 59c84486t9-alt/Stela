@@ -2,7 +2,9 @@
 import ctypes
 import importlib
 import json
+from pathlib import Path
 import struct
+import tempfile
 import unittest
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
@@ -12,6 +14,106 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_numerical_original_state_keeps_transport_registers_and_captures_every_vector(self):
+        initial = State()
+        seed_extended_state(initial, 19)
+        initial.x[:] = range(31)
+        initial.sp, initial.reserved = 0x12345678, 0x51ad1234
+        values = [value for vector in initial.v for value in vector]
+        values[62:64] = [0x7ff8000000000001, 0xabcdef0123456789]
+        captured = struct.pack('<64Q4I', *values, 0xf0000000, 7, 0x0800009f, 0x1234)
+        expected = suite.numerical_expected_state(initial, captured)
+        self.assertEqual(list(expected.x), list(initial.x))
+        self.assertEqual((expected.sp, expected.reserved), (initial.sp, initial.reserved))
+        self.assertEqual(list(expected.v[31]), values[62:64])
+        self.assertEqual((expected.nzcv, expected.fpcr, expected.fpsr), (0xf0000000, 7, 0x0800009f))
+        with self.assertRaises(AssertionError):
+            suite.numerical_expected_state(initial, captured[:-1])
+        with self.assertRaises(AssertionError):
+            suite.numerical_expected_state(initial, captured[:-4] + bytes(4))
+
+    def test_numerical_capture_requires_bound_original_sources_and_checks_all_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            receipt = {'files': {}}
+            for name in ('inputs.bin', 'results.bin', 'cases.json', 'guest.S', 'guest.elf', 'original.py'):
+                data = name.encode()
+                (directory / name).write_bytes(data)
+                receipt['files'][name] = {'sha256': suite.digest(data), 'bytes': len(data)}
+            path = directory / 'receipt.json'
+            path.write_text(json.dumps(receipt))
+            expected_hash = suite.digest(path.read_bytes())
+            suite.numerical_capture(path, expected_hash)
+            (directory / 'guest.elf').write_bytes(b'changed')
+            with self.assertRaises(AssertionError):
+                suite.numerical_capture(path, expected_hash)
+            with self.assertRaises(AssertionError):
+                suite.numerical_capture(path, '0' * 64)
+            receipt['files'].pop('guest.S')
+            path.write_text(json.dumps(receipt))
+            with self.assertRaises(AssertionError):
+                suite.numerical_capture(path, suite.digest(path.read_bytes()))
+
+    def test_numerical_runtime_selection_preserves_controls_aliases_and_typed_declines(self):
+        records = []
+        for function, (name, lane) in enumerate((('fadd', 2), ('fdiv', 8))):
+            for fpcr in (0, 4, 7, 1 << 8, suite.NUMERICAL_TRAP_ENABLE_MASK):
+                initial = State()
+                initial.fpcr, initial.fpsr = fpcr, 0
+                records.append({'producer': 'fixture', 'case': len(records), 'function': function,
+                    'operation': {'name': name, 'lane': lane}, 'label': 'zero_pp', 'initial': bytes(initial),
+                    'unsupported': bool(fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)})
+        selected = suite.numerical_runtime_cases(records)
+        compatible = [record for record in selected if not record['unsupported']]
+        self.assertEqual({State.from_buffer_copy(record['initial']).fpcr for record in compatible}, {0, 4, 7})
+        self.assertEqual({record['function'] for record in compatible}, {0, 1})
+        self.assertEqual(len({(record['producer'], record['case']) for record in selected}), len(selected))
+        self.assertTrue(any(record['unsupported'] for record in selected))
+
+    def test_numerical_mxcsr_wrapper_installs_captures_and_restores_around_actual_call(self):
+        decoded = suite.decode_native_stream(suite.NUMERICAL_MXCSR_WRAPPER)
+        self.assertEqual([instruction.mnemonic for instruction in decoded],
+                         ['sub', 'stmxcsr', 'mov', 'mov', 'ldmxcsr', 'stmxcsr', 'call',
+                          'mov', 'mov', 'mov', 'stmxcsr', 'ldmxcsr', 'add', 'ret'])
+        self.assertEqual(decoded[0].op_str, 'rsp, 0x18')
+        self.assertEqual(decoded[6].op_str, 'rsi')
+        self.assertEqual(decoded[10].op_str, 'dword ptr [rcx + 0x10]')
+        self.assertEqual(decoded[11].op_str, 'dword ptr [rsp]')
+        self.assertEqual(suite.NumericalNativeExit.mxcsr_after.offset, 16)
+        self.assertEqual(suite.NumericalNativeExit.mxcsr_before.offset, 20)
+
+    def test_numerical_runtime_selection_keeps_arithmetic_and_status_cases_beside_first_zero(self):
+        records = []
+        required = set()
+        for name in ('fadd', 'fsub', 'fmul', 'fdiv'):
+            for lane in (2, 4, 8):
+                flush = suite.NUMERICAL_FZ16 if lane == 2 else suite.NUMERICAL_FZ
+                scenarios = ((0, 'zero_pp'), (0, 'one_opposite_one'), (0, 'qnan_snan'),
+                             (suite.NUMERICAL_AH, 'zero_pp'), (suite.NUMERICAL_AH, 'normal_boundary_midpoint'),
+                             (flush, 'zero_pp'), (flush, 'minimum_normal_half'),
+                             (suite.NUMERICAL_ROUND_NEGATIVE, 'zero_pp'),
+                             (suite.NUMERICAL_ROUND_NEGATIVE, 'maximum_maximum'))
+                for control, label in scenarios:
+                    initial = State()
+                    initial.fpcr, initial.fpsr = control, 0
+                    records.append({'producer': 'fixture', 'case': len(records), 'function': len(records),
+                        'operation': {'name': name, 'lane': lane}, 'label': label,
+                        'initial': bytes(initial), 'unsupported': False})
+                    required.add((name, lane, control, label))
+        selected = suite.numerical_runtime_cases(records)
+        actual = {(record['operation']['name'], record['operation']['lane'],
+                   State.from_buffer_copy(record['initial']).fpcr, record['label']) for record in selected}
+        self.assertEqual(actual, required)
+
+    def test_numerical_synthetic_control_words_decode_to_the_declared_loop_and_prefix(self):
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        words = (suite.NUMERICAL_ADD_X7_ONE, suite.NUMERICAL_ADD_X8_TWO,
+                 suite.NUMERICAL_SUBS_X10_ONE, suite.NUMERICAL_CBNZ_X10_BACK_TWO)
+        decoded = list(decoder.disasm(struct.pack('<4I', *words), 0x1000))
+        self.assertEqual([(instruction.mnemonic, instruction.op_str) for instruction in decoded],
+                         [('add', 'x7, x7, #1'), ('add', 'x8, x8, #2'),
+                          ('subs', 'x10, x10, #1'), ('cbnz', 'x10, #0x1004')])
+
     def test_narrowing_shift_encodings_cover_all_immediates_and_allocated_shapes(self):
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         operations = [op for function in suite.narrowing_shift_programs() for op in function['operations']]

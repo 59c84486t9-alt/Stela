@@ -33,6 +33,173 @@ fn mov(destination: u32, source: u32) -> u32 {
     0xaa0003e0 | source << 16 | destination
 }
 
+mod numerical {
+    use super::*;
+    use stela_compiler::{
+        TargetCpu,
+        aarch64::floating::{INEXACT, INVALID},
+        block::BlockProfile,
+    };
+
+    const FADD_S0_S1_S2: u32 = 0x1e222820;
+    const FADD_H3_H4_H5: u32 = 0x1ee52883;
+    const FMUL_D6_D7_D8: u32 = 0x1e6808e6;
+    const FPCR_NEP: u32 = 1 << 2;
+    const ROUNDING_SHIFT: u32 = 22;
+    const EXCEPTION_ENABLE_SHIFT: u32 = 8;
+    const FPSR_QC: u32 = 1 << 27;
+
+    fn input(nep: bool) -> ThreadState {
+        let mut thread = state(BASE, 19);
+        thread.registers.v =
+            std::array::from_fn(|i| [0xdeadbeef01234567 ^ i as u64, 0x89abcdef76543210 ^ i as u64]);
+        thread.registers.v[1][0] = 0xdeadbeef3f800000;
+        thread.registers.v[2][0] = 0x89abcdef40000000;
+        thread.registers.v[4][0] = 0xdeadbeef01233c00;
+        thread.registers.v[5][0] = 0x89abcdef76544000;
+        thread.registers.v[7][0] = 0x4008000000000000;
+        thread.registers.v[8][0] = 0x4000000000000000;
+        thread.registers.fpcr = if nep { FPCR_NEP } else { 0 };
+        thread.registers.fpsr = FPSR_QC | 0x80000000;
+        thread.registers.nzcv = 0xa0000000;
+        thread.registers.reserved = 0xa53cf012;
+        thread
+    }
+    fn publish(expected: &mut GuestState, d: usize, n: usize, bits: u64, width: u32) {
+        let mask = u64::MAX >> (u64::BITS - width);
+        let mut value = if expected.fpcr & FPCR_NEP != 0 {
+            expected.v[n]
+        } else {
+            [0; 2]
+        };
+        value[0] = (value[0] & !mask) | bits;
+        expected.v[d] = value;
+    }
+
+    #[test]
+    fn interior_half_helper_resumes_after_prefix_and_reuses_disk_code() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let source = words(&[ADD_ONE, FADD_S0_S1_S2, FADD_H3_H4_H5, FMUL_D6_D7_D8, RET]);
+        for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+            for nep in [false, true] {
+                for reused in [false, true] {
+                    let mut runtime = BlockRuntime::new_for_target(
+                        71,
+                        cache.path().into(),
+                        BlockProfile::Ordinary,
+                        target,
+                    );
+                    runtime.register_code(GuestAddress(BASE), source.clone())?;
+                    let mut thread = input(nep);
+                    let mut prefix = thread.registers.clone();
+                    prefix.x[0] += 1;
+                    publish(&mut prefix, 0, 1, 0x40400000, 32);
+                    publish(&mut prefix, 3, 4, 0x4200, 16);
+                    let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+                    assert_eq!(first.reason, StopReason::BudgetExhausted);
+                    assert_eq!(first.floating_point_helpers, 1);
+                    assert_eq!(thread.pc, GuestAddress(BASE + 12));
+                    assert_eq!(thread.registers, prefix);
+                    let mut expected = prefix;
+                    publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    let rest = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+                    assert_eq!(rest.reason, StopReason::StopAddress);
+                    assert_eq!(rest.blocks_executed, 1);
+                    assert_eq!(rest.floating_point_helpers, 0);
+                    assert_eq!(thread.registers, expected);
+                    if reused {
+                        assert!(first.disk_cache_hits > 0 && rest.disk_cache_hits > 0);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_control_refusal_preserves_instruction_and_resumes_without_prefix_replay()
+    -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            72,
+            cache.path().into(),
+            BlockProfile::Ordinary,
+            TargetCpu::Baseline,
+        );
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, FADD_S0_S1_S2, ADD_ONE, RET]),
+        )?;
+        let mut thread = input(true);
+        thread.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
+        let mut prefix = thread.registers.clone();
+        prefix.x[0] += 1;
+        let stop = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+        assert_eq!(
+            stop.reason,
+            StopReason::FloatingPointUnsupported {
+                instruction_pc: GuestAddress(BASE + 4),
+                fpcr: prefix.fpcr,
+                enabled_exceptions: INVALID
+            }
+        );
+        assert_eq!(stop.floating_point_helpers, 0);
+        assert_eq!(thread.registers, prefix);
+        assert_eq!(thread.pc, GuestAddress(BASE + 4));
+        let zero = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 0)? };
+        assert_eq!(zero.blocks_executed, 0);
+        assert_eq!(thread.registers, prefix);
+        thread.registers.fpcr = FPCR_NEP;
+        let mut expected = thread.registers.clone();
+        expected.x[0] += 1;
+        publish(&mut expected, 0, 1, 0x40400000, 32);
+        let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+        assert_eq!(done.reason, StopReason::StopAddress);
+        assert_eq!(done.floating_point_helpers, 0);
+        assert_eq!(thread.registers, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn native_rounding_reads_each_current_control_through_same_cached_code() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        for rounding in 0..4 {
+            let mut runtime = BlockRuntime::new_for_target(
+                73,
+                cache.path().into(),
+                BlockProfile::Ordinary,
+                TargetCpu::Baseline,
+            );
+            runtime.register_code(GuestAddress(BASE), words(&[FADD_S0_S1_S2, RET]))?;
+            let mut thread = input(true);
+            thread.registers.fpcr |= rounding << ROUNDING_SHIFT;
+            thread.registers.v[2][0] = 0x33800000; // half an S ulp at one
+            let mut expected = thread.registers.clone();
+            publish(
+                &mut expected,
+                0,
+                1,
+                if rounding == 1 {
+                    0x3f800001
+                } else {
+                    0x3f800000
+                },
+                32,
+            );
+            expected.fpsr |= INEXACT;
+            let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(done.reason, StopReason::StopAddress);
+            assert_eq!(done.blocks_executed, 1);
+            assert_eq!(done.floating_point_helpers, 0);
+            assert_eq!(thread.registers, expected);
+            if rounding > 0 {
+                assert!(done.disk_cache_hits > 0);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Result<()> {
     use stela_compiler::aarch64::simd::saturating::FPSR_QC;

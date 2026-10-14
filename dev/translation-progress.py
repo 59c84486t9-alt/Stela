@@ -103,6 +103,9 @@ def validate_sample(form, sample):
     expected = sample.get('expected_mnemonics')
     if not isinstance(expected, list) or not expected:
         raise ValueError('Smoke needs an independent decoded mnemonic expectation')
+    consumed = sample.get('consumed_source_bytes', 4)
+    if type(consumed) is not int or consumed not in (4, 8):
+        raise ValueError('Smoke must declare a valid instruction/RET boundary')
     return word
 
 
@@ -123,9 +126,12 @@ def summarize(rows):
                                   'evidence_requirement': 'Stela full Mach-O load and native execution with validated process behavior; leaf fixtures do not qualify.'}}
 
 
-def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf'):
+def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
+                  expected_source_bytes=4):
     if mode not in ('leaf', 'block', 'service'):
         raise ValueError('Unknown compiler probe mode')
+    if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
+        raise ValueError('Invalid declared compiler probe boundary')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
     output = directory / 'native'
@@ -148,8 +154,8 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         if manifest.get('abi') != (SERVICE_ABI if mode == 'service' else BLOCK_ABI):
             raise ValueError('Compiler block probe ABI mismatch')
         consumed = manifest.get('source_bytes')
-        if type(consumed) is not int or consumed != 4 or consumed > len(source_data):
-            raise ValueError('Compiler block probe must consume exactly the first terminator')
+        if type(consumed) is not int or consumed != expected_source_bytes:
+            raise ValueError('Compiler block probe differs from the declared consumed boundary')
         source_data = source_data[:consumed]
     if manifest.get('source_sha256') != hashlib.sha256(source_data).hexdigest():
         raise ValueError('Compiler probe source identity mismatch')
@@ -179,7 +185,10 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
             location.mkdir()
-            probe = compile_probe(cli, word, location, **({'mode': mode} if mode != 'leaf' else {}))
+            options = {'mode': mode} if mode != 'leaf' else {}
+            if 'consumed_source_bytes' in sample:
+                options['expected_source_bytes'] = sample['consumed_source_bytes']
+            probe = compile_probe(cli, word, location, **options)
             if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
@@ -344,7 +353,7 @@ def markdown(report):
                           if group.get('comparison_field') != 'trap_state_exit_comparisons')
         traps = sum(group['native_comparisons'] for group in groups
                     if group.get('comparison_field') == 'trap_state_exit_comparisons')
-        block_rows = (f"| Block-profile control-flow forms implemented | {counts['implemented']:,} |\n"
+        block_rows = (f"| Block-profile instruction forms implemented | {counts['implemented']:,} |\n"
                       f"| Native block state/exit comparisons | {comparisons:,} |\n")
         if counts['partial']:
             block_rows += f"| Block-profile forms partially implemented | {counts['partial']:,} |\n"

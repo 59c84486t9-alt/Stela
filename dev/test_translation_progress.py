@@ -354,6 +354,23 @@ class BlockProgressTests(unittest.TestCase):
                     progress.compile_probe('cli', 0xd63f03c0, Path(temporary),
                                            run=self.fake_compiler(mutate), mode='block')
 
+    def test_nonterminal_block_probe_requires_its_declared_ret_boundary(self):
+        def full_prefix(manifest, source):
+            manifest.update(source_bytes=8, source_sha256=progress.sha256(source))
+        with tempfile.TemporaryDirectory() as temporary:
+            result = progress.compile_probe('cli', 0x1e222820, Path(temporary),
+                run=self.fake_compiler(full_prefix), mode='block', expected_source_bytes=8)
+        self.assertEqual(result['source_bytes'], 8)
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(ValueError, 'boundary'):
+            progress.compile_probe('cli', 0x1e222820, Path(temporary),
+                run=self.fake_compiler(), mode='block', expected_source_bytes=8)
+        registry = fixtures()
+        row = registry['forms'][0]
+        for invalid in (False, 0, 12, '8'):
+            sample = {**row['smoke_samples'][0], 'consumed_source_bytes': invalid}
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                progress.validate_sample(row, sample)
+
     def test_block_smoke_selects_block_compiler_without_changing_leaf_default(self):
         registry = fixtures()
         registry['forms'] = [registry['forms'][1]]
@@ -392,7 +409,7 @@ class BlockProgressTests(unittest.TestCase):
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
         self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 585)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 18)
-        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 12)
+        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 24)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
         self.assertEqual(len(set(leaf) & set(block)), 9)
         report = {'summary': progress.summarize(leaf), 'measured_at_utc': '2026-10-12T00:00:00Z',
@@ -404,7 +421,7 @@ class BlockProgressTests(unittest.TestCase):
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
         self.assertIn('| Leaf-profile instruction forms implemented | 585 |', text)
-        self.assertIn('| Block-profile control-flow forms implemented | 12 |', text)
+        self.assertIn('| Block-profile instruction forms implemented | 24 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('| Block-profile forms partially implemented | 2 |', text)
         self.assertIn('| Native synchronous-trap boundary comparisons | 320 |', text)

@@ -98,6 +98,7 @@ pub enum ExitKind {
     PointerAuthentication = 6,
     Clock = 7,
     ThreadRegister = 8,
+    FloatingPoint = 9,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -114,6 +115,7 @@ impl TryFrom<u64> for ExitKind {
             6 => Ok(Self::PointerAuthentication),
             7 => Ok(Self::Clock),
             8 => Ok(Self::ThreadRegister),
+            9 => Ok(Self::FloatingPoint),
             _ => Err(()),
         }
     }
@@ -924,11 +926,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..=ExitKind::ThreadRegister as u64 {
+        for kind in 0..=ExitKind::FloatingPoint as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
         assert_eq!(
-            ExitKind::try_from(ExitKind::ThreadRegister as u64 + 1),
+            ExitKind::try_from(ExitKind::FloatingPoint as u64 + 1),
             Err(())
         );
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));

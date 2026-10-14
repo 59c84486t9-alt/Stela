@@ -11,7 +11,7 @@ fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
     code.push(0xc3);
 }
 
-fn direct_exit(code: &mut Vec<u8>, target: GuestAddress, kind: ExitKind) {
+pub(super) fn direct_exit(code: &mut Vec<u8>, target: GuestAddress, kind: ExitKind) {
     super::immediate(code, target.0);
     exit_kind(code, kind);
 }
@@ -63,7 +63,11 @@ pub(crate) fn emit_for_target(
     let mut fixups = vec![];
     for instruction in instructions {
         block.source_map.push((instruction.pc, code.len()));
-        super::emit_instruction(code, instruction, &mut fixups, target);
+        if let Operation::FloatingPoint(operand) = &instruction.operation {
+            super::simd::arithmetic::emit(code, operand, instruction.pc);
+        } else {
+            super::emit_instruction(code, instruction, &mut fixups, target);
+        }
     }
     debug_assert!(
         fixups.is_empty(),

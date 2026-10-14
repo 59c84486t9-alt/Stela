@@ -41,7 +41,7 @@ impl Format {
             Self::Double => 64,
         }
     }
-    const fn fraction_bits(self) -> u32 {
+    pub(crate) const fn fraction_bits(self) -> u32 {
         match self {
             Self::Half => 10,
             Self::Single => 23,

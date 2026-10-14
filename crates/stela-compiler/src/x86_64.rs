@@ -279,6 +279,9 @@ fn emit_instruction(
     target: crate::TargetCpu,
 ) {
     match instruction.operation {
+        Operation::FloatingPoint(_) => {
+            unreachable!("numerical instructions require block emission")
+        }
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
@@ -562,6 +565,11 @@ impl Emitter {
         let code = &mut block.x86_64_code;
         let mut fixups = vec![];
         for instruction in instructions {
+            if matches!(instruction.operation, Operation::FloatingPoint(_)) {
+                return Err(UnsupportedReason::NumericalRuntimeRequired {
+                    address: instruction.pc,
+                });
+            }
             block.source_map.push((instruction.pc, code.len()));
             emit_instruction(code, instruction, &mut fixups, target);
         }

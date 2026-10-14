@@ -60,6 +60,8 @@
     "crates/stela-compiler/src/x86_64/simd/memory.rs",
     "crates/stela-compiler/src/aarch64/simd/floating.rs",
     "crates/stela-compiler/src/x86_64/simd/floating.rs",
+    "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
@@ -78,15 +80,16 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v3",
+  "registry_version": "apple-silicon-block-forms-v4",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
     "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
-    "description": "Reviewed ordinary control-flow forms under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind is returned in RAX/RDX. The mapped guest code/address profile is nonwrapping, GCS disabled, executable pages unguarded and ordinary data addresses use private direct RAM. SVC/BRK partially support a precise typed boundary: native kind 5 returns the instruction PC, and immutable source decoding retains kind, imm16 and the preferred exception return PC. Architectural exception entry is pending.",
+    "description": "Reviewed ordinary control flow and scalar numerical FP under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind returns in RAX/RDX. The nonwrapping, non-streaming profile enables FP/FP16/AFP, disables GCS, uses unguarded executable pages and private direct RAM. Numerical S/D common paths execute inline with preserved caller MXCSR; H and exceptional values complete through an immutable-source-validated kind-9 interior boundary. Any numerical exception enable declines before effects. SVC/BRK partially support a precise typed kind-5 boundary retaining kind, imm16 and preferred exception return PC; architectural exception entry is pending.",
     "outside_scope": [
       "PAC and tagged/authenticated pointers",
       "GCS, guarded-page BTI checks and PSTATE.BTYPE",
+      "disabled-FP access checks, streaming SME and numerical FP exception delivery",
       "architectural exception delivery and asynchronous state reconstruction",
       "privilege, MMU, devices and full ARM memory ordering",
       "full process ABI, application loading and macOS boot"
@@ -121,6 +124,37 @@
       "required_positive_counts": [
         "trap_rust_runtime_execution_comparisons"
       ]
+    },
+    "scalar_numerical_fp": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-scalar_numerical-differential-report.json",
+      "kind": "simd_scalar_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "runtime_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_disk_cache_resume_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "raw_native_state_and_exit_comparisons": 37524,
+        "raw_native.raw_inline_complete_state_comparisons": 6057,
+        "raw_native.raw_helper_unchanged_state_comparisons": 31383,
+        "raw_native.raw_unsupported_unchanged_state_comparisons": 84,
+        "raw_native.unicorn_original_complete_state_comparisons": 14556
+      }
     }
   },
   "forms": [
@@ -547,6 +581,786 @@
       ],
       "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
       "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "FADD_D_floatdp2",
+      "mnemonic": "FADD",
+      "category": "fp_simd",
+      "source_file": "fadd_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e602800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fadd_float.xml",
+      "source_sha256": "6c44487a7ba79d0c4754efe9e116137bc15f2d33ac1cd28939d22ec977dfb6da",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FADD",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e622820",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7f2bff",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7d2821",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FADD_H_floatdp2",
+      "mnemonic": "FADD",
+      "category": "fp_simd",
+      "source_file": "fadd_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ee02800",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fadd_float.xml",
+      "source_sha256": "6c44487a7ba79d0c4754efe9e116137bc15f2d33ac1cd28939d22ec977dfb6da",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FADD",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee22820",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1eff2bff",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1efd2821",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FADD_S_floatdp2",
+      "mnemonic": "FADD",
+      "category": "fp_simd",
+      "source_file": "fadd_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e202800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fadd_float.xml",
+      "source_sha256": "6c44487a7ba79d0c4754efe9e116137bc15f2d33ac1cd28939d22ec977dfb6da",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FADD",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e222820",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3f2bff",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3d2821",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FDIV_D_floatdp2",
+      "mnemonic": "FDIV",
+      "category": "fp_simd",
+      "source_file": "fdiv_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e601800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdiv_float.xml",
+      "source_sha256": "f556696e701a4ef947b299e17f41bc6516f34b02356904386f78f48a47860c0f",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FDIV",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e621820",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7f1bff",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7d1821",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FDIV_H_floatdp2",
+      "mnemonic": "FDIV",
+      "category": "fp_simd",
+      "source_file": "fdiv_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ee01800",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdiv_float.xml",
+      "source_sha256": "f556696e701a4ef947b299e17f41bc6516f34b02356904386f78f48a47860c0f",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FDIV",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee21820",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1eff1bff",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1efd1821",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FDIV_S_floatdp2",
+      "mnemonic": "FDIV",
+      "category": "fp_simd",
+      "source_file": "fdiv_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e201800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdiv_float.xml",
+      "source_sha256": "f556696e701a4ef947b299e17f41bc6516f34b02356904386f78f48a47860c0f",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FDIV",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e221820",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3f1bff",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3d1821",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FMUL_D_floatdp2",
+      "mnemonic": "FMUL",
+      "category": "fp_simd",
+      "source_file": "fmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e600800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_float.xml",
+      "source_sha256": "43987a2b1a86dc140cf7123db05f17cd8f66f1b4ed7e2221ccb00e9c18cfeab4",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e620820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7f0bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7d0821",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FMUL_H_floatdp2",
+      "mnemonic": "FMUL",
+      "category": "fp_simd",
+      "source_file": "fmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ee00800",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_float.xml",
+      "source_sha256": "43987a2b1a86dc140cf7123db05f17cd8f66f1b4ed7e2221ccb00e9c18cfeab4",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee20820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1eff0bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1efd0821",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FMUL_S_floatdp2",
+      "mnemonic": "FMUL",
+      "category": "fp_simd",
+      "source_file": "fmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e200800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_float.xml",
+      "source_sha256": "43987a2b1a86dc140cf7123db05f17cd8f66f1b4ed7e2221ccb00e9c18cfeab4",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e220820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3f0bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3d0821",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FSUB_D_floatdp2",
+      "mnemonic": "FSUB",
+      "category": "fp_simd",
+      "source_file": "fsub_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e603800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fsub_float.xml",
+      "source_sha256": "54d888b1e606f376e17d89814edd2babc5b69c35ad396c0d9b5e5112137bf725",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FSUB",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e623820",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7f3bff",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7d3821",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FSUB_H_floatdp2",
+      "mnemonic": "FSUB",
+      "category": "fp_simd",
+      "source_file": "fsub_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ee03800",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fsub_float.xml",
+      "source_sha256": "54d888b1e606f376e17d89814edd2babc5b69c35ad396c0d9b5e5112137bf725",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FSUB",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee23820",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1eff3bff",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1efd3821",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
+    },
+    {
+      "id": "FSUB_S_floatdp2",
+      "mnemonic": "FSUB",
+      "category": "fp_simd",
+      "source_file": "fsub_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e203800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fsub_float.xml",
+      "source_sha256": "54d888b1e606f376e17d89814edd2babc5b69c35ad396c0d9b5e5112137bf725",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FSUB",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e223820",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3f3bff",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3d3821",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved ftype reviewed with original QEMU result/status captures, complete-state ordinary-control Unicorn checks, actual native block exits and Rust runtime/cache/budget completion. Baseline SSE2 and checked-host output agree; emitted bodies and mapping performance are recorded in the numerical FP native receipt.",
+      "scope": "Enabled FP/FP16/AFP, non-streaming scalar H/S/D arithmetic with all operand aliases, NEP upper bits from original Vn, Arm NaN/flushing/rounding/tininess behavior and sticky FPSR. Normal S/D operations can continue inline; H and exceptional values complete through the precise shared integer-core helper. Every exception-enable bit declines before this instruction changes state. No enabled trap delivery, disabled-FP access checks, streaming SME, numerical leaf ABI or complete process execution is claimed."
     },
     {
       "id": "RET_64R_branch_reg",

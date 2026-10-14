@@ -2,6 +2,7 @@
 //! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
+pub mod arithmetic;
 pub mod floating;
 pub mod halving;
 pub mod immediates;

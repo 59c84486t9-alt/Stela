@@ -1,7 +1,9 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
-use crate::{Prepared, clock, execution::platform, pauth, prepare_block_for_target, thread};
+use crate::{
+    Prepared, clock, execution::platform, floating, pauth, prepare_block_for_target, thread,
+};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
@@ -47,6 +49,11 @@ pub enum StopReason {
     },
     Unsupported {
         detail: String,
+    },
+    FloatingPointUnsupported {
+        instruction_pc: GuestAddress,
+        fpcr: u32,
+        enabled_exceptions: u32,
     },
     SynchronousTrap {
         trap: SynchronousTrap,
@@ -116,6 +123,8 @@ pub struct RunOutcome {
     pub disk_cache_hits: usize,
     pub memory_cache_hits: usize,
     pub last_exit: Option<(u64, u64)>,
+    /// Successful numerical slowpath completions; no per-instruction event allocation.
+    pub floating_point_helpers: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pointer_authentication_events: Vec<PointerAuthenticationEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -665,6 +674,7 @@ impl BlockRuntime {
             disk_cache_hits: 0,
             memory_cache_hits: 0,
             last_exit: None,
+            floating_point_helpers: 0,
             pointer_authentication_events: Vec::new(),
             clock_events: Vec::new(),
             thread_register_events: Vec::new(),
@@ -788,9 +798,32 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let numerical = if exit_kind == ExitKind::FloatingPoint {
+                Some(validate_numerical_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some((operand, continuation)) = numerical {
+                if let Err(error) = floating::complete(&mut state.registers, &operand) {
+                    outcome.reason = StopReason::FloatingPointUnsupported {
+                        instruction_pc: state.pc,
+                        fpcr: state.registers.fpcr,
+                        enabled_exceptions: error.enabled_exceptions,
+                    };
+                    break;
+                }
+                state.pc = continuation;
+                outcome.floating_point_helpers += 1;
+            }
             if let Some(instruction) = thread_register_instruction {
                 let Some(thread) = thread_context else {
                     outcome.reason = StopReason::ThreadRegisterRequired { instruction };
@@ -1091,6 +1124,67 @@ fn validate_pauth_exit(
         .context("PAuth exit does not identify a reviewed instruction")
 }
 
+/// Every consumed aligned word is a source-map boundary, checked at preparation.
+/// Numerical exits may identify an interior instruction; all operands are decoded
+/// again from the registered immutable source, never from artifact descriptors.
+fn validate_numerical_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<(
+    stela_compiler::aarch64::simd::arithmetic::Operand,
+    GuestAddress,
+)> {
+    ensure!(
+        entry.0.is_multiple_of(INSTRUCTION_BYTES as u64)
+            && exit.0.is_multiple_of(INSTRUCTION_BYTES as u64)
+            && source_bytes >= INSTRUCTION_BYTES
+            && source_bytes.is_multiple_of(INSTRUCTION_BYTES),
+        "invalid numerical helper block extent/alignment"
+    );
+    entry
+        .0
+        .checked_add(u64::try_from(source_bytes)?)
+        .context("numerical consumed guest extent overflow")?;
+    let prefix = usize::try_from(
+        entry
+            .0
+            .checked_sub(region_base)
+            .context("numerical block precedes immutable source")?,
+    )?;
+    let end = prefix
+        .checked_add(source_bytes)
+        .context("numerical block extent overflow")?;
+    ensure!(
+        end <= source.len(),
+        "numerical block exceeds immutable source"
+    );
+    let relative = usize::try_from(
+        exit.0
+            .checked_sub(entry.0)
+            .context("numerical exit precedes consumed block")?,
+    )?;
+    ensure!(
+        relative < source_bytes,
+        "numerical exit exceeds consumed block"
+    );
+    let offset = prefix
+        .checked_add(relative)
+        .context("numerical source offset overflow")?;
+    let word = u32::from_le_bytes(source[offset..offset + INSTRUCTION_BYTES].try_into()?);
+    let operand = stela_compiler::aarch64::simd::arithmetic::decode(word)
+        .context("numerical exit does not identify arithmetic")?
+        .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
+    let next = GuestAddress(
+        exit.0
+            .checked_add(INSTRUCTION_BYTES as u64)
+            .context("numerical continuation address overflow")?,
+    );
+    Ok((operand, next))
+}
+
 /// Native exit metadata must identify the final immutable source instruction;
 /// descriptors are decoded again instead of trusting artifact-supplied operands.
 fn validate_terminal_word(
@@ -1176,6 +1270,91 @@ fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: us
         prior = Some(native);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod numerical_validation_tests {
+    use super::*;
+
+    const BASE: u64 = 0x1000;
+    const NOP: u32 = 0xd503201f;
+    const FADD_S: u32 = 0x1e222820;
+    const RET: u32 = 0xd65f03c0;
+
+    fn source(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn interior_numerical_exit_keeps_terminal_helpers_strict() {
+        let bytes = source(&[NOP, FADD_S, RET]);
+        let (operand, continuation) = validate_numerical_exit(
+            GuestAddress(BASE),
+            GuestAddress(BASE + 4),
+            bytes.len(),
+            BASE,
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            (operand.destination, operand.left, operand.right),
+            (0, 1, 2)
+        );
+        assert_eq!(continuation, GuestAddress(BASE + 8));
+        assert!(
+            validate_terminal_word(
+                GuestAddress(BASE),
+                GuestAddress(BASE + 4),
+                bytes.len(),
+                BASE,
+                &bytes
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn metadata_cannot_authorize_outside_reserved_or_nonnumerical_words() {
+        let bytes = source(&[NOP, FADD_S, RET]);
+        for (entry, exit, count, region) in [
+            (BASE, BASE - 4, 12, BASE),
+            (BASE, BASE + 12, 12, BASE),
+            (BASE, BASE + 5, 12, BASE),
+            (BASE + 1, BASE + 4, 12, BASE),
+            (BASE, BASE + 4, 0, BASE),
+            (BASE, BASE + 4, 10, BASE),
+            (BASE, BASE + 4, 16, BASE),
+            (BASE, BASE + 4, 12, BASE + 4),
+            (BASE, BASE, 12, BASE),
+            (BASE, BASE + 8, 12, BASE),
+        ] {
+            assert!(
+                validate_numerical_exit(
+                    GuestAddress(entry),
+                    GuestAddress(exit),
+                    count,
+                    region,
+                    &bytes
+                )
+                .is_err()
+            );
+        }
+        let reserved = source(&[FADD_S | (2 << 22)]);
+        assert!(
+            validate_numerical_exit(GuestAddress(BASE), GuestAddress(BASE), 4, BASE, &reserved)
+                .is_err()
+        );
+        assert!(
+            validate_numerical_exit(
+                GuestAddress(u64::MAX - 3),
+                GuestAddress(u64::MAX - 3),
+                4,
+                u64::MAX - 3,
+                &source(&[FADD_S])
+            )
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
