@@ -15,6 +15,8 @@ mod crc;
 mod flags;
 mod fp_register;
 mod integer_math;
+mod integer_minmax;
+mod integer_unary;
 pub mod isa;
 mod literal;
 mod memory_store;
@@ -298,6 +300,8 @@ fn emit_instruction(
         Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::Flags(operand) => flags::emit(code, &operand),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
+        Operation::IntegerMinMax(operand) => integer_minmax::emit(code, &operand),
+        Operation::IntegerUnary(operand) => integer_unary::emit(code, &operand, target),
         Operation::Literal(operand) => literal::emit(code, &operand),
         Operation::MemoryPair {
             transfer,

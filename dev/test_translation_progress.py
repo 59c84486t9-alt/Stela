@@ -41,6 +41,32 @@ def fixtures():
 
 
 class IsaProgressTests(unittest.TestCase):
+    def test_cssc_fixed_encoding_alternative_is_explicit_and_canonical(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        facts = progress.a64_checklist.validate(catalog)
+        cssc = [row for row in facts.values()
+                if any(feature['feature'] == 'FEAT_CSSC' for feature in row['features'])]
+        self.assertEqual(len(cssc), 22)
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        for row in cssc:
+            word = int(row['encoding_value'], 16) | 0x3ff
+            mnemonic, assembly, basis = progress.smoke_decoding(decoder, word, row['id'], facts)
+            self.assertEqual((mnemonic, assembly), (row['mnemonic'].lower(), row['mnemonic'].lower()))
+            self.assertEqual(basis, 'pinned_arm_cssc_fixed_encoding')
+            with self.assertRaises(ValueError):
+                progress.smoke_decoding(decoder, word ^ (1 << 31), row['id'], facts)
+
+    def test_fixed_encoding_alternative_does_not_cover_other_families_or_missing_facts(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        facts = progress.a64_checklist.validate(catalog)
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        for identity in ('ABS_32_dp_1src', 'RET_64R_branch_reg'):
+            row = facts[identity]
+            with self.assertRaises(ValueError):
+                progress.smoke_decoding(decoder, int(row['encoding_value'], 16), identity)
+        with self.assertRaises(ValueError):
+            progress.smoke_decoding(decoder, progress.RET, 'RET_64R_branch_reg', facts)
+
     def test_implementation_refresh_preserves_archived_verification_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -407,7 +433,7 @@ class BlockProgressTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
-        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 585)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 635)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 20)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 434)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
@@ -420,7 +446,7 @@ class BlockProgressTests(unittest.TestCase):
                           'traps': {'native_comparisons': 320,
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
-        self.assertIn('| Leaf-profile instruction forms implemented | 585 |', text)
+        self.assertIn('| Leaf-profile instruction forms implemented | 635 |', text)
         self.assertIn('| Block-profile instruction forms implemented | 434 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('| Block-profile forms partially implemented | 2 |', text)

@@ -7,6 +7,8 @@ pub mod flags;
 pub mod floating;
 pub mod fp_register;
 pub mod integer_math;
+pub mod integer_minmax;
+pub mod integer_unary;
 pub mod literal;
 pub mod pc_relative;
 pub mod register_offset;
@@ -194,6 +196,8 @@ pub enum Operation {
     Crc(crc::Operand),
     Flags(flags::Operand),
     IntegerMath(integer_math::Operand),
+    IntegerMinMax(integer_minmax::Operand),
+    IntegerUnary(integer_unary::Operand),
     Literal(literal::Operand),
     MemoryRegisterOffset(register_offset::Operand),
     MemoryPair {
@@ -394,6 +398,10 @@ impl Lifter for Decoder {
             Operation::Flags(decoded)
         } else if let Some(decoded) = fp_register::decode(word) {
             Operation::FloatingPointRegister(decoded)
+        } else if let Some(decoded) = integer_unary::decode(word) {
+            Operation::IntegerUnary(decoded)
+        } else if let Some(decoded) = integer_minmax::decode(word) {
+            Operation::IntegerMinMax(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = FloatingPointOperation::decode(word) {

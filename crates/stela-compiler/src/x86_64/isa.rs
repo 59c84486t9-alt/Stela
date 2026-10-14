@@ -16,6 +16,17 @@ macro_rules! catalog {
     };
 }
 catalog! {
+    AesEncryptRound => ("aesenc", Aes, [0x66,0x0f,0x38,0xdc]),
+    AesEncryptLast => ("aesenclast", Aes, [0x66,0x0f,0x38,0xdd]),
+    AesDecryptRound => ("aesdec", Aes, [0x66,0x0f,0x38,0xde]),
+    AesDecryptLast => ("aesdeclast", Aes, [0x66,0x0f,0x38,0xdf]),
+    AesInverseMixColumns => ("aesimc", Aes, [0x66,0x0f,0x38,0xdb]),
+    HorizontalAddDword => ("phaddd", Ssse3, [0x66,0x0f,0x38,0x02]),
+    Sha1Rounds4 => ("sha1rnds4", Sha, [0x0f,0x3a,0xcc]),
+    Sha1Message2 => ("sha1msg2", Sha, [0x0f,0x38,0xca]),
+    Sha256Rounds2 => ("sha256rnds2", Sha, [0x0f,0x38,0xcb]),
+    Sha256Message1 => ("sha256msg1", Sha, [0x0f,0x38,0xcc]),
+    Sha256Message2 => ("sha256msg2", Sha, [0x0f,0x38,0xcd]),
     And => ("pand", Baseline, [0x66,0x0f,0xdb]),
     AndNot => ("pandn", Baseline, [0x66,0x0f,0xdf]),
     Or => ("por", Baseline, [0x66,0x0f,0xeb]),
@@ -111,6 +122,7 @@ catalog! {
     StoreUnaligned => ("movdqu", Baseline, [0xf3,0x0f,0x7f]),
     MoveQword => ("movq", Baseline, [0xf3,0x0f,0x7e]),
     ByteShuffle => ("pshufb", Ssse3, [0x66,0x0f,0x38,0x00]),
+    AlignBytes => ("palignr", Ssse3, [0x66,0x0f,0x3a,0x0f]),
 }
 
 /// Packed immediate shifts use an opcode group, rather than a source ModRM field.

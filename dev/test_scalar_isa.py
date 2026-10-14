@@ -694,5 +694,75 @@ OPERANDS: REG0:rw MEM0:r
                 x86_mappings.safe_artifact(root, '../outside')
 
 
+class CsscIntegerOracleTests(unittest.TestCase):
+    def test_abs_minimum_counts_zero_and_all_bit_positions(self):
+        for width in (32, 64):
+            sign, mask = 1 << (width - 1), (1 << width) - 1
+            absolute = math.cssc_operation(f'ABS{width}')
+            count = math.cssc_operation(f'CNT{width}')
+            trailing = math.cssc_operation(f'CTZ{width}')
+            self.assertEqual(math.cssc_value(absolute, sign), sign)
+            self.assertEqual(math.cssc_value(absolute, mask), 1)
+            self.assertEqual(math.cssc_value(trailing, 0), width)
+            for bit in range(width):
+                self.assertEqual(math.cssc_value(trailing, 1 << bit), bit)
+                self.assertEqual(math.cssc_value(count, 1 << bit), 1)
+            for population in range(width + 1):
+                self.assertEqual(math.cssc_value(count, (1 << population) - 1), population)
+            if width == 32:
+                self.assertEqual(math.cssc_value(absolute, 0xdeadc0de80000000), sign)
+                self.assertEqual(math.cssc_value(trailing, 0xffffffff00000000), width)
+                self.assertEqual(math.cssc_value(count, 0xffffffff00000000), 0)
+
+    def test_signed_immediate_and_overflow_ordering_are_distinct_from_unsigned(self):
+        for width in (32, 64):
+            sign, mask = 1 << (width - 1), (1 << width) - 1
+            self.assertEqual(math.cssc_value(math.cssc_operation(f'SMIN{width}'), sign, sign - 1), sign)
+            self.assertEqual(math.cssc_value(math.cssc_operation(f'SMAX{width}'), sign, sign - 1), sign - 1)
+            self.assertEqual(math.cssc_value(math.cssc_operation(f'UMIN{width}'), sign, sign - 1), sign - 1)
+            self.assertEqual(math.cssc_value(math.cssc_operation(f'UMAX{width}'), sign, sign - 1), sign)
+            for raw in range(256):
+                signed = raw if raw < 128 else raw - 256
+                signed_max = math.cssc_operation(f'SMAX{width}I', immediate=raw)
+                unsigned_max = math.cssc_operation(f'UMAX{width}I', immediate=raw)
+                self.assertEqual(math.cssc_value(signed_max, sign), signed & mask)
+                self.assertEqual(math.cssc_value(unsigned_max, 0), raw)
+                self.assertEqual(math.cssc_value(signed_max, signed & mask), signed & mask)
+
+    def test_sequential_alias_zero_and_w_results_preserve_all_other_state(self):
+        initial = State()
+        initial.x[1] = 0xdeadc0deffffffff
+        initial.x[2] = 0xffffffffffffffff
+        initial.sp, initial.nzcv, initial.reserved = 0x1230, 0xf0000000, 0x43535343
+        initial.fpcr, initial.fpsr = 0x07c89f07, 0x0800009f
+        operations = [math.cssc_operation('ABS32', 1, 1),
+                      math.cssc_operation('CTZ64', 2, 1),
+                      math.cssc_operation('CNT32', 0, 2),
+                      math.cssc_operation('SMIN64I', 3, 0, immediate=0xff),
+                      math.cssc_operation('ABS64', 31, 3),
+                      math.cssc_operation('CTZ32', 4, 31)]
+        expected = complete_state(initial)
+        expected['x'][0:5] = [0, 1, 0, math.MASK, 32]
+        self.assertEqual(math.cssc_mathematical_reference(operations, initial), expected)
+        self.assertEqual(initial.x[1], 0xdeadc0deffffffff)
+
+    def test_corpus_is_bounded_complete_and_keeps_all_raw_immediate_fields(self):
+        functions, records = math.cssc_corpus()
+        self.assertEqual(len({operation['canonical_id'] for operation in functions}), 22)
+        self.assertEqual(len({operation['word'] for operation in functions}), len(functions))
+        self.assertLess(len(records), 50000)
+        for form, (_, _, kind) in math.CSSC_FORMS.items():
+            selected = [operation for operation in functions if operation['form'] == form]
+            if kind == 'unary':
+                self.assertEqual({operation['d'] for operation in selected}, set(range(32)))
+                self.assertEqual({operation['n'] for operation in selected}, set(range(32)))
+                self.assertTrue(any(operation['d'] == operation['n'] == 31 for operation in selected))
+            if kind == 'immediate':
+                self.assertEqual({operation['raw_imm8'] for operation in selected}, set(range(256)))
+        controls = {State.from_buffer_copy(record['initial']).fpcr for record in records}
+        for bit in (8, 9, 10, 11, 12, 15):
+            self.assertIn(1 << bit, controls)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v27",
+  "registry_version": "apple-silicon-reviewed-forms-v28",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -513,6 +513,129 @@
         "policy_difference_classifications": 83,
         "rust_runtime.status_clear_repeat_checks": 120
       }
+    },
+    "scalar_cssc": {
+      "harness": "dev/integer-math-differential.py",
+      "report": ".stela/cssc-differential-report.json",
+      "kind": "cssc_original_vs_native_integer",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd-differential.py",
+        "dev/differential.py",
+        "dev/evidence.py"
+      ],
+      "comparison_field": "original_native_full_state",
+      "required_positive_counts": [
+        "runtime_model_full_state_comparisons"
+      ],
+      "required_measurements": {
+        "forms": 22,
+        "original_cases": 29776,
+        "runtime_joined_original_cssc_comparisons": 0
+      }
+    },
+    "simd_aes": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-aes-selected-bridge-report.json",
+      "kind": "simd_aes_selected_byte_bridge",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_fixture_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_fixtures/aes.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "preserved_direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "fresh_runtime_complete_state_comparisons"
+      ]
+    },
+    "simd_sha12": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-sha12-differential-report.json",
+      "kind": "simd_sha12_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_fixture_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_fixtures/sha12.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 10,
+        "functions": 98
+      }
+    },
+    "simd_sha512": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-sha512-differential-report.json",
+      "kind": "simd_sha512_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_fixture_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_fixtures/sha512.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 4,
+        "functions": 157
+      }
+    },
+    "simd_sha3": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-sha3-selected-bridge-report.json",
+      "kind": "simd_sha3_selected_byte_bridge",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_fixture_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_fixtures/sha3.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "preserved_direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "fresh_runtime_complete_state_comparisons"
+      ]
+    },
+    "simd_i8mm": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-i8mm-selected-bridge-report.json",
+      "kind": "simd_i8mm_selected_byte_bridge",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_fixture_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/__init__.py",
+        "dev/simd_fixtures/i8mm.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "preserved_direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "fresh_runtime_complete_state_comparisons"
+      ]
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -25955,10 +26078,2615 @@
           "reason": "Instruction"
         }
       ]
+    },
+    {
+      "id": "ABS_32_dp_1src",
+      "mnemonic": "ABS",
+      "category": "base_integer_system",
+      "source_file": "abs.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac02000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/abs.xml",
+      "source_sha256": "acfa3d8e2627910cca840c29da13fcda128d09b09639c326ae8f8384625f4e54",
+      "smoke_samples": [
+        {
+          "word": "0x5ac02020",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        },
+        {
+          "word": "0x5ac023ff",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "ABS_64_dp_1src",
+      "mnemonic": "ABS",
+      "category": "base_integer_system",
+      "source_file": "abs.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac02000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/abs.xml",
+      "source_sha256": "acfa3d8e2627910cca840c29da13fcda128d09b09639c326ae8f8384625f4e54",
+      "smoke_samples": [
+        {
+          "word": "0xdac02020",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        },
+        {
+          "word": "0xdac023ff",
+          "expected_mnemonics": [
+            "abs"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "CNT_32_dp_1src",
+      "mnemonic": "CNT",
+      "category": "base_integer_system",
+      "source_file": "cnt.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac01c00",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cnt.xml",
+      "source_sha256": "ad48e6b059fc47c53f8c44309a10161b593d03a10700a2aa3851471c25cf8287",
+      "smoke_samples": [
+        {
+          "word": "0x5ac01c20",
+          "expected_mnemonics": [
+            "cnt"
+          ]
+        },
+        {
+          "word": "0x5ac01fff",
+          "expected_mnemonics": [
+            "cnt"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "CNT_64_dp_1src",
+      "mnemonic": "CNT",
+      "category": "base_integer_system",
+      "source_file": "cnt.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac01c00",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cnt.xml",
+      "source_sha256": "ad48e6b059fc47c53f8c44309a10161b593d03a10700a2aa3851471c25cf8287",
+      "smoke_samples": [
+        {
+          "word": "0xdac01c20",
+          "expected_mnemonics": [
+            "cnt"
+          ]
+        },
+        {
+          "word": "0xdac01fff",
+          "expected_mnemonics": [
+            "cnt"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "CTZ_32_dp_1src",
+      "mnemonic": "CTZ",
+      "category": "base_integer_system",
+      "source_file": "ctz.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5ac01800",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ctz.xml",
+      "source_sha256": "46c9cc52ad22bca1b05179654ec7942f10678344748d9ad3f42725f4bce0e511",
+      "smoke_samples": [
+        {
+          "word": "0x5ac01820",
+          "expected_mnemonics": [
+            "ctz"
+          ]
+        },
+        {
+          "word": "0x5ac01bff",
+          "expected_mnemonics": [
+            "ctz"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "CTZ_64_dp_1src",
+      "mnemonic": "CTZ",
+      "category": "base_integer_system",
+      "source_file": "ctz.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xdac01800",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ctz.xml",
+      "source_sha256": "46c9cc52ad22bca1b05179654ec7942f10678344748d9ad3f42725f4bce0e511",
+      "smoke_samples": [
+        {
+          "word": "0xdac01820",
+          "expected_mnemonics": [
+            "ctz"
+          ]
+        },
+        {
+          "word": "0xdac01bff",
+          "expected_mnemonics": [
+            "ctz"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMAX_32_dp_2src",
+      "mnemonic": "SMAX",
+      "category": "base_integer_system",
+      "source_file": "smax_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac06000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smax_reg.xml",
+      "source_sha256": "47857350d924361b2253bb02d3beb33cf20bccd65aa7fdab4d32f9478371386f",
+      "smoke_samples": [
+        {
+          "word": "0x1ac26020",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        },
+        {
+          "word": "0x1adf63ff",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMAX_32_minmax_imm",
+      "mnemonic": "SMAX",
+      "category": "base_integer_system",
+      "source_file": "smax_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x11c00000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smax_imm.xml",
+      "source_sha256": "0d1b266bcac83f8ec0079786d6329efb418e70ffd80eb9b85b0d0b3d8ef788c4",
+      "smoke_samples": [
+        {
+          "word": "0x11c20020",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        },
+        {
+          "word": "0x11c3ffff",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMAX_64_dp_2src",
+      "mnemonic": "SMAX",
+      "category": "base_integer_system",
+      "source_file": "smax_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac06000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smax_reg.xml",
+      "source_sha256": "47857350d924361b2253bb02d3beb33cf20bccd65aa7fdab4d32f9478371386f",
+      "smoke_samples": [
+        {
+          "word": "0x9ac26020",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        },
+        {
+          "word": "0x9adf63ff",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMAX_64_minmax_imm",
+      "mnemonic": "SMAX",
+      "category": "base_integer_system",
+      "source_file": "smax_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x91c00000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smax_imm.xml",
+      "source_sha256": "0d1b266bcac83f8ec0079786d6329efb418e70ffd80eb9b85b0d0b3d8ef788c4",
+      "smoke_samples": [
+        {
+          "word": "0x91c20020",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        },
+        {
+          "word": "0x91c3ffff",
+          "expected_mnemonics": [
+            "smax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMIN_32_dp_2src",
+      "mnemonic": "SMIN",
+      "category": "base_integer_system",
+      "source_file": "smin_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac06800",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smin_reg.xml",
+      "source_sha256": "582480ab48d85fa3024790bbb73b281f1d12f83124d0111f9bbfb9121ff5480c",
+      "smoke_samples": [
+        {
+          "word": "0x1ac26820",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        },
+        {
+          "word": "0x1adf6bff",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMIN_32_minmax_imm",
+      "mnemonic": "SMIN",
+      "category": "base_integer_system",
+      "source_file": "smin_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x11c80000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smin_imm.xml",
+      "source_sha256": "49eda5289b4421d450e6781ef1b4648f72cedf80f15460ab8fc55b0f727046a9",
+      "smoke_samples": [
+        {
+          "word": "0x11ca0020",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        },
+        {
+          "word": "0x11cbffff",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMIN_64_dp_2src",
+      "mnemonic": "SMIN",
+      "category": "base_integer_system",
+      "source_file": "smin_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac06800",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smin_reg.xml",
+      "source_sha256": "582480ab48d85fa3024790bbb73b281f1d12f83124d0111f9bbfb9121ff5480c",
+      "smoke_samples": [
+        {
+          "word": "0x9ac26820",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        },
+        {
+          "word": "0x9adf6bff",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "SMIN_64_minmax_imm",
+      "mnemonic": "SMIN",
+      "category": "base_integer_system",
+      "source_file": "smin_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x91c80000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smin_imm.xml",
+      "source_sha256": "49eda5289b4421d450e6781ef1b4648f72cedf80f15460ab8fc55b0f727046a9",
+      "smoke_samples": [
+        {
+          "word": "0x91ca0020",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        },
+        {
+          "word": "0x91cbffff",
+          "expected_mnemonics": [
+            "smin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMAX_32U_minmax_imm",
+      "mnemonic": "UMAX",
+      "category": "base_integer_system",
+      "source_file": "umax_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x11c40000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umax_imm.xml",
+      "source_sha256": "c792dcda3cddc8617c645aff89cd90dde732e71dcc5f1fcf1c93f5aed24acf93",
+      "smoke_samples": [
+        {
+          "word": "0x11c60020",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        },
+        {
+          "word": "0x11c7ffff",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMAX_32_dp_2src",
+      "mnemonic": "UMAX",
+      "category": "base_integer_system",
+      "source_file": "umax_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac06400",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umax_reg.xml",
+      "source_sha256": "a64c3a4b4eedd5b592de9fbaa6706262fc5a16d207467b992c17b694dd745c06",
+      "smoke_samples": [
+        {
+          "word": "0x1ac26420",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        },
+        {
+          "word": "0x1adf67ff",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMAX_64U_minmax_imm",
+      "mnemonic": "UMAX",
+      "category": "base_integer_system",
+      "source_file": "umax_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x91c40000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umax_imm.xml",
+      "source_sha256": "c792dcda3cddc8617c645aff89cd90dde732e71dcc5f1fcf1c93f5aed24acf93",
+      "smoke_samples": [
+        {
+          "word": "0x91c60020",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        },
+        {
+          "word": "0x91c7ffff",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMAX_64_dp_2src",
+      "mnemonic": "UMAX",
+      "category": "base_integer_system",
+      "source_file": "umax_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac06400",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umax_reg.xml",
+      "source_sha256": "a64c3a4b4eedd5b592de9fbaa6706262fc5a16d207467b992c17b694dd745c06",
+      "smoke_samples": [
+        {
+          "word": "0x9ac26420",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        },
+        {
+          "word": "0x9adf67ff",
+          "expected_mnemonics": [
+            "umax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMIN_32U_minmax_imm",
+      "mnemonic": "UMIN",
+      "category": "base_integer_system",
+      "source_file": "umin_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x11cc0000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umin_imm.xml",
+      "source_sha256": "8d6ae3ef797dabee04614525a60b7336db5edbff5efe8644bfc1bdd04513b7f7",
+      "smoke_samples": [
+        {
+          "word": "0x11ce0020",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        },
+        {
+          "word": "0x11cfffff",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMIN_32_dp_2src",
+      "mnemonic": "UMIN",
+      "category": "base_integer_system",
+      "source_file": "umin_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ac06c00",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umin_reg.xml",
+      "source_sha256": "b3cd6ca37524a941a77dda9c11458fe48b4dcb60b0fbeeb2cf48e1e2bd6d64ca",
+      "smoke_samples": [
+        {
+          "word": "0x1ac26c20",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        },
+        {
+          "word": "0x1adf6fff",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMIN_64U_minmax_imm",
+      "mnemonic": "UMIN",
+      "category": "base_integer_system",
+      "source_file": "umin_imm.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x91cc0000",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umin_imm.xml",
+      "source_sha256": "8d6ae3ef797dabee04614525a60b7336db5edbff5efe8644bfc1bdd04513b7f7",
+      "smoke_samples": [
+        {
+          "word": "0x91ce0020",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        },
+        {
+          "word": "0x91cfffff",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "UMIN_64_dp_2src",
+      "mnemonic": "UMIN",
+      "category": "base_integer_system",
+      "source_file": "umin_reg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac06c00",
+      "features": [
+        {
+          "feature": "FEAT_CSSC",
+          "name": "v8Ap9"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umin_reg.xml",
+      "source_sha256": "b3cd6ca37524a941a77dda9c11458fe48b4dcb60b0fbeeb2cf48e1e2bd6d64ca",
+      "smoke_samples": [
+        {
+          "word": "0x9ac26c20",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        },
+        {
+          "word": "0x9adf6fff",
+          "expected_mnemonics": [
+            "umin"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "scalar_cssc"
+      ],
+      "scope": "Enabled FEAT_CSSC, all W32/X64 registers and allocated imm8 values. ZR, aliases, width truncation, zero extension and signed immediate extension preserve NZCV, SIMD/FP state and RAM. Disabled-feature traps, DIT timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/integer_unary.rs",
+        "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+        "crates/stela-compiler/src/x86_64/integer_unary.rs",
+        "crates/stela-compiler/src/x86_64/integer_minmax.rs"
+      ]
+    },
+    {
+      "id": "AESE_B_cryptoaes",
+      "mnemonic": "AESE",
+      "category": "fp_simd",
+      "source_file": "aese_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x4e284800",
+      "features": [
+        {
+          "feature": "FEAT_AES",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/aese_advsimd.xml",
+      "source_sha256": "62c63b3f106061201c9bde0fd5ea57e220e6d553b4eab8e3967f1018b6818aa6",
+      "smoke_samples": [
+        {
+          "word": "0x4e284800",
+          "expected_mnemonics": [
+            "aese"
+          ]
+        },
+        {
+          "word": "0x4e284bff",
+          "expected_mnemonics": [
+            "aese"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_aes"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and AES. All register roles and aliases; pre-XOR rounds and column transformations write 128 bits. Fixed-work baseline, independent SSSE3 staging and checked AES-NI preserve NZCV, FPCR/FPSR and guest RAM. Disabled access, streaming, hardware timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes/sbox.rs"
+      ]
+    },
+    {
+      "id": "AESD_B_cryptoaes",
+      "mnemonic": "AESD",
+      "category": "fp_simd",
+      "source_file": "aesd_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x4e285800",
+      "features": [
+        {
+          "feature": "FEAT_AES",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/aesd_advsimd.xml",
+      "source_sha256": "42b5ea0fe0359f8eb0f49c7fd2ea3ef8a4749a864cff0278cb00e63f68385336",
+      "smoke_samples": [
+        {
+          "word": "0x4e285800",
+          "expected_mnemonics": [
+            "aesd"
+          ]
+        },
+        {
+          "word": "0x4e285bff",
+          "expected_mnemonics": [
+            "aesd"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_aes"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and AES. All register roles and aliases; pre-XOR rounds and column transformations write 128 bits. Fixed-work baseline, independent SSSE3 staging and checked AES-NI preserve NZCV, FPCR/FPSR and guest RAM. Disabled access, streaming, hardware timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes/sbox.rs"
+      ]
+    },
+    {
+      "id": "AESMC_B_cryptoaes",
+      "mnemonic": "AESMC",
+      "category": "fp_simd",
+      "source_file": "aesmc_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x4e286800",
+      "features": [
+        {
+          "feature": "FEAT_AES",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/aesmc_advsimd.xml",
+      "source_sha256": "c20d2258ca17443adfb2ddb071989b878095f5ab6ebb703fc02018640f87bcbf",
+      "smoke_samples": [
+        {
+          "word": "0x4e286800",
+          "expected_mnemonics": [
+            "aesmc"
+          ]
+        },
+        {
+          "word": "0x4e286bff",
+          "expected_mnemonics": [
+            "aesmc"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_aes"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and AES. All register roles and aliases; pre-XOR rounds and column transformations write 128 bits. Fixed-work baseline, independent SSSE3 staging and checked AES-NI preserve NZCV, FPCR/FPSR and guest RAM. Disabled access, streaming, hardware timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes/sbox.rs"
+      ]
+    },
+    {
+      "id": "AESIMC_B_cryptoaes",
+      "mnemonic": "AESIMC",
+      "category": "fp_simd",
+      "source_file": "aesimc_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x4e287800",
+      "features": [
+        {
+          "feature": "FEAT_AES",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/aesimc_advsimd.xml",
+      "source_sha256": "f555d9f45171829e6bff1674944dbaa4aa50f6210e19167282a79c8dac71d590",
+      "smoke_samples": [
+        {
+          "word": "0x4e287800",
+          "expected_mnemonics": [
+            "aesimc"
+          ]
+        },
+        {
+          "word": "0x4e287bff",
+          "expected_mnemonics": [
+            "aesimc"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_aes"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and AES. All register roles and aliases; pre-XOR rounds and column transformations write 128 bits. Fixed-work baseline, independent SSSE3 staging and checked AES-NI preserve NZCV, FPCR/FPSR and guest RAM. Disabled access, streaming, hardware timing guarantees and Apple hardware conformance remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes.rs",
+        "crates/stela-compiler/src/x86_64/simd/aes/sbox.rs"
+      ]
+    },
+    {
+      "id": "SHA1C_QSV_cryptosha3",
+      "mnemonic": "SHA1C",
+      "category": "fp_simd",
+      "source_file": "sha1c_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e000000",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1c_advsimd.xml",
+      "source_sha256": "be2c87c527220ae967fefb924775ecaa5f651bfd47d7fb00f7718ec80ab74cf6",
+      "smoke_samples": [
+        {
+          "word": "0x5e020020",
+          "expected_mnemonics": [
+            "sha1c"
+          ]
+        },
+        {
+          "word": "0x5e1f03c0",
+          "expected_mnemonics": [
+            "sha1c"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA1P_QSV_cryptosha3",
+      "mnemonic": "SHA1P",
+      "category": "fp_simd",
+      "source_file": "sha1p_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e001000",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1p_advsimd.xml",
+      "source_sha256": "1d7017761113b232a29077b77caa224b201bc30cedae26447803bd0e339cc912",
+      "smoke_samples": [
+        {
+          "word": "0x5e021020",
+          "expected_mnemonics": [
+            "sha1p"
+          ]
+        },
+        {
+          "word": "0x5e1f13c0",
+          "expected_mnemonics": [
+            "sha1p"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA1M_QSV_cryptosha3",
+      "mnemonic": "SHA1M",
+      "category": "fp_simd",
+      "source_file": "sha1m_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e002000",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1m_advsimd.xml",
+      "source_sha256": "153525a153b96aace16a090f12700981b15881a8c93bd0f6bb1cf556d4e6d642",
+      "smoke_samples": [
+        {
+          "word": "0x5e022020",
+          "expected_mnemonics": [
+            "sha1m"
+          ]
+        },
+        {
+          "word": "0x5e1f23c0",
+          "expected_mnemonics": [
+            "sha1m"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA1H_SS_cryptosha2",
+      "mnemonic": "SHA1H",
+      "category": "fp_simd",
+      "source_file": "sha1h_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5e280800",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1h_advsimd.xml",
+      "source_sha256": "ba81e90a3bb7e021d8e41f36c298cffd73cf17043ea64c4872f5a49789e3d0e5",
+      "smoke_samples": [
+        {
+          "word": "0x5e280820",
+          "expected_mnemonics": [
+            "sha1h"
+          ]
+        },
+        {
+          "word": "0x5e280bc0",
+          "expected_mnemonics": [
+            "sha1h"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA1SU0_VVV_cryptosha3",
+      "mnemonic": "SHA1SU0",
+      "category": "fp_simd",
+      "source_file": "sha1su0_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e003000",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1su0_advsimd.xml",
+      "source_sha256": "d1a97e4d412db4c31ba77136dca8771cea9d72243da554ccb485db5571c695fa",
+      "smoke_samples": [
+        {
+          "word": "0x5e023020",
+          "expected_mnemonics": [
+            "sha1su0"
+          ]
+        },
+        {
+          "word": "0x5e1f33c0",
+          "expected_mnemonics": [
+            "sha1su0"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA1SU1_VV_cryptosha2",
+      "mnemonic": "SHA1SU1",
+      "category": "fp_simd",
+      "source_file": "sha1su1_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5e281800",
+      "features": [
+        {
+          "feature": "FEAT_SHA1",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha1su1_advsimd.xml",
+      "source_sha256": "417c52d8247908904e5fdd7ba7baace948d02cb2259cd449448903ca65f1da26",
+      "smoke_samples": [
+        {
+          "word": "0x5e281820",
+          "expected_mnemonics": [
+            "sha1su1"
+          ]
+        },
+        {
+          "word": "0x5e281bc0",
+          "expected_mnemonics": [
+            "sha1su1"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA256H_QQV_cryptosha3",
+      "mnemonic": "SHA256H",
+      "category": "fp_simd",
+      "source_file": "sha256h_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e004000",
+      "features": [
+        {
+          "feature": "FEAT_SHA256",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha256h_advsimd.xml",
+      "source_sha256": "fbeb793af49e990f87fe822b1696d009f8db8606a424253be5fe2c0747af8bda",
+      "smoke_samples": [
+        {
+          "word": "0x5e024020",
+          "expected_mnemonics": [
+            "sha256h"
+          ]
+        },
+        {
+          "word": "0x5e1f43c0",
+          "expected_mnemonics": [
+            "sha256h"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA256H2_QQV_cryptosha3",
+      "mnemonic": "SHA256H2",
+      "category": "fp_simd",
+      "source_file": "sha256h2_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e005000",
+      "features": [
+        {
+          "feature": "FEAT_SHA256",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha256h2_advsimd.xml",
+      "source_sha256": "bf3a46cd280704c0b775ca5f3ca26db49ba36bc62ccd2f74988aac7bb9d5e8c5",
+      "smoke_samples": [
+        {
+          "word": "0x5e025020",
+          "expected_mnemonics": [
+            "sha256h2"
+          ]
+        },
+        {
+          "word": "0x5e1f53c0",
+          "expected_mnemonics": [
+            "sha256h2"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA256SU0_VV_cryptosha2",
+      "mnemonic": "SHA256SU0",
+      "category": "fp_simd",
+      "source_file": "sha256su0_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5e282800",
+      "features": [
+        {
+          "feature": "FEAT_SHA256",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha256su0_advsimd.xml",
+      "source_sha256": "2523cab427f892bf5726a770d9f7abc7527872789878131af70c49ae76f633e5",
+      "smoke_samples": [
+        {
+          "word": "0x5e282820",
+          "expected_mnemonics": [
+            "sha256su0"
+          ]
+        },
+        {
+          "word": "0x5e282bc0",
+          "expected_mnemonics": [
+            "sha256su0"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA256SU1_VVV_cryptosha3",
+      "mnemonic": "SHA256SU1",
+      "category": "fp_simd",
+      "source_file": "sha256su1_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e006000",
+      "features": [
+        {
+          "feature": "FEAT_SHA256",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha256su1_advsimd.xml",
+      "source_sha256": "078d88f76e35c62884c26263a676634d7b68cdb568b2829fd3963340b3959ec9",
+      "smoke_samples": [
+        {
+          "word": "0x5e026020",
+          "expected_mnemonics": [
+            "sha256su1"
+          ]
+        },
+        {
+          "word": "0x5e1f63c0",
+          "expected_mnemonics": [
+            "sha256su1"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha12"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha32.rs"
+      ]
+    },
+    {
+      "id": "SHA512H_QQV_cryptosha512_3",
+      "mnemonic": "SHA512H",
+      "category": "fp_simd",
+      "source_file": "sha512h_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0xce608000",
+      "features": [
+        {
+          "feature": "FEAT_SHA512",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha512h_advsimd.xml",
+      "source_sha256": "84bdca397bc1c7ae0484e5d101e59a1649ae9068715eef076bff1f59a52a4a1f",
+      "smoke_samples": [
+        {
+          "word": "0xce628020",
+          "expected_mnemonics": [
+            "sha512h"
+          ]
+        },
+        {
+          "word": "0xce6c809f",
+          "expected_mnemonics": [
+            "sha512h"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha512"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA512. All register roles and aliases, exact sequential two-qword hash and schedule dependencies, full 128-bit destination. Baseline integer/SSE2 preserves NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha512.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha512.rs"
+      ]
+    },
+    {
+      "id": "SHA512H2_QQV_cryptosha512_3",
+      "mnemonic": "SHA512H2",
+      "category": "fp_simd",
+      "source_file": "sha512h2_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0xce608400",
+      "features": [
+        {
+          "feature": "FEAT_SHA512",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha512h2_advsimd.xml",
+      "source_sha256": "849a9fdc9b0b702fb39fa29bec03515d46e79f8a8f72d09192574ce6eb2697b7",
+      "smoke_samples": [
+        {
+          "word": "0xce628420",
+          "expected_mnemonics": [
+            "sha512h2"
+          ]
+        },
+        {
+          "word": "0xce6c849f",
+          "expected_mnemonics": [
+            "sha512h2"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha512"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA512. All register roles and aliases, exact sequential two-qword hash and schedule dependencies, full 128-bit destination. Baseline integer/SSE2 preserves NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha512.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha512.rs"
+      ]
+    },
+    {
+      "id": "SHA512SU0_VV2_cryptosha512_2",
+      "mnemonic": "SHA512SU0",
+      "category": "fp_simd",
+      "source_file": "sha512su0_advsimd.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xcec08000",
+      "features": [
+        {
+          "feature": "FEAT_SHA512",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha512su0_advsimd.xml",
+      "source_sha256": "387dff4dd1658c87a2bd970bff255c56d73eb09a2199d3017a1affb71963e611",
+      "smoke_samples": [
+        {
+          "word": "0xcec08020",
+          "expected_mnemonics": [
+            "sha512su0"
+          ]
+        },
+        {
+          "word": "0xcec0809f",
+          "expected_mnemonics": [
+            "sha512su0"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha512"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA512. All register roles and aliases, exact sequential two-qword hash and schedule dependencies, full 128-bit destination. Baseline integer/SSE2 preserves NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha512.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha512.rs"
+      ]
+    },
+    {
+      "id": "SHA512SU1_VVV2_cryptosha512_3",
+      "mnemonic": "SHA512SU1",
+      "category": "fp_simd",
+      "source_file": "sha512su1_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0xce608800",
+      "features": [
+        {
+          "feature": "FEAT_SHA512",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sha512su1_advsimd.xml",
+      "source_sha256": "1a2722a3775f1e0eea1f9f8fd3cc498c91a5f771e6f3e5950ae0c84e2256d9f2",
+      "smoke_samples": [
+        {
+          "word": "0xce628820",
+          "expected_mnemonics": [
+            "sha512su1"
+          ]
+        },
+        {
+          "word": "0xce6c889f",
+          "expected_mnemonics": [
+            "sha512su1"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha512"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA512. All register roles and aliases, exact sequential two-qword hash and schedule dependencies, full 128-bit destination. Baseline integer/SSE2 preserves NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha512.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha512.rs"
+      ]
+    },
+    {
+      "id": "EOR3_VVV16_crypto4",
+      "mnemonic": "EOR3",
+      "category": "fp_simd",
+      "source_file": "eor3_advsimd.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xce000000",
+      "features": [
+        {
+          "feature": "FEAT_SHA3",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/eor3_advsimd.xml",
+      "source_sha256": "c803a3fa66e06d42d73220dcaed7db0350754b0acaefbb9615b66a52debd32a6",
+      "smoke_samples": [
+        {
+          "word": "0xce000000",
+          "expected_mnemonics": [
+            "eor3"
+          ]
+        },
+        {
+          "word": "0xce1f0c20",
+          "expected_mnemonics": [
+            "eor3"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha3"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA3. EOR3/BCAX three-source logic, qword RAX1 and every XAR immediate 0..63; all register roles and aliases. Full 128-bit destination, NZCV/FPCR/FPSR and guest RAM preserved. Disabled access, streaming/SVE spellings and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha3.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha3.rs"
+      ]
+    },
+    {
+      "id": "BCAX_VVV16_crypto4",
+      "mnemonic": "BCAX",
+      "category": "fp_simd",
+      "source_file": "bcax_advsimd.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xce200000",
+      "features": [
+        {
+          "feature": "FEAT_SHA3",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bcax_advsimd.xml",
+      "source_sha256": "01be27ecddabcacbc83ef35edbf97d92436e37ce64e7f19cc9a5ba9e52f001a3",
+      "smoke_samples": [
+        {
+          "word": "0xce200000",
+          "expected_mnemonics": [
+            "bcax"
+          ]
+        },
+        {
+          "word": "0xce3f0c20",
+          "expected_mnemonics": [
+            "bcax"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha3"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA3. EOR3/BCAX three-source logic, qword RAX1 and every XAR immediate 0..63; all register roles and aliases. Full 128-bit destination, NZCV/FPCR/FPSR and guest RAM preserved. Disabled access, streaming/SVE spellings and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha3.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha3.rs"
+      ]
+    },
+    {
+      "id": "RAX1_VVV2_cryptosha512_3",
+      "mnemonic": "RAX1",
+      "category": "fp_simd",
+      "source_file": "rax1_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0xce608c00",
+      "features": [
+        {
+          "feature": "FEAT_SHA3",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rax1_advsimd.xml",
+      "source_sha256": "98fba43976771b7859c0128e667d31bb1618330ec2ed79abb764c247ed2af8a5",
+      "smoke_samples": [
+        {
+          "word": "0xce608c00",
+          "expected_mnemonics": [
+            "rax1"
+          ]
+        },
+        {
+          "word": "0xce7f8c20",
+          "expected_mnemonics": [
+            "rax1"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha3"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA3. EOR3/BCAX three-source logic, qword RAX1 and every XAR immediate 0..63; all register roles and aliases. Full 128-bit destination, NZCV/FPCR/FPSR and guest RAM preserved. Disabled access, streaming/SVE spellings and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha3.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha3.rs"
+      ]
+    },
+    {
+      "id": "XAR_VVV2_crypto3_imm6",
+      "mnemonic": "XAR",
+      "category": "fp_simd",
+      "source_file": "xar_advsimd.xml",
+      "encoding_mask": "0xffe00000",
+      "encoding_value": "0xce800000",
+      "features": [
+        {
+          "feature": "FEAT_SHA3",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/xar_advsimd.xml",
+      "source_sha256": "431e69639092a0645331a730234a570644457446609b6b29324fa4609c71c978",
+      "smoke_samples": [
+        {
+          "word": "0xce800000",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce800400",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce804000",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce808000",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce80c000",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce80fc00",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        },
+        {
+          "word": "0xce9ffc20",
+          "expected_mnemonics": [
+            "xar"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_sha3"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and SHA3. EOR3/BCAX three-source logic, qword RAX1 and every XAR immediate 0..63; all register roles and aliases. Full 128-bit destination, NZCV/FPCR/FPSR and guest RAM preserved. Disabled access, streaming/SVE spellings and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/sha3.rs",
+        "crates/stela-compiler/src/x86_64/simd/sha3.rs"
+      ]
+    },
+    {
+      "id": "SMMLA_asimdsame2_G",
+      "mnemonic": "SMMLA",
+      "category": "fp_simd",
+      "source_file": "smmla_advsimd_vec.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4e80a400",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smmla_advsimd_vec.xml",
+      "source_sha256": "f20c781cb251b88a2d187cd2b4aef06945f3724d702cf5bb11539f72ff15120f",
+      "smoke_samples": [
+        {
+          "word": "0x4e82a420",
+          "expected_mnemonics": [
+            "smmla"
+          ]
+        },
+        {
+          "word": "0x4e8ca49f",
+          "expected_mnemonics": [
+            "smmla"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
+    },
+    {
+      "id": "UMMLA_asimdsame2_G",
+      "mnemonic": "UMMLA",
+      "category": "fp_simd",
+      "source_file": "ummla_advsimd_vec.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x6e80a400",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ummla_advsimd_vec.xml",
+      "source_sha256": "0dabab692609eefd648404ea38b97c8687097d31ff1dc9cd1724601103f8b2e7",
+      "smoke_samples": [
+        {
+          "word": "0x6e82a420",
+          "expected_mnemonics": [
+            "ummla"
+          ]
+        },
+        {
+          "word": "0x6e8ca49f",
+          "expected_mnemonics": [
+            "ummla"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
+    },
+    {
+      "id": "USMMLA_asimdsame2_G",
+      "mnemonic": "USMMLA",
+      "category": "fp_simd",
+      "source_file": "usmmla_advsimd_vec.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4e80ac00",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usmmla_advsimd_vec.xml",
+      "source_sha256": "72baf1518de8d0358f4ed9c07527a44fd7758eebd9d24cbb89e0b592b856d527",
+      "smoke_samples": [
+        {
+          "word": "0x4e82ac20",
+          "expected_mnemonics": [
+            "usmmla"
+          ]
+        },
+        {
+          "word": "0x4e8cac9f",
+          "expected_mnemonics": [
+            "usmmla"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
+    },
+    {
+      "id": "USDOT_asimdsame2_D",
+      "mnemonic": "USDOT",
+      "category": "fp_simd",
+      "source_file": "usdot_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e809c00",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_advsimd_vec.xml",
+      "source_sha256": "5f0b1c617bbfc7c5d79dc6ac3be3f84d52e1fd6be925fd8a27531edaa8cf7dc5",
+      "smoke_samples": [
+        {
+          "word": "0x0e829c20",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4e829c20",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4e8c9c9f",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
+    },
+    {
+      "id": "USDOT_asimdelem_D",
+      "mnemonic": "USDOT",
+      "category": "fp_simd",
+      "source_file": "usdot_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f80f000",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_advsimd_elt.xml",
+      "source_sha256": "ae8d461f45a93eb5df02bdd4c8d9c33687bcc3e53ae0b44cab17d9c2c85e1940",
+      "smoke_samples": [
+        {
+          "word": "0x0f82f020",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x0fa2f020",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x0f82f820",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x0fa2f820",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4f82f020",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4fa2f020",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4f82f820",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4fa2f820",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        },
+        {
+          "word": "0x4facf89f",
+          "expected_mnemonics": [
+            "usdot"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
+    },
+    {
+      "id": "SUDOT_asimdelem_D",
+      "mnemonic": "SUDOT",
+      "category": "fp_simd",
+      "source_file": "sudot_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f00f000",
+      "features": [
+        {
+          "feature": "FEAT_I8MM",
+          "name": "v8Ap2 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_advsimd_elt.xml",
+      "source_sha256": "9836b1b9cf015eed00632fa9d1f9c9716dfc455399fc6ffe2cb56ea78685bada",
+      "smoke_samples": [
+        {
+          "word": "0x0f02f020",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x0f22f020",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x0f02f820",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x0f22f820",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x4f02f020",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x4f22f020",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x4f02f820",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x4f22f820",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        },
+        {
+          "word": "0x4f2cf89f",
+          "expected_mnemonics": [
+            "sudot"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "simd_i8mm"
+      ],
+      "scope": "Enabled nonstreaming FP/AdvSIMD and I8MM. Signed/unsigned/mixed 2x8-by-8x2 matrix accumulation, mixed dot vector/indexed forms, Q0/Q1 and all allocated Vm/index roles. Accumulation wraps modulo32; Q0 clears upper64. Baseline/checked SSSE3 preserve NZCV, FPCR/FPSR including QC and RAM. Disabled access, streaming and Apple hardware remain outside scope.",
+      "review": "Pinned June fields, original ARM/math/native states, emitted bytes/maps and measured mappings reviewed. Final receipts separate direct originals, storage policy, fresh execution and byte-preserved evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+        "crates/stela-compiler/src/x86_64/simd/i8mm.rs"
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
     "crates/stela-compiler/src/x86_64.rs",
     "crates/stela-compiler/src/block.rs",
@@ -25990,6 +28718,10 @@
     "crates/stela-compiler/src/x86_64/fp_register.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
     "crates/stela-compiler/src/x86_64/integer_math.rs",
+    "crates/stela-compiler/src/aarch64/integer_unary.rs",
+    "crates/stela-compiler/src/x86_64/integer_unary.rs",
+    "crates/stela-compiler/src/aarch64/integer_minmax.rs",
+    "crates/stela-compiler/src/x86_64/integer_minmax.rs",
     "crates/stela-compiler/src/aarch64/literal.rs",
     "crates/stela-compiler/src/x86_64/literal.rs",
     "crates/stela-compiler/src/aarch64/pc_relative.rs",
@@ -25999,6 +28731,20 @@
     "crates/stela-compiler/src/x86_64/memory_store.rs",
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
+    "crates/stela-compiler/src/aarch64/simd/aes.rs",
+    "crates/stela-compiler/src/x86_64/simd/aes.rs",
+    "crates/stela-compiler/src/x86_64/simd/aes/sbox.rs",
+    "crates/stela-compiler/src/aarch64/simd/i8mm.rs",
+    "crates/stela-compiler/src/x86_64/simd/i8mm.rs",
+    "crates/stela-compiler/src/aarch64/simd/sha1.rs",
+    "crates/stela-compiler/src/x86_64/simd/sha1.rs",
+    "crates/stela-compiler/src/aarch64/simd/sha256.rs",
+    "crates/stela-compiler/src/x86_64/simd/sha256.rs",
+    "crates/stela-compiler/src/x86_64/simd/sha32.rs",
+    "crates/stela-compiler/src/aarch64/simd/sha3.rs",
+    "crates/stela-compiler/src/x86_64/simd/sha3.rs",
+    "crates/stela-compiler/src/aarch64/simd/sha512.rs",
+    "crates/stela-compiler/src/x86_64/simd/sha512.rs",
     "crates/stela-compiler/src/aarch64/simd/memory.rs",
     "crates/stela-compiler/src/x86_64/simd/memory.rs",
     "crates/stela-compiler/src/aarch64/simd/floating.rs",

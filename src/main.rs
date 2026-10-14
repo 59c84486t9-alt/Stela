@@ -2519,3 +2519,25 @@ mod clock_cli_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod cpu_target_cli_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_selectors_keep_native_and_explicit_capabilities_distinct() {
+        use stela_compiler::TargetCpu;
+        assert_eq!(parse_cpu_target("native"), Ok(TargetCpu::detect()));
+        assert_eq!(
+            parse_cpu_target("baseline+popcnt+bmi1+aes+sha"),
+            Ok(TargetCpu::Baseline
+                .with_popcnt()
+                .with_bmi1()
+                .with_aes()
+                .with_sha())
+        );
+        for invalid in ["native+aes", "baseline+sha+aes", "baseline+bmi1+bmi1"] {
+            assert!(parse_cpu_target(invalid).is_err(), "{invalid}");
+        }
+    }
+}

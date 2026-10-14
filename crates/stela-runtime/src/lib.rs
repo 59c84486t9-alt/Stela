@@ -107,7 +107,7 @@ pub fn prepare_leaf_for_target(
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
         abi: NATIVE_ABI.into(),
-        target_cpu: target.id().into(),
+        target_cpu: target.id(),
     };
     prepare(identity, root, || {
         stela_compiler::compile_for_target(source, base, target)
@@ -163,7 +163,7 @@ pub fn prepare_block_for_target(
         compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
         guest_base: base.0,
         abi: profile.abi().into(),
-        target_cpu: target.id().into(),
+        target_cpu: target.id(),
     };
     let prepared = prepare(identity, root, || {
         block::compile_for_target(prefix, base, profile, target).map(|b| b.native)
@@ -284,6 +284,49 @@ mod tests {
                 assert_eq!(artifact.manifest.identity.target_cpu, target.id());
                 assert!(keys.insert(artifact.key));
             }
+            assert!(
+                prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?
+                    .cache_hit
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn independent_cpu_requirements_have_distinct_cache_identities() -> Result<()> {
+        use stela_compiler::TargetCpu;
+        let root = tempfile::tempdir()?;
+        let input = source(42);
+        let mut keys = std::collections::BTreeSet::new();
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Popcnt,
+            TargetCpu::Bmi1,
+            TargetCpu::Aes,
+            TargetCpu::Sha,
+            TargetCpu::Baseline.with_popcnt().with_bmi1(),
+            TargetCpu::Baseline.with_aes().with_sha(),
+            TargetCpu::Sse42
+                .with_pclmulqdq()
+                .with_fma()
+                .with_f16c()
+                .with_popcnt()
+                .with_bmi1()
+                .with_aes()
+                .with_sha(),
+        ] {
+            let artifact =
+                prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?;
+            assert_eq!(artifact.manifest.identity.target_cpu, target.id());
+            assert_eq!(
+                artifact
+                    .manifest
+                    .identity
+                    .target_cpu
+                    .parse::<TargetCpu>()
+                    .unwrap(),
+                target
+            );
+            assert!(keys.insert(artifact.key));
             assert!(
                 prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?
                     .cache_hit

@@ -442,7 +442,7 @@ def bounded_cases(compiled):
         receive.close()
 
 
-def unary_blocks(cli, directory, forms=UNARY_FORMS, target='native'):
+def unary_blocks(cli, directory, forms=UNARY_FORMS, target='native', fixtures=None):
     """Unchanged ARM RET and native shared block dispatch, with disk reuse."""
     from differential import initialize_arm, capture_arm, seed_extended_state
     from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
@@ -450,26 +450,53 @@ def unary_blocks(cli, directory, forms=UNARY_FORMS, target='native'):
     base, stop = 0x100000, 0x100800
     source, state_path = directory / 'unary.arm64', directory / 'unary-state.json'
     rows = []
-    incoming = states(all_flags=True)[:16]
+    incoming = states(all_flags=True)[:16 if fixtures is None else 3]
     for form in forms:
-        words = [encoding(form, 0, 1, 2), RET]
-        code = struct.pack('<2I', *words)
+        operations = None if fixtures is None else fixtures[form]
+        words = ([encoding(form, 0, 1, 2)] if operations is None else
+                 [operation['word'] for operation in operations]) + [RET]
+        code = struct.pack('<' + 'I' * len(words), *words)
         source.write_bytes(code)
         for flag, template in enumerate(incoming):
             initial = State.from_buffer_copy(template)
-            seed_extended_state(initial, (flag + FORMS[form]).to_bytes(8, 'little'))
+            seed_extended_state(initial, (flag + forms[form]).to_bytes(8, 'little'))
             initial.nzcv = flag << 28
             initial.x[1] = (0, MASK, 1 << 63, 0x0123456789abcdef)[flag % 4]
             initial.x[30] = stop
-            expected = mathematical_reference(words, initial)
+            if operations is None:
+                expected = mathematical_reference(words, initial)
+                original_initial, original_code, original_start = initial, code, base
+            else:
+                initial.nzcv = (0, 7, 15)[flag] << 28
+                initial.fpcr = (0, CSSC_READABLE_FPCR, CSSC_TRAP_ENABLES | CSSC_NEP)[flag]
+                expected = cssc_mathematical_reference(operations, initial)
+                # The primary QEMU capture proves CSSC separately. Unicorn can
+                # execute the unchanged RET from the model's post-CSSC state,
+                # under compatible controls; this is no joined-original claim.
+                original_initial = State.from_buffer_copy(initial)
+                original_initial.x[:] = expected['x']
+                original_initial.fpcr &= CSSC_RET_COMPATIBLE_FPCR
+                original_code, original_start = struct.pack('<I', RET), base
             machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-            machine.mem_map(base, 4096); machine.mem_write(base, code)
+            machine.mem_map(base, 4096); machine.mem_write(base, original_code)
             machine.reg_write(arm.UC_ARM64_REG_PSTATE, 0)
-            initialize_arm(machine, initial)
-            machine.emu_start(base, stop, count=4)
+            initialize_arm(machine, original_initial)
+            machine.emu_start(original_start, stop, count=4)
             assert machine.reg_read(arm.UC_ARM64_REG_PC) == stop
-            assert complete_state(capture_arm(machine, initial)) == expected
+            original_ret = complete_state(capture_arm(machine, original_initial))
+            assert original_ret == (expected if operations is None else complete_state(original_initial))
             state_path.write_text(json.dumps(complete_state(initial)))
+            if operations is not None and flag == 0:
+                budget_stop = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source),
+                    '--state', str(state_path), '--guest-base', hex(base), '--stop-pc', hex(stop),
+                    '--block-budget', '0', '--cpu-target', target,
+                    '--cache-dir', str(directory / ('unary-cache-' + target))], timeout=15))
+                assert budget_stop['state'] == complete_state(initial) and budget_stop['pc'] == base
+                assert budget_stop['outcome']['reason'] == {'kind': 'budget_exhausted'}
+                assert budget_stop['outcome']['blocks_executed'] == 0
+                assert budget_stop['outcome']['compiled_blocks'] == 0
+            else:
+                budget_stop = None
             native = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source),
                 '--state', str(state_path), '--guest-base', hex(base), '--stop-pc', hex(stop),
                 '--block-budget', '1', '--cpu-target', target,
@@ -481,7 +508,14 @@ def unary_blocks(cli, directory, forms=UNARY_FORMS, target='native'):
             outcome = native['outcome']
             assert outcome['reason'] == {'kind': 'stop_address'} and outcome['blocks_executed'] == 1
             assert outcome['compiled_blocks'] == int(flag == 0) and outcome['disk_cache_hits'] == int(flag != 0)
-            rows.append({'form': form, 'flags': flag, 'target': target, 'original': expected, 'native': native})
+            if operations is None:
+                rows.append({'form': form, 'flags': flag, 'target': target, 'original': expected, 'native': native})
+            else:
+                assert outcome['last_exit'] == [stop, CSSC_RETURN_EXIT]
+                rows.append({'form': form, 'flags': initial.nzcv >> 28, 'target': target,
+                    'expected_integer_model': expected, 'native': native,
+                    'budget0_stop': budget_stop, 'original_ret_only': original_ret,
+                    'original_cssc_joined': False})
     return rows
 
 
@@ -767,15 +801,471 @@ def crc_mapping_benchmark(cli):
     print(json.dumps({'snapshot': str(snapshot), 'rows': len(rows), 'passed': True}))
 
 
+# Add before main() in dev/integer-math-differential.py. Historical cases(),
+# FORMS, mathematical_reference() and default execution stay byte-identical.
+CSSC_BATCH_FUNCTIONS = 512
+CSSC_REGISTER_MASK = 31
+CSSC_SOURCE_SHIFT = 5
+CSSC_RIGHT_SHIFT = 16
+CSSC_IMMEDIATE_SHIFT = 10
+CSSC_WIDTH_BIT = 1 << 31
+CSSC_UNARY_MASK = 0xfffffc00
+CSSC_REGISTER_OPCODE_MASK = 0xffe0fc00
+CSSC_IMMEDIATE_OPCODE_MASK = 0xfffc0000
+CSSC_INPUT_STRIDE = 800
+CSSC_RECORD_BYTES = 1024
+CSSC_RETURN_EXIT = 4
+CSSC_STATUS_OFFSET = 248
+CSSC_EXCEPTION_OFFSET = 280
+CSSC_VECTOR_OFFSET = 320
+CSSC_READBACK_OFFSET = 832
+CSSC_TRAP_ENABLES = 0x9f00
+CSSC_NEP = 1 << 2
+CSSC_RET_COMPATIBLE_FPCR = 0x07c00000
+CSSC_READABLE_FPCR = 0x07c80007
+CSSC_FPSR_MASK = 0x0800009f
+CSSC_ORACLE = ROOT / '.stela/research/cssc-implementation/original/receipt.json'
+CSSC_FORMS = {
+    'ABS32': (0x5ac02000, 'ABS_32_dp_1src', 'unary'),
+    'ABS64': (0xdac02000, 'ABS_64_dp_1src', 'unary'),
+    'CNT32': (0x5ac01c00, 'CNT_32_dp_1src', 'unary'),
+    'CNT64': (0xdac01c00, 'CNT_64_dp_1src', 'unary'),
+    'CTZ32': (0x5ac01800, 'CTZ_32_dp_1src', 'unary'),
+    'CTZ64': (0xdac01800, 'CTZ_64_dp_1src', 'unary'),
+    'SMAX32': (0x1ac06000, 'SMAX_32_dp_2src', 'register'),
+    'SMAX32I': (0x11c00000, 'SMAX_32_minmax_imm', 'immediate'),
+    'SMAX64': (0x9ac06000, 'SMAX_64_dp_2src', 'register'),
+    'SMAX64I': (0x91c00000, 'SMAX_64_minmax_imm', 'immediate'),
+    'SMIN32': (0x1ac06800, 'SMIN_32_dp_2src', 'register'),
+    'SMIN32I': (0x11c80000, 'SMIN_32_minmax_imm', 'immediate'),
+    'SMIN64': (0x9ac06800, 'SMIN_64_dp_2src', 'register'),
+    'SMIN64I': (0x91c80000, 'SMIN_64_minmax_imm', 'immediate'),
+    'UMAX32I': (0x11c40000, 'UMAX_32U_minmax_imm', 'immediate'),
+    'UMAX32': (0x1ac06400, 'UMAX_32_dp_2src', 'register'),
+    'UMAX64I': (0x91c40000, 'UMAX_64U_minmax_imm', 'immediate'),
+    'UMAX64': (0x9ac06400, 'UMAX_64_dp_2src', 'register'),
+    'UMIN32I': (0x11cc0000, 'UMIN_32U_minmax_imm', 'immediate'),
+    'UMIN32': (0x1ac06c00, 'UMIN_32_dp_2src', 'register'),
+    'UMIN64I': (0x91cc0000, 'UMIN_64U_minmax_imm', 'immediate'),
+    'UMIN64': (0x9ac06c00, 'UMIN_64_dp_2src', 'register'),
+}
+
+
+def cssc_operation(form, d=0, n=1, m=2, immediate=0):
+    base, canonical, input_kind = CSSC_FORMS[form]
+    if any(not 0 <= register <= CSSC_REGISTER_MASK for register in (d, n, m)):
+        raise ValueError('Invalid CSSC register')
+    if not 0 <= immediate <= 255:
+        raise ValueError('Invalid CSSC immediate')
+    word = base | n << CSSC_SOURCE_SHIFT | d
+    if input_kind == 'register':
+        word |= m << CSSC_RIGHT_SHIFT
+    elif input_kind == 'immediate':
+        word |= immediate << CSSC_IMMEDIATE_SHIFT
+    return {'form': form, 'canonical_id': canonical, 'input_kind': input_kind,
+            'width': 64 if base & CSSC_WIDTH_BIT else 32,
+            'd': d, 'n': n, 'm': m if input_kind == 'register' else None,
+            'raw_imm8': immediate if input_kind == 'immediate' else None,
+            'word': word, 'name': form.rstrip('I').rstrip('0123456789').lower()}
+
+
+def cssc_value(operation, first, second=0):
+    """Independent arbitrary-precision definition, not the native SWAR recipe."""
+    width = operation['width']
+    mask = (1 << width) - 1
+    first &= mask
+    form = operation['form']
+    if form.startswith('ABS'):
+        return abs(signed(first, width)) & mask
+    if form.startswith('CNT'):
+        return first.bit_count()
+    if form.startswith('CTZ'):
+        return width if first == 0 else (first & -first).bit_length() - 1
+    is_signed = form.startswith('S')
+    if operation['input_kind'] == 'immediate':
+        second = signed(operation['raw_imm8'], 8) if is_signed else operation['raw_imm8']
+    else:
+        second = signed(second, width) if is_signed else second & mask
+    first = signed(first, width) if is_signed else first
+    select = min if 'MIN' in form else max
+    return select(first, second) & mask
+
+
+def cssc_mathematical_reference(operations, initial):
+    registers = list(initial.x)
+    for operation in operations:
+        first = registers[operation['n']] if operation['n'] != CSSC_REGISTER_MASK else 0
+        right = operation['m']
+        second = registers[right] if right not in (None, CSSC_REGISTER_MASK) else 0
+        value = cssc_value(operation, first, second)
+        if operation['d'] != CSSC_REGISTER_MASK:
+            registers[operation['d']] = value
+    return {**complete_state(initial), 'x': registers}
+
+
+def cssc_corpus():
+    """Bounded original full-frame inputs; no host result guides generation."""
+    from differential import seed_extended_state
+    functions, records, indexes = [], [], {}
+    rng = random.Random(0x43535343494e5447)
+    controls = (0, CSSC_READABLE_FPCR, *(1 << bit for bit in (8, 9, 10, 11, 12, 15)),
+                CSSC_TRAP_ENABLES, CSSC_READABLE_FPCR | CSSC_TRAP_ENABLES)
+
+    def append(operation, label, first=None, second=None, control=None, flags=None):
+        word = operation['word']
+        if word not in indexes:
+            indexes[word] = len(functions)
+            functions.append(operation)
+        function = indexes[word]
+        initial = State()
+        for register in range(31):
+            initial.x[register] = rng.getrandbits(64)
+        initial.sp = rng.getrandbits(64) & ~15
+        initial.reserved = rng.getrandbits(32)
+        seed_extended_state(initial, len(records))
+        initial.nzcv = (len(records) % 16 if flags is None else flags) << 28
+        initial.fpcr = controls[len(records) % len(controls)] if control is None else control
+        initial.fpsr = (0, CSSC_FPSR_MASK, 1 << 27, 0x9f)[len(records) % 4]
+        poison = 0xdeadc0de00000000 if operation['width'] == 32 else 0
+        if operation['n'] != CSSC_REGISTER_MASK and first is not None:
+            initial.x[operation['n']] = (first & ((1 << operation['width']) - 1)) | poison
+        right = operation['m']
+        if right not in (None, CSSC_REGISTER_MASK, operation['n']) and second is not None:
+            initial.x[right] = (second & ((1 << operation['width']) - 1)) | poison
+        records.append({'case': len(records), 'function': function, 'function_index': function,
+                        'label': label, 'initial': bytes(initial),
+                        'initial_state_sha256': hashlib.sha256(bytes(initial)).hexdigest()})
+
+    # Decoder tests cover all 1024 combinations. Original execution spans each
+    # register field plus every in-place/ZR/discard position without a quadratic
+    # repeated native compilation sweep.
+    unary_roles = tuple(dict.fromkeys((
+        *((d, (d + 5) % 32) for d in range(32)),
+        *((r, r) for r in range(32)),
+        *((d, 31) for d in range(32)),
+        *((31, n) for n in range(32)))))
+    binary_roles = ((0, 1, 2), (1, 1, 2), (2, 1, 2), (1, 1, 1),
+                    (0, 1, 1), (31, 1, 2), (0, 31, 2), (0, 1, 31),
+                    (0, 31, 31), (31, 31, 31), (30, 30, 30))
+    for form, (_, _, input_kind) in CSSC_FORMS.items():
+        operation = cssc_operation(form)
+        width = operation['width']
+        sign, mask = 1 << (width - 1), (1 << width) - 1
+        values = (0, 1, 2, sign - 1, sign, sign + 1, mask - 1, mask,
+                  0xaaaaaaaaaaaaaaaa & mask, 0x5555555555555555 & mask)
+        if input_kind == 'unary':
+            for d, n in unary_roles:
+                append(cssc_operation(form, d, n), 'all_register_roles')
+            directed = (*values, *(1 << bit for bit in range(width)),
+                        *((1 << count) - 1 for count in range(width + 1)))
+            for value in dict.fromkeys(directed):
+                append(operation, 'bit_and_sign_boundaries', value)
+        elif input_kind == 'register':
+            roles = tuple(dict.fromkeys((*binary_roles,
+                *((d, (d + 5) % 32, (d + 13) % 32) for d in range(32)))))
+            for d, n, m in roles:
+                append(cssc_operation(form, d, n, m), 'register_aliases', sign, mask)
+            for first, second in itertools.product(values, values):
+                append(operation, 'ordering_and_overflow_boundaries', first, second)
+        else:
+            for immediate in range(256):
+                operation = cssc_operation(form, immediate=immediate)
+                decoded = signed(immediate, 8) if form.startswith('S') else immediate
+                for first in dict.fromkeys((decoded - 1, decoded, decoded + 1, *values)):
+                    append(operation, 'all_immediate_ordering_boundaries', first)
+            for immediate in (0, 0x7f, 0x80, 0xff):
+                for d, n in ((1, 1), (31, 1), (0, 31), (31, 31), (30, 30)):
+                    append(cssc_operation(form, d, n, immediate=immediate), 'immediate_aliases', sign)
+            operation = cssc_operation(form, immediate=0x80)
+        for flags in range(16):
+            append(operation, 'all_nzcv_and_extended_state', sign, mask, flags=flags)
+        for control in controls:
+            append(operation, 'integer_preserves_fp_controls', sign, mask, control=control)
+    if len(records) > 50000 or len({op['canonical_id'] for op in functions}) != 22:
+        raise AssertionError('CSSC corpus exceeded scope or omitted a canonical form')
+    return functions, records
+
+
+def cssc_calibration_corpus():
+    functions, records = [], []
+    for form in CSSC_FORMS:
+        operation = cssc_operation(form, immediate=0x80)
+        function = len(functions)
+        functions.append(operation)
+        for control in (0, CSSC_READABLE_FPCR | CSSC_TRAP_ENABLES):
+            initial = State()
+            for register in range(31):
+                initial.x[register] = (0xdeadc0de00000000 | (1 << 31)) ^ register
+            initial.x[2] = MASK
+            initial.sp = 0x42008000
+            initial.nzcv = (len(records) % 16) << 28
+            initial.reserved = 0x43535343
+            initial.fpcr = control
+            initial.fpsr = CSSC_FPSR_MASK
+            records.append({'case': len(records), 'function': function, 'function_index': function,
+                'label': 'calibration', 'initial': bytes(initial),
+                'initial_state_sha256': hashlib.sha256(bytes(initial)).hexdigest()})
+    return functions, records
+
+
+def prepare_cssc_oracle(directory, calibration=False):
+    functions, records = cssc_calibration_corpus() if calibration else cssc_corpus()
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    functions = [{**op, 'source_hex': struct.pack('<II', op['word'], RET).hex()} for op in functions]
+    metadata = [{key: value for key, value in record.items() if key != 'initial'} for record in records]
+    inputs = b''.join(struct.pack('<Q', record['function']) + record['initial'] + bytes(8) for record in records)
+    files = {'functions.json': (json.dumps(functions, indent=2) + '\n').encode(),
+             'cases.json': (json.dumps(metadata, indent=2) + '\n').encode(), 'inputs.bin': inputs}
+    plan = {'kind': 'cssc_original_input_plan', 'cases': len(records), 'functions': len(functions),
+            'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'files': {name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)} for name, data in files.items()}}
+    files['input-plan.json'] = (json.dumps(plan, indent=2) + '\n').encode()
+    for name, data in files.items():
+        path = directory / name
+        if path.exists():
+            if path.read_bytes() != data:
+                raise AssertionError(f'Immutable CSSC original input changed: {name}')
+        else:
+            with path.open('xb') as output:
+                output.write(data)
+    return plan
+
+
+def load_cssc_oracle(path):
+    """Validate unchanged producer framing before admitting original results."""
+    import importlib.util
+    path = Path(path)
+    receipt_bytes = path.read_bytes()
+    receipt = json.loads(receipt_bytes)
+    if 'receipt' in receipt:
+        pointer = receipt['receipt']
+        receipt_bytes = (ROOT / pointer['path']).read_bytes()
+        if hashlib.sha256(receipt_bytes).hexdigest() != pointer['sha256']:
+            raise AssertionError('CSSC original receipt pointer changed')
+        receipt = json.loads(receipt_bytes)
+    if (receipt.get('passed_transport_and_architectural_frame_checks') is not True
+            or receipt.get('capability_and_execution_supported') is not True):
+        raise AssertionError('Passing CSSC original transport receipt required')
+    directory = ROOT / receipt['directory']
+    artifacts = {}
+    for name, identity in receipt['files'].items():
+        if Path(name).name != name:
+            raise AssertionError('Original artifact is not one path component')
+        data = (directory / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != identity['sha256'] or len(data) != identity['bytes']:
+            raise AssertionError(f'Original CSSC artifact changed: {name}')
+        artifacts[name] = data
+    expected_functions, expected_records = cssc_corpus()
+    functions = json.loads(artifacts['functions.json'])
+    cases = json.loads(artifacts['cases.json'])
+    if len(functions) != len(expected_functions) or len(cases) != len(expected_records):
+        raise AssertionError('CSSC original corpus/function counts changed')
+    spec = importlib.util.spec_from_file_location('cssc_shared_full_frame', ROOT / 'dev/simd-differential.py')
+    shared = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shared)
+    inputs, results = artifacts['inputs.bin'], artifacts['results.bin']
+    if len(inputs) != len(cases) * CSSC_INPUT_STRIDE or len(results) != (len(cases) + 1) * CSSC_RECORD_BYTES:
+        raise AssertionError('CSSC original input/output framing changed')
+    for actual, expected in zip(functions, expected_functions):
+        if actual != {**expected, 'source_hex': struct.pack('<II', expected['word'], RET).hex()}:
+            raise AssertionError('CSSC original instruction metadata changed')
+    records = []
+    for index, (case, expected) in enumerate(zip(cases, expected_records)):
+        raw = inputs[index * CSSC_INPUT_STRIDE:(index + 1) * CSSC_INPUT_STRIDE]
+        if raw != struct.pack('<Q', expected['function']) + expected['initial'] + bytes(8):
+            raise AssertionError('CSSC input state differs from independent generation')
+        if case != {key: value for key, value in expected.items() if key != 'initial'}:
+            raise AssertionError('CSSC original case metadata changed')
+        operation = expected_functions[expected['function']]
+        initial = State.from_buffer_copy(expected['initial'])
+        snapshot = results[(index + 1) * CSSC_RECORD_BYTES:(index + 2) * CSSC_RECORD_BYTES]
+        original = shared.full_frame_numerical_original_state(initial, snapshot)
+        esr, elr, current_el, cpacr, marker = struct.unpack_from('<5Q', snapshot, CSSC_EXCEPTION_OFFSET)
+        pre_fpcr, pre_fpsr = struct.unpack_from('<2Q', snapshot, CSSC_READBACK_OFFSET)
+        if (esr >> 26 != shared.FP_REGISTER_EC_SVC or current_el != 4
+                or cpacr != shared.VECTOR_NUMERICAL_CPACR_FPEN or marker != shared.VECTOR_NUMERICAL_ORIGINAL_MARKER
+                or shared.fp_register_elf_word(artifacts['guest.elf'], elr - 8) != operation['word']
+                or shared.fp_register_elf_word(artifacts['guest.elf'], elr - 4) != shared.FP_REGISTER_SVC
+                or original.fpcr != pre_fpcr or original.fpsr != pre_fpsr
+                or pre_fpsr != initial.fpsr
+                or pre_fpcr != initial.fpcr & ~CSSC_TRAP_ENABLES):
+            raise AssertionError(f'CSSC original source/exception/control evidence invalid: {index}')
+        observed_initial = State.from_buffer_copy(initial)
+        observed_initial.fpcr = pre_fpcr
+        if cssc_mathematical_reference([operation], observed_initial) != complete_state(original):
+            raise AssertionError(f'CSSC original differs from independent integer model: {index}')
+        records.append({**expected, 'operation': operation, 'original': bytes(original),
+                        'control_policy': pre_fpcr != initial.fpcr})
+    return {'records': records, 'functions': expected_functions, 'receipt': receipt,
+            'receipt_sha256': hashlib.sha256(receipt_bytes).hexdigest(),
+            'control_policy_cases': sum(record['control_policy'] for record in records)}
+
+
+def execute_cssc_cases(compiled, records):
+    counts = {'original_native_full_state': 0, 'requested_control_policy_full_state': 0,
+              'native_integer_model_full_state': 0}
+    corpus = hashlib.sha256()
+    for target, binaries in compiled.items():
+        for record in records:
+            initial = State.from_buffer_copy(record['initial'])
+            expected = cssc_mathematical_reference([record['operation']], initial)
+            actual = native_state(binaries[record['function']], initial)
+            if actual != expected:
+                raise AssertionError(json.dumps({'target': target, 'case': record['case'],
+                    'operation': record['operation'], 'expected': expected, 'actual': actual}))
+            counts['native_integer_model_full_state'] += 1
+            if record['control_policy']:
+                # Original raw requested enables are RAZ/WI. Preserve that input
+                # and observation; count storage-policy equality separately.
+                adjusted = dict(actual, fpcr=complete_state(State.from_buffer_copy(record['original']))['fpcr'])
+                if adjusted != complete_state(State.from_buffer_copy(record['original'])):
+                    raise AssertionError('CSSC requested-control policy changed a non-control effect')
+                counts['requested_control_policy_full_state'] += 1
+            else:
+                if actual != complete_state(State.from_buffer_copy(record['original'])):
+                    raise AssertionError('CSSC raw original/native full state differs')
+                counts['original_native_full_state'] += 1
+            corpus.update(target.encode() + struct.pack('<Q', record['case']) + record['initial'])
+    return {**counts, 'state_corpus_sha256': corpus.hexdigest(), 'targets': list(compiled)}
+
+
+def cssc_blocks(cli, directory, target='baseline'):
+    fixtures = {form: [cssc_operation(form, immediate=0x80)] for form in CSSC_FORMS}
+    fixtures['abs_count_alias_chain'] = [cssc_operation('ABS32', 1, 1),
+        cssc_operation('CNT64', 2, 1), cssc_operation('CTZ32', 0, 2)]
+    fixtures['signed_unsigned_immediate_chain'] = [cssc_operation('SMIN64I', 1, 1, immediate=0xff),
+        cssc_operation('UMAX32I', 1, 1, immediate=0x80), cssc_operation('SMAX64', 0, 1, 1)]
+    fixtures['zero_discard_chain'] = [cssc_operation('CTZ64', 1, 31),
+        cssc_operation('ABS32', 31, 1), cssc_operation('UMIN32', 0, 31, 1)]
+    forms = {name: operations[0]['word'] for name, operations in fixtures.items()}
+    return unary_blocks(cli, directory, forms, target, fixtures=fixtures)
+
+
+def cssc_worker(pipe, compiled, records):
+    try:
+        pipe.send(execute_cssc_cases(compiled, records))
+    except BaseException as error:
+        pipe.send({'error': repr(error)})
+    finally:
+        pipe.close()
+
+
+def run_cssc_cohort(cli, oracle_path):
+    import importlib.util
+    oracle = load_cssc_oracle(oracle_path)
+    spec = importlib.util.spec_from_file_location('cssc_shared_batch', ROOT / 'dev/simd-differential.py')
+    shared = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shared)
+    shared_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+                     for name in ('dev/simd-differential.py', 'dev/differential.py', 'dev/evidence.py')}
+    # Reuse the established CLI native-target probe rather than assuming feature
+    # availability from the host OS or an SSE tier.
+    with tempfile.TemporaryDirectory(prefix='stela-cssc-capability-') as temporary:
+        directory = Path(temporary)
+        source = directory / 'probe.arm64'
+        source.write_bytes(struct.pack('<II', CSSC_FORMS['ABS32'][0], RET))
+        manifest = json.loads(subprocess.check_output([str(cli), 'compile-leaf', str(source),
+            '--cpu-target', 'native', '--output-dir', str(directory / 'output')]))
+    native_target = manifest['target_cpu']
+    features = set(native_target.split('+'))
+    targets = ['baseline']
+    for target, required in (('baseline+popcnt', {'popcnt'}), ('baseline+bmi1', {'bmi1'}),
+                             ('baseline+popcnt+bmi1', {'popcnt', 'bmi1'})):
+        if required <= features:
+            targets.append(target)
+    host = {'native_target': native_target, 'checked_targets': targets}
+    compiled, compiler = {}, None
+    cli_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
+    with tempfile.TemporaryDirectory(prefix='stela-cssc-') as temporary:
+        directory = Path(temporary)
+        for target in targets:
+            binaries = []
+            for start in range(0, len(oracle['functions']), CSSC_BATCH_FUNCTIONS):
+                functions = oracle['functions'][start:start + CSSC_BATCH_FUNCTIONS]
+                # Capstone lacks CSSC. The original reader has already checked
+                # every word against the pinned forms and immutable capture.
+                source_bytes = b''.join(struct.pack('<II', operation['word'], RET) for operation in functions)
+                source = directory / f'{target}-{start}.arm64'
+                source.write_bytes(source_bytes)
+                output = directory / f'{target}-{start}'
+                manifest = json.loads(subprocess.check_output([str(cli), 'compile-leaf', str(source),
+                    '--guest-base', hex(shared.BASE), '--output-dir', str(output), '--cpu-target', target], timeout=60))
+                native = (output / 'native.bin').read_bytes()
+                offsets = shared.validate_manifest(manifest, source_bytes, native, False, f'x86_64-{target}')
+                identity = manifest['compiler_source_sha256']
+                if compiler is not None and compiler != identity:
+                    raise AssertionError('Compiler changed during CSSC compilation')
+                compiler = identity
+                for index in range(len(functions)):
+                    end = offsets[2 * index + 2] if index + 1 < len(functions) else len(native)
+                    if native[offsets[2 * index + 1]:end] != b'\xc3':
+                        raise AssertionError('CSSC function has no exact host RET boundary')
+                    binaries.append(native[offsets[2 * index]:end])
+            compiled[target] = binaries
+        context = multiprocessing.get_context('spawn')
+        receive, send = context.Pipe(duplex=False)
+        process = context.Process(target=cssc_worker, args=(send, compiled, oracle['records']))
+        process.start()
+        send.close()
+        try:
+            if not receive.poll(600):
+                raise AssertionError('CSSC native isolated worker timed out')
+            result = receive.recv()
+            process.join(timeout=2)
+            if process.exitcode != 0 or 'error' in result:
+                raise AssertionError(f'CSSC native isolated worker failed: {result}; exit={process.exitcode}')
+        finally:
+            if process.is_alive():
+                process.kill()
+            process.join()
+            receive.close()
+        runtime_targets = list(dict.fromkeys(('baseline', targets[-1])))
+        block_cases = [row for target in runtime_targets for row in cssc_blocks(cli, directory, target)]
+    if hashlib.sha256(cli.read_bytes()).hexdigest() != cli_hash:
+        raise AssertionError('Compiler executable changed during CSSC cohort')
+    if any(hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != identity
+           for name, identity in shared_hashes.items()):
+        raise AssertionError('Shared harness sources changed during CSSC cohort')
+    report = {'kind': 'cssc_original_vs_native_integer', 'passed': True, **result,
+              'forms': 22, 'original_cases': len(oracle['records']),
+              'original_receipt_sha256': oracle['receipt_sha256'], 'original_producer': oracle['receipt'],
+              'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
+              'harness_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'shared_sources_sha256': shared_hashes,
+              'source_decode_basis': 'Pinned CSSC forms/masks and exact immutable original source/frame validation; shared manifest hash/map/target and exact host RET checks.',
+              'capstone_cssc_decode_supported': False,
+              'host_capabilities': host,
+              'runtime_block_cases': block_cases, 'runtime_model_full_state_comparisons': len(block_cases),
+              'runtime_budget0_stops': sum(row['budget0_stop'] is not None for row in block_cases),
+              'runtime_original_ret_only_comparisons': len(block_cases),
+              'runtime_joined_original_cssc_comparisons': 0,
+              'limits': 'Enabled FEAT_CSSC integer results and complete GuestState only. Requested FP enable storage policy is counted separately where original controls are RAZ/WI. Original full frames execute each source word before SVC; native leaf executes the word plus compiled RET. No full PSTATE/DIT timing guarantee, disabled-feature exception, Apple hardware, guest memory or OS/application claim. Bounded native model/RET, cold/warm disk-cache and budget0-stop/budget1-one-block checks are separate from primary single-word original captures. Original RET-only composition has zero joined-original CSSC equality credit.'}
+    write_evidence(ROOT / '.stela/cssc-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true', help='Use the already built CLI')
     parser.add_argument('--crc-mapping-benchmark', action='store_true',
                         help='Compare actual CRC output with baseline candidates using shared native timer')
+    parser.add_argument('--cssc', action='store_true', help='Run the separate 22-form scalar CSSC cohort')
+    parser.add_argument('--cssc-oracle', type=Path, default=CSSC_ORACLE)
+    parser.add_argument('--prepare-cssc-oracle', type=Path, help='Write immutable original-only CSSC inputs')
+    parser.add_argument('--cssc-calibration', action='store_true', help='Prepare the bounded 44-frame original calibration')
     arguments = parser.parse_args()
+    if arguments.prepare_cssc_oracle is not None:
+        print(json.dumps(prepare_cssc_oracle(arguments.prepare_cssc_oracle, arguments.cssc_calibration), indent=2))
+        return
+    if arguments.cssc_calibration:
+        parser.error('--cssc-calibration requires --prepare-cssc-oracle')
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
+    if arguments.cssc:
+        run_cssc_cohort(cli, arguments.cssc_oracle)
+        return
     if arguments.crc_mapping_benchmark:
         crc_mapping_benchmark(cli)
         return

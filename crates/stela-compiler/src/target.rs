@@ -1,0 +1,473 @@
+//! Host requirements, detection and stable generated-code target identities.
+
+/// Explicit host requirements bind generated code and persistent cache identity.
+/// SSE tiers are nested; every other capability is independent.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TargetCpu {
+    tier: SseTier,
+    pclmulqdq: bool,
+    fma: bool,
+    f16c: bool,
+    popcnt: bool,
+    bmi1: bool,
+    aes: bool,
+    sha: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SseTier {
+    #[default]
+    Baseline,
+    Ssse3,
+    Sse41,
+    Sse42,
+}
+
+// Retain the established public tier names and their canonical cache identities.
+#[allow(non_upper_case_globals)]
+impl TargetCpu {
+    pub const Baseline: Self = Self {
+        tier: SseTier::Baseline,
+        pclmulqdq: false,
+        fma: false,
+        f16c: false,
+        popcnt: false,
+        bmi1: false,
+        aes: false,
+        sha: false,
+    };
+    pub const Ssse3: Self = Self {
+        tier: SseTier::Ssse3,
+        ..Self::Baseline
+    };
+    pub const Sse41: Self = Self {
+        tier: SseTier::Sse41,
+        ..Self::Baseline
+    };
+    pub const Sse42: Self = Self {
+        tier: SseTier::Sse42,
+        ..Self::Baseline
+    };
+    /// Minimum requirements for legacy XMM PCLMULQDQ, independent of SSE tiers.
+    pub const Pclmulqdq: Self = Self::Baseline.with_pclmulqdq();
+    /// Minimum requirements for VEX FMA3, including OS-enabled AVX register state.
+    pub const Fma: Self = Self::Baseline.with_fma();
+    /// Minimum requirements for F16C, including OS-enabled AVX register state.
+    pub const F16c: Self = Self::Baseline.with_f16c();
+    pub const Popcnt: Self = Self::Baseline.with_popcnt();
+    pub const Bmi1: Self = Self::Baseline.with_bmi1();
+    /// Minimum requirements for legacy XMM AES instructions, independent of SSE tiers.
+    pub const Aes: Self = Self::Baseline.with_aes();
+    /// Minimum requirements for legacy XMM SHA instructions, independent of SSE tiers.
+    pub const Sha: Self = Self::Baseline.with_sha();
+
+    pub const fn with_pclmulqdq(self) -> Self {
+        Self {
+            pclmulqdq: true,
+            ..self
+        }
+    }
+    pub const fn with_fma(self) -> Self {
+        Self { fma: true, ..self }
+    }
+    pub const fn with_f16c(self) -> Self {
+        Self { f16c: true, ..self }
+    }
+    pub const fn with_popcnt(self) -> Self {
+        Self {
+            popcnt: true,
+            ..self
+        }
+    }
+    pub const fn with_bmi1(self) -> Self {
+        Self { bmi1: true, ..self }
+    }
+    pub const fn with_aes(self) -> Self {
+        Self { aes: true, ..self }
+    }
+    pub const fn with_sha(self) -> Self {
+        Self { sha: true, ..self }
+    }
+    /// True only when every required feature is present in this target.
+    pub fn supports(self, required: Self) -> bool {
+        self.tier >= required.tier
+            && (!required.pclmulqdq || self.pclmulqdq)
+            && (!required.fma || self.fma)
+            && (!required.f16c || self.f16c)
+            && (!required.popcnt || self.popcnt)
+            && (!required.bmi1 || self.bmi1)
+            && (!required.aes || self.aes)
+            && (!required.sha || self.sha)
+    }
+    pub fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self {
+                popcnt: std::is_x86_feature_detected!("popcnt"),
+                bmi1: std::is_x86_feature_detected!("bmi1"),
+                aes: std::is_x86_feature_detected!("aes"),
+                sha: std::is_x86_feature_detected!("sha"),
+                ..Self::for_features_with_vex(
+                    std::is_x86_feature_detected!("ssse3"),
+                    std::is_x86_feature_detected!("sse4.1"),
+                    std::is_x86_feature_detected!("sse4.2"),
+                    std::is_x86_feature_detected!("pclmulqdq"),
+                    std::is_x86_feature_detected!("avx"),
+                    std::is_x86_feature_detected!("fma"),
+                    std::is_x86_feature_detected!("f16c"),
+                )
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Self::Baseline
+        }
+    }
+    #[cfg(any(target_arch = "x86_64", test))]
+    fn for_features(ssse3: bool, sse41: bool, sse42: bool, pclmulqdq: bool) -> Self {
+        let tier = match (ssse3, sse41, sse42) {
+            (false, _, _) => SseTier::Baseline,
+            (true, false, _) => SseTier::Ssse3,
+            (true, true, false) => SseTier::Sse41,
+            (true, true, true) => SseTier::Sse42,
+        };
+        Self {
+            tier,
+            pclmulqdq,
+            ..Self::Baseline
+        }
+    }
+    #[cfg(any(target_arch = "x86_64", test))]
+    fn for_features_with_vex(
+        ssse3: bool,
+        sse41: bool,
+        sse42: bool,
+        pclmulqdq: bool,
+        avx: bool,
+        fma: bool,
+        f16c: bool,
+    ) -> Self {
+        // Rust's AVX detector checks XSAVE, OSXSAVE and XCR0's SSE/AVX state.
+        // Gate each VEX feature independently on that usable register state.
+        Self {
+            fma: avx && fma,
+            f16c: avx && f16c,
+            ..Self::for_features(ssse3, sse41, sse42, pclmulqdq)
+        }
+    }
+    /// Canonical metadata identity; serialization is outside emitted execution.
+    pub fn id(self) -> String {
+        let mut id = match self.tier {
+            SseTier::Baseline => "x86_64-baseline",
+            SseTier::Ssse3 => "x86_64-baseline+ssse3",
+            SseTier::Sse41 => "x86_64-baseline+ssse3+sse4.1",
+            SseTier::Sse42 => "x86_64-baseline+ssse3+sse4.1+sse4.2",
+        }
+        .to_owned();
+        for (enabled, suffix) in [
+            (self.pclmulqdq, "+pclmulqdq"),
+            (self.fma, "+fma"),
+            (self.f16c, "+f16c"),
+            (self.popcnt, "+popcnt"),
+            (self.bmi1, "+bmi1"),
+            (self.aes, "+aes"),
+            (self.sha, "+sha"),
+        ] {
+            if enabled {
+                id.push_str(suffix);
+            }
+        }
+        id
+    }
+    pub fn supported(self) -> bool {
+        cfg!(target_arch = "x86_64") && Self::detect().supports(self)
+    }
+}
+
+// Ordering means feature containment, not an arbitrary rank.
+impl PartialOrd for TargetCpu {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self.supports(*other), other.supports(*self)) {
+            (true, true) => Some(std::cmp::Ordering::Equal),
+            (true, false) => Some(std::cmp::Ordering::Greater),
+            (false, true) => Some(std::cmp::Ordering::Less),
+            (false, false) => None,
+        }
+    }
+}
+
+impl std::str::FromStr for TargetCpu {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut target = Self::Baseline;
+        let mut tier_name = value;
+        // Strip each optional suffix once, in reverse canonical order. Any
+        // duplicate, unknown or reordered suffix remains and fails tier parsing.
+        for (suffix, enabled) in [
+            ("+sha", &mut target.sha),
+            ("+aes", &mut target.aes),
+            ("+bmi1", &mut target.bmi1),
+            ("+popcnt", &mut target.popcnt),
+            ("+f16c", &mut target.f16c),
+            ("+fma", &mut target.fma),
+            ("+pclmulqdq", &mut target.pclmulqdq),
+        ] {
+            if let Some(prefix) = tier_name.strip_suffix(suffix) {
+                tier_name = prefix;
+                *enabled = true;
+            }
+        }
+        target.tier = match tier_name {
+            "baseline" | "x86_64-baseline" => SseTier::Baseline,
+            "ssse3" | "x86_64-baseline+ssse3" => SseTier::Ssse3,
+            "sse4.1" | "x86_64-baseline+ssse3+sse4.1" => SseTier::Sse41,
+            "sse4.2" | "x86_64-baseline+ssse3+sse4.1+sse4.2" => SseTier::Sse42,
+            _ => return Err(format!("unknown x86-64 CPU target {value}")),
+        };
+        Ok(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TIERS: [(TargetCpu, &str, &str); 4] = [
+        (TargetCpu::Baseline, "baseline", "x86_64-baseline"),
+        (TargetCpu::Ssse3, "ssse3", "x86_64-baseline+ssse3"),
+        (TargetCpu::Sse41, "sse4.1", "x86_64-baseline+ssse3+sse4.1"),
+        (
+            TargetCpu::Sse42,
+            "sse4.2",
+            "x86_64-baseline+ssse3+sse4.1+sse4.2",
+        ),
+    ];
+    const FEATURES: [TargetCpu; 7] = [
+        TargetCpu::Pclmulqdq,
+        TargetCpu::Fma,
+        TargetCpu::F16c,
+        TargetCpu::Popcnt,
+        TargetCpu::Bmi1,
+        TargetCpu::Aes,
+        TargetCpu::Sha,
+    ];
+
+    fn profiles() -> impl Iterator<Item = TargetCpu> {
+        TIERS.into_iter().flat_map(|(tier, _, _)| {
+            (0..128).map(move |bits| TargetCpu {
+                pclmulqdq: bits & 1 != 0,
+                fma: bits & 2 != 0,
+                f16c: bits & 4 != 0,
+                popcnt: bits & 8 != 0,
+                bmi1: bits & 16 != 0,
+                aes: bits & 32 != 0,
+                sha: bits & 64 != 0,
+                ..tier
+            })
+        })
+    }
+
+    #[test]
+    fn old_canonical_ids_and_aliases_keep_exact_bytes() {
+        for (tier, alias, canonical) in TIERS {
+            for (suffix, target) in [
+                ("", tier),
+                ("+pclmulqdq", tier.with_pclmulqdq()),
+                ("+fma", tier.with_fma()),
+                ("+pclmulqdq+fma", tier.with_pclmulqdq().with_fma()),
+                ("+f16c", tier.with_f16c()),
+                ("+pclmulqdq+f16c", tier.with_pclmulqdq().with_f16c()),
+                ("+fma+f16c", tier.with_fma().with_f16c()),
+                (
+                    "+pclmulqdq+fma+f16c",
+                    tier.with_pclmulqdq().with_fma().with_f16c(),
+                ),
+            ] {
+                assert_eq!(target.id(), format!("{canonical}{suffix}"));
+                assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
+            }
+        }
+    }
+
+    #[test]
+    fn every_profile_has_one_canonical_identity_and_alias() {
+        let mut ids = std::collections::BTreeSet::new();
+        for target in profiles() {
+            let id = target.id();
+            assert!(ids.insert(id.clone()));
+            assert_eq!(id.parse::<TargetCpu>(), Ok(target));
+            let (_, alias, canonical) = TIERS
+                .into_iter()
+                .find(|(tier, _, _)| tier.tier == target.tier)
+                .unwrap();
+            let suffix = id.strip_prefix(canonical).unwrap();
+            assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
+        }
+        assert_eq!(ids.len(), 512);
+        assert_eq!(
+            TargetCpu::Sse42
+                .with_sha()
+                .with_aes()
+                .with_bmi1()
+                .with_popcnt()
+                .with_f16c()
+                .with_fma()
+                .with_pclmulqdq()
+                .id(),
+            "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha"
+        );
+    }
+
+    #[test]
+    fn invalid_duplicate_and_reordered_suffixes_are_rejected() {
+        for invalid in [
+            "",
+            "native",
+            "fma",
+            "f16c",
+            "popcnt",
+            "bmi1",
+            "aes",
+            "sha",
+            "avx",
+            "baseline+",
+            "baseline+avx+fma",
+            "baseline+avx+f16c",
+            "x86_64-baseline+avx2",
+            "x86_64-baseline+sse4.2+fma",
+            "baseline+fma+unknown",
+            "baseline+f16c+fma",
+            "baseline+sha+aes",
+            "baseline+aes+bmi1",
+            "baseline+bmi1+popcnt",
+            "baseline+popcnt+f16c",
+            "baseline+fma+pclmulqdq",
+            "baseline+sha+ssse3",
+            "baseline+POPCNT",
+        ] {
+            assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
+        }
+        for suffix in ["pclmulqdq", "fma", "f16c", "popcnt", "bmi1", "aes", "sha"] {
+            for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
+                let duplicate = format!("{tier}+{suffix}+{suffix}");
+                assert!(duplicate.parse::<TargetCpu>().is_err(), "{duplicate}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_independent_feature_requires_full_containment() {
+        for host in profiles() {
+            for (required, present) in FEATURES.into_iter().zip([
+                host.pclmulqdq,
+                host.fma,
+                host.f16c,
+                host.popcnt,
+                host.bmi1,
+                host.aes,
+                host.sha,
+            ]) {
+                assert_eq!(host.supports(required), present);
+                assert_eq!(host >= required, present);
+            }
+            for (required, _, _) in TIERS {
+                assert_eq!(host.supports(required), host.tier >= required.tier);
+            }
+            assert!(host.supports(host));
+            assert!(host.supports(TargetCpu::Baseline));
+        }
+        for feature in FEATURES {
+            assert!(!TargetCpu::Sse42.supports(feature));
+            assert_eq!(TargetCpu::Sse42.partial_cmp(&feature), None);
+            for other in FEATURES {
+                assert_eq!(feature.supports(other), feature == other);
+                assert_eq!(
+                    feature.partial_cmp(&other),
+                    if feature == other {
+                        Some(std::cmp::Ordering::Equal)
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+        let combined = TargetCpu::Ssse3.with_popcnt().with_aes();
+        assert!(combined.supports(TargetCpu::Baseline.with_popcnt().with_aes()));
+        assert!(!combined.supports(TargetCpu::Ssse3.with_popcnt().with_sha()));
+        assert!(!combined.supports(TargetCpu::Sse41.with_popcnt().with_aes()));
+        assert_eq!(
+            combined.partial_cmp(&TargetCpu::Popcnt),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            TargetCpu::Aes.partial_cmp(&combined),
+            Some(std::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn tier_and_vex_detection_keep_each_prerequisite() {
+        for bits in 0..128 {
+            let ssse3 = bits & 1 != 0;
+            let sse41 = bits & 2 != 0;
+            let sse42 = bits & 4 != 0;
+            let pclmulqdq = bits & 8 != 0;
+            let avx = bits & 16 != 0;
+            let fma = bits & 32 != 0;
+            let f16c = bits & 64 != 0;
+            let original = TargetCpu::for_features(ssse3, sse41, sse42, pclmulqdq);
+            assert!(!original.supports(TargetCpu::Fma));
+            assert!(!original.supports(TargetCpu::F16c));
+            let target =
+                TargetCpu::for_features_with_vex(ssse3, sse41, sse42, pclmulqdq, avx, fma, f16c);
+            assert_eq!(target >= TargetCpu::Ssse3, ssse3);
+            assert_eq!(target >= TargetCpu::Sse41, ssse3 && sse41);
+            assert_eq!(target >= TargetCpu::Sse42, ssse3 && sse41 && sse42);
+            assert_eq!(target.supports(TargetCpu::Pclmulqdq), pclmulqdq);
+            assert_eq!(target.supports(TargetCpu::Fma), avx && fma);
+            assert_eq!(target.supports(TargetCpu::F16c), avx && f16c);
+            for independent in [
+                TargetCpu::Popcnt,
+                TargetCpu::Bmi1,
+                TargetCpu::Aes,
+                TargetCpu::Sha,
+            ] {
+                assert!(!target.supports(independent));
+            }
+        }
+    }
+
+    #[test]
+    fn native_detection_reads_independent_bits_without_tier_gating() {
+        let target = TargetCpu::detect();
+        #[cfg(target_arch = "x86_64")]
+        {
+            for (required, detected) in [
+                (
+                    TargetCpu::Pclmulqdq,
+                    std::is_x86_feature_detected!("pclmulqdq"),
+                ),
+                (
+                    TargetCpu::Fma,
+                    std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("fma"),
+                ),
+                (
+                    TargetCpu::F16c,
+                    std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("f16c"),
+                ),
+                (TargetCpu::Popcnt, std::is_x86_feature_detected!("popcnt")),
+                (TargetCpu::Bmi1, std::is_x86_feature_detected!("bmi1")),
+                (TargetCpu::Aes, std::is_x86_feature_detected!("aes")),
+                (TargetCpu::Sha, std::is_x86_feature_detected!("sha")),
+            ] {
+                assert_eq!(target.supports(required), detected);
+            }
+            assert!(target.supported());
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            assert_eq!(target, TargetCpu::Baseline);
+            assert!(!target.supported());
+        }
+    }
+}

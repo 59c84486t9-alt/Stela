@@ -2,6 +2,7 @@
 //! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
+pub mod aes;
 pub mod arithmetic;
 pub mod bfloat16;
 pub mod comparison;
@@ -11,6 +12,7 @@ pub mod estimate;
 pub mod floating;
 pub mod fused;
 pub mod halving;
+pub mod i8mm;
 pub mod immediates;
 pub mod memory;
 pub mod minmax;
@@ -20,6 +22,10 @@ pub mod reductions;
 pub mod refinement;
 pub mod rounding;
 pub mod saturating;
+pub mod sha1;
+pub mod sha256;
+pub mod sha3;
+pub mod sha512;
 pub mod shifts;
 pub mod sqrt;
 pub mod widening;
@@ -54,6 +60,12 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
+    Aes(aes::Operand),
+    I8mm(i8mm::Operand),
+    Sha1(sha1::Operand),
+    Sha256(sha256::Operand),
+    Sha3(sha3::Operand),
+    Sha512(sha512::Operand),
     Floating(floating::Operand),
     MemoryRegisterOffset(memory::Operand),
     Immediate(immediates::Operand),
@@ -111,6 +123,24 @@ pub enum Operand {
 /// Each reviewed family validates its reserved encodings; structures decline.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(decoded) = aes::decode(word) {
+        return Some(decoded.map(Operand::Aes));
+    }
+    if let Some(decoded) = i8mm::decode(word) {
+        return Some(decoded.map(Operand::I8mm));
+    }
+    if let Some(decoded) = sha1::decode(word) {
+        return Some(Ok(Operand::Sha1(decoded)));
+    }
+    if let Some(decoded) = sha256::decode(word) {
+        return Some(Ok(Operand::Sha256(decoded)));
+    }
+    if let Some(decoded) = sha3::decode(word) {
+        return Some(decoded.map(Operand::Sha3));
+    }
+    if let Some(decoded) = sha512::decode(word) {
+        return Some(decoded.map(Operand::Sha512));
+    }
     if let Some(decoded) = memory::decode(word) {
         return Some(decoded.map(Operand::MemoryRegisterOffset));
     }

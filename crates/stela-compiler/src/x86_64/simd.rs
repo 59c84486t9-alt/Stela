@@ -4,6 +4,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
+mod aes;
 pub(super) mod arithmetic;
 mod bfloat16;
 mod comparison;
@@ -13,6 +14,7 @@ mod floating;
 mod fused;
 mod half;
 mod halving;
+mod i8mm;
 mod immediates;
 mod integer_conversion;
 pub(super) mod memory;
@@ -25,6 +27,11 @@ mod reductions;
 mod refinement;
 mod rounding;
 mod saturating;
+mod sha1;
+mod sha256;
+mod sha3;
+mod sha32;
+mod sha512;
 mod shifts;
 mod sqrt;
 mod widening;
@@ -279,6 +286,12 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 }
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
+        Operand::Aes(ref operand) => aes::emit(code, operand, target),
+        Operand::I8mm(ref operand) => i8mm::emit(code, operand, target),
+        Operand::Sha1(ref operand) => sha1::emit(code, operand, target),
+        Operand::Sha256(ref operand) => sha256::emit(code, operand, target),
+        Operand::Sha3(ref operand) => sha3::emit(code, operand),
+        Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
         Operand::MemoryRegisterOffset(ref operand) => memory::emit_register_offset(code, operand),
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),

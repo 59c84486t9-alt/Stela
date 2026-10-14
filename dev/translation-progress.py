@@ -171,7 +171,22 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
             **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode} if mode != 'leaf' else {})}
 
 
-def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
+def smoke_decoding(decoder, word, identity, canonical_facts=None):
+    instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
+    if instruction is not None:
+        return instruction.mnemonic, f'{instruction.mnemonic} {instruction.op_str}', 'capstone'
+    # CSSC has no reserved operand combinations beyond its fixed encoding bits.
+    # This limited alternative uses independently hash-validated Arm facts;
+    # it does not claim that the installed Capstone decoded the instruction.
+    fact = (canonical_facts or {}).get(identity)
+    if (fact is not None and any(feature['feature'] == 'FEAT_CSSC' for feature in fact['features'])
+            and word & int(fact['encoding_mask'], 16) == int(fact['encoding_value'], 16)):
+        mnemonic = fact['mnemonic'].lower()
+        return mnemonic, mnemonic, 'pinned_arm_cssc_fixed_encoding'
+    raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
+
+
+def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None):
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
     results = []
@@ -180,8 +195,8 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
             continue
         for index, sample in enumerate(row['smoke_samples']):
             word = validate_sample(forms[identity], sample)
-            instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
-            if instruction is None or instruction.mnemonic not in sample['expected_mnemonics']:
+            mnemonic, assembly, basis = smoke_decoding(decoder, word, identity, canonical_facts)
+            if mnemonic not in sample['expected_mnemonics']:
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
             location.mkdir()
@@ -192,7 +207,8 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf'):
             if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
-            results.append({'id': identity, 'sample': index, 'assembly': f'{instruction.mnemonic} {instruction.op_str}', **probe})
+            results.append({'id': identity, 'sample': index, 'assembly': assembly,
+                            'independent_decode_basis': basis, **probe})
         for index, sample in enumerate(row.get('rejected_samples', [])):
             location = directory / f'{len(results)}-rejected'
             location.mkdir()
@@ -450,6 +466,7 @@ def main():
     service_rows = validate_registry(service_registry)
     catalog_data = args.checklist.read_bytes()
     catalog = json.loads(catalog_data)
+    canonical_facts = a64_checklist.validate(catalog)
     apple_profiles_data = args.apple_profiles.read_bytes()
     apple_profiles = json.loads(apple_profiles_data)
     apple = json.loads((ROOT / 'tests/isa/apple-specific-extensions.json').read_bytes())
@@ -462,13 +479,15 @@ def main():
         raise ValueError('Block registry must declare the native block-exit compiler ABI')
     executable_hash = sha256(args.cli)
     with tempfile.TemporaryDirectory(prefix='stela-apple-progress-') as temporary:
-        compiler, probes = smoke_forms(args.cli, rows, rows, Path(temporary))
+        compiler, probes = smoke_forms(args.cli, rows, rows, Path(temporary), canonical_facts=canonical_facts)
         block_directory = Path(temporary) / 'blocks'
         block_directory.mkdir()
-        block_compiler, block_probes = smoke_forms(args.cli, block_rows, block_rows, block_directory, mode='block')
+        block_compiler, block_probes = smoke_forms(args.cli, block_rows, block_rows, block_directory,
+                                                 mode='block', canonical_facts=canonical_facts)
         service_directory = Path(temporary) / 'services'
         service_directory.mkdir()
-        service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory, mode='service')
+        service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory,
+                                                     mode='service', canonical_facts=canonical_facts)
         if block_compiler != compiler or service_compiler != compiler:
             raise ValueError('Leaf and block compiler identities differ')
     if args.implementation_only:
