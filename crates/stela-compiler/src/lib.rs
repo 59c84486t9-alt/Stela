@@ -56,6 +56,12 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/register_offset.rs"),
     include_str!("x86_64/register_offset.rs"),
     include_str!("x86_64/memory_store.rs"),
+    include_str!("aarch64/non_temporal.rs"),
+    include_str!("x86_64/non_temporal.rs"),
+    include_str!("aarch64/unprivileged.rs"),
+    include_str!("x86_64/unprivileged.rs"),
+    include_str!("aarch64/prefetch.rs"),
+    include_str!("x86_64/prefetch.rs"),
     include_str!("aarch64/simd.rs"),
     include_str!("x86_64/simd.rs"),
     include_str!("aarch64/simd/aes.rs"),
@@ -344,7 +350,7 @@ mod tests {
             vec![],
             vec![0xd503201fu32],
             vec![0x14000002, 0xd65f03c0], // branch falls outside the region
-            vec![0xf9800000, 0xd65f03c0], // PRFM is not a data load
+            vec![0xf8800800, 0xd65f03c0], // reserved unprivileged prefetch neighbor
             vec![0xd65f0000],
         ] {
             let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();

@@ -10,9 +10,12 @@ pub mod integer_math;
 pub mod integer_minmax;
 pub mod integer_unary;
 pub mod literal;
+pub mod non_temporal;
 pub mod pc_relative;
+pub mod prefetch;
 pub mod register_offset;
 pub mod simd;
+pub mod unprivileged;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
@@ -200,6 +203,9 @@ pub enum Operation {
     IntegerUnary(integer_unary::Operand),
     Literal(literal::Operand),
     MemoryRegisterOffset(register_offset::Operand),
+    MemoryNonTemporal(non_temporal::Operand),
+    MemoryUnprivileged(unprivileged::Operand),
+    Prefetch(prefetch::Operand),
     MemoryPair {
         transfer: MemoryTransfer,
         bytes: u8,
@@ -406,6 +412,12 @@ impl Lifter for Decoder {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = FloatingPointOperation::decode(word) {
             Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = non_temporal::decode(word) {
+            Operation::MemoryNonTemporal(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = unprivileged::decode(word) {
+            Operation::MemoryUnprivileged(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = prefetch::decode(pc, word) {
+            Operation::Prefetch(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = literal::decode(pc, word) {
             Operation::Literal(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::decode(word) {
@@ -825,8 +837,8 @@ mod tests {
     #[test]
     fn pair_neighbors_and_unpredictable_operands_are_rejected() {
         for word in [
-            0xa8400400, // LDNP x0,x1,[x0] is non-temporal, not LDP
-            0xa8000400, // STNP
+            0xa8400000, // LDNP with identical destinations
+            0xa8407fff, // LDNP xzr,xzr,[sp] still has identical destinations
             0x6d400000, // SIMD LDP d0,d0,[x0] has duplicate V destinations
             0xe9400400, // unallocated integer pair opcode
             0x69000400, // STGP allocation-tag store must not become plain STP
@@ -840,6 +852,12 @@ mod tests {
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
         }
         assert!(Decoder.lift(GuestAddress(0), 0xa9400400).is_ok()); // offset LDP can overwrite base
+        for word in [0xa8400400, 0xa8000400] {
+            assert!(matches!(
+                Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                Operation::MemoryNonTemporal(_)
+            ));
+        }
         assert!(Decoder.lift(GuestAddress(0), 0xa9000000).is_ok()); // STP same source twice is defined
         assert!(Decoder.lift(GuestAddress(0), 0xa9bf7fff).is_ok()); // STP xzr,xzr,[sp,#-16]!
         assert!(matches!(
@@ -851,12 +869,8 @@ mod tests {
     #[test]
     fn memory_neighbors_and_unpredictable_writeback_fail_closed() {
         for word in [
-            0xf9800000, // PRFM: same unsigned-immediate family, no load result
-            0xf8800000, // PRFUM
             0xb9c00000, // unallocated signed word -> W32
             0xf9c00000, // unallocated signed doubleword
-            0xf8400800, // LDTR: unprivileged access is a different policy
-            0xf8000800, // STTR
             0x3cc00800, // SIMD unprivileged/reserved mode
             0xf8400c00, // pre-index LDR with base/target overlap
             0xf8400400, // post-index LDR with base/target overlap
@@ -864,6 +878,18 @@ mod tests {
             0xf8000400, // post-index STR with base/target overlap
         ] {
             assert!(Decoder.lift(GuestAddress(0), word).is_err(), "{word:#x}");
+        }
+        for word in [0xf9800000, 0xf8800000] {
+            assert!(matches!(
+                Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                Operation::Prefetch(_)
+            ));
+        }
+        for word in [0xf8400800, 0xf8000800] {
+            assert!(matches!(
+                Decoder.lift(GuestAddress(0), word).unwrap().operation,
+                Operation::MemoryUnprivileged(_)
+            ));
         }
         // The same register as base and destination is defined without writeback.
         assert!(Decoder.lift(GuestAddress(0), 0xf9400000).is_ok());

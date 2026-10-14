@@ -2036,7 +2036,7 @@ class SimdDifferentialTests(unittest.TestCase):
                 self.assertEqual(bytes(expected), bytes(state))
                 with self.assertRaises(ValueError):
                     suite.mathematical([suite.pair_op(width, True, register, register, 0, 0, 'offset')], state, memory, 0x8000)
-        self.assertEqual(len(suite.declined_pair_encodings()), 33)
+        self.assertEqual(len(suite.declined_pair_encodings()), 30)
         for register in (0, 7, 31):
             self.assertTrue(any(case['reason'] == 'constrained_duplicate_load' and case['word'] & 31 == register
                                 for case in suite.declined_pair_encodings()))

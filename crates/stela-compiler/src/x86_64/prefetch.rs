@@ -1,0 +1,154 @@
+//! Advisory SSE prefetches in the untagged private ordinary-RAM profile.
+//! No SP checks, guest-data loads, state writes or optional host features.
+use super::{load, offset};
+use crate::aarch64::{
+    prefetch::{Address, Hint, Operand},
+    register_offset::IndexExtend,
+};
+
+const NOP: u8 = 0x90;
+const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
+const MOV_ECX_STATE: &[u8] = &[0x8b, 0x8f];
+const MOVSXD_RCX_STATE: &[u8] = &[0x48, 0x63, 0x8f];
+const MOV_RCX_STATE: &[u8] = &[0x48, 0x8b, 0x8f];
+const PREFETCH: &[u8] = &[0x0f, 0x18];
+const MOD_DISP8: u8 = 0x40;
+const MOD_DISP32: u8 = 0x80;
+const SIB_ADDRESS: u8 = 4;
+const SIB_RAX_RCX: u8 = 1 << 3;
+const SIB_SCALE_SHIFT: u8 = 6;
+
+#[derive(Clone, Copy)]
+enum Locality {
+    NonTemporal = 0,
+    Level1 = 1,
+    Level2 = 2,
+    Level3 = 3,
+}
+
+impl Locality {
+    const fn modrm(self) -> u8 {
+        (self as u8) << 3
+    }
+}
+
+fn locality(hint: Hint) -> Option<Locality> {
+    const STORE_HINT: u8 = 0b10000;
+    const TYPE_MASK: u8 = 0b11000;
+    const TARGET_MASK: u8 = 0b00110;
+    const SYSTEM_CACHE: u8 = 0b00110;
+    const STREAMING: u8 = 1;
+    let raw = hint.encoding();
+    if !matches!(raw & TYPE_MASK, 0 | STORE_HINT) || raw & TARGET_MASK == SYSTEM_CACHE {
+        // Arm Hint_Prefetch explicitly permits any/all hints to be NOPs.
+        // PLI needs translated instruction addresses/execute permissions; SLC,
+        // intent-to-read-on-update and unallocated hints have no selected host map.
+        return None;
+    }
+    Some(if raw & STREAMING != 0 {
+        Locality::NonTemporal
+    } else {
+        match (raw & TARGET_MASK) >> 1 {
+            0 => Locality::Level1,
+            1 => Locality::Level2,
+            2 => Locality::Level3,
+            _ => unreachable!("system cache hints use the explicit NOP policy"),
+        }
+    })
+}
+
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+    let Some(locality) = locality(operand.hint) else {
+        // One byte preserves strict source-map intervals for the no-action hint.
+        code.push(NOP);
+        return;
+    };
+    match operand.address {
+        Address::Immediate { base, displacement } => {
+            load(code, base); // SP is an ordinary source here; no CheckSPAlignment.
+            immediate(code, locality, displacement);
+        }
+        Address::Register {
+            base,
+            index,
+            extend,
+            shift,
+        } => {
+            load(code, base);
+            if let Some(displacement) = offset(index) {
+                // Read precisely the bits used by ExtendReg. W forms avoid an
+                // unnecessary 64-bit load followed by a separate conversion.
+                code.extend(match extend {
+                    IndexExtend::Uxtw => MOV_ECX_STATE,
+                    IndexExtend::Sxtw => MOVSXD_RCX_STATE,
+                    IndexExtend::Lsl | IndexExtend::Sxtx => MOV_RCX_STATE,
+                });
+                code.extend(displacement.to_le_bytes());
+                code.extend(PREFETCH);
+                code.push(locality.modrm() | SIB_ADDRESS);
+                // Decoder restricts shift to 0 or 3. SIB performs the shift and
+                // modulo-64 addition without an extra SHL/LEA instruction.
+                code.push((shift << SIB_SCALE_SHIFT) | SIB_RAX_RCX);
+            } else {
+                immediate(code, locality, 0); // XZR index contributes zero.
+            }
+        }
+        Address::Literal(address) => {
+            code.extend(MOVABS_RAX);
+            code.extend(address.to_le_bytes());
+            immediate(code, locality, 0);
+        }
+    }
+}
+
+fn immediate(code: &mut Vec<u8>, locality: Locality, displacement: i32) {
+    code.extend(PREFETCH);
+    if displacement == 0 {
+        code.push(locality.modrm()); // [rax]
+    } else if let Ok(short) = i8::try_from(displacement) {
+        code.push(locality.modrm() | MOD_DISP8);
+        code.extend(short.to_le_bytes());
+    } else {
+        code.push(locality.modrm() | MOD_DISP32);
+        code.extend(displacement.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GuestAddress, aarch64::prefetch};
+
+    fn emitted(word: u32) -> Vec<u8> {
+        let operand = prefetch::decode(GuestAddress(0), word).unwrap().unwrap();
+        let mut code = vec![];
+        emit(&mut code, &operand);
+        code
+    }
+
+    #[test]
+    fn advisory_hints_select_baseline_data_prefetch_or_explicit_nop() {
+        for hint in 0..32 {
+            let code = emitted(0xf9800000 | hint);
+            if matches!(hint, 0..=5 | 16..=21) {
+                let modrm = if hint & 1 != 0 {
+                    0
+                } else {
+                    (((hint >> 1) & 3) + 1) << 3
+                };
+                assert_eq!(&code[7..], &[0x0f, 0x18, modrm as u8]);
+            } else {
+                assert_eq!(code, [NOP]);
+            }
+        }
+    }
+
+    #[test]
+    fn sp_sources_never_add_the_transfer_alignment_trap() {
+        for word in [0xf98003e0, 0xf88003e0, 0xf8bf6be0] {
+            let code = emitted(word);
+            assert_eq!(&code[..7], &[0x48, 0x8b, 0x87, 248, 0, 0, 0]);
+            assert!(!code.windows(2).any(|bytes| bytes == [0x0f, 0x0b]));
+        }
+    }
+}

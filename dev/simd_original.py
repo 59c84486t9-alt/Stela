@@ -450,6 +450,26 @@ def execute(destination, qemu, count):
                     process.wait(timeout=5)
 
 
+def memory_destinations(op):
+    """Declared ordinary destinations; retain legacy structured inference."""
+    if op['kind'] == 'structure_memory':
+        if not 1 <= op['total_bytes'] <= 64:
+            raise AssertionError('Invalid structured memory footprint')
+        gprs = [op['rn']] if op['mode'] != 'offset' and op['rn'] != 31 else []
+        vectors = [(op['rt'] + slot) % 32 for slot in range(op['runs'] * op['structures'])] if op['loading'] else []
+        return set(gprs), set(vectors), op['mode'] != 'offset' and op['rn'] == 31
+    if op['kind'] != 'ordinary_memory' or not 0 <= op['total_bytes'] <= 32:
+        raise AssertionError('Invalid memory observer family/footprint')
+    destinations = []
+    for name, bound in (('written_gprs', 31), ('written_vectors', 32)):
+        values = op.get(name)
+        if (not isinstance(values, list) or any(type(value) is not int or not 0 <= value < bound for value in values)
+                or len(values) != len(set(values))):
+            raise AssertionError('Invalid declared memory destinations: ' + name)
+        destinations.append(set(values))
+    return *destinations, False
+
+
 def validate_results(destination, functions, cases, inputs, subjects):
     results = (destination / 'results.bin').read_bytes()
     memory = memory_plan(destination)
@@ -469,10 +489,11 @@ def validate_results(destination, functions, cases, inputs, subjects):
         assert pre_fpcr == requested_fpcr & QEMU_FPCR_MASK, (index, 'pre_fpcr')
         assert pre_fpsr == requested_fpsr & QEMU_FPSR_MASK, (index, 'pre_fpsr')
         op = operation(functions[function_index])
+        written_gprs, written_vectors, written_sp = memory_destinations(op) if memory is not None else (set(), set(), False)
         for register in range(31):
-            if memory is None or op['mode'] == 'offset' or register != op['rn']:
+            if register not in written_gprs:
                 assert record[register * 8:register * 8 + 8] == initial[register * 8:register * 8 + 8], (index, 'unchanged_gpr', register)
-        if memory is None or op['mode'] == 'offset' or op['rn'] != 31:
+        if not written_sp:
             assert observed['sp'] == struct.unpack_from('<Q', initial, 248)[0], (index, 'sp')
         initial_nzcv = struct.unpack_from('<I', initial, 256)[0]
         assert observed['spsr'] == (initial_nzcv & NZCV_MASK) | PSTATE_EL0T_MASKED, (index, 'spsr_unchanged')
@@ -488,10 +509,8 @@ def validate_results(destination, functions, cases, inputs, subjects):
         word = integer(op['word'])
         destination_register = op.get('d')
         if memory is not None:
-            assert op['kind'] == 'structure_memory' and 1 <= op['total_bytes'] <= 64
             assert observed['fpsr'] == pre_fpsr, (index, 'movement_fpsr')
-            destinations = {(op['rt'] + slot) % 32 for slot in range(op['runs'] * op['structures'])} if op['loading'] else set()
-            for register in set(range(32)) - destinations:
+            for register in set(range(32)) - written_vectors:
                 assert record[320 + register * 16:336 + register * 16] == initial[264 + register * 16:280 + register * 16], (index, 'non_destination_v', register)
             controls.setdefault(str(requested_fpcr), set()).add(pre_fpcr)
             continue

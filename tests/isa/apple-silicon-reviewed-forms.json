@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v29",
+  "registry_version": "apple-silicon-reviewed-forms-v30",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -665,6 +665,37 @@
         "calibrated_original_faults.partitions.success_direct_original": 16,
         "calibrated_original_faults.partitions.fault_direct_original": 9,
         "calibrated_original_faults.partitions.fault_classified_source_policy_difference": 7
+      }
+    },
+    "ordinary_memory": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-ordinary_memory-differential-report.json",
+      "kind": "simd_ordinary_memory_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd_memory_runner.py",
+        "dev/simd_original.py",
+        "dev/simd_fixtures/ordinary_memory.py",
+        "dev/simd_fixtures/structure_memory.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/native-memory-faults.c",
+        "dev/memory-faults.py",
+        "dev/test_simd_fixtures.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_RAM_comparisons",
+        "native_source_policy_fault_checks"
+      ],
+      "required_measurements": {
+        "canonical_forms": 27,
+        "fully_implemented_forms": 22,
+        "functions": 3051,
+        "success_cases": 3231,
+        "state_bytes": 784,
+        "ram_bytes": 8192,
+        "declined_encodings.declined_before_execution": 160
       }
     }
   },
@@ -36512,6 +36543,1230 @@
         "crates/stela-compiler/src/aarch64/simd/structure_memory/single.rs",
         "crates/stela-compiler/src/x86_64/simd/structure_memory/single.rs"
       ]
+    },
+    {
+      "id": "LDNP_32_ldstnapair_offs",
+      "mnemonic": "LDNP",
+      "category": "base_integer_system",
+      "source_file": "ldnp_gen.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x28400000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldnp_gen.xml",
+      "source_sha256": "bb005a6b5ac862d1398ecb447b478bc0a68ef794902df8551d52eeaf8c6a3f37",
+      "smoke_samples": [
+        {
+          "word": "0x284008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        },
+        {
+          "word": "0x286008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x284000a0",
+          "reason": "Instruction"
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "LDNP_64_ldstnapair_offs",
+      "mnemonic": "LDNP",
+      "category": "base_integer_system",
+      "source_file": "ldnp_gen.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xa8400000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldnp_gen.xml",
+      "source_sha256": "bb005a6b5ac862d1398ecb447b478bc0a68ef794902df8551d52eeaf8c6a3f37",
+      "smoke_samples": [
+        {
+          "word": "0xa84008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        },
+        {
+          "word": "0xa86008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xa84000a0",
+          "reason": "Instruction"
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "LDNP_D_ldstnapair_offs",
+      "mnemonic": "LDNP",
+      "category": "fp_simd",
+      "source_file": "ldnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6c400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldnp_fpsimd.xml",
+      "source_sha256": "28234cdee6d3543b504b255a3ef9f1f5350b7375791c4a74c863bdcdc1fd1dc3",
+      "smoke_samples": [
+        {
+          "word": "0x6c4008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        },
+        {
+          "word": "0x6c6008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x6c4000a0",
+          "reason": "Instruction"
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "LDNP_Q_ldstnapair_offs",
+      "mnemonic": "LDNP",
+      "category": "fp_simd",
+      "source_file": "ldnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xac400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldnp_fpsimd.xml",
+      "source_sha256": "28234cdee6d3543b504b255a3ef9f1f5350b7375791c4a74c863bdcdc1fd1dc3",
+      "smoke_samples": [
+        {
+          "word": "0xac4008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        },
+        {
+          "word": "0xac6008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xac4000a0",
+          "reason": "Instruction"
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "LDNP_S_ldstnapair_offs",
+      "mnemonic": "LDNP",
+      "category": "fp_simd",
+      "source_file": "ldnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2c400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldnp_fpsimd.xml",
+      "source_sha256": "28234cdee6d3543b504b255a3ef9f1f5350b7375791c4a74c863bdcdc1fd1dc3",
+      "smoke_samples": [
+        {
+          "word": "0x2c4008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        },
+        {
+          "word": "0x2c6008a1",
+          "expected_mnemonics": [
+            "ldnp"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2c4000a0",
+          "reason": "Instruction"
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "LDTRB_32_ldst_unpriv",
+      "mnemonic": "LDTRB",
+      "category": "base_integer_system",
+      "source_file": "ldtrb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x38400800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrb.xml",
+      "source_sha256": "d9298c7347819bf04ceeb71bac3c7a7fd382248a4899ebe9b2230c67f22caf9d",
+      "smoke_samples": [
+        {
+          "word": "0x384008a1",
+          "expected_mnemonics": [
+            "ldtrb"
+          ]
+        },
+        {
+          "word": "0x385008a1",
+          "expected_mnemonics": [
+            "ldtrb"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRH_32_ldst_unpriv",
+      "mnemonic": "LDTRH",
+      "category": "base_integer_system",
+      "source_file": "ldtrh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x78400800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrh.xml",
+      "source_sha256": "a84e9eb0bbdbb8ccf8db81b4620bbb99c5bd5b9a65641f5ba74f6074fcb6adfc",
+      "smoke_samples": [
+        {
+          "word": "0x784008a1",
+          "expected_mnemonics": [
+            "ldtrh"
+          ]
+        },
+        {
+          "word": "0x785008a1",
+          "expected_mnemonics": [
+            "ldtrh"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRSB_32_ldst_unpriv",
+      "mnemonic": "LDTRSB",
+      "category": "base_integer_system",
+      "source_file": "ldtrsb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x38c00800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrsb.xml",
+      "source_sha256": "e357ac968dcdb9e7c35c784afb4d51b9203acf5b0e50f639b9d5530298cfae7c",
+      "smoke_samples": [
+        {
+          "word": "0x38c008a1",
+          "expected_mnemonics": [
+            "ldtrsb"
+          ]
+        },
+        {
+          "word": "0x38d008a1",
+          "expected_mnemonics": [
+            "ldtrsb"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRSB_64_ldst_unpriv",
+      "mnemonic": "LDTRSB",
+      "category": "base_integer_system",
+      "source_file": "ldtrsb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x38800800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrsb.xml",
+      "source_sha256": "e357ac968dcdb9e7c35c784afb4d51b9203acf5b0e50f639b9d5530298cfae7c",
+      "smoke_samples": [
+        {
+          "word": "0x388008a1",
+          "expected_mnemonics": [
+            "ldtrsb"
+          ]
+        },
+        {
+          "word": "0x389008a1",
+          "expected_mnemonics": [
+            "ldtrsb"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRSH_32_ldst_unpriv",
+      "mnemonic": "LDTRSH",
+      "category": "base_integer_system",
+      "source_file": "ldtrsh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x78c00800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrsh.xml",
+      "source_sha256": "bd9084a79243bef66273905b76ee3c12a6492e3deb85cae578cae92be2112f9a",
+      "smoke_samples": [
+        {
+          "word": "0x78c008a1",
+          "expected_mnemonics": [
+            "ldtrsh"
+          ]
+        },
+        {
+          "word": "0x78d008a1",
+          "expected_mnemonics": [
+            "ldtrsh"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRSH_64_ldst_unpriv",
+      "mnemonic": "LDTRSH",
+      "category": "base_integer_system",
+      "source_file": "ldtrsh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x78800800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrsh.xml",
+      "source_sha256": "bd9084a79243bef66273905b76ee3c12a6492e3deb85cae578cae92be2112f9a",
+      "smoke_samples": [
+        {
+          "word": "0x788008a1",
+          "expected_mnemonics": [
+            "ldtrsh"
+          ]
+        },
+        {
+          "word": "0x789008a1",
+          "expected_mnemonics": [
+            "ldtrsh"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTRSW_64_ldst_unpriv",
+      "mnemonic": "LDTRSW",
+      "category": "base_integer_system",
+      "source_file": "ldtrsw.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xb8800800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtrsw.xml",
+      "source_sha256": "fcffec2e8482e4668a30673d3311bd7d762a21a26977b2d315c5d5a208071f84",
+      "smoke_samples": [
+        {
+          "word": "0xb88008a1",
+          "expected_mnemonics": [
+            "ldtrsw"
+          ]
+        },
+        {
+          "word": "0xb89008a1",
+          "expected_mnemonics": [
+            "ldtrsw"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTR_32_ldst_unpriv",
+      "mnemonic": "LDTR",
+      "category": "base_integer_system",
+      "source_file": "ldtr.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xb8400800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtr.xml",
+      "source_sha256": "2dc9eeed3417775d96b79180419f60bf2e2256703efbe1338496db3b97813b5e",
+      "smoke_samples": [
+        {
+          "word": "0xb84008a1",
+          "expected_mnemonics": [
+            "ldtr"
+          ]
+        },
+        {
+          "word": "0xb85008a1",
+          "expected_mnemonics": [
+            "ldtr"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "LDTR_64_ldst_unpriv",
+      "mnemonic": "LDTR",
+      "category": "base_integer_system",
+      "source_file": "ldtr.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xf8400800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldtr.xml",
+      "source_sha256": "2dc9eeed3417775d96b79180419f60bf2e2256703efbe1338496db3b97813b5e",
+      "smoke_samples": [
+        {
+          "word": "0xf84008a1",
+          "expected_mnemonics": [
+            "ldtr"
+          ]
+        },
+        {
+          "word": "0xf85008a1",
+          "expected_mnemonics": [
+            "ldtr"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "PRFM_P_ldst_pos",
+      "mnemonic": "PRFM",
+      "category": "base_integer_system",
+      "source_file": "prfm_imm.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xf9800000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/prfm_imm.xml",
+      "source_sha256": "553294bd1abaa6c0c31967c5773cc64566b7430a525df4470982775c289ba8a4",
+      "smoke_samples": [
+        {
+          "word": "0xf98000a0",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        },
+        {
+          "word": "0xf98000a1",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Untagged/authenticated, checked-pointer-disabled addresses; all allocated raw hints/addresses, baseline data-prefetch hints and source-authorized no-action choice for unavailable hints. No SP alignment trap, RAM/register effects or synchronous data fault. Register RPRFM neighbors remain a separate unsupported class.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/prefetch.rs",
+        "crates/stela-compiler/src/x86_64/prefetch.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs"
+      ]
+    },
+    {
+      "id": "PRFM_P_ldst_regoff",
+      "mnemonic": "PRFM",
+      "category": "base_integer_system",
+      "source_file": "prfm_reg.xml",
+      "encoding_mask": "0xffe04c00",
+      "encoding_value": "0xf8a04800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/prfm_reg.xml",
+      "source_sha256": "4700f57ea7c665daa7ffcf9d8cd5bccbb1c6a7edbc497854161306ee5325da28",
+      "smoke_samples": [
+        {
+          "word": "0xf8a668a0",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        },
+        {
+          "word": "0xf8a668a1",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Untagged/authenticated, checked-pointer-disabled addresses; all allocated raw hints/addresses, baseline data-prefetch hints and source-authorized no-action choice for unavailable hints. No SP alignment trap, RAM/register effects or synchronous data fault. Register RPRFM neighbors remain a separate unsupported class.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/prefetch.rs",
+        "crates/stela-compiler/src/x86_64/prefetch.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs"
+      ]
+    },
+    {
+      "id": "PRFM_P_loadlit",
+      "mnemonic": "PRFM",
+      "category": "base_integer_system",
+      "source_file": "prfm_lit.xml",
+      "encoding_mask": "0xff000000",
+      "encoding_value": "0xd8000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/prfm_lit.xml",
+      "source_sha256": "b583fd136dcfd3e0c8b7925c86412e318f0b618b8fe81ad3fd9e0c18fb1f7825",
+      "smoke_samples": [
+        {
+          "word": "0xd8000000",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        },
+        {
+          "word": "0xd8000001",
+          "expected_mnemonics": [
+            "prfm"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Untagged/authenticated, checked-pointer-disabled addresses; all allocated raw hints/addresses, baseline data-prefetch hints and source-authorized no-action choice for unavailable hints. No SP alignment trap, RAM/register effects or synchronous data fault. Register RPRFM neighbors remain a separate unsupported class.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/prefetch.rs",
+        "crates/stela-compiler/src/x86_64/prefetch.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs"
+      ]
+    },
+    {
+      "id": "PRFUM_P_ldst_unscaled",
+      "mnemonic": "PRFUM",
+      "category": "base_integer_system",
+      "source_file": "prfum.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xf8800000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/prfum.xml",
+      "source_sha256": "97a0c6139b09097ee6fb2155cf2764d91901481022aa0dd4f11c0fb83d127ad6",
+      "smoke_samples": [
+        {
+          "word": "0xf88000a0",
+          "expected_mnemonics": [
+            "prfum"
+          ]
+        },
+        {
+          "word": "0xf88000a1",
+          "expected_mnemonics": [
+            "prfum"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Untagged/authenticated, checked-pointer-disabled addresses; all allocated raw hints/addresses, baseline data-prefetch hints and source-authorized no-action choice for unavailable hints. No SP alignment trap, RAM/register effects or synchronous data fault. Register RPRFM neighbors remain a separate unsupported class.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/prefetch.rs",
+        "crates/stela-compiler/src/x86_64/prefetch.rs",
+        "crates/stela-compiler/src/aarch64/register_offset.rs"
+      ]
+    },
+    {
+      "id": "STNP_32_ldstnapair_offs",
+      "mnemonic": "STNP",
+      "category": "base_integer_system",
+      "source_file": "stnp_gen.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x28000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stnp_gen.xml",
+      "source_sha256": "1b008a31f5d1b26c060df62b02b299c2d46d2e0ab46fdc491bac2192dd5095e9",
+      "smoke_samples": [
+        {
+          "word": "0x280008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        },
+        {
+          "word": "0x282008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "STNP_64_ldstnapair_offs",
+      "mnemonic": "STNP",
+      "category": "base_integer_system",
+      "source_file": "stnp_gen.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xa8000000",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stnp_gen.xml",
+      "source_sha256": "1b008a31f5d1b26c060df62b02b299c2d46d2e0ab46fdc491bac2192dd5095e9",
+      "smoke_samples": [
+        {
+          "word": "0xa80008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        },
+        {
+          "word": "0xa82008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "STNP_D_ldstnapair_offs",
+      "mnemonic": "STNP",
+      "category": "fp_simd",
+      "source_file": "stnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x6c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stnp_fpsimd.xml",
+      "source_sha256": "7709ef9249010dde6803016e37c03d814141f7cbd4454ba733fa7d14949a32cf",
+      "smoke_samples": [
+        {
+          "word": "0x6c0008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        },
+        {
+          "word": "0x6c2008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "STNP_Q_ldstnapair_offs",
+      "mnemonic": "STNP",
+      "category": "fp_simd",
+      "source_file": "stnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0xac000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stnp_fpsimd.xml",
+      "source_sha256": "7709ef9249010dde6803016e37c03d814141f7cbd4454ba733fa7d14949a32cf",
+      "smoke_samples": [
+        {
+          "word": "0xac0008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        },
+        {
+          "word": "0xac2008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "STNP_S_ldstnapair_offs",
+      "mnemonic": "STNP",
+      "category": "fp_simd",
+      "source_file": "stnp_fpsimd.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x2c000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stnp_fpsimd.xml",
+      "source_sha256": "7709ef9249010dde6803016e37c03d814141f7cbd4454ba733fa7d14949a32cf",
+      "smoke_samples": [
+        {
+          "word": "0x2c0008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        },
+        {
+          "word": "0x2c2008a1",
+          "expected_mnemonics": [
+            "stnp"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "Little-endian private Normal RAM, nonstreaming AdvSIMD for vector forms; advisory cache allocation uses ordinary transfers, staged pair loads and source-ordered completed store prefixes. Duplicate LDNP destinations remain unsupported constrained outcomes; no shared-memory atomicity or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs",
+        "crates/stela-compiler/src/aarch64/non_temporal.rs",
+        "crates/stela-compiler/src/x86_64/non_temporal.rs",
+        "crates/stela-compiler/src/aarch64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory.rs"
+      ]
+    },
+    {
+      "id": "STTRB_32_ldst_unpriv",
+      "mnemonic": "STTRB",
+      "category": "base_integer_system",
+      "source_file": "sttrb.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x38000800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sttrb.xml",
+      "source_sha256": "434ab23dab4906f9cf48e2395a9629a1410701db219414e8b6f6fe2699e5b238",
+      "smoke_samples": [
+        {
+          "word": "0x380008a1",
+          "expected_mnemonics": [
+            "sttrb"
+          ]
+        },
+        {
+          "word": "0x381008a1",
+          "expected_mnemonics": [
+            "sttrb"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "STTRH_32_ldst_unpriv",
+      "mnemonic": "STTRH",
+      "category": "base_integer_system",
+      "source_file": "sttrh.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0x78000800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sttrh.xml",
+      "source_sha256": "a5f94f4f103a2e02f295417aa2c2c51b303794fc05cd14b6f483b2368338af58",
+      "smoke_samples": [
+        {
+          "word": "0x780008a1",
+          "expected_mnemonics": [
+            "sttrh"
+          ]
+        },
+        {
+          "word": "0x781008a1",
+          "expected_mnemonics": [
+            "sttrh"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "STTR_32_ldst_unpriv",
+      "mnemonic": "STTR",
+      "category": "base_integer_system",
+      "source_file": "sttr.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xb8000800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sttr.xml",
+      "source_sha256": "66ebc032b2f66c6dc6fa70f6565ad4410f16bf685d558ee20c8b17e1a560b640",
+      "smoke_samples": [
+        {
+          "word": "0xb80008a1",
+          "expected_mnemonics": [
+            "sttr"
+          ]
+        },
+        {
+          "word": "0xb81008a1",
+          "expected_mnemonics": [
+            "sttr"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
+    },
+    {
+      "id": "STTR_64_ldst_unpriv",
+      "mnemonic": "STTR",
+      "category": "base_integer_system",
+      "source_file": "sttr.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xf8000800",
+      "features": [],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sttr.xml",
+      "source_sha256": "66ebc032b2f66c6dc6fa70f6565ad4410f16bf685d558ee20c8b17e1a560b640",
+      "smoke_samples": [
+        {
+          "word": "0xf80008a1",
+          "expected_mnemonics": [
+            "sttr"
+          ]
+        },
+        {
+          "word": "0xf81008a1",
+          "expected_mnemonics": [
+            "sttr"
+          ]
+        }
+      ],
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "ordinary_memory"
+      ],
+      "scope": "EL0 little-endian private Normal RAM, untagged/authenticated and checked pointers disabled; all allocated widths, sign/zero extension, imm9, ZR/SP and base/data aliases, exact access footprint and source-ordered store prefixes. No privileged user-permission/MMU or guest exception delivery claim.",
+      "review": "Pinned source/catalog review; primary original/model/native complete state/RAM, actual emitted bodies, retained fault observations and declared oracle limits. Selected mappings and meaningful candidate comparisons are joined in the ordinary-memory receipt.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/unprivileged.rs",
+        "crates/stela-compiler/src/x86_64/memory_store.rs"
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -36559,6 +37814,12 @@
     "crates/stela-compiler/src/aarch64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/register_offset.rs",
     "crates/stela-compiler/src/x86_64/memory_store.rs",
+    "crates/stela-compiler/src/aarch64/non_temporal.rs",
+    "crates/stela-compiler/src/x86_64/non_temporal.rs",
+    "crates/stela-compiler/src/aarch64/unprivileged.rs",
+    "crates/stela-compiler/src/x86_64/unprivileged.rs",
+    "crates/stela-compiler/src/aarch64/prefetch.rs",
+    "crates/stela-compiler/src/x86_64/prefetch.rs",
     "crates/stela-compiler/src/aarch64/simd.rs",
     "crates/stela-compiler/src/x86_64/simd.rs",
     "crates/stela-compiler/src/aarch64/simd/aes.rs",

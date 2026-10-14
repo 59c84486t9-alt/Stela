@@ -12,13 +12,233 @@ from contextlib import nullcontext
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import ROOT, BASE, State, seed_extended_state
-from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory
+from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory
 import simd_fixture_runner as runner
 import simd_original
 import simd_memory_runner
 import hashlib
 
 engine = importlib.import_module('simd-differential')
+
+class OrdinaryMemoryFixtureTests(unittest.TestCase):
+    def test_exact27_pinned_forms_and_independent_decoding(self):
+        family = ordinary_memory
+        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        self.assertEqual(len(family.CANONICAL_FORMS), 27)
+        self.assertEqual(len(family.PARTIAL_FORMS), 5)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        operations = family.functions()
+        self.assertEqual(len(operations), len({op['word'] for op in operations}))
+        for op in operations:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), BASE))
+            if decoded:
+                self.assertEqual(len(decoded), 1, op)
+                self.assertEqual(decoded[0].mnemonic, op['name'], op)
+            else:
+                self.assertIn(op['canonical_id'], family.CAPSTONE_ALIAS_GAPS)
+                self.assertEqual(op['rn'], op['rt'])
+                self.assertLess(op['rt'], 31)
+            gprs, vectors, sp = simd_original.memory_destinations(op)
+            self.assertFalse(sp)
+            self.assertEqual(gprs, set(op['written_gprs']))
+            self.assertEqual(vectors, set(op['written_vectors']))
+        source = b''.join(struct.pack('<II', op['word'], engine.RET) for op in operations)
+        validation = family.validate_source_words(source, [{'operations': [op]} for op in operations], {op['name'] for op in operations})
+        self.assertEqual(validation['capstone_decode_fallback_words'], 186)
+        for canonical in family.CANONICAL_FORMS:
+            selected = [op for op in operations if op['canonical_id'] == canonical]
+            if selected[0]['layout'] != 'prefetch':
+                self.assertEqual({op['rt'] for op in selected}, set(range(32)))
+                self.assertEqual({op['rn'] for op in selected}, set(range(32)))
+            if selected[0]['layout'] == 'pair':
+                self.assertEqual({op['rt2'] for op in selected}, set(range(32)))
+                self.assertEqual(any(op['rt'] == op['rt2'] for op in selected), not selected[0]['loading'])
+
+    def test_pinned_alias_fallback_rejects_changed_words_neighbors_and_facts(self):
+        family = ordinary_memory
+        op = family.unprivileged('LDTRB_32_ldst_unpriv', rt=0, rn=0)
+        def validate(operation, **kwargs):
+            source = struct.pack('<II', operation['word'], engine.RET)
+            return family.validate_source_words(source, [{'operations': [operation]}], {'ldtrb'}, **kwargs)
+        self.assertEqual(validate(op)['capstone_decode_fallback_words'], 1)
+        for changed in ({**op, 'word': op['word'] ^ 1 << 10},
+                        {**op, 'canonical_id': 'LDTRH_32_ldst_unpriv'},
+                        {**op, 'rn': 1}, {**op, 'offset': 1}, {**op, 'name': 'ldr'}):
+            with self.assertRaises(AssertionError):
+                validate(changed)
+        catalog = json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog['forms'][0]['encoding_value'] = '0xffffffff'
+        with self.assertRaises(ValueError):
+            validate(op, catalog=catalog)
+
+    def test_success_corpus_full_states_controls_RAM_and_runtime_forms(self):
+        family = ordinary_memory
+        operations, cases = family.corpus()
+        self.assertEqual(sum(case['runtime'] for case in cases), 27)
+        self.assertEqual({operations[case['function']]['canonical_id'] for case in cases if case['runtime']}, set(family.CANONICAL_FORMS))
+        for case in cases:
+            initial = State.from_buffer_copy(case['initial'])
+            self.assertEqual(len(case['initial']), 784)
+            expected, ram, fault = family.expected(operations[case['function']], initial, family.memory_template())
+            self.assertIsNone(fault, case)
+            self.assertEqual(len(ram), 8192)
+            self.assertEqual((expected.nzcv, expected.reserved, expected.fpcr, expected.fpsr),
+                             (initial.nzcv, initial.reserved, initial.fpcr, initial.fpsr))
+        self.assertIs(simd_memory_runner.family_module('ordinary_memory'), family)
+        self.assertIs(simd_memory_runner.family_module('structure_memory'), structure_memory)
+        with self.assertRaises(ValueError):
+            simd_memory_runner.family_module('unknown')
+
+    def test_signed_unsigned_loads_upper_zero_and_base_alias(self):
+        family = ordinary_memory
+        for canonical, _, width, bits, _ in family.UNPRIVILEGED:
+            if not bits:
+                continue
+            op = family.unprivileged(canonical, rt=5, rn=5, offset=-1)
+            initial = family.initial_state(op, 1, 1)
+            memory = bytes([0, 0x80, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
+            state, ram, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            value = int.from_bytes(memory[1:1 + width], 'little', signed=op['signed']) & ((1 << bits) - 1)
+            self.assertEqual(state.x[5], value)
+            self.assertEqual(ram, memory)
+            op = family.unprivileged(canonical, rt=31)
+            initial = family.initial_state(op, 2, 0)
+            state, _, fault = family.expected(op, initial, bytes(8), accessible=0)
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(fault['kind'], 'memory')
+
+    def test_pair_complete_staging_and_exact_unicorn_second_vector_effect(self):
+        family = ordinary_memory
+        for width, vector, _, _ in family.PAIR_WIDTHS:
+            op = family.pair(width, True, vector, rt=5, rt2=31, rn=5)
+            initial = family.initial_state(op, 3, 0)
+            memory = bytes(range(32))
+            source, ram, fault = family.expected(op, initial, memory, accessible=width)
+            predicted, predicted_ram, _ = family.expected(op, initial, memory, accessible=width, policy='unicorn')
+            self.assertEqual(bytes(source), bytes(initial))
+            self.assertEqual(ram, memory)
+            self.assertEqual(predicted_ram, memory)
+            self.assertEqual(fault['ordinal'], 1)
+            expected = State.from_buffer_copy(initial)
+            if vector:
+                value = int.from_bytes(memory[:width], 'little')
+                expected.v[5][:] = [value & ((1 << 64) - 1), value >> 64]
+            self.assertEqual(bytes(predicted), bytes(expected))
+            success, _, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            if vector:
+                self.assertEqual(bytes(success.v[31]), memory[width:2 * width] + bytes(16 - width))
+            else:
+                self.assertEqual(success.x[5], int.from_bytes(memory[:width], 'little'))
+
+    def test_store_prefix_every_byte_cut_duplicate_sources_and_ZR(self):
+        family = ordinary_memory
+        operations = [family.unprivileged(row[0], rt=31) for row in family.UNPRIVILEGED if not row[3]]
+        operations += [family.pair(width, False, vector, rt=31, rt2=31) for width, vector, _, _ in family.PAIR_WIDTHS]
+        for op in operations:
+            initial = family.initial_state(op, 4, 0)
+            width = op['element_bytes']
+            element = bytes(initial.v[31])[:width] if op.get('vector') else bytes(width)
+            data = element * (2 if op['layout'] == 'pair' else 1)
+            memory = bytes([0xa5]) * 64
+            for cut in range(op['total_bytes']):
+                source, ram, fault = family.expected(op, initial, memory, accessible=cut)
+                self.assertEqual(bytes(source), bytes(initial))
+                self.assertEqual(ram, data[:cut] + memory[cut:])
+                self.assertIsNotNone(fault)
+            _, ram, fault = family.expected(op, initial, memory, readonly=True)
+            self.assertEqual(ram, memory)
+            self.assertEqual(fault['address'], family.RAM_ADDRESS)
+
+    def test_retained_EL0_STTRH_crossing_prediction_keeps_successful_byte(self):
+        # Actual Unicorn2.1.4 EL0 cut1 retained 0xd1 before the guard fault.
+        family = ordinary_memory
+        op = family.unprivileged('STTRH_32_ldst_unpriv')
+        initial = State()
+        initial.x[1] = 0xf0123456789abcd1
+        initial.x[5] = family.RAM_ADDRESS + 4095
+        memory = b'\xa5' * 4096
+        for policy in ('source', 'unicorn'):
+            state, ram, fault = family.expected(op, initial, memory, policy=policy)
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(ram, memory[:-1] + b'\xd1')
+            self.assertEqual(fault['address'], family.RAM_ADDRESS + 4096)
+
+    def test_SP_checked_before_offset_and_prefetch_never_checks_access(self):
+        family = ordinary_memory
+        for op in (family.unprivileged('LDTR_64_ldst_unpriv', rn=31, offset=-1),
+                   family.pair(8, True, False, rn=31, offset=-8)):
+            initial = State()
+            initial.sp = family.RAM_ADDRESS + 1
+            state, ram, fault = family.expected(op, initial, bytes(64))
+            self.assertEqual(fault['kind'], 'sp_alignment')
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(ram, bytes(64))
+        for mode in family.PREFETCH_FORMS:
+            op = family.prefetch(mode, rn=31)
+            initial = State()
+            initial.sp = (1 << 64) - 1
+            state, ram, fault = family.expected(op, initial, bytes(64), accessible=0, readonly=True)
+            self.assertIsNone(fault)
+            self.assertEqual(bytes(state), bytes(initial))
+            self.assertEqual(ram, bytes(64))
+
+    def test_illegal_encodings_and_explicit_partial_destination_declines(self):
+        family = ordinary_memory
+        for width, vector, _, _ in family.PAIR_WIDTHS:
+            for register in range(32):
+                with self.assertRaises(ValueError):
+                    family.pair(width, True, vector, register, register)
+        declines = family.declined_encodings()
+        self.assertEqual(len(declines), 160)
+        self.assertEqual({case['canonical_id'] for case in declines}, set(family.PARTIAL_FORMS))
+        for case in declines:
+            self.assertEqual(case['word'] & 31, case['word'] >> 10 & 31)
+        for option in (0, 1, 4, 5):
+            with self.assertRaises(ValueError):
+                family.prefetch('register', option=option)
+        for hint in range(24, 32):
+            with self.assertRaises(ValueError):
+                family.prefetch('register', hint)
+        for op in family.shapes():
+            if op['layout'] == 'unprivileged':
+                for offset in (-257, 256):
+                    with self.assertRaises(ValueError):
+                        family.unprivileged(op['canonical_id'], offset=offset)
+
+    def test_declared_original_destinations_reject_invalid_metadata(self):
+        family = ordinary_memory
+        op = family.pair(8, True, False, rt=0, rt2=30)
+        self.assertEqual(simd_original.memory_destinations(op), ({0, 30}, set(), False))
+        op = family.pair(16, True, True, rt=0, rt2=31)
+        self.assertEqual(simd_original.memory_destinations(op), (set(), {0, 31}, False))
+        for key, invalid in (('written_gprs', [31]), ('written_gprs', [-1]), ('written_gprs', [True]),
+                             ('written_vectors', [32]), ('written_vectors', [1, 1]), ('written_vectors', None)):
+            with self.assertRaises(AssertionError):
+                simd_original.memory_destinations({**op, key: invalid})
+
+    def test_fault_selection_prefetch_nonfaults_and_default_structure_identity(self):
+        family = ordinary_memory
+        selected = simd_memory_runner.native_fault_selection(family=family)
+        self.assertEqual(selected, family.fault_selection())
+        shapes = family.shapes()
+        for case in selected:
+            op = simd_memory_runner.fault_operation(shapes[case['function']], case['rn'], family, case)
+            self.assertEqual(op['rn'], case['rn'])
+            if op['mode'] != 'literal':
+                self.assertEqual(op['word'] >> 5 & 31, case['rn'])
+        self.assertEqual(len(simd_memory_runner.native_fault_selection()), 931)
+        self.assertEqual(len(simd_memory_runner.native_fault_selection(True)), 290)
+        op = family.prefetch()
+        batch = {'native': b'\x90\xc3', 'source': struct.pack('<II', op['word'], engine.RET),
+                 'instruction_offsets': [0, 1], 'functions': [{'operations': [op]}], 'entries': [0]}
+        accounting = simd_memory_runner.native_binary_accounting(engine, batch)
+        self.assertEqual(accounting['static_body_native_bytes'], 1)
+        self.assertEqual(accounting['bodies'][0]['layout'], 'prefetch')
+
 
 class StructureMemoryFixtureTests(unittest.TestCase):
     def test_exact150_inventory_1134_shapes_and_independent_decoding(self):

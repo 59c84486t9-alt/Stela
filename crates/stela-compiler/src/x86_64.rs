@@ -20,9 +20,12 @@ mod integer_unary;
 pub mod isa;
 mod literal;
 mod memory_store;
+mod non_temporal;
 mod pc_relative;
+mod prefetch;
 mod register_offset;
 mod simd;
+mod unprivileged;
 
 fn offset(register: Register) -> Option<u32> {
     match register {
@@ -448,6 +451,9 @@ fn emit_instruction(
             }
         }
         Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
+        Operation::MemoryNonTemporal(operand) => non_temporal::emit(code, &operand),
+        Operation::MemoryUnprivileged(operand) => unprivileged::emit(code, &operand),
+        Operation::Prefetch(operand) => prefetch::emit(code, &operand),
         Operation::LogicalImmediate {
             width,
             kind,

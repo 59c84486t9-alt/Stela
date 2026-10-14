@@ -1,0 +1,55 @@
+//! Non-temporal pairs in the direct EL0 private ordinary-RAM profile.
+//! Cache allocation is an implementation choice; ordinary transfers preserve
+//! the exact footprint without streaming opcodes' extra alignment requirements.
+use super::{AddressMode, MemoryTransfer, Width, memory_pair, simd};
+use crate::aarch64::{
+    non_temporal::{Data, Operand},
+    simd::Operand as SimdOperand,
+};
+
+const DWORD_BYTES: u8 = 4;
+const QWORD_BYTES: u8 = 8;
+
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+    match operand.data {
+        Data::Integer(data) => {
+            let transfer = if operand.load {
+                MemoryTransfer::Load {
+                    signed: false,
+                    width: match operand.bytes {
+                        DWORD_BYTES => Width::W32,
+                        QWORD_BYTES => Width::X64,
+                        _ => unreachable!("decoder validates integer non-temporal width"),
+                    },
+                }
+            } else {
+                MemoryTransfer::Store
+            };
+            memory_pair(
+                code,
+                transfer,
+                operand.bytes,
+                data,
+                operand.base,
+                operand.displacement,
+                AddressMode::Offset,
+            );
+        }
+        Data::Vector(vectors) => {
+            simd::emit_for_target(
+                code,
+                &SimdOperand::MemoryPair {
+                    load: operand.load,
+                    bytes: operand.bytes,
+                    vectors,
+                    base: operand.base,
+                    displacement: operand.displacement,
+                    mode: AddressMode::Offset,
+                },
+                crate::TargetCpu::Baseline,
+            );
+        }
+    }
+    // The shared pair recipes stage both loads before destination commits,
+    // retain completed store prefixes on faults, and never write back at Offset.
+}

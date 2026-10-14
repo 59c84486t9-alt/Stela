@@ -246,7 +246,7 @@ def validate_manifest(manifest, source, native, block, target_cpu=None, guest_ba
     return [row[1] for row in mapping]
 
 
-def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline", guest_base=BASE, allowed_mnemonics=None):
+def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline", guest_base=BASE, allowed_mnemonics=None, source_validator=None):
     if block and len(functions) != 1:
         raise ValueError('A block compilation batch must have exactly one entry')
     words, entries = [], []
@@ -255,9 +255,13 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.extend(operation['word'] for operation in function['operations'])
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
-    disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in ({'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx', 'fmlal', 'fmlal2', 'fmlsl', 'fmlsl2', 'bfcvt', 'bfcvtn', 'bfcvtn2', 'bfdot', 'bfmlalb', 'bfmlalt', 'bfmmla', 'fcadd', 'fcmla'} if allowed_mnemonics is None else set(allowed_mnemonics) | {'ret'}) for i in disassembly):
-        raise AssertionError('Independent decoder declined SIMD fixture')
+    decoder_validation = None
+    if source_validator is None:
+        disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
+        if len(disassembly) != len(words) or any(i.mnemonic not in ({'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx', 'fmlal', 'fmlal2', 'fmlsl', 'fmlsl2', 'bfcvt', 'bfcvtn', 'bfcvtn2', 'bfdot', 'bfmlalb', 'bfmlalt', 'bfmmla', 'fcadd', 'fcmla'} if allowed_mnemonics is None else set(allowed_mnemonics) | {'ret'}) for i in disassembly):
+            raise AssertionError('Independent decoder declined SIMD fixture')
+    else:
+        decoder_validation = source_validator(source, functions, allowed_mnemonics)
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
     output = directory / f'native-{index}'
@@ -273,6 +277,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
     return {'functions': functions, 'source': source, 'compiled_source': compiled_source, 'native': native, 'entries': entries,
             'offsets': [offsets[entry] for entry in entries], 'block': block,
             'compiler': manifest['compiler_source_sha256'],'manifest':manifest,'instruction_offsets':offsets,
+            **({'source_decoder_validation': decoder_validation} if decoder_validation is not None else {}),
             'receipt': {'functions': len(functions), 'source_bytes': consumed, 'source_sha256': digest(compiled_source),
                         'input_source_bytes': len(source), 'input_source_sha256': digest(source),
                         'native_bytes': len(native), 'native_sha256': digest(native),
@@ -410,7 +415,7 @@ def execute_batches(batches, pipe):
 
 def worker(pipe, batches):
     try:
-        if batches[0].get('cohort') == simd_memory_runner.FOCUS:
+        if batches[0].get('cohort') in simd_memory_runner.FAMILIES:
             result = simd_memory_runner.execute_batches(sys.modules[__name__], batches)
         elif batches[0].get('cohort') in FIXTURE_FAMILIES:
             result = simd_fixture_runner.execute_batches(sys.modules[__name__], batches)
@@ -508,8 +513,6 @@ def declined_pair_encodings():
                 result.append({'reason': 'constrained_duplicate_load', 'word': pair_encoding(width, True, register, register, 0, 0, mode)})
     for mode in PAIR_MODES:
         result.append({'reason': 'reserved_opc', 'word': (pair_encoding(16, True, 0, 1, 0, 0, mode) & ~(3 << 30)) | (3 << 30)})
-    for width in PAIR_WIDTHS:
-        result.append({'reason': 'non_temporal_pair_outside_profile', 'word': pair_encoding(width, True, 0, 1, 0, 0, 'offset') & ~(3 << 23)})
     return result
 
 
@@ -7422,7 +7425,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[simd_memory_runner.FOCUS, *REGISTER_COHORTS, *FIXTURE_FAMILIES, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS, COMPLEX_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*simd_memory_runner.FAMILIES, *REGISTER_COHORTS, *FIXTURE_FAMILIES, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS, COMPLEX_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--fixture-oracle', type=Path, help='Full-frame primary original pointer for an integer/crypto fixture family')
     parser.add_argument('--prepare-fixture-oracle', type=Path, help='Freeze original-only fixture inputs in this directory')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
@@ -7447,8 +7450,8 @@ def main():
     parser.add_argument('--refinement-oracle', type=Path, default=REFINEMENT_NUMERICAL_ORACLE)
     arguments = parser.parse_args()
     if arguments.prepare_fixture_oracle:
-        if arguments.focus == simd_memory_runner.FOCUS:
-            print(json.dumps(simd_memory_runner.prepare_original(sys.modules[__name__], arguments.prepare_fixture_oracle), indent=2))
+        if arguments.focus in simd_memory_runner.FAMILIES:
+            print(json.dumps(simd_memory_runner.prepare_original(sys.modules[__name__], arguments.prepare_fixture_oracle, arguments.focus), indent=2))
             return
         if arguments.focus not in FIXTURE_FAMILIES:
             parser.error('--prepare-fixture-oracle requires an integer/crypto fixture focus')
@@ -7459,8 +7462,8 @@ def main():
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = ROOT / 'target/debug/stela'
-    if arguments.focus == simd_memory_runner.FOCUS:
-        _, report = simd_memory_runner.run(sys.modules[__name__], cli, arguments.fixture_oracle)
+    if arguments.focus in simd_memory_runner.FAMILIES:
+        _, report = simd_memory_runner.run(sys.modules[__name__], cli, arguments.fixture_oracle, arguments.focus)
         print(json.dumps(report, indent=2))
         return
     if arguments.focus in FIXTURE_FAMILIES:

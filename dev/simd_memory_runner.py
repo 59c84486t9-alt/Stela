@@ -17,37 +17,49 @@ import time
 
 from differential import ROOT, BASE, State, state_dict, parse_fault_record, move
 from evidence import write_evidence
-from simd_fixtures import structure_memory as family
+from simd_fixtures import structure_memory as family, ordinary_memory
 import simd_original
 
 BATCH_FUNCTIONS = 256
 FOCUS = family.FOCUS
 ORACLE_DIRECTORY = ROOT / '.stela/research/structured-memory-implementation/fixtures/oracle'
+FAMILIES = {FOCUS: family, ordinary_memory.FOCUS: ordinary_memory}
+ORACLE_DIRECTORIES = {FOCUS: ORACLE_DIRECTORY, ordinary_memory.FOCUS: ROOT / '.stela/research/ordinary-memory/fixtures/oracle'}
 
 
-def dependencies(engine):
+def family_module(focus):
+    if focus not in FAMILIES:
+        raise ValueError('Unknown memory fixture focus: ' + focus)
+    return FAMILIES[focus]
+
+
+def dependencies(engine, family=family):
     paths = [Path(engine.__file__), Path(__file__), Path(family.__file__), Path(simd_original.__file__),
              ROOT / 'dev/differential.py', ROOT / 'dev/evidence.py', ROOT / 'dev/native-memory-faults.c',
              ROOT / 'dev/test_simd_fixtures.py']
+    if family is ordinary_memory:
+        paths += [ROOT / 'dev/memory-faults.py', ROOT / 'dev/simd_fixtures/structure_memory.py', ROOT / 'dev/a64_checklist.py']
     return {str(path.relative_to(ROOT)): engine.digest(path.read_bytes()) for path in paths}
 
 
-def prepare_original(engine, directory):
+def prepare_original(engine, directory, focus=FOCUS):
+    family = family_module(focus)
     directory = Path(directory)
     operations, cases = family.corpus()
-    plan = engine.prepare_full_frame_numerical_oracle(directory, operations, cases, FOCUS)
+    plan = engine.prepare_full_frame_numerical_oracle(directory, operations, cases, focus)
     memory = family.memory_template()
     memory_plan = {'ram_address': family.RAM_ADDRESS, 'ram_bytes': len(memory), 'initial_ram_sha256': engine.digest(memory)}
     simd_original.write_new(directory / 'memory.bin', memory)
     simd_original.write_new(directory / 'memory-plan.json', simd_original.json_bytes(memory_plan))
-    sources = dependencies(engine)
+    sources = dependencies(engine, family)
     simd_original.write_new(directory / 'source-bindings.json', simd_original.json_bytes(sources))
     return {**plan, **family.inventory(), 'memory_plan': memory_plan,
             'capture_command': [sys.executable, str(Path(simd_original.__file__)), '--directory', str(directory),
-                                '--focus', FOCUS, '--source-bindings', str(directory / 'source-bindings.json'), '--capture']}
+                                '--focus', focus, '--source-bindings', str(directory / 'source-bindings.json'), '--capture']}
 
 
-def load_original(engine, pointer):
+def load_original(engine, pointer, focus=FOCUS):
+    family = family_module(focus)
     pointer_data, pointer_sha = engine.numerical_json(pointer)
     producer, receipt_sha = engine.numerical_json(ROOT / pointer_data['receipt']['path'], pointer_data['receipt']['sha256'])
     directory = ROOT / producer['directory']
@@ -95,7 +107,7 @@ def load_original(engine, pointer):
 
 
 @contextmanager
-def fixed_private_ram():
+def fixed_private_ram(family=family):
     """Ask for the original address as a hint; never replace existing mappings."""
     libc = ctypes.CDLL(None, use_errno=True)
     libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_longlong]
@@ -116,7 +128,8 @@ def fixed_private_ram():
 
 
 def execute_batches(engine, batches):
-    oracle = load_original(engine, batches[0]['oracle_path'])
+    family = family_module(batches[0]['cohort'])
+    oracle = load_original(engine, batches[0]['oracle_path'], family.FOCUS)
     counts = Counter()
     with ExitStack() as mappings:
         functions = {}
@@ -124,7 +137,7 @@ def execute_batches(engine, batches):
             pointer = mappings.enter_context(engine.executable(batch['native']))
             for local, offset in enumerate(batch['offsets']):
                 functions[batch['function_base'] + local] = pointer + offset
-        ram_pointer = mappings.enter_context(fixed_private_ram())
+        ram_pointer = mappings.enter_context(fixed_private_ram(family))
         wrapper_pointer = mappings.enter_context(engine.executable(engine.NUMERICAL_MXCSR_WRAPPER))
         wrapper = ctypes.CFUNCTYPE(None, ctypes.POINTER(State), ctypes.c_void_p, ctypes.c_uint32,
                                   ctypes.POINTER(engine.NumericalNativeExit))(wrapper_pointer)
@@ -149,8 +162,8 @@ def execute_batches(engine, batches):
             'caller_mxcsr_preservation_comparisons': len(oracle['records'])}
 
 
-def runtime_checks(engine, cli, directory, compiler, target, target_id, oracle):
-    """All150 canonical forms through actual owned-memory dispatcher/cache."""
+def runtime_checks(engine, cli, directory, compiler, target, target_id, oracle, family=family):
+    """Canonical forms through actual owned-memory dispatcher/cache."""
     records = [record for record in oracle['records'] if record['runtime']]
     counts, transcripts = Counter(), []
     for record in records:
@@ -180,7 +193,7 @@ def runtime_checks(engine, cli, directory, compiler, target, target_id, oracle):
             counts['complete_state_RAM_comparisons'] += 1
             counts['disk_cache_checks'] += int(warm)
             transcripts.append({'function': record['function'], 'warm': warm, 'initial_state_hex': bytes(initial).hex(), 'report': report})
-    snapshot = write_evidence(ROOT / f'.stela/simd-{FOCUS}-{target_id}-runtime-records.json', transcripts)
+    snapshot = write_evidence(ROOT / f'.stela/simd-{family.FOCUS}-{target_id}-runtime-records.json', transcripts)
     return {**counts, 'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': engine.digest(snapshot.read_bytes())},
             'limits': 'Runtime models are grounded in individual primary originals. No joined-original, fault delivery, process or performance credit.'}
 
@@ -240,8 +253,10 @@ def calibrated_originals(engine):
             'limits': 'These32 observations are actual immutable original QEMU frames/RAM. Seven source-policy differences retain every raw byte; no UNKNOWN mask, normalization or direct-equality credit. They are not native fault observations.'}
 
 
-def native_fault_selection(first_access_only=False):
-    """Bounded semantic cuts; success separately covers all1134 shapes."""
+def native_fault_selection(first_access_only=False, family=family):
+    """Bounded family semantic cuts."""
+    if family is ordinary_memory:
+        return family.fault_selection(first_access_only)
     selected, seen, representatives = [], set(), {}
     shapes = family.shapes()
     for function, op in enumerate(shapes):
@@ -284,26 +299,94 @@ def native_fault_selection(first_access_only=False):
     return [case for case in selected if case['protection'] != 'structure_crossing'] if first_access_only else selected
 
 
-def fault_operation(shape, rn):
+def fault_operation(shape, rn, family=family, case=None):
+    if family is ordinary_memory:
+        return family.fault_operation(shape, case or {'rn': rn})
     values = {key: shape[key] for key in ('layout', 'loading', 'structures', 'runs',
               'vector_bytes', 'element_bytes', 'index', 'mode', 'rt', 'rm')}
     return family.operation(**values, rn=rn)
 
 
-def verify_faults(engine, cli, directory, compiler, target, target_id):
-    observer = directory / 'structure-fault-observer'
+def retain_ordinary_fault_bytes(engine, source, native, data, case, mapping):
+    """Keep actual native transport and its exact program before validation."""
+    files = {'source.arm64': source, 'native.bin': native, 'native-record.bin': data,
+             'metadata.json': simd_original.json_bytes({'case': case, 'source_map': mapping})}
+    key = engine.digest(b''.join(len(value).to_bytes(8, 'little') + value for value in files.values()))
+    directory = ROOT / '.stela/native-evidence/ordinary-memory-faults' / key
+    directory.mkdir(parents=True, exist_ok=True)
+    identities = {}
+    for name, value in files.items():
+        simd_original.write_new(directory / name, value)
+        identities[name] = {'path': str((directory / name).relative_to(ROOT)),
+                            'sha256': engine.digest(value), 'bytes': len(value)}
+    return identities
+
+def ordinary_original_fault(oracle, source, initial, ram_address, page_size, readonly):
+    """Reuse mapped-access fault oracle with explicit observed EL0/FP controls."""
+    import unicorn
+    from unicorn import arm64_const as arm
+    initialize = oracle.initialize_arm
+    observed = {}
+    machine_reference = []
+    def initialize_el0(machine, state):
+        observed['before_setup'] = {'pstate': machine.reg_read(arm.UC_ARM64_REG_PSTATE),
+                                   'cpacr_el1': machine.reg_read(arm.UC_ARM64_REG_CPACR_EL1)}
+        machine.reg_write(arm.UC_ARM64_REG_PSTATE, state.nzcv & 0xf0000000)
+        machine.reg_write(arm.UC_ARM64_REG_CPACR_EL1, simd_original.FP_ACCESS_ENABLED)
+        initialize(machine, state)
+        observed['before_execution'] = {name: machine.reg_read(register) for name, register in (
+            ('pstate', arm.UC_ARM64_REG_PSTATE), ('cpacr_el1', arm.UC_ARM64_REG_CPACR_EL1),
+            ('fpcr', arm.UC_ARM64_REG_FPCR), ('fpsr', arm.UC_ARM64_REG_FPSR))}
+        if (observed['before_execution']['pstate'] & 15
+                or observed['before_execution']['cpacr_el1'] & simd_original.FP_ACCESS_ENABLED != simd_original.FP_ACCESS_ENABLED):
+            raise AssertionError('Ordinary Unicorn oracle refused explicit EL0/FP setup')
+        machine_reference.append(machine)
+    oracle.initialize_arm = initialize_el0
+    try:
+        state, ram, faults = oracle.arm_fault(source, initial, ram_address, page_size, readonly)
+    finally:
+        oracle.initialize_arm = initialize
+    machine = machine_reference[0]
+    observed['after_execution'] = {name: machine.reg_read(register) for name, register in (
+        ('pstate', arm.UC_ARM64_REG_PSTATE), ('cpacr_el1', arm.UC_ARM64_REG_CPACR_EL1),
+        ('fpcr', arm.UC_ARM64_REG_FPCR), ('fpsr', arm.UC_ARM64_REG_FPSR))}
+    return state, ram, faults, {'engine_version': unicorn.__version__, 'requested_el': 0, **observed,
+        'limits': 'Explicit PSTATE EL0 and FP access readbacks; Unicorn mem_map access permissions. Architectural MMU/TCR/SCTLR controls are not observed. No EL0 page-table permission, guest syndrome or hardware exception delivery claim.'}
+
+
+def verify_declined(engine, cli, directory, family):
+    records = []
+    for index, case in enumerate(family.declined_encodings()):
+        path, output = directory / f'declined-{index}.arm64', directory / f'declined-{index}.native'
+        source = struct.pack('<II', case['word'], engine.RET)
+        path.write_bytes(source)
+        completed = subprocess.run([str(cli), 'compile-leaf', str(path), '--guest-base', hex(BASE),
+                                    '--output-dir', str(output)], capture_output=True, text=True, timeout=30)
+        if completed.returncode == 0 or (output / 'native.bin').exists():
+            raise AssertionError('Declined ordinary-memory input emitted native code: ' + str(case))
+        records.append({**case, 'source_sha256': engine.digest(source), 'error': completed.stderr.strip()})
+    return {'declined_before_execution': len(records), 'records': records}
+
+def verify_faults(engine, cli, directory, compiler, target, target_id, family=family):
+    observer = directory / (family.FOCUS + '-fault-observer')
     subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', str(ROOT / 'dev/native-memory-faults.c'), '-o', str(observer)], check=True)
     records, counts = [], Counter()
     shapes = family.shapes()
-    selections = native_fault_selection(first_access_only=target != 'baseline')
-    unique = list(dict.fromkeys((case['function'], case['rn']) for case in selections))
+    selections = native_fault_selection(first_access_only=target != 'baseline', family=family)
+    operations_by_word = {}
+    for case in selections:
+        op = fault_operation(shapes[case['function']], case['rn'], family, case)
+        case['word'] = op['word']
+        operations_by_word.setdefault(op['word'], op)
+    unique = list(operations_by_word)
     compiled = {}
     for start in range(0, len(unique), BATCH_FUNCTIONS):
         indexes = unique[start:start + BATCH_FUNCTIONS]
-        operations = [fault_operation(shapes[function], rn) for function, rn in indexes]
+        operations = [operations_by_word[word] for word in indexes]
         programs = [{'operations': [{'kind': 'prefix', 'word': move(2, 1, 7, 99)}, op]} for op in operations]
         batch = engine.compile_batch(cli, directory, programs, 'fault-batch-' + str(start),
-            cpu_target=target, target_id=target_id, allowed_mnemonics={'mov', 'movz', *[op['name'] for op in operations]})
+            cpu_target=target, target_id=target_id, allowed_mnemonics={'mov', 'movz', *[op['name'] for op in operations]},
+            **({'source_validator': family.validate_source_words} if family is ordinary_memory else {}))
         if batch['compiler'] != compiler:
             raise AssertionError('Structured fault compiler changed')
         for local, key in enumerate(indexes):
@@ -313,16 +396,24 @@ def verify_faults(engine, cli, directory, compiler, target, target_id):
             entry = batch['entries'][local]
             source = batch['source'][entry * 4:(entry + 3) * 4]
             mapping = [[BASE + slot * 4, batch['instruction_offsets'][entry + slot] - first] for slot in range(3)]
-            path = directory / f'fault-function-{key[0]}-rn{key[1]}.bin'
+            path = directory / f'fault-word-{key:08x}.bin'
             path.write_bytes(native)
             compiled[key] = source, native, mapping, path
+    original_oracle = None
+    if family is ordinary_memory:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('ordinary_original_faults', ROOT / 'dev/memory-faults.py')
+        original_oracle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(original_oracle)
     for index, case in enumerate(selections):
-        op = fault_operation(shapes[case['function']], case['rn'])
-        source, native, mapping, native_path = compiled[case['function'], case['rn']]
-        arguments = [str(observer), str(native_path), case['protection'], str(op['rn']), '0']
+        op = operations_by_word[case['word']]
+        source, native, mapping, native_path = compiled[case['word']]
+        pre_offset = op['offset'] if family is ordinary_memory and op['layout'] != 'prefetch' else 0
+        arguments = [str(observer), str(native_path), case['protection'], str(op['rn']), str(pre_offset)]
         if case['protection'] == 'structure_crossing':
             arguments.append(str(case['cut']))
         data = subprocess.check_output(arguments, timeout=10)
+        raw_identity = retain_ordinary_fault_bytes(engine, source, native, data, case, mapping) if family is ordinary_memory else None
         (code_address, ram_address, page_size), initial, (number, pc, address), actual, ram = parse_fault_record(data)
         staged = State.from_buffer_copy(initial)
         staged.x[7] = 99
@@ -330,31 +421,55 @@ def verify_faults(engine, cli, directory, compiler, target, target_id):
         if case['protection'] == 'readonly':
             expected, expected_ram, fault = family.expected(op, staged, b'\xa5' * page_size, ram_address, readonly=True)
         mapped = [guest for guest, offset in mapping if offset <= pc - code_address]
-        sp_fault = case['protection'] in ('sp_alignment', 'sp_alignment8')
+        hint_completion = family is ordinary_memory and op['layout'] == 'prefetch'
+        sp_fault = not hint_completion and case['protection'] in ('sp_alignment', 'sp_alignment8')
         fault_offset = pc - code_address
         boundary_valid = (number == signal.SIGILL and native[fault_offset:fault_offset + 2] == b'\x0f\x0b'
                           and fault is not None and fault['kind'] == 'sp_alignment') if sp_fault else (
                           number in (signal.SIGSEGV, signal.SIGBUS) and fault is not None
                           and fault['kind'] == 'memory' and address == fault['address'])
-        if (not boundary_valid or not mapped or mapped[-1] != BASE + 4
+        if hint_completion:
+            boundary_valid = number == 0 and fault is None
+        if (not boundary_valid or not hint_completion and (not mapped or mapped[-1] != BASE + 4)
                 or bytes(actual) != bytes(expected) or ram != expected_ram):
             raise AssertionError(json.dumps({'case': case, 'op': op, 'signal': number, 'native_address': address, 'fault': fault,
-                'native': state_dict(actual), 'expected': state_dict(expected), 'RAM_equal': ram == expected_ram}))
+                'native': state_dict(actual), 'expected': state_dict(expected), 'RAM_equal': ram == expected_ram,
+                **({'native_raw_record': raw_identity} if raw_identity else {})}))
+        policy = 'unicorn' if family is ordinary_memory else 'qemu'
         qemu, qemu_ram, _ = family.expected(op, staged, b'\xa5' * page_size, ram_address,
-            readonly=case['protection'] == 'readonly', policy='qemu')
+            readonly=case['protection'] == 'readonly', policy=policy)
+        original_fields = {}
+        if original_oracle is not None and not sp_fault and not hint_completion:
+            original, original_ram, original_faults, controls = ordinary_original_fault(
+                original_oracle, source, initial, ram_address, page_size, case['protection'] == 'readonly')
+            original_raw = write_evidence(ROOT / f'.stela/ordinary-memory-{target_id}-original-fault-{index}.json', {
+                'case': case, 'source_hex': source.hex(), 'native_raw': raw_identity,
+                'initial_state_hex': bytes(initial).hex(), 'original_state_hex': bytes(original).hex(),
+                'original_ram_hex': original_ram.hex(), 'original_faults': original_faults, 'controls': controls})
+            if bytes(original) != bytes(qemu) or original_ram != qemu_ram or any(item['pc'] != BASE + 4 for item in original_faults):
+                raise AssertionError('Actual Unicorn ordinary fault differs from explicit emulator model: ' + str(case) + ' raw=' + str(original_raw))
+            equal = bytes(original) == bytes(expected) and original_ram == expected_ram
+            classification = 'original_native_full_state_RAM_equal' if equal else 'classified_unicorn_source_policy_difference'
+            counts[classification] += 1
+            original_fields = {'original_observation': True, 'original_engine': 'Unicorn mapped access',
+                'original_classification': classification, 'original_controls': controls,
+                'original_raw_record': {'path': str(original_raw.relative_to(ROOT)), 'sha256': engine.digest(original_raw.read_bytes())},
+                'original_state_hex': bytes(original).hex(), 'original_ram_hex': original_ram.hex(),
+                'original_faults': original_faults}
         counts['native_source_policy_full_state_RAM_checks'] += 1
-        counts['native_sp_alignment_policy_fault_checks' if sp_fault else 'native_memory_address_fault_checks'] += 1
-        counts['predicted_qemu_difference_cases'] += int(bytes(qemu) != bytes(expected) or qemu_ram != expected_ram)
+        counts['native_prefetch_nonfault_checks' if hint_completion else 'native_sp_alignment_policy_fault_checks' if sp_fault else 'native_memory_address_fault_checks'] += 1
+        counts['predicted_' + policy + '_difference_cases'] += int(bytes(qemu) != bytes(expected) or qemu_ram != expected_ram)
         records.append({**case, 'target_cpu': target_id, 'canonical_id': op['canonical_id'], 'source_sha256': engine.digest(source),
-            'native_sha256': engine.digest(native), 'native_signal': number, 'native_fault_offset': pc - code_address,
-            'fault_classification': 'enabled_sp_alignment_policy' if sp_fault else 'memory_address',
+            'native_sha256': engine.digest(native), 'native_signal': number, 'native_fault_offset': None if hint_completion else pc - code_address,
+            'fault_classification': 'prefetch_completed_without_data_fault' if hint_completion else 'enabled_sp_alignment_policy' if sp_fault else 'memory_address',
             'initial_state_hex': bytes(initial).hex(), 'native_state_hex': bytes(actual).hex(),
-            'native_ram_hex': ram.hex(), 'qemu_prediction_state_hex': bytes(qemu).hex(),
-            'qemu_prediction_ram_sha256': engine.digest(qemu_ram), 'original_observation': False})
-    snapshot = write_evidence(ROOT / f'.stela/simd-{FOCUS}-{target_id}-fault-records.json', records)
-    return {**counts, 'target_cpu': target_id, 'selection': 'all_bounded_cuts' if target == 'baseline' else 'first_access_and_sp_policy',
+            'native_ram_hex': ram.hex(), **({'native_raw_record': raw_identity} if raw_identity else {}), policy + '_prediction_state_hex': bytes(qemu).hex(),
+            policy + '_prediction_ram_sha256': engine.digest(qemu_ram), 'original_observation': False, **original_fields})
+    snapshot = write_evidence(ROOT / f'.stela/simd-{family.FOCUS}-{target_id}-fault-records.json', records)
+    return {**counts, 'target_cpu': target_id, 'selection': ('all_bounded_cuts' if target == 'baseline' else
+                'first_access_sp_and_duplicate_store_second_element' if family is ordinary_memory else 'first_access_and_sp_policy'),
             'records': {'path': str(snapshot.relative_to(ROOT)), 'sha256': engine.digest(snapshot.read_bytes())},
-            'limits': 'Full native/source-policy equality. SP alignment uses the enabled pre-access UD2 policy, with no memory-address or guest-exception claim. QEMU columns are predictions only; immutable calibrated original observations are separately retained and classified.'}
+            'limits': ('Full native/source-policy equality, including nonfaulting prefetch hints. SP alignment is source-policy-only UD2. Actual Unicorn mapped-access fault frames/RAM and controls are retained separately; emulator differences receive no equality credit. No QEMU EL0-MMU fault, hardware exception delivery or concurrency claim.' if family is ordinary_memory else 'Full native/source-policy equality. SP alignment uses the enabled pre-access UD2 policy, with no memory-address or guest-exception claim. QEMU columns are predictions only; immutable calibrated original observations are separately retained and classified.')}
 
 
 def native_binary_accounting(engine, batch):
@@ -423,8 +538,8 @@ def native_binary_accounting(engine, batch):
             bodies.append({'canonical_id': op['canonical_id'], 'word': op['word'], 'start': start, 'end': end,
                            'native_bytes': end - start, 'reachable_instruction_bytes': owners.count(1),
                            'mask_pool_bytes': owners.count(2), 'reachable_instructions': len(code),
-                           'layout': op['layout'], 'element_bytes': op['element_bytes'], 'vector_bytes': op['vector_bytes'],
-                           'runs': op['runs'], 'structures': op['structures'], 'index': op['index']})
+                           **{key: op[key] for key in ('layout', 'element_bytes', 'vector_bytes', 'runs', 'structures', 'index',
+                                                      'rt', 'rt2', 'rn', 'offset', 'mode', 'hint', 'rm', 'option', 'shift') if key in op}})
         ret = offsets[entry + len(function['operations'])]
         if native[ret:ret + 1] != b'\xc3':
             raise AssertionError('Memory function lacks exact one-byte harness RET')
@@ -443,16 +558,17 @@ def native_binary_accounting(engine, batch):
             'limits': 'Static reachable instruction counts include both fast/fallback branches and terminal SP-policy UD2; sixteen-byte RIP mask pools are separately bound and excluded from instruction counts. No dynamic-count or timing credit.'}
 
 
-def run(engine, cli, pointer=None):
-    pointer = Path(pointer) if pointer else ORACLE_DIRECTORY / 'receipt.json'
-    oracle = load_original(engine, pointer)
-    sources, cli_sha, started = dependencies(engine), engine.digest(cli.read_bytes()), time.monotonic()
+def run(engine, cli, pointer=None, focus=FOCUS):
+    family = family_module(focus)
+    pointer = Path(pointer) if pointer else ORACLE_DIRECTORIES[focus] / 'receipt.json'
+    oracle = load_original(engine, pointer, focus)
+    sources, cli_sha, started = dependencies(engine, family), engine.digest(cli.read_bytes()), time.monotonic()
     cpu = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
     selections = [('baseline', 'x86_64-baseline')]
     if cpu['detected_target'] != 'x86_64-baseline':
         selections.append(('native', cpu['detected_target']))
     profiles, faults, compiler = [], [], None
-    with tempfile.TemporaryDirectory(prefix='stela-structure-memory-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='stela-' + focus + '-') as temporary:
         for target, target_id in selections:
             directory = Path(temporary) / target_id
             directory.mkdir()
@@ -461,13 +577,15 @@ def run(engine, cli, pointer=None):
                 operations = oracle['functions'][start:start + BATCH_FUNCTIONS]
                 batch = engine.compile_batch(cli, directory, [{'operations': [op]} for op in operations], start,
                     cpu_target=target, target_id=target_id, guest_base=BASE + start * 8,
-                    allowed_mnemonics={op['name'] for op in operations})
-                batch.update(cohort=FOCUS, function_base=start, oracle_path=str(pointer))
+                    allowed_mnemonics={op['name'] for op in operations},
+                    **({'source_validator': family.validate_source_words} if family is ordinary_memory else {}))
+                batch.update(cohort=focus, function_base=start, oracle_path=str(pointer))
                 if compiler is not None and compiler != batch['compiler']:
                     raise AssertionError('Structured memory compiler changed')
                 compiler = batch['compiler']
                 accounting = native_binary_accounting(engine, batch)
                 artifacts.append({'function_base': start, 'accounting': accounting,
+                                  **({'source_decoder_validation': batch['source_decoder_validation']} if 'source_decoder_validation' in batch else {}),
                                   'files': engine.retain_native_binary_evidence(batch, accounting, [])})
                 batches.append(batch)
             optional = {row['mnemonic'] for row in cpu['simd_opcodes'] if row['minimum_target'] != 'x86_64-baseline'}
@@ -475,13 +593,16 @@ def run(engine, cli, pointer=None):
             if target == 'baseline' and used:
                 raise AssertionError('Baseline memory body emitted optional opcodes: ' + str(sorted(used)))
             raw = engine.bounded_cases(batches)
-            runtime = runtime_checks(engine, cli, directory, compiler, target, target_id, oracle)
+            runtime = runtime_checks(engine, cli, directory, compiler, target, target_id, oracle, family)
             profiles.append({'target_cpu': target_id, 'raw_native': raw, 'runtime': runtime, 'native_artifacts': artifacts, 'optional_opcodes_used': sorted(used)})
-            faults.append(verify_faults(engine, cli, directory, compiler, target, target_id))
-        calibration = calibrated_originals(engine)
-    if engine.digest(cli.read_bytes()) != cli_sha or dependencies(engine) != sources:
+            faults.append(verify_faults(engine, cli, directory, compiler, target, target_id, family))
+        calibration = calibrated_originals(engine) if family.FOCUS == FOCUS else {
+            'actual_QEMU_original_fault_observations': 0,
+            'limits': 'Structured-memory calibration is not ordinary-memory evidence. Actual ordinary mapped-access Unicorn frames are separately retained in faults.'}
+        declines = verify_declined(engine, cli, Path(temporary), family) if family is ordinary_memory else None
+    if engine.digest(cli.read_bytes()) != cli_sha or dependencies(engine, family) != sources:
         raise AssertionError('Structured memory executable or source changed during verification')
-    report = {'kind': 'simd_structure_memory_arm_vs_native_x86', 'passed': True, **family.inventory(),
+    report = {'kind': 'simd_' + focus + '_arm_vs_native_x86', 'passed': True, **family.inventory(),
         'direct_original_math_native_comparisons': sum(profile['raw_native']['direct_original_math_native_comparisons'] for profile in profiles),
         'requested_control_storage_native_policy_comparisons': sum(profile['raw_native']['requested_control_storage_native_policy_comparisons'] for profile in profiles),
         'runtime_complete_state_RAM_comparisons': sum(profile['runtime']['complete_state_RAM_comparisons'] for profile in profiles),
@@ -490,7 +611,8 @@ def run(engine, cli, pointer=None):
         'harness_source_sha256': sources[str(Path(engine.__file__).relative_to(ROOT))],
         'original_receipt_sha256': oracle['receipt_sha256'], 'original_producer': oracle['producer'],
         'control_readbacks': oracle['control_readbacks'], 'profiles': profiles, 'faults': faults, 'calibrated_original_faults': calibration,
+        **({'declined_encodings': declines} if declines is not None else {}),
         'verification_wall_seconds': time.monotonic() - started,
         'limits': 'Declared private little-endian RAM/nonstreaming AdvSIMD profile. Success primary originals and native/source-policy faults are separate evidence. No guest exception delivery, concurrency, Apple hardware, application or performance credit.'}
-    path = write_evidence(ROOT / f'.stela/simd-{FOCUS}-differential-report.json', report)
+    path = write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     return path, report
