@@ -223,14 +223,18 @@ def mathematical(operations, initial, memory, ram_address):
 def validate_manifest(manifest, source, native, block, target_cpu=None, guest_base=BASE):
     if target_cpu is not None and manifest.get("target_cpu") != target_cpu:
         raise AssertionError("SIMD manifest CPU requirements differ from selection")
+    consumed = manifest['source_bytes'] if block else manifest['guest_instructions'] * 4
+    if (not isinstance(consumed, int) or not 0 < consumed <= len(source) or consumed % 4
+            or (not block and consumed != len(source))):
+        raise AssertionError('SIMD manifest has an invalid consumed source prefix')
+    compiled_source = source[:consumed]
     if (manifest['schema_version'] != 1 or manifest['abi'] != (BLOCK_ABI if block else LEAF_ABI)
-            or manifest['guest_base'] != guest_base or manifest['source_sha256'] != digest(source)
+            or manifest['guest_base'] != guest_base or manifest['source_sha256'] != digest(compiled_source)
             or manifest['native_sha256'] != digest(native) or manifest['native_bytes'] != len(native)
             or manifest['verified'] is not False):
         raise AssertionError('SIMD manifest does not bind original/native bytes and ABI')
-    consumed = manifest['source_bytes'] if block else manifest['guest_instructions'] * 4
     mapping = manifest['source_map']
-    if (consumed != len(source) or [row[0] for row in mapping] != list(range(guest_base, guest_base + len(source), 4))
+    if ([row[0] for row in mapping] != list(range(guest_base, guest_base + consumed, 4))
             or any(not 0 <= row[1] < len(native) for row in mapping)
             or any(a[1] >= b[1] for a, b in zip(mapping, mapping[1:]))):
         raise AssertionError('SIMD source map omits or merges original instructions')
@@ -238,6 +242,8 @@ def validate_manifest(manifest, source, native, block, target_cpu=None, guest_ba
 
 
 def compile_batch(cli, directory, functions, index, block=False, cpu_target="baseline", target_id="x86_64-baseline", guest_base=BASE):
+    if block and len(functions) != 1:
+        raise ValueError('A block compilation batch must have exactly one entry')
     words, entries = [], []
     for function in functions:
         entries.append(len(words))
@@ -253,14 +259,17 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
     manifest = json.loads(subprocess.check_output([str(cli), 'compile-block' if block else 'compile-leaf', str(path), '--guest-base', hex(guest_base), '--output-dir', str(output), '--cpu-target', cpu_target], timeout=60))
     native = (output / 'native.bin').read_bytes()
     offsets = validate_manifest(manifest, source, native, block, target_id, guest_base)
+    consumed = manifest['source_bytes'] if block else len(source)
+    compiled_source = source[:consumed]
     if not block:
         for entry, function in zip(entries, functions):
             if native[offsets[entry + len(function['operations'])]] != 0xc3:
                 raise AssertionError('Independent mini-function has no exact host RET boundary')
-    return {'functions': functions, 'source': source, 'native': native, 'entries': entries,
+    return {'functions': functions, 'source': source, 'compiled_source': compiled_source, 'native': native, 'entries': entries,
             'offsets': [offsets[entry] for entry in entries], 'block': block,
             'compiler': manifest['compiler_source_sha256'],'manifest':manifest,'instruction_offsets':offsets,
-            'receipt': {'functions': len(functions), 'source_bytes': len(source), 'source_sha256': digest(source),
+            'receipt': {'functions': len(functions), 'source_bytes': consumed, 'source_sha256': digest(compiled_source),
+                        'input_source_bytes': len(source), 'input_source_sha256': digest(source),
                         'native_bytes': len(native), 'native_sha256': digest(native),
                         'source_map_sha256': digest(json.dumps(manifest['source_map']).encode()), 'block': block,
                         'target_cpu': manifest['target_cpu']}}
@@ -2281,6 +2290,13 @@ NUMERICAL_MXCSR_ALL_STATUS = 0x3f
 NUMERICAL_MXCSR_ROUND_SHIFT = 13
 NUMERICAL_CACHE_LOOP_ITERATIONS = 3
 NUMERICAL_ZERO_CARRY_FLAGS = 0x60000000
+NUMERICAL_MANY_HALF_OPERATIONS = 8
+NUMERICAL_HELPER_NATIVE_BYTES = 16
+NUMERICAL_RETURN_NATIVE_BYTES = 13
+NUMERICAL_MOV_X30_X11 = 0xaa0b03fe
+NUMERICAL_BRANCH_IMMEDIATE_BASE = 0x14000000
+NUMERICAL_BRANCH_IMMEDIATE_MASK = (1 << 26) - 1
+NUMERICAL_UNSUPPORTED_WORD = 0xffffffff
 NUMERICAL_INPUT_HEADER = struct.calcsize('<Q')
 NUMERICAL_INPUT_STRIDE = NUMERICAL_INPUT_HEADER + ctypes.sizeof(State) + 8
 NUMERICAL_OUTPUT_STRIDE = struct.calcsize('<64Q4I')
@@ -2401,10 +2417,14 @@ def load_numerical_oracle(path):
 def numerical_native_accounting(batch):
     decoded = decode_native_stream(batch['native'])
     operation = batch['functions'][0]['operations'][0]
-    split = batch['instruction_offsets'][1]
-    if split not in {instruction.address for instruction in decoded}:
+    compiled = batch['compiled_source']
+    mapped_ret = struct.unpack_from('<I', compiled, len(compiled) - 4)[0] == RET
+    split = batch['instruction_offsets'][-1] if mapped_ret else len(batch['native'])
+    if split not in {instruction.address for instruction in decoded} | {len(batch['native'])}:
         raise AssertionError('Numerical source map splits a native instruction')
     return {'shape': operation, 'native_bytes': len(batch['native']), 'native_instructions': len(decoded),
+            'input_source_bytes': len(batch['source']), 'input_source_sha256': digest(batch['source']),
+            'compiled_source_bytes': len(compiled), 'compiled_source_sha256': digest(compiled),
             'fp_body_bytes': split, 'fp_body_instructions': sum(instruction.address < split for instruction in decoded),
             'guest_ret_native_bytes': len(batch['native']) - split,
             'static_opcode_histogram': dict(sorted(Counter(native_mnemonic(i.mnemonic) for i in decoded).items())),
@@ -2533,6 +2553,48 @@ def numerical_report_state(value):
     for name in ('sp', 'nzcv', 'reserved', 'fpcr', 'fpsr'):
         setattr(state, name, value[name])
     return state
+
+
+def numerical_half_chain_sources(operation):
+    source = struct.pack('<' + 'I' * (NUMERICAL_MANY_HALF_OPERATIONS + 1),
+                         *([operation['word']] * NUMERICAL_MANY_HALF_OPERATIONS), RET)
+    # The first guest RET enters a declared trampoline which replaces LR with
+    # STOP and revisits the same nine entries exactly once in this runtime.
+    branch_displacement = -(len(source) + 4) // 4
+    branch = NUMERICAL_BRANCH_IMMEDIATE_BASE | (branch_displacement & NUMERICAL_BRANCH_IMMEDIATE_MASK)
+    repeated = source + struct.pack('<II', NUMERICAL_MOV_X30_X11, branch)
+    return source, repeated
+
+
+def numerical_half_cache_artifacts(cache, source, base, compiler, evidence_root=ROOT):
+    manifests = sorted(cache.rglob('manifest.json'))
+    if len(manifests) != NUMERICAL_MANY_HALF_OPERATIONS + 1:
+        raise AssertionError('Half chain did not prepare exactly eight helpers and RET')
+    entries, artifacts = set(), []
+    for path in manifests:
+        manifest = json.loads(path.read_bytes())
+        identity = manifest['identity']
+        pc = identity['guest_base']
+        position = pc - base
+        prefix = source[position:position + 4]
+        if (position < 0 or position % 4 or position >= len(source) or pc in entries
+                or identity['source_sha256'] != digest(prefix) or identity['compiler_source_sha256'] != compiler
+                or identity['abi'] != BLOCK_ABI or identity['target_cpu'] != 'x86_64-baseline'
+                or manifest['source_map'] != [[pc, 0]] or manifest['verified'] is not False):
+            raise AssertionError('Half chain cache contains an incorrect source prefix or identity')
+        entries.add(pc)
+        native = (path.parent / 'native.bin').read_bytes()
+        expected_bytes = NUMERICAL_RETURN_NATIVE_BYTES if position == len(source) - 4 else NUMERICAL_HELPER_NATIVE_BYTES
+        if len(native) != expected_bytes or manifest['native_bytes'] != len(native) or manifest['native_sha256'] != digest(native):
+            raise AssertionError('Half chain retained dead suffix bytes or changed its native body')
+        accounting = {'guest_pc': pc, 'compiled_source_bytes': len(prefix), 'native_bytes': len(native),
+                      'native_instructions': len(decode_native_stream(native))}
+        retained = retain_native_evidence('simd-scalar_numerical-half-chain', prefix, native,
+                                          manifest, accounting, Path(__file__).read_bytes(), root=evidence_root)
+        artifacts.append({**accounting, 'files': retained})
+    if entries != set(range(base, base + len(source), 4)):
+        raise AssertionError('Half chain cache omitted a source instruction')
+    return artifacts
 
 
 def numerical_runtime_cohort(cli, directory, oracle, compiler):
@@ -2671,10 +2733,83 @@ def numerical_runtime_cohort(cli, directory, oracle, compiler):
             raise AssertionError('Original loop fixture differs from complete runtime state')
         counts['memory_cache_loop_checks'] += 1
         counts['synthetic_original_complete_state_checks'] += 1
+
+    half_record = next(record for record in oracle['records']
+        if record['operation']['name'] == 'fadd' and record['operation']['lane'] == 2
+        and record['label'] == 'one_one' and State.from_buffer_copy(record['initial']).fpcr == 0
+        and State.from_buffer_copy(record['initial']).fpsr == 0)
+    half_initial = State.from_buffer_copy(half_record['initial'])
+    half_expected = State.from_buffer_copy(half_record['expected'])
+    half_source, repeated_source = numerical_half_chain_sources(half_record['operation'])
+    half_base = BASE + 0x1c00
+    half_cache = directory / 'many-half-cache'
+    cold, actual = invoke(half_source, half_base, half_base, half_initial,
+                          budget=NUMERICAL_MANY_HALF_OPERATIONS + 1, cache_dir=half_cache)
+    if (cold['pc'] != STOP or bytes(actual) != bytes(half_expected)
+            or cold['outcome']['compiled_blocks'] != NUMERICAL_MANY_HALF_OPERATIONS + 1
+            or cold['outcome']['floating_point_helpers'] != NUMERICAL_MANY_HALF_OPERATIONS):
+        raise AssertionError('Many-H cold runtime changed full state or prepared a dead suffix')
+    half_artifacts = numerical_half_cache_artifacts(half_cache, half_source, half_base, compiler)
+    half_bytes = sum(artifact['native_bytes'] for artifact in half_artifacts)
+    if half_bytes != NUMERICAL_MANY_HALF_OPERATIONS * NUMERICAL_HELPER_NATIVE_BYTES + NUMERICAL_RETURN_NATIVE_BYTES:
+        raise AssertionError('Many-H cached native aggregate is not exactly141bytes')
+    warm, actual = invoke(half_source, half_base, half_base, half_initial,
+                          budget=NUMERICAL_MANY_HALF_OPERATIONS + 1, cache_dir=half_cache)
+    if (warm['pc'] != STOP or bytes(actual) != bytes(half_expected) or warm['outcome']['compiled_blocks'] != 0
+            or warm['outcome']['disk_cache_hits'] != NUMERICAL_MANY_HALF_OPERATIONS + 1):
+        raise AssertionError('Many-H fresh runtime did not reuse all nine disk artifacts')
+    budget_cache = directory / 'many-half-budget-cache'
+    partial, intermediate = invoke(half_source, half_base, half_base, half_initial,
+        budget=NUMERICAL_CACHE_LOOP_ITERATIONS, cache_dir=budget_cache)
+    resume_pc = half_base + NUMERICAL_CACHE_LOOP_ITERATIONS * 4
+    if (partial['outcome']['reason']['kind'] != 'budget_exhausted' or partial['pc'] != resume_pc
+            or bytes(intermediate) != bytes(half_expected)
+            or partial['outcome']['floating_point_helpers'] != NUMERICAL_CACHE_LOOP_ITERATIONS):
+        raise AssertionError('Many-H budget boundary skipped or repeated a helper')
+    resumed, actual = invoke(half_source, half_base, resume_pc, intermediate,
+        budget=NUMERICAL_MANY_HALF_OPERATIONS - NUMERICAL_CACHE_LOOP_ITERATIONS + 1, cache_dir=budget_cache)
+    if (resumed['pc'] != STOP or bytes(actual) != bytes(half_expected)
+            or resumed['outcome']['floating_point_helpers'] != NUMERICAL_MANY_HALF_OPERATIONS - NUMERICAL_CACHE_LOOP_ITERATIONS):
+        raise AssertionError('Many-H budget resume failed to complete the suffix and RET')
+    repeated_initial = State.from_buffer_copy(half_initial)
+    repeated_initial.x[11], repeated_initial.x[30] = STOP, half_base + len(half_source)
+    repeated_expected = State.from_buffer_copy(half_expected)
+    repeated_expected.x[11] = STOP
+    repeated, actual = invoke(repeated_source, half_base, half_base, repeated_initial,
+        budget=2 * (NUMERICAL_MANY_HALF_OPERATIONS + 1) + 1, cache_dir=directory / 'many-half-live-cache')
+    if (repeated['pc'] != STOP or bytes(actual) != bytes(repeated_expected)
+            or repeated['outcome']['floating_point_helpers'] != 2 * NUMERICAL_MANY_HALF_OPERATIONS
+            or repeated['outcome']['memory_cache_hits'] != NUMERICAL_MANY_HALF_OPERATIONS + 1):
+        raise AssertionError('Many-H live runtime did not reuse exactly nine loaded entries')
+    for code, initial, expected in ((half_source, half_initial, half_expected),
+                                    (repeated_source, repeated_initial, repeated_expected)):
+        original.mem_write(half_base, code)
+        original.ctl_remove_cache(half_base, half_base + len(code))
+        initialize_arm(original, initial)
+        original.emu_start(half_base, STOP, count=32)
+        if original.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(capture_arm(original, initial)) != bytes(expected):
+            raise AssertionError('Many-H original instruction chain differs from native runtime state')
+        counts['synthetic_original_complete_state_checks'] += 1
+    unsupported_source = half_source[:-4] + struct.pack('<I', NUMERICAL_UNSUPPORTED_WORD)
+    unsupported, actual = invoke(unsupported_source, half_base, half_base, half_initial,
+        budget=NUMERICAL_MANY_HALF_OPERATIONS + 1, cache_dir=directory / 'many-half-unsupported-cache')
+    if (unsupported['pc'] != half_base + NUMERICAL_MANY_HALF_OPERATIONS * 4
+            or unsupported['outcome']['reason']['kind'] != 'unsupported' or bytes(actual) != bytes(half_expected)
+            or unsupported['outcome']['compiled_blocks'] != NUMERICAL_MANY_HALF_OPERATIONS
+            or unsupported['outcome']['floating_point_helpers'] != NUMERICAL_MANY_HALF_OPERATIONS):
+        raise AssertionError('Many-H unsupported suffix failed to preserve the completed prefix')
+    counts['unsupported_suffix_state_checks'] += 1
+    counts['many_half_complete_state_checks'] += 5
+    counts['many_half_cache_artifacts'] = len(half_artifacts)
+    counts['many_half_cached_native_bytes'] = half_bytes
+    counts['many_half_disk_cache_hits'] = warm['outcome']['disk_cache_hits']
+    counts['many_half_memory_cache_hits'] = repeated['outcome']['memory_cache_hits']
+    counts['many_half_budget_resume_checks'] += 1
     if counts['disk_cache_hits'] == 0:
         raise AssertionError('Numerical runtime evidence never exercised persistent cached code')
     snapshot = write_evidence(ROOT / '.stela/simd-scalar_numerical-runtime-records.json', transcripts)
     return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
+            'many_half_native_artifacts': half_artifacts,
             'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())},
             'limits': 'Actual Rust BlockRuntime completes helpers and executes guest RET. Subprocesses exercise disk reuse; bounded three-iteration guest loops exercise live memory-cache reuse. Synthetic ADD/SUBS/CBNZ fixtures have separate complete-state original Unicorn checks. Original QEMU transports GPR/SP, while ordinary-control original Unicorn checks close that frame subset.'}
 
@@ -2700,7 +2835,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
                 raise AssertionError('Numerical compiler changed between block preparations')
             compiler = batch['compiler']
             accounting = numerical_native_accounting(batch)
-            retained = retain_native_evidence('simd-scalar_numerical', batch['source'], batch['native'],
+            retained = retain_native_evidence('simd-scalar_numerical', batch['compiled_source'], batch['native'],
                 batch['manifest'], accounting, Path(__file__).read_bytes())
             batches.append(batch)
             artifacts.append({'function': index, 'compilation': batch['receipt'], 'accounting': accounting, 'files': retained})
@@ -2722,7 +2857,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     if any(digest((ROOT / name).read_bytes()) != identity for name, identity in shared_hashes.items()):
         raise AssertionError('Numerical shared runner changed during verification')
     typed_checks = runtime['typed_unsupported_state_checks'] + runtime['interior_decline_state_checks']
-    completed_checks = runtime['invocations'] - typed_checks
+    completed_checks = runtime['invocations'] - typed_checks - runtime['unsupported_suffix_state_checks']
     report = {'kind': 'simd_scalar_numerical_arm_vs_native_x86', 'passed': True,
         'abi': batches[0]['manifest']['abi'], 'state_comparisons': completed_checks,
         'runtime_complete_state_comparisons': completed_checks,
@@ -2730,6 +2865,10 @@ def run_scalar_numerical_cohort(cli, oracle_path):
         'runtime_budget_resume_checks': runtime['budget_resume_checks'],
         'runtime_memory_cache_loop_checks': runtime['memory_cache_loop_checks'],
         'runtime_disk_cache_resume_checks': runtime['disk_cache_resume_checks'],
+        'runtime_many_half_complete_state_comparisons': runtime['many_half_complete_state_checks'],
+        'runtime_many_half_cache_artifacts': runtime['many_half_cache_artifacts'],
+        'runtime_many_half_cached_native_bytes': runtime['many_half_cached_native_bytes'],
+        'runtime_unsupported_suffix_state_checks': runtime['unsupported_suffix_state_checks'],
         'raw_native_state_and_exit_comparisons': raw['raw_native_state_and_exit_comparisons'],
         'native_mxcsr_preservation_comparisons': raw['caller_mxcsr_preservation_comparisons'],
         'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,

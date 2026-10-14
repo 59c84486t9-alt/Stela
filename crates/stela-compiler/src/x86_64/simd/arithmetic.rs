@@ -221,8 +221,13 @@ mod tests {
                     .contains("NumericalRuntimeRequired")
             );
             let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
-            assert_eq!(block.native.source_map.len(), 2);
-            assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
+            if word == FADD_H {
+                assert_eq!(block.source_bytes, size_of::<u32>());
+                assert_eq!(block.native.source_map, [(GuestAddress(0x1000), 0)]);
+            } else {
+                assert_eq!(block.native.source_map.len(), 2);
+                assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
+            }
         }
     }
 }

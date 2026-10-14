@@ -688,21 +688,21 @@
           "expected_mnemonics": [
             "fadd"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1eff2bff",
           "expected_mnemonics": [
             "fadd"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1efd2821",
           "expected_mnemonics": [
             "fadd"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         }
       ],
       "status": "implemented",
@@ -883,21 +883,21 @@
           "expected_mnemonics": [
             "fdiv"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1eff1bff",
           "expected_mnemonics": [
             "fdiv"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1efd1821",
           "expected_mnemonics": [
             "fdiv"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         }
       ],
       "status": "implemented",
@@ -1078,21 +1078,21 @@
           "expected_mnemonics": [
             "fmul"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1eff0bff",
           "expected_mnemonics": [
             "fmul"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1efd0821",
           "expected_mnemonics": [
             "fmul"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         }
       ],
       "status": "implemented",
@@ -1273,21 +1273,21 @@
           "expected_mnemonics": [
             "fsub"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1eff3bff",
           "expected_mnemonics": [
             "fsub"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         },
         {
           "word": "0x1efd3821",
           "expected_mnemonics": [
             "fsub"
           ],
-          "consumed_source_bytes": 8
+          "consumed_source_bytes": 4
         }
       ],
       "status": "implemented",

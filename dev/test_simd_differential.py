@@ -14,6 +14,68 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_block_manifest_binds_only_its_consumed_prefix_without_losing_original_input(self):
+        source = struct.pack('<II', 0x1ee22820, suite.RET)
+        native = bytes.fromhex('48b80010000000000000ba09000000c3')
+        manifest = {'schema_version': 1, 'abi': suite.BLOCK_ABI, 'guest_base': 0x1000,
+                    'source_bytes': 4, 'source_sha256': suite.digest(source[:4]),
+                    'native_sha256': suite.digest(native), 'native_bytes': len(native),
+                    'source_map': [[0x1000, 0]], 'verified': False, 'target_cpu': 'x86_64-baseline'}
+        self.assertEqual(suite.validate_manifest(manifest, source, native, True, guest_base=0x1000), [0])
+        for changed in ({'source_bytes': 0}, {'source_bytes': 2}, {'source_bytes': 12},
+                        {'source_sha256': suite.digest(source)}, {'source_map': [[0x1000, 0], [0x1004, 10]]}):
+            with self.assertRaises(AssertionError):
+                suite.validate_manifest({**manifest, **changed}, source, native, True, guest_base=0x1000)
+        with self.assertRaises(AssertionError):
+            suite.validate_manifest({**manifest, 'abi': suite.LEAF_ABI, 'guest_instructions': 1},
+                                    source, native, False, guest_base=0x1000)
+
+    def test_terminal_numerical_accounting_has_no_invented_ret_mapping_or_bytes(self):
+        operation = {'name': 'fadd', 'lane': 2, 'word': 0x1ee22820}
+        source = struct.pack('<II', operation['word'], suite.RET)
+        stub = bytes.fromhex('48b80010000000000000ba09000000c3')
+        batch = {'functions': [{'operations': [operation]}], 'source': source,
+                 'compiled_source': source[:4], 'native': stub, 'instruction_offsets': [0]}
+        accounting = suite.numerical_native_accounting(batch)
+        self.assertEqual((accounting['compiled_source_bytes'], accounting['input_source_bytes']), (4, 8))
+        self.assertEqual((accounting['fp_body_bytes'], accounting['guest_ret_native_bytes']), (16, 0))
+        self.assertEqual(accounting['native_instructions'], 3)
+        ret = bytes.fromhex('488b87f0000000ba04000000c3')
+        ordinary = {**batch, 'compiled_source': source, 'native': b'\x90' + ret, 'instruction_offsets': [0, 1]}
+        accounting = suite.numerical_native_accounting(ordinary)
+        self.assertEqual((accounting['compiled_source_bytes'], accounting['fp_body_bytes'], accounting['guest_ret_native_bytes']), (8, 1, 13))
+
+    def test_many_half_cache_contains_eight_exact_prefix_helpers_and_one_ret(self):
+        operation = {'word': 0x1ee22820}
+        source, repeated = suite.numerical_half_chain_sources(operation)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        decoded = list(decoder.disasm(repeated, 0x1000))
+        self.assertEqual([instruction.mnemonic for instruction in decoded], ['fadd'] * 8 + ['ret', 'mov', 'b'])
+        self.assertEqual(decoded[-1].op_str, '#0x1000')
+        self.assertEqual(decoded[-2].op_str, 'x30, x11')
+        self.assertEqual(len(source), 36)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / 'cache'
+            compiler = 'a' * 64
+            for index in range(9):
+                entry = cache / str(index)
+                entry.mkdir(parents=True)
+                pc = 0x1000 + index * 4
+                native = (bytes.fromhex('48b8') + struct.pack('<Q', pc) + bytes.fromhex('ba09000000c3')
+                          if index < 8 else bytes.fromhex('488b87f0000000ba04000000c3'))
+                manifest = {'identity': {'guest_base': pc, 'source_sha256': suite.digest(source[index * 4:index * 4 + 4]),
+                    'compiler_source_sha256': compiler, 'abi': suite.BLOCK_ABI, 'target_cpu': 'x86_64-baseline'},
+                    'source_map': [[pc, 0]], 'native_bytes': len(native), 'native_sha256': suite.digest(native), 'verified': False}
+                (entry / 'native.bin').write_bytes(native)
+                (entry / 'manifest.json').write_text(json.dumps(manifest))
+            artifacts = suite.numerical_half_cache_artifacts(cache, source, 0x1000, compiler, evidence_root=root)
+            self.assertEqual(len(artifacts), 9)
+            self.assertEqual(sum(artifact['native_bytes'] for artifact in artifacts), 141)
+            (cache / '0/native.bin').write_bytes((cache / '0/native.bin').read_bytes() + b'\x90')
+            with self.assertRaises(AssertionError):
+                suite.numerical_half_cache_artifacts(cache, source, 0x1000, compiler, evidence_root=root)
+
     def test_numerical_original_state_keeps_transport_registers_and_captures_every_vector(self):
         initial = State()
         seed_extended_state(initial, 19)

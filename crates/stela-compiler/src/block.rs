@@ -456,11 +456,16 @@ pub struct CompiledBlock {
 pub(crate) enum Terminator {
     Branch(Operation),
     DirectCall(GuestAddress),
-    Register { source: Register, kind: ExitKind },
+    Register {
+        source: Register,
+        kind: ExitKind,
+    },
     Trap(SynchronousTrap),
     PointerAuthentication(PointerAuthentication),
     Clock(ClockInstruction),
     ThreadRegister(ThreadRegisterInstruction),
+    /// Scalar mapping that unconditionally returns to numerical completion.
+    FloatingPoint(crate::aarch64::simd::arithmetic::Operand),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -631,6 +636,9 @@ pub fn analyze_with_profile(
             thread_register_instruction = Some(*value);
             add(SuccessorKind::Fallthrough, value.next_pc);
         }
+        Some(Terminator::FloatingPoint(_)) => {
+            add(SuccessorKind::Fallthrough, parsed.next_pc);
+        }
         Some(Terminator::Branch(_)) => {
             unreachable!("private parser only stores branch operations as terminators")
         }
@@ -719,6 +727,12 @@ fn parse(
             pc,
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
+        if let Operation::FloatingPoint(operand) = &instruction.operation
+            && operand.format == crate::aarch64::floating::Format::Half
+        {
+            terminal = Some((pc, Terminator::FloatingPoint(*operand)));
+            break;
+        }
         if matches!(
             instruction.operation,
             Operation::Branch { .. }
@@ -755,7 +769,8 @@ pub fn source_bytes_with_profile(
         .source_bytes)
 }
 
-/// Compile through the first control transfer/trap, or exit at the input boundary.
+/// Compile through the first transfer, trap or unconditional runtime helper,
+/// or exit at the input boundary.
 /// Unknown semantics before that boundary are rejected. Bytes following a
 /// terminator are unconsumed and do not participate in the returned source map.
 pub fn compile(source: &[u8], base: GuestAddress) -> Result<CompiledBlock, CompileError> {
@@ -794,6 +809,66 @@ mod tests {
 
     fn bytes(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn unconditional_half_helpers_share_exact_consumption_analysis_and_emission() {
+        const NOP: u32 = 0xd503201f;
+        const UNSUPPORTED: u32 = 0xffffffff;
+        const HALF_OPERATIONS: [u32; 4] = [
+            0x1ee02800, // FADD H0,H0,H0
+            0x1ee03800, // FSUB H0,H0,H0
+            0x1ee00800, // FMUL H0,H0,H0
+            0x1ee01800, // FDIV H0,H0,H0
+        ];
+        let base = GuestAddress(0x1000);
+        let helper_pc = GuestAddress(base.0 + size_of::<u32>() as u64);
+        let continuation = GuestAddress(helper_pc.0 + size_of::<u32>() as u64);
+        for operation in HALF_OPERATIONS {
+            for profile in [
+                BlockProfile::Ordinary,
+                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::AppleArm64eSoftwarePauthClockV1,
+                BlockProfile::DarwinArm64ThreadV1,
+                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+            ] {
+                let source = bytes(&[NOP, operation, UNSUPPORTED]);
+                let analysis = analyze_with_profile(&source, base, profile).unwrap();
+                let compiled = compile_with_profile(&source, base, profile).unwrap();
+                assert_eq!(analysis.source_bytes, 2 * size_of::<u32>());
+                assert_eq!(compiled.source_bytes, analysis.source_bytes);
+                assert_eq!(
+                    source_bytes_with_profile(&source, base, profile).unwrap(),
+                    analysis.source_bytes
+                );
+                assert_eq!(analysis.terminator_pc, Some(helper_pc));
+                assert_eq!(analysis.dynamic_edge, None);
+                assert_eq!(
+                    analysis.static_successors,
+                    [StaticSuccessor {
+                        kind: SuccessorKind::Fallthrough,
+                        target: continuation,
+                    }]
+                );
+                assert_eq!(compiled.native.source_map.len(), 2);
+                assert_eq!(compiled.native.source_map[1].0, helper_pc);
+                let mut helper = vec![0x48, 0xb8]; // MOVABS RAX,original PC
+                helper.extend(helper_pc.0.to_le_bytes());
+                helper.push(0xba); // MOV EDX,FloatingPoint; RET
+                helper.extend((ExitKind::FloatingPoint as u32).to_le_bytes());
+                helper.push(0xc3);
+                let offset = compiled.native.source_map[1].1;
+                assert_eq!(&compiled.native.x86_64_code[offset..], helper);
+                let suffix = &source[analysis.source_bytes..];
+                assert_eq!(
+                    analyze_with_profile(suffix, continuation, profile)
+                        .unwrap_err()
+                        .pc,
+                    continuation
+                );
+            }
+        }
     }
 
     #[test]

@@ -76,6 +76,9 @@ pub(crate) fn emit_for_target(
     if let Some((pc, terminal)) = terminal {
         block.source_map.push((*pc, code.len()));
         match terminal {
+            Terminator::FloatingPoint(operand) => {
+                super::simd::arithmetic::emit(code, operand, *pc);
+            }
             Terminator::Clock(request) => {
                 // MRS results and ISB synchronization belong to the explicit
                 // runtime clock service, not a host counter or placeholder.
