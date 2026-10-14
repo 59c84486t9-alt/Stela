@@ -16,6 +16,8 @@ const FPCR_NEGATIVE_TO_MXCSR_SHIFT: u8 = 10;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 pub(super) const INPUT_MINIMUM_EXPONENT: u8 = 1;
 pub(super) const RESULT_MINIMUM_EXPONENT: u8 = 2;
+/// Callers must prove usable AVX through their independent FMA/F16C capability.
+pub(super) const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 const SCALAR_SINGLE_PREFIX: u8 = 0xf3;
 const SCALAR_DOUBLE_PREFIX: u8 = 0xf2;
 const PACKED_DOUBLE_PREFIX: u8 = 0x66;
@@ -375,6 +377,40 @@ pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8
         code.extend(vector_offset(source).to_le_bytes());
     } else {
         read_vector(code, source, xmm);
+    }
+}
+
+/// Select from the complete indexed source before broadcasting active lanes.
+/// Indexed Q=0 operations may read a lane in the original upper qword.
+pub(super) fn read_numerical_right(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    right_lane: Option<u8>,
+) {
+    const BROADCAST_LOW_LANE: u8 = 0;
+    if let Some(lane) = right_lane {
+        read_vector(code, source, RIGHT_VECTOR);
+        ShiftOpcode::RightBytes.emit(
+            code,
+            RIGHT_VECTOR,
+            (u32::from(lane) * format.bits() / u8::BITS) as u8,
+        );
+        if shape != Shape::Scalar {
+            if format == Format::Half {
+                packed(code, Host::ShuffleLowWord, RIGHT_VECTOR, RIGHT_VECTOR);
+                code.push(BROADCAST_LOW_LANE);
+            }
+            if format != Format::Double {
+                packed(code, Host::ShuffleDword, RIGHT_VECTOR, RIGHT_VECTOR);
+                code.push(BROADCAST_LOW_LANE);
+            } else {
+                packed(code, Host::UnpackLowQword, RIGHT_VECTOR, RIGHT_VECTOR);
+            }
+        }
+    } else {
+        read_numerical_vector(code, shape, source, RIGHT_VECTOR);
     }
 }
 

@@ -16,6 +16,83 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_remaining_binary_forms_reach_compiler_after_independent_decode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(suite.subprocess, 'check_output', side_effect=RuntimeError('reached mocked compiler')) as compile_call:
+                for index, op in enumerate(suite.binary_remaining_functions()):
+                    with self.assertRaisesRegex(RuntimeError, 'reached mocked compiler'):
+                        suite.compile_batch(Path('mock-stela'), directory, [{'operations': [op]}], index, block=True)
+                self.assertEqual(compile_call.call_count, 636)
+
+    def test_remaining_binary_encodings_cover_every_form_width_index_and_alias(self):
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        functions = suite.binary_remaining_functions()
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (636, 636))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 23)
+        self.assertEqual(len({suite.binary_remaining_shape(op) for op in functions}), 43)
+        self.assertEqual(len({(suite.binary_remaining_shape(op), op['index']) for op in functions}), 107)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(decoded[0].mnemonic, op['name'])
+            if op['index'] is not None and op['lane'] == 2:
+                self.assertLess(op['m'], 16)
+            if op['input_kind'] == 'scalar_pair':
+                self.assertIsNone(op['m'])
+                self.assertEqual(op['source_lane_count'], 2)
+                self.assertEqual(op['merge'], 'none')
+        for args, keywords in ((('fnmul', 4, 16, False), {}), (('faddp', 2, 2, True), {}),
+                (('fmulx', 8, 8, False), {}), (('fmul', 2, 8, False), {'m': 16, 'index': 0}),
+                (('fmul', 8, 16, False), {'index': 2})):
+            with self.assertRaises(ValueError):
+                suite.binary_remaining_operation(*args, **keywords)
+
+    def test_remaining_binary_state_preserves_pair_order_and_upper_index_selection(self):
+        op = suite.binary_remaining_operation('faddp', 2, 8, False)
+        state = suite.binary_remaining_state(op, 0, [(1, 2), (3, 4), (5, 6), (7, 8)])
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *state.v[1])), (1, 2, 3, 4, 0x7c05, 0x7c05, 0x7c05, 0x7c05))
+        self.assertEqual(struct.unpack('<4H', struct.pack('<Q', state.v[2][0])), (5, 6, 7, 8))
+        scalar = suite.binary_remaining_operation('faddp', 2, 2, True, m=None)
+        state = suite.binary_remaining_state(scalar, 1, [(0x3c00, 0x4000)])
+        self.assertEqual(state.v[1][0] & 0xffffffff, 0x40003c00)
+        self.assertNotEqual(state.v[1][0] >> 32, 0)
+        indexed = suite.binary_remaining_operation('fmul', 4, 8, False, index=3)
+        state = suite.binary_remaining_state(indexed, 2, [(0x3f800000, 0x40000000), (0x40400000, 0x40000000)])
+        self.assertEqual(state.v[1][0], 0x404000003f800000)
+        self.assertEqual(state.v[2][1] >> 32, 0x40000000)
+        self.assertNotEqual(state.v[2][0] & 0xffffffff, 0x40000000)
+
+    def test_remaining_binary_scalar_nep_merges_left_but_pair_clears(self):
+        for name, m in (('fnmul', 2), ('fabd', 2), ('faddp', None)):
+            op = suite.binary_remaining_operation(name, 4, 4, True, m=m)
+            initial = suite.binary_remaining_state(op, 0, [(0x3f800000, 0x40000000)], suite.NUMERICAL_NEP)
+            original = State.from_buffer_copy(initial)
+            original.v[0][:] = initial.v[1] if name != 'faddp' else (0, 0)
+            original.v[0][0] = original.v[0][0] & ~0xffffffff | 0x40400000
+            suite.validate_binary_remaining_original_effects(initial, original, op)
+            original.v[0][1] ^= 1
+            with self.assertRaises(AssertionError):
+                suite.validate_binary_remaining_original_effects(initial, original, op)
+        descriptor = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.BINARY_REMAINING_FOCUS]
+        self.assertNotIn('accepts_enabled_control', descriptor)
+        self.assertNotIn('profile_expectation', descriptor)
+        self.assertNotIn('native_fma_operations', descriptor)
+
+    def test_remaining_binary_corpus_and_runtime_stay_within_approved_budget(self):
+        functions, cases = suite.binary_remaining_corpus()
+        self.assertEqual(len(cases), 33518)
+        imported = [dict(case, operation=functions[case['function']]) for case in cases]
+        self.assertEqual(sum(bool(State.from_buffer_copy(case['initial']).fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK) for case in cases), 462)
+        self.assertEqual({case['function'] for case in cases}, set(range(636)))
+        self.assertEqual(len(suite.binary_remaining_runtime_cases(imported)), 363)
+        self.assertEqual(len(suite.binary_remaining_helpers(imported)), 43)
+        self.assertEqual(suite.binary_remaining_helpers(imported, set()), [])
+        self.assertLessEqual(len(suite.binary_remaining_runtime_cases(imported)) + 6 * len(suite.binary_remaining_helpers(imported)), 621)
+
     def test_fullframe_fma_expectations_follow_family_and_independent_host_capability(self):
         families = suite.FULL_FRAME_NUMERICAL_COHORTS
         fused = families[suite.FUSED_NUMERICAL_FOCUS]['native_fma_operations']

@@ -1,7 +1,7 @@
 //! Square root: positive-normal SSE2 mappings with transactional exact fallback.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar, commit_inexact,
+    Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact,
     environment_round, positive_exponent_range, prepare_vector_input_range, read_numerical_vector,
     reject_other_status, resolve, restore_environment, test_control,
     vector_positive_exponent_range,
@@ -38,7 +38,6 @@ const BT_EAX_IMM8: &[u8] = &[0x0f, 0xba, 0xe0];
 const ADD_EAX_IMM32: u8 = 0x05;
 const ADC_EAX_IMM32: u8 = 0x15;
 const SUB_EAX_IMM32: u8 = 0x2d;
-const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const FPCR_LOW_ROUNDING_BIT: u32 = 1 << FPCR_ROUNDING_SHIFT;
 const FPCR_HIGH_ROUNDING_BIT: u32 = 1 << (FPCR_ROUNDING_SHIFT + 1);

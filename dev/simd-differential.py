@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -3078,7 +3078,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -5337,7 +5337,274 @@ def refinement_runtime_cases(records):
     return list({record['case']: record for record in selected.values()}.values())
 
 
+BINARY_REMAINING_FOCUS = 'binary_remaining_numerical'
+BINARY_REMAINING_ORACLE = ROOT / '.stela/research/fp-binary-remaining/oracle/receipt.json'
+BINARY_REMAINING_REGISTER_BASES = {'fabd': (0x2ec01400, 0x2ea0d400),
+    'faddp': (0x2e401400, 0x2e20d400), 'fmulx': (0x0e401c00, 0x0e20dc00)}
+BINARY_REMAINING_INDEXED_BASES = {'fmul': 0x0f009000, 'fmulx': 0x2f009000}
+BINARY_REMAINING_NEGATED_BASE = 0x1e208800
+BINARY_REMAINING_PAIR_BASES = {2: 0x5e30d800, 4: 0x7e30d800, 8: 0x7e70d800}
+BINARY_REMAINING_CONTROLS = (NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_NEP, NUMERICAL_FZ,
+    NUMERICAL_FZ16, NUMERICAL_DN, CONVERSION_AHP, NUMERICAL_AH | NUMERICAL_FIZ,
+    NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_FZ16,
+    NUMERICAL_AH | NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_NEP)
+BINARY_REMAINING_CASES = 33518
+BINARY_REMAINING_RANDOM_SEED = 0x42494e4152594650
+
+
+def binary_remaining_operation(name, lane, width, scalar, d=0, n=1, m=2, index=None):
+    if (lane not in (2, 4, 8) or any(not 0 <= register < 32 for register in (d, n))
+            or scalar and width != lane or not scalar and (lane, width) not in VECTOR_NUMERICAL_SHAPES):
+        raise ValueError('Unallocated remaining binary arrangement')
+    pair = name == 'faddp'
+    if pair and scalar:
+        if index is not None or m is not None:
+            raise ValueError('Scalar pair has exactly one source register')
+        word = BINARY_REMAINING_PAIR_BASES[lane]
+        canonical = 'FADDP_asisdpair_only_' + ('H' if lane == 2 else 'SD')
+    elif name == 'fnmul':
+        if not scalar or index is not None:
+            raise ValueError('FNMUL is scalar and non-indexed')
+        word = BINARY_REMAINING_NEGATED_BASE | {2: 3, 4: 0, 8: 1}[lane] << 22
+        canonical = 'FNMUL_' + {2: 'H', 4: 'S', 8: 'D'}[lane] + '_floatdp2'
+    elif index is not None:
+        if (name not in BINARY_REMAINING_INDEXED_BASES or not 0 <= index < 16 // lane
+                or m is None or lane == 2 and m >= 16):
+            raise ValueError('Unallocated indexed source')
+        word = BINARY_REMAINING_INDEXED_BASES[name] | int(scalar) << 28 | int(scalar or width == 16) << 30
+        if lane == 2:
+            word |= ((index >> 2) & 1) << 11 | (index & 3) << 20
+        elif lane == 4:
+            word |= 1 << 23 | ((index >> 1) & 1) << 11 | (index & 1) << 21
+        else:
+            word |= 3 << 22 | index << 11
+        canonical = name.upper() + ('_asisdelem_' if scalar else '_asimdelem_') + ('RH_H' if lane == 2 else 'R_SD')
+    elif name in BINARY_REMAINING_REGISTER_BASES:
+        if name == 'faddp' and scalar:
+            raise ValueError('Scalar pair requires its one-source form')
+        half, standard = BINARY_REMAINING_REGISTER_BASES[name]
+        word = (half if lane == 2 else standard | int(lane == 8) << 22)
+        word |= int(scalar) << 28 | int(scalar or width == 16) << 30
+        canonical = name.upper() + ('_asisdsame' if scalar else '_asimdsame') + ('fp16_only' if lane == 2 else '_only')
+    else:
+        raise ValueError('Unknown remaining binary mnemonic')
+    if m is not None:
+        if not 0 <= m < 32:
+            raise ValueError('Invalid right source register')
+        word |= m << 16
+    elif not (pair and scalar):
+        raise ValueError('Binary instruction requires a right source')
+    return {'name': name, 'lane': lane, 'bytes': width, 'scalar': scalar, 'd': d, 'n': n, 'm': m,
+        'index': index, 'word': word | n << 5 | d, 'canonical_id': canonical,
+        'source_lane_count': 2 if pair and scalar else 1 if scalar else width // lane,
+        'output_kind': 'vector', 'input_kind': 'scalar_pair' if pair and scalar else 'vector_pair' if pair else 'indexed' if index is not None else 'register',
+        'merge': 'left_if_nep' if scalar and not pair else 'none', 'cohort_family': 'binary_remaining'}
+
+
+def binary_remaining_functions():
+    functions = []
+    for name in ('fnmul', 'fabd', 'faddp', 'fmulx', 'fmul'):
+        indexed_modes = (False, True) if name == 'fmulx' else (True,) if name == 'fmul' else (False,)
+        shapes = [(lane, lane, True) for lane in (2, 4, 8)]
+        if name != 'fnmul':
+            shapes += [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES]
+        for indexed in indexed_modes:
+            for lane, width, scalar in shapes:
+                for index in (range(16 // lane) if indexed else (None,)):
+                    roles = [(d, n, None) for d, n in NUMERICAL_UNARY_ROLES] if name == 'faddp' and scalar else COMPARISON_MINMAX_BINARY_ROLES
+                    for d, n, m in roles:
+                        if indexed and lane == 2:
+                            m &= 15
+                        functions.append(binary_remaining_operation(name, lane, width, scalar, d, n, m, index))
+    if len(functions) != len({op['word'] for op in functions}):
+        raise AssertionError('Remaining binary subject words must be unique')
+    return functions
+
+
+def binary_remaining_pairs(lane):
+    v = dict(numerical_unary_values(lane))
+    one, two, half = (v[name + '_positive'] for name in ('one', 'two', 'half'))
+    sign, fraction = 1 << (lane * 8 - 1), {2: 10, 4: 23, 8: 52}[lane]
+    pairs = [('one_one', one, one), ('one_two', one, two), ('opposed_one', one, one | sign),
+        ('product_residual', one + 1, one - 1), ('product_round', one + 1, one + 1),
+        ('sum_tie_even', one, ({2: 15, 4: 127, 8: 1023}[lane] - fraction - 1) << fraction),
+        ('sum_tie_odd', one + 1, ({2: 15, 4: 127, 8: 1023}[lane] - fraction - 1) << fraction),
+        ('negative_round', one | sign, one + 1), ('normal_boundary', v['minnormal_positive'], half),
+        ('overflow', v['maxfinite_positive'], two), ('maximum', v['maxfinite_positive'], v['maxfinite_positive']),
+        ('tiny', v['minsubnormal_positive'], half)]
+    for left, right in (('zero', 'zero'), ('zero', 'infinity'), ('infinity', 'zero'), ('infinity', 'infinity')):
+        for ls, rs in (('positive', 'positive'), ('positive', 'negative'), ('negative', 'positive'), ('negative', 'negative')):
+            pairs.append((left + '_' + ls + '_' + right + '_' + rs, v[left + '_' + ls], v[right + '_' + rs]))
+    for label in ('minsubnormal_positive', 'minsubnormal_negative', 'maxsubnormal_positive', 'minnormal_positive',
+                  'qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+        pairs.extend(((label + '_left', v[label], one), (label + '_right', one, v[label])))
+    pairs.extend((('denormal_infinity', v['minsubnormal_positive'], v['infinity_negative']),
+        ('infinity_denormal', v['infinity_negative'], v['minsubnormal_positive']),
+        ('nan_denormal', v['qnan_negative'], v['minsubnormal_positive']),
+        ('denormal_nan', v['minsubnormal_positive'], v['qnan_negative'])))
+    if len(pairs) != 48:
+        raise AssertionError('Remaining binary directed catalog changed')
+    return pairs
+
+
+def binary_remaining_state(op, case, pairs, control=0, sticky=0):
+    if len(pairs) != (1 if op['input_kind'] == 'scalar_pair' else op['bytes'] // op['lane']):
+        raise ValueError('Incorrect remaining binary active pair count')
+    # The common binary state generator owns full-state canaries and poison.
+    shape = dict(op, bytes=op['lane'] if op['scalar'] else op['bytes'], m=op['n'] if op['m'] is None else op['m'])
+    initial = vector_numerical_state(shape, case, [(left, right) for left, right in pairs], control)
+    initial.fpsr = sticky
+    lane, bits = op['lane'], op['lane'] * 8
+    poison = dict(numerical_unary_values(lane))['snan_positive']
+    def store(register, values):
+        packed = sum(poison << (position * bits) for position in range(16 // lane))
+        for position, value in values:
+            if not 0 <= value < 1 << bits:
+                raise ValueError('Invalid remaining binary input bits')
+            mask = ((1 << bits) - 1) << (position * bits)
+            packed = packed & ~mask | value << (position * bits)
+        initial.v[register][:] = [packed & MASK, packed >> 64]
+    if op['input_kind'] == 'scalar_pair':
+        store(op['n'], enumerate(pairs[0]))
+    elif op['input_kind'] == 'vector_pair':
+        half = len(pairs) // 2
+        for register, active in ((op['n'], pairs[:half]), (op['m'], pairs[half:])):
+            store(register, enumerate(value for pair in active for value in pair))
+    elif op['index'] is not None:
+        store(op['n'], enumerate(left for left, _ in pairs))
+        store(op['m'], [(op['index'], pairs[0][1])])
+    return initial
+
+
+def binary_remaining_shape(op):
+    return op['name'], op['lane'], op['bytes'], op['scalar'], op['input_kind']
+
+
+def binary_remaining_corpus():
+    functions, records, primary, enabled = binary_remaining_functions(), [], set(), set()
+    rng = random.Random(BINARY_REMAINING_RANDOM_SEED)
+    def append(function, label, pairs, control=0, sticky=0):
+        initial = binary_remaining_state(functions[function], len(records), pairs, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function, op in enumerate(functions):
+        shape = binary_remaining_shape(op)
+        count = 1 if op['input_kind'] == 'scalar_pair' else op['bytes'] // op['lane']
+        pairs = binary_remaining_pairs(op['lane'])
+        catalog = {label: (left, right) for label, left, right in pairs}
+        v = dict(numerical_unary_values(op['lane']))
+        if shape not in primary:
+            primary.add(shape)
+            for mode in range(4):
+                for label, left, right in pairs:
+                    append(function, 'directed_' + label, [(left, right)] * count, mode << NUMERICAL_ROUND_SHIFT)
+            for mode in range(4):
+                for label in ('product_round', 'negative_round', 'sum_tie_even', 'sum_tie_odd', 'opposed_one', 'tiny', 'overflow', 'normal_boundary'):
+                    append(function, 'ah_round_' + label, [catalog[label]] * count, NUMERICAL_AH | mode << NUMERICAL_ROUND_SHIFT)
+            matrix = [v['qnan_positive'], v['qnan_negative'], v['qnan_positive'] + 7, v['qnan_negative'] + 7, v['snan_positive'], v['snan_negative']]
+            for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+                for left, x in enumerate(matrix):
+                    for right, y in enumerate(matrix):
+                        append(function, f'nan_matrix_{left}_{right}', [(x, y)] * count, control)
+            for control in BINARY_REMAINING_CONTROLS:
+                for label in ('product_round', 'negative_round', 'tiny', 'normal_boundary', 'denormal_infinity',
+                              'infinity_denormal', 'nan_denormal', 'denormal_nan'):
+                    append(function, 'control_' + label, [catalog[label]] * count, control)
+            for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+                for control in (0, NUMERICAL_AH):
+                    for label in ('one_one', 'product_round', 'snan_negative_left', 'tiny'):
+                        append(function, 'sticky_' + label, [catalog[label]] * count, control, sticky)
+            for mode in range(4):
+                for iteration in range(8):
+                    active = [(rng.getrandbits(op['lane'] * 8), rng.getrandbits(op['lane'] * 8)) for _ in range(count)]
+                    append(function, f'bounded_random_{iteration}', active, mode << NUMERICAL_ROUND_SHIFT)
+            if not op['scalar']:
+                for control in (0, NUMERICAL_AH, NUMERICAL_FZ16, NUMERICAL_AH | NUMERICAL_FZ):
+                    for label in ('one_two', 'snan_negative_left', 'tiny', 'denormal_infinity', 'negative_round', 'overflow'):
+                        for position in range(count):
+                            active = [catalog['one_one']] * count
+                            active[position] = catalog[label]
+                            append(function, f'mixed_{label}_{position}', active, control)
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_enable_readback_only', [catalog['snan_negative_left']] * count, control)
+        if op['canonical_id'] not in enabled:
+            enabled.add(op['canonical_id'])
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_ah_enable_readback_only', [catalog['one_one']] * count, control | NUMERICAL_AH)
+        if op['index'] not in (None, 0):
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP):
+                for label in ('one_two', 'product_round', 'snan_negative_right', 'denormal_infinity'):
+                    append(function, 'indexed_' + label, [catalog[label]] * count, control)
+        elif (op['d'], op['n'], op['m']) != ((0, 1, None) if op['input_kind'] == 'scalar_pair' else (0, 1, 2)):
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP, NUMERICAL_FZ16):
+                for label in ('one_two', 'product_round', 'snan_negative_right', 'tiny'):
+                    append(function, 'alias_' + label, [catalog[label]] * count, control)
+    if len(records) != BINARY_REMAINING_CASES:
+        raise AssertionError('Remaining binary corpus exceeded approved bounded scope')
+    return functions, records
+
+
+def binary_remaining_runtime_cases(records):
+    selected = {}
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        shape = binary_remaining_shape(op)
+        if initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK:
+            enabled = initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK
+            selected.setdefault(('enable', op['canonical_id'] if enabled == NUMERICAL_TRAP_ENABLE_MASK else enabled, bool(initial.fpcr & NUMERICAL_AH)), record)
+        elif label == 'directed_one_one' and initial.fpcr == 0:
+            selected.setdefault(('shape', shape), record)
+        elif label == 'directed_product_round':
+            selected.setdefault(('round', op['name'], op['lane'], initial.fpcr), record)
+        elif label in ('directed_zero_positive_infinity_positive', 'directed_snan_negative_left',
+                       'directed_denormal_infinity', 'directed_sum_tie_odd') and initial.fpcr == 0:
+            selected.setdefault(('semantic', op['name'], op['lane'], label), record)
+        elif label == 'indexed_one_two' and initial.fpcr == 0:
+            selected.setdefault(('index', shape, op['index']), record)
+        elif label == 'control_denormal_nan':
+            selected.setdefault(('control', op['lane'], initial.fpcr), record)
+        elif label == 'alias_one_two' and initial.fpcr == NUMERICAL_NEP:
+            selected.setdefault(('alias', op['name'], op['d'], op['n'], op['m']), record)
+        elif label == 'sticky_product_round' and initial.fpcr == 0:
+            selected.setdefault(('sticky', op['name']), record)
+        elif label == 'mixed_one_two_0' and op['name'] == 'faddp' and initial.fpcr == 0:
+            selected.setdefault(('pair_order', shape), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def binary_remaining_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (case_ids is not None and record['case'] not in case_ids or initial.fpcr or initial.fpsr
+                or op['d'] != 0 or op['n'] != 1 or op['m'] not in (None, 2) or op['index'] not in (None, 0)):
+            continue
+        selected.setdefault(binary_remaining_shape(op), record)
+    return list(selected.values())
+
+
+def validate_binary_remaining_original_effects(initial, original, operation):
+    if operation['scalar']:
+        source = initial.v[operation['n']] if operation['merge'] != 'none' and initial.fpcr & NUMERICAL_NEP else (0, 0)
+        merge = struct.pack('<2Q', *source)
+        if struct.pack('<2Q', *original.v[operation['d']])[operation['lane']:] != merge[operation['lane']:]:
+            raise AssertionError('Remaining binary scalar inactive bits violated merge/clear contract')
+
+
+def prepare_binary_remaining_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *binary_remaining_corpus(), BINARY_REMAINING_FOCUS)
+
+
+def load_binary_remaining_oracle(path=BINARY_REMAINING_ORACLE):
+    return load_full_frame_numerical_oracle(path, binary_remaining_functions(), BINARY_REMAINING_CASES, BINARY_REMAINING_FOCUS)
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
+    BINARY_REMAINING_FOCUS: {'loader': load_binary_remaining_oracle, 'runtime_cases': binary_remaining_runtime_cases,
+        'helpers': binary_remaining_helpers, 'forms': 23, 'actual_helpers': True,
+        'original_effects': validate_binary_remaining_original_effects, 'status_merge_source': 'n',
+        'limits': 'Enabled nonstreaming H/S/D scalar FNMUL, scalar/vector FABD/FMULX/FADDP and indexed FMUL/FMULX only. All retained enables precisely refuse, including AH1; QEMU RAZ/WI observations receive no successful equality credit. Full original states and supplementary oracle limitations remain explicit. No trap delivery, disabled-feature, Apple hardware, application, OS or performance claim.'},
     VECTOR_NUMERICAL_FOCUS: {'loader': load_vector_numerical_oracle, 'runtime_cases': vector_numerical_runtime_cases,
         'helpers': vector_numerical_helpers, 'forms': 8,
         'limits': 'Enabled nonstreaming H/S/D vector arithmetic only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'},
@@ -5506,7 +5773,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 chain_expected.x[control_register] = control
                 if reuse_reference:
                     chain_expected.fpcr = control
-                    if (unary or merge_source) and operation['scalar'] and control & NUMERICAL_NEP:
+                    if (unary or merge_source) and operation['scalar'] and operation['merge'] != 'none' and control & NUMERICAL_NEP:
                         bits = operation['lane'] * 8
                         active_mask = (1 << bits) - 1
                         merge_register = operation[merge_source] if merge_source else operation['d']
@@ -5585,7 +5852,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -5677,7 +5944,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -5898,7 +6165,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -6022,7 +6289,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -6037,6 +6304,7 @@ def main():
                         help='Pinned full-frame original integral rounding receipt')
     parser.add_argument('--sqrt-oracle', type=Path, default=SQRT_NUMERICAL_ORACLE,
                         help='Pinned full-frame original square-root receipt')
+    parser.add_argument('--binary-remaining-oracle', type=Path, default=BINARY_REMAINING_ORACLE)
     parser.add_argument('--estimate-oracle', type=Path, default=ESTIMATE_NUMERICAL_ORACLE)
     parser.add_argument('--refinement-oracle', type=Path, default=REFINEMENT_NUMERICAL_ORACLE)
     arguments = parser.parse_args()
@@ -6048,6 +6316,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == BINARY_REMAINING_FOCUS:
+        run_full_frame_numerical_cohort(cli, arguments.binary_remaining_oracle, arguments.focus)
         return
     if arguments.focus in (ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS):
         oracle_path = arguments.estimate_oracle if arguments.focus == ESTIMATE_NUMERICAL_FOCUS else arguments.refinement_oracle

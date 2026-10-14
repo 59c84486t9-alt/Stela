@@ -88,6 +88,9 @@ pub enum BinaryOperation {
     Subtract,
     Multiply,
     Divide,
+    NegatedMultiply,
+    AbsoluteDifference,
+    MultiplyExtended,
 }
 
 /// Fresh exception bits only; the caller owns sticky FPSR and destination commit.
@@ -282,8 +285,10 @@ fn nan(
 fn apply<F: Float>(operation: BinaryOperation, left: F, right: F, round: Round) -> StatusAnd<F> {
     match operation {
         BinaryOperation::Add => left.add_r(right, round),
-        BinaryOperation::Subtract => left.sub_r(right, round),
-        BinaryOperation::Multiply => left.mul_r(right, round),
+        BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference => left.sub_r(right, round),
+        BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended => left.mul_r(right, round),
         BinaryOperation::Divide => left.div_r(right, round),
     }
 }
@@ -317,9 +322,19 @@ fn tiny<F: Float>(
         scaled
     };
     let (left, right) = match operation {
-        BinaryOperation::Add | BinaryOperation::Subtract => (double(left), double(right)),
-        BinaryOperation::Multiply if left.abs() <= right.abs() => (double(left), right),
-        BinaryOperation::Multiply => (left, double(right)),
+        BinaryOperation::Add | BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference => {
+            (double(left), double(right))
+        }
+        BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended
+            if left.abs() <= right.abs() =>
+        {
+            (double(left), right)
+        }
+        BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended => (left, double(right)),
         BinaryOperation::Divide => (double(left), right),
     };
     let scaled = apply(operation, left, right, control.round());
@@ -418,11 +433,23 @@ pub fn evaluate(
         return Err(UnsupportedControl { enabled_exceptions });
     }
     let control = Control(fpcr);
+    // FPNeg/FPAbs act on the rounded result, including a selected NaN. Moving
+    // either transform onto an input would change directed rounding and NaNs.
+    let transform_result = |bits| match operation {
+        BinaryOperation::NegatedMultiply => negate(format, bits, control),
+        BinaryOperation::AbsoluteDifference if bits & format.sign_mask() != 0 => {
+            negate(format, bits, control)
+        }
+        _ => bits,
+    };
     let mut exceptions = 0;
     let left = unpack(format, left, control, &mut exceptions);
     let right = unpack(format, right, control, &mut exceptions);
     if let Some(bits) = nan(format, left, right, control, &mut exceptions) {
-        return Ok(Outcome { bits, exceptions });
+        return Ok(Outcome {
+            bits: transform_result(bits),
+            exceptions,
+        });
     }
     let zero = |negative| if negative { format.sign_mask() } else { 0 };
     let mut invalid = || {
@@ -430,8 +457,8 @@ pub fn evaluate(
         control.default_nan(format)
     };
     let bits = match operation {
-        BinaryOperation::Add | BinaryOperation::Subtract => {
-            let right_negative = right.negative ^ (operation == BinaryOperation::Subtract);
+        BinaryOperation::Add | BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference => {
+            let right_negative = right.negative ^ (operation != BinaryOperation::Add);
             if left.class == Class::Infinity
                 && right.class == Class::Infinity
                 && left.negative != right_negative
@@ -451,11 +478,18 @@ pub fn evaluate(
                 None
             }
         }
-        BinaryOperation::Multiply => {
+        BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended => {
             if left.class == Class::Infinity && right.class == Class::Zero
                 || right.class == Class::Infinity && left.class == Class::Zero
             {
-                Some(invalid())
+                if operation == BinaryOperation::MultiplyExtended {
+                    let two = u64::from(format.exponent_bias() + 1) << format.fraction_bits();
+                    Some(two | zero(left.negative ^ right.negative))
+                } else {
+                    Some(invalid())
+                }
             } else if left.class == Class::Infinity || right.class == Class::Infinity {
                 Some(format.infinity(left.negative ^ right.negative))
             } else if left.class == Class::Zero || right.class == Class::Zero {
@@ -503,7 +537,7 @@ pub fn evaluate(
         exceptions |= INPUT_DENORMAL;
     }
     Ok(Outcome {
-        bits: result.bits,
+        bits: transform_result(result.bits),
         exceptions: exceptions | result.exceptions,
     })
 }
@@ -523,6 +557,155 @@ mod tests {
     }
 
     #[test]
+    fn negated_multiply_changes_the_rounded_result_under_every_direction() {
+        for format in [Format::Half, Format::Single, Format::Double] {
+            let one = u64::from(format.exponent_bias()) << format.fraction_bits();
+            for ah in [0, FPCR_AH] {
+                for round in [
+                    ROUND_NEAREST_EVEN,
+                    ROUND_POSITIVE,
+                    ROUND_NEGATIVE,
+                    ROUND_ZERO,
+                ] {
+                    assert_eq!(
+                        result(
+                            format,
+                            BinaryOperation::NegatedMultiply,
+                            ah | (round << FPCR_ROUNDING_SHIFT),
+                            one + 1,
+                            one + 1,
+                        ),
+                        Outcome {
+                            bits: format.sign_mask()
+                                | (one + if round == ROUND_POSITIVE { 3 } else { 2 }),
+                            exceptions: INEXACT,
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_difference_rounds_the_negative_difference_before_clearing_sign() {
+        for format in [Format::Half, Format::Single, Format::Double] {
+            let one = u64::from(format.exponent_bias()) << format.fraction_bits();
+            let minimum_normal = 1 << format.fraction_bits();
+            for ah in [0, FPCR_AH] {
+                for round in [
+                    ROUND_NEAREST_EVEN,
+                    ROUND_POSITIVE,
+                    ROUND_NEGATIVE,
+                    ROUND_ZERO,
+                ] {
+                    assert_eq!(
+                        result(
+                            format,
+                            BinaryOperation::AbsoluteDifference,
+                            ah | (round << FPCR_ROUNDING_SHIFT),
+                            minimum_normal,
+                            one,
+                        ),
+                        Outcome {
+                            bits: one - u64::from(matches!(round, ROUND_POSITIVE | ROUND_ZERO)),
+                            exceptions: INEXACT,
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_arithmetic_sign_transforms_keep_ah_nan_signs_and_fresh_invalid() {
+        for format in [Format::Half, Format::Single, Format::Double] {
+            let one = u64::from(format.exponent_bias()) << format.fraction_bits();
+            let signaling = format.sign_mask() | format.exponent_mask() | 1;
+            for operation in [
+                BinaryOperation::NegatedMultiply,
+                BinaryOperation::AbsoluteDifference,
+            ] {
+                for ah in [0, FPCR_AH] {
+                    assert_eq!(
+                        result(format, operation, ah, signaling, one),
+                        Outcome {
+                            bits: (signaling | format.quiet_bit())
+                                ^ if ah == 0 { format.sign_mask() } else { 0 },
+                            exceptions: INVALID,
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_multiply_zero_times_infinity_returns_signed_two_without_invalid() {
+        for format in [Format::Half, Format::Single, Format::Double] {
+            let two = u64::from(format.exponent_bias() + 1) << format.fraction_bits();
+            for ah in [0, FPCR_AH] {
+                for zero_negative in [false, true] {
+                    for infinity_negative in [false, true] {
+                        let zero = if zero_negative { format.sign_mask() } else { 0 };
+                        let infinity = format.infinity(infinity_negative);
+                        for (left, right) in [(zero, infinity), (infinity, zero)] {
+                            assert_eq!(
+                                result(format, BinaryOperation::MultiplyExtended, ah, left, right),
+                                Outcome {
+                                    bits: two
+                                        | if zero_negative ^ infinity_negative {
+                                            format.sign_mask()
+                                        } else {
+                                            0
+                                        },
+                                    exceptions: 0,
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_multiply_flush_and_nan_shortcuts_keep_denormal_status_order() {
+        for format in [Format::Single, Format::Double] {
+            let two = u64::from(format.exponent_bias() + 1) << format.fraction_bits();
+            let infinity = format.infinity(false);
+            for (control, expected, exceptions) in [
+                (0, infinity, 0),
+                (FPCR_FZ, two, INPUT_DENORMAL),
+                (FPCR_FIZ, two, 0),
+                (FPCR_AH, infinity, INPUT_DENORMAL),
+                (FPCR_AH | FPCR_FIZ, two, 0),
+            ] {
+                assert_eq!(
+                    result(
+                        format,
+                        BinaryOperation::MultiplyExtended,
+                        control,
+                        1,
+                        infinity
+                    ),
+                    Outcome {
+                        bits: expected,
+                        exceptions
+                    }
+                );
+            }
+            let quiet = infinity | format.quiet_bit() | 1;
+            assert_eq!(
+                result(format, BinaryOperation::MultiplyExtended, FPCR_AH, 1, quiet),
+                Outcome {
+                    bits: quiet,
+                    exceptions: 0
+                }
+            );
+        }
+    }
+
+    #[test]
     fn enabled_exceptions_decline_before_any_numerical_effect() {
         for exception in [
             INVALID,
@@ -533,18 +716,27 @@ mod tests {
             INPUT_DENORMAL,
             EXCEPTIONS,
         ] {
-            assert_eq!(
-                evaluate(
-                    Format::Double,
-                    BinaryOperation::Divide,
-                    exception << FPCR_EXCEPTION_ENABLE_SHIFT,
-                    0,
-                    0
-                ),
-                Err(UnsupportedControl {
-                    enabled_exceptions: exception
-                })
-            );
+            for operation in [
+                BinaryOperation::Divide,
+                BinaryOperation::NegatedMultiply,
+                BinaryOperation::AbsoluteDifference,
+                BinaryOperation::MultiplyExtended,
+            ] {
+                for ah in [0, FPCR_AH] {
+                    assert_eq!(
+                        evaluate(
+                            Format::Double,
+                            operation,
+                            ah | (exception << FPCR_EXCEPTION_ENABLE_SHIFT),
+                            0,
+                            0
+                        ),
+                        Err(UnsupportedControl {
+                            enabled_exceptions: exception
+                        })
+                    );
+                }
+            }
         }
     }
 

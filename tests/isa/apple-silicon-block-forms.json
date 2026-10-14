@@ -79,6 +79,9 @@
     "crates/stela-compiler/src/aarch64/simd/refinement.rs",
     "crates/stela-compiler/src/aarch64/simd/sqrt.rs",
     "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+    "crates/stela-compiler/src/x86_64/simd/arithmetic/half/product.rs",
+    "crates/stela-compiler/src/x86_64/simd/half.rs",
     "crates/stela-compiler/src/x86_64/simd/comparison.rs",
     "crates/stela-compiler/src/x86_64/simd/estimate.rs",
     "crates/stela-compiler/src/x86_64/simd/minmax.rs",
@@ -109,7 +112,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v11",
+  "registry_version": "apple-silicon-block-forms-v12",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -542,6 +545,56 @@
         "native_mxcsr_preservation_comparisons": 1280
       },
       "review": "x86_64-baseline: 3,762 direct original inline equalities, 0 requested-control policy and 0 declared-profile model inline checks, 8,902 unchanged helpers, 56 precise refusals; 406 runtime completions include 14 policy and 0 model checks. x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c: 4,342 direct original inline equalities, 0 requested-control policy and 0 declared-profile model inline checks, 8,322 unchanged helpers, 56 precise refusals; 406 runtime completions include 14 policy and 0 model checks. Policy/model checks never receive direct original-equality credit. Actual emitted binaries retain separate feature, source/map and preservation proof; original full-frame captures, native boundaries and successful runtime completion remain distinct."
+    },
+    "binary_remaining_numerical": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-binary_remaining_numerical-differential-report.json",
+      "kind": "simd_binary_remaining_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/floating/comparison.rs",
+        "crates/stela-runtime/src/floating/minmax.rs",
+        "crates/stela-runtime/src/floating/rounding.rs",
+        "crates/stela-runtime/src/floating/sqrt.rs",
+        "crates/stela-runtime/src/floating/estimate.rs",
+        "crates/stela-runtime/src/floating/refinement.rs",
+        "crates/stela-runtime/src/floating/arithmetic.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 23,
+        "original_full_frame_captures": 33518,
+        "raw_native_state_and_exit_comparisons": 67036,
+        "raw_original_complete_state_comparisons": 18192,
+        "raw_inline_complete_state_comparisons": 18192,
+        "raw_helper_unchanged_state_comparisons": 47920,
+        "raw_unsupported_unchanged_state_comparisons": 924,
+        "runtime_complete_state_comparisons": 1126,
+        "runtime_typed_unsupported_state_checks": 116,
+        "runtime_budget_resume_checks": 86,
+        "runtime_disk_cache_checks": 86,
+        "runtime_memory_cache_loop_checks": 86,
+        "runtime_control_status_chain_checks": 172,
+        "native_mxcsr_preservation_comparisons": 3360
+      },
+      "review": "Both target profiles retain 33,518 raw observations each: 9,096 direct original inline equalities, 23,960 unchanged helper exits and 462 precise refusals. Each profile completes 563 Rust state comparisons and 58 typed refusals. This family has zero requested-control policy or profile-model success classes; all retained enables refuse, including AH=1. Final mapping proof binds 1,272 family artifacts, 9,717 prior-byte/map/extent comparisons and 288 measured block/suffix references. Original full frames, unchanged native boundaries and successful runtime completion remain distinct."
     }
   },
   "forms": [
@@ -26948,6 +27001,2620 @@
       ],
       "review": "Exact June canonical fields and source semantics are reviewed. Current direct original completion stays separate from retained-control policy success, RPRES profile-model scope, unchanged helper/refusal exits and actual runtime completion; final emitted-artifact and preservation audit gates ledger credit.",
       "scope": "All allocated H/S/D scalar/vector refinements compute exactly 2-N*M or (3-N*M)/2 with one final target rounding, including halving before that rounding. Architectural FPNeg precedes effective-control changes and NaN selection; zero-times-infinity returns positive 2 or 1.5 without invalid status, other infinite products use the negated product sign, and exact zero follows effective rounding. Scalar NEP merges original Vn. AH=1 applies local effective FIZ/FZ and suppresses every fresh exception, accepting retained numerical enables; FRECPE and refinements additionally force nearest-even. AH=0 retained numerical enables precisely refuse before effects. H retains independent FZ16 and ignores AHP; no helper adds post-operation denormal status. Architectural FPCR is unchanged. The enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile preserves the architectural suppression contract independently of retained controls. V0\u2013V31 are ordinary data and aliases are legal. Vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper bits. Sources and old merge state are captured before transactional destination/sticky-status commit, preserving NZCV, unrelated registers and RAM. Native S/D use independently checked FMA with usable AVX OS state or guarded exact-product SSE2; baseline Single may use a cold exact-Double-product path only when its affine result is exact before narrowing. Native H uses an exact-Double loop and integer rounding with precise zero/tiny helper boundaries. Conditional interior helpers validate immutable source at the original instruction; caller MXCSR is restored before every helper exit or guest commit. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, complete Apple hardware specification, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FABD_asimdsame_only",
+      "mnemonic": "FABD",
+      "source_file": "fabd_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2ea0d400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fabd_advsimd.xml",
+      "source_sha256": "1159db6edf4d345e5535be0be26a86c1df608f6f612a559ce6dd4d8e6de690b9",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FABD",
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ea2d420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2ebfd7ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ea2d420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ebfd7ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ee2d420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6effd7ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Subtract is rounded under guest controls before AH-sensitive FPAbs, including every selected/defaulted NaN result. AH=0 clears the result NaN sign and AH=1 preserves it; finite/zero result signs are cleared after arithmetic. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FABD_asimdsamefp16_only",
+      "mnemonic": "FABD",
+      "source_file": "fabd_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ec01400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fabd_advsimd.xml",
+      "source_sha256": "1159db6edf4d345e5535be0be26a86c1df608f6f612a559ce6dd4d8e6de690b9",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FABD",
+        "advsimd-datatype": "simd-half",
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ec21420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2edf17ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec21420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edf17ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Subtract is rounded under guest controls before AH-sensitive FPAbs, including every selected/defaulted NaN result. AH=0 clears the result NaN sign and AH=1 preserves it; finite/zero result signs are cleared after arithmetic. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal vector H Add/Subtract uses the compact exact-Double loop; an independently checked F16C target may widen lanes through shared Half helpers, requiring usable AVX OS state. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FABD_asisdsame_only",
+      "mnemonic": "FABD",
+      "source_file": "fabd_advsimd.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x7ea0d400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fabd_advsimd.xml",
+      "source_sha256": "1159db6edf4d345e5535be0be26a86c1df608f6f612a559ce6dd4d8e6de690b9",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FABD",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ea2d420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7ebfd7ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7ee2d420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7effd7ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Subtract is rounded under guest controls before AH-sensitive FPAbs, including every selected/defaulted NaN result. AH=0 clears the result NaN sign and AH=1 preserves it; finite/zero result signs are cleared after arithmetic. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FABD_asisdsamefp16_only",
+      "mnemonic": "FABD",
+      "source_file": "fabd_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x7ec01400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fabd_advsimd.xml",
+      "source_sha256": "1159db6edf4d345e5535be0be26a86c1df608f6f612a559ce6dd4d8e6de690b9",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FABD",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-type": "sisd",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7ec21420",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7edf17ff",
+          "expected_mnemonics": [
+            "fabd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Subtract is rounded under guest controls before AH-sensitive FPAbs, including every selected/defaulted NaN result. AH=0 clears the result NaN sign and AH=1 preserves it; finite/zero result signs are cleared after arithmetic. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FADDP_asimdsame_only",
+      "mnemonic": "FADDP",
+      "source_file": "faddp_advsimd_vec.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2e20d400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/faddp_advsimd_vec.xml",
+      "source_sha256": "269c6fe4e806c29b2dc8be0ae78924c8e837720bc487174debcd4398d6f540eb",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADDP",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22d420",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e3fd7ff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e22d420",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e3fd7ff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e62d420",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e7fd7ff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Pairwise Add stages adjacent Vn pairs followed by adjacent Vm pairs; scalar forms evaluate exactly the first source pair and always clear inactive destination bits, including scalar Half reading only two H lanes. Scalar pairwise ignores NEP; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FADDP_asimdsamefp16_only",
+      "mnemonic": "FADDP",
+      "source_file": "faddp_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e401400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/faddp_advsimd_vec.xml",
+      "source_sha256": "269c6fe4e806c29b2dc8be0ae78924c8e837720bc487174debcd4398d6f540eb",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADDP",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e421420",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5f17ff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e421420",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5f17ff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Pairwise Add stages adjacent Vn pairs followed by adjacent Vm pairs; scalar forms evaluate exactly the first source pair and always clear inactive destination bits, including scalar Half reading only two H lanes. Scalar pairwise ignores NEP; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal vector H Add/Subtract uses the compact exact-Double loop; an independently checked F16C target may widen lanes through shared Half helpers, requiring usable AVX OS state. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FADDP_asisdpair_only_H",
+      "mnemonic": "FADDP",
+      "source_file": "faddp_advsimd_pair.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x5e30d800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/faddp_advsimd_pair.xml",
+      "source_sha256": "0b1d0c374f8ae163193d8ffef87d0324238a8237a260f535163506b0f2a27074",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADDP",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e30d820",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5e30dbff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Pairwise Add stages adjacent Vn pairs followed by adjacent Vm pairs; scalar forms evaluate exactly the first source pair and always clear inactive destination bits, including scalar Half reading only two H lanes. Scalar pairwise ignores NEP; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FADDP_asisdpair_only_SD",
+      "mnemonic": "FADDP",
+      "source_file": "faddp_advsimd_pair.xml",
+      "encoding_mask": "0xffbffc00",
+      "encoding_value": "0x7e30d800",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/faddp_advsimd_pair.xml",
+      "source_sha256": "0b1d0c374f8ae163193d8ffef87d0324238a8237a260f535163506b0f2a27074",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADDP",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7e30d820",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7e30dbff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7e70d820",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7e70dbff",
+          "expected_mnemonics": [
+            "faddp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Pairwise Add stages adjacent Vn pairs followed by adjacent Vm pairs; scalar forms evaluate exactly the first source pair and always clear inactive destination bits, including scalar Half reading only two H lanes. Scalar pairwise ignores NEP; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asimdelem_RH_H",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x2f009000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_elt.xml",
+      "source_sha256": "cacc1627655c12aa617114205aa54efe08cc95b9d6460498153bbc748a106ffa",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "half",
+        "reguse-datatype": "2reg-element-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half/product.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f029020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f0f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f129020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f1f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f229020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f2f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f329020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f3f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f029820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f0f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f129820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f1f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f229820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f2f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f329820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f3f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f029020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f0f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f129020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f1f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f229020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f2f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f329020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f3f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f029820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f0f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f129820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f1f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f229820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f2f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f329820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f3f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal vector H4/H8 products use packed SSE2 exact Single multiplication with integer Half rounding and guarded result/status acceptance. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asimdelem_R_SD",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_elt.xml",
+      "encoding_mask": "0xbf80f400",
+      "encoding_value": "0x2f809000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_elt.xml",
+      "source_sha256": "cacc1627655c12aa617114205aa54efe08cc95b9d6460498153bbc748a106ffa",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-element-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f829020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa29020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbf93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f829820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa29820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbf9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f829020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa29020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbf93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f829820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa29820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbf9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fc29020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fdf93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fc29820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fdf9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asimdsame_only",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_vec.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0e20dc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_vec.xml",
+      "source_sha256": "bba73bee7c779eba9aeae195eb6f295fb996f964dc7a40281cf95de595f2ed9c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "simd-single-and-double",
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22dc20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e3fdfff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e22dc20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e3fdfff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e62dc20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e7fdfff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asimdsamefp16_only",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e401c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_vec.xml",
+      "source_sha256": "bba73bee7c779eba9aeae195eb6f295fb996f964dc7a40281cf95de595f2ed9c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "simd-half",
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half/product.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e421c20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e5f1fff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e421c20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e5f1fff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal vector H4/H8 products use packed SSE2 exact Single multiplication with integer Half rounding and guarded result/status acceptance. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asisdelem_RH_H",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_elt.xml",
+      "encoding_mask": "0xffc0f400",
+      "encoding_value": "0x7f009000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_elt.xml",
+      "source_sha256": "cacc1627655c12aa617114205aa54efe08cc95b9d6460498153bbc748a106ffa",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "half",
+        "reguse-datatype": "2reg-scalar-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f029020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f0f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f129020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f1f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f229020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f2f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f329020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f3f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f029820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f0f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f129820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f1f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f229820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f2f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f329820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f3f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asisdelem_R_SD",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_elt.xml",
+      "encoding_mask": "0xff80f400",
+      "encoding_value": "0x7f809000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_elt.xml",
+      "source_sha256": "cacc1627655c12aa617114205aa54efe08cc95b9d6460498153bbc748a106ffa",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-scalar-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x7f829020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f9f93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fa29020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fbf93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f829820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7f9f9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fa29820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fbf9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fc29020",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fdf93ff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fc29820",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x7fdf9bff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asisdsame_only",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_vec.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x5e20dc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_vec.xml",
+      "source_sha256": "bba73bee7c779eba9aeae195eb6f295fb996f964dc7a40281cf95de595f2ed9c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e22dc20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5e3fdfff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5e62dc20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5e7fdfff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMULX_asisdsamefp16_only",
+      "mnemonic": "FMULX",
+      "source_file": "fmulx_advsimd_vec.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x5e401c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmulx_advsimd_vec.xml",
+      "source_sha256": "bba73bee7c779eba9aeae195eb6f295fb996f964dc7a40281cf95de595f2ed9c",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMULX",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-type": "sisd",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5e421c20",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5e5f1fff",
+          "expected_mnemonics": [
+            "fmulx"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Extended Multiply preserves ordinary multiplication rounding/NaN priority except that effective zero-times-infinity returns signed 2.0 without IOC; the sign is the XOR of input signs. Input flushing occurs first, and post-arithmetic denormal status follows non-NaN shortcuts. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMUL_asimdelem_RH_H",
+      "mnemonic": "FMUL",
+      "source_file": "fmul_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f009000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_elt.xml",
+      "source_sha256": "75103c682ecd8f83e3955e95a6e2a24d31fc3b0c6bb75c864f729baa92d28a9a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "half",
+        "reguse-datatype": "2reg-element-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half/product.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f029020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f0f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f129020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f1f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f229020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f2f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f329020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f3f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f029820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f0f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f129820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f1f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f229820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f2f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f329820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f3f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f029020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f0f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f129020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f1f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f229020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f2f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f329020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f3f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f029820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f0f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f129820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f1f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f229820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f2f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f329820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f3f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Indexed Multiply uses the selected original right-source lane in every active result lane with the ordinary multiplication rounding, NaN and status semantics. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal vector H4/H8 products use packed SSE2 exact Single multiplication with integer Half rounding and guarded result/status acceptance. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMUL_asimdelem_R_SD",
+      "mnemonic": "FMUL",
+      "source_file": "fmul_advsimd_elt.xml",
+      "encoding_mask": "0xbf80f400",
+      "encoding_value": "0x0f809000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_elt.xml",
+      "source_sha256": "75103c682ecd8f83e3955e95a6e2a24d31fc3b0c6bb75c864f729baa92d28a9a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-element-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f829020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa29020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f829820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa29820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f829020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa29020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f829820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa29820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fc29020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdf93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fc29820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdf9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Indexed Multiply uses the selected original right-source lane in every active result lane with the ordinary multiplication rounding, NaN and status semantics. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMUL_asisdelem_RH_H",
+      "mnemonic": "FMUL",
+      "source_file": "fmul_advsimd_elt.xml",
+      "encoding_mask": "0xffc0f400",
+      "encoding_value": "0x5f009000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_elt.xml",
+      "source_sha256": "75103c682ecd8f83e3955e95a6e2a24d31fc3b0c6bb75c864f729baa92d28a9a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "half",
+        "reguse-datatype": "2reg-scalar-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f029020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f0f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f129020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f1f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f229020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f2f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f329020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f3f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f029820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f0f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f129820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f1f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f229820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f2f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f329820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f3f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Indexed Multiply uses the selected original right-source lane in every active result lane with the ordinary multiplication rounding, NaN and status semantics. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMUL_asisdelem_R_SD",
+      "mnemonic": "FMUL",
+      "source_file": "fmul_advsimd_elt.xml",
+      "encoding_mask": "0xff80f400",
+      "encoding_value": "0x5f809000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_elt.xml",
+      "source_sha256": "75103c682ecd8f83e3955e95a6e2a24d31fc3b0c6bb75c864f729baa92d28a9a",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-scalar-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f829020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f9f93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fa29020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fbf93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f829820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5f9f9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fa29820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fbf9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fc29020",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fdf93ff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fc29820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fdf9bff",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Indexed Multiply uses the selected original right-source lane in every active result lane with the ordinary multiplication rounding, NaN and status semantics. All encoded lane indices are covered. Indexed H selects V0\u2013V15 using H:L:M; S/D select V0\u2013V31 using H:L or H, with Double L=0. Q=0 may select the upper half of the full indexed source. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FNMUL_D_floatdp2",
+      "mnemonic": "FNMUL",
+      "source_file": "fnmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e608800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmul_float.xml",
+      "source_sha256": "07fc54eb12b07a3fefaf82e32717d6a4a313c7f529bad03c0c0784a6f28ccb9c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMUL",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e628820",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e7f8bff",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Multiply is rounded under guest controls before the AH-sensitive result FPNeg, including every selected/defaulted NaN result. AH=0 toggles the result NaN sign and AH=1 preserves it; directed rounding is not emulated by negating an input. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FNMUL_H_floatdp2",
+      "mnemonic": "FNMUL",
+      "source_file": "fnmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1ee08800",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmul_float.xml",
+      "source_sha256": "07fc54eb12b07a3fefaf82e32717d6a4a313c7f529bad03c0c0784a6f28ccb9c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMUL",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1ee28820",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1eff8bff",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Multiply is rounded under guest controls before the AH-sensitive result FPNeg, including every selected/defaulted NaN result. AH=0 toggles the result NaN sign and AH=1 preserves it; directed rounding is not emulated by negating an input. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal scalar H uses the compact exact-Double loop with integer Half rounding; it does not use the packed product child. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FNMUL_S_floatdp2",
+      "mnemonic": "FNMUL",
+      "source_file": "fnmul_float.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x1e208800",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "category": "fp_simd",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmul_float.xml",
+      "source_sha256": "07fc54eb12b07a3fefaf82e32717d6a4a313c7f529bad03c0c0784a6f28ccb9c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMUL",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1e228820",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e3f8bff",
+          "expected_mnemonics": [
+            "fnmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "binary_remaining_numerical"
+      ],
+      "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
+      "scope": "Multiply is rounded under guest controls before the AH-sensitive result FPNeg, including every selected/defaulted NaN result. AH=0 toggles the result NaN sign and AH=1 preserves it; directed rounding is not emulated by negating an input. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
       "status": "implemented"
     }
   ]

@@ -1299,9 +1299,10 @@ mod numerical_validation_tests {
         let stela_compiler::aarch64::FloatingPointOperation::Binary(operand) = operand else {
             panic!("binary instruction decoded as another numerical family");
         };
+        assert_eq!(operand.destination, 0);
         assert_eq!(
-            (operand.destination, operand.left, operand.right),
-            (0, 1, 2)
+            operand.inputs,
+            stela_compiler::aarch64::simd::arithmetic::Inputs::Elementwise { left: 1, right: 2 }
         );
         assert_eq!(continuation, GuestAddress(BASE + 8));
         assert!(

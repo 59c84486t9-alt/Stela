@@ -3,11 +3,12 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,
     branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment, exponent_range,
-    prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
-    reject_other_status, reject_product_status, resolve, restore_environment,
-    restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
+    prepare_vector_input_range, prepare_vector_result_range, read_numerical_right,
+    read_numerical_vector, reject_other_status, reject_product_status, resolve,
+    restore_environment, restore_environment_with_product, save_product_status, test_control,
+    vector_exponent_range,
 };
-use super::{Host, commit, packed, read_vector};
+use super::{Host, commit, packed};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -28,7 +29,6 @@ const SINGLE_PREFIX: u8 = 0xf3;
 const DOUBLE_PREFIX: u8 = 0xf2;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
-const SHUFFLE_LOW_DWORD: u8 = 0;
 
 fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     let opcode = match operand.operation {
@@ -41,24 +41,13 @@ fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 }
 
 fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
-    if let Some(lane) = operand.right_lane {
-        read_vector(code, operand.right, RIGHT);
-        ShiftOpcode::RightBytes.emit(
-            code,
-            RIGHT,
-            (lane as u32 * operand.format.bits() / u8::BITS) as u8,
-        );
-        if operand.shape != Shape::Scalar {
-            if operand.format == Format::Single {
-                packed(code, Host::ShuffleDword, RIGHT, RIGHT);
-                code.push(SHUFFLE_LOW_DWORD);
-            } else {
-                packed(code, Host::UnpackLowQword, RIGHT, RIGHT);
-            }
-        }
-    } else {
-        read_numerical_vector(code, operand.shape, operand.right, RIGHT);
-    }
+    read_numerical_right(
+        code,
+        operand.format,
+        operand.shape,
+        operand.right,
+        operand.right_lane,
+    );
 }
 
 fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {

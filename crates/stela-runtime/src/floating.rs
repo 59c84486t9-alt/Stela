@@ -1,4 +1,5 @@
 //! Transactional scalar/vector numerical completion over saved guest state.
+mod arithmetic;
 mod comparison;
 mod estimate;
 mod minmax;
@@ -11,7 +12,7 @@ use stela_compiler::{
     aarch64::{
         FloatingPointOperation, Register,
         floating::{
-            FPCR_NEP, UnsupportedControl, evaluate, fused,
+            FPCR_NEP, UnsupportedControl, fused,
             integer::{self, IntegerRounding, IntegerWidth},
             precision,
         },
@@ -48,15 +49,7 @@ pub(crate) fn complete(
 ) -> Result<(), UnsupportedControl> {
     let (destination, merge_register, left_register, right_register, right_lane, format, shape) =
         match operation {
-            FloatingPointOperation::Binary(operand) => (
-                operand.destination,
-                operand.left,
-                operand.left,
-                operand.right,
-                None,
-                operand.format,
-                operand.shape,
-            ),
+            FloatingPointOperation::Binary(operand) => return arithmetic::complete(state, operand),
             FloatingPointOperation::Fused(operand) => (
                 operand.destination,
                 operand.addend,
@@ -95,9 +88,6 @@ pub(crate) fn complete(
         let left = read_lane(&left, format.bits(), lane);
         let right = read_lane(&right, format.bits(), right_lane.map_or(lane, u32::from));
         let outcome = match operation {
-            FloatingPointOperation::Binary(operand) => {
-                evaluate(format, operand.operation, state.fpcr, left, right)?
-            }
             FloatingPointOperation::Fused(operand) => fused::evaluate(
                 format,
                 operand.operation,
@@ -106,7 +96,8 @@ pub(crate) fn complete(
                 left,
                 right,
             )?,
-            FloatingPointOperation::Conversion(_)
+            FloatingPointOperation::Binary(_)
+            | FloatingPointOperation::Conversion(_)
             | FloatingPointOperation::Comparison(_)
             | FloatingPointOperation::MinMax(_)
             | FloatingPointOperation::Rounding(_)
@@ -317,7 +308,10 @@ mod tests {
         UNDERFLOW, fused::FusedOperation,
     };
     use stela_compiler::aarch64::floating::{integer::IntegerFormat, precision::PrecisionRounding};
-    use stela_compiler::aarch64::simd::{arithmetic::Operand, fused::Operand as FusedOperand};
+    use stela_compiler::aarch64::simd::{
+        arithmetic::{Inputs, Operand},
+        fused::Operand as FusedOperand,
+    };
 
     const VECTOR_REGISTER_COUNT: usize = 32;
     const LAST_VECTOR_REGISTER: u8 = (VECTOR_REGISTER_COUNT - 1) as u8;
@@ -425,8 +419,7 @@ mod tests {
                         format,
                         shape: Shape::Scalar,
                         destination,
-                        left,
-                        right,
+                        inputs: Inputs::Elementwise { left, right },
                     };
                     complete(&mut state, &operand.into()).unwrap();
                     assert_eq!(state, expected, "{operand:?}, NEP={nep}");
@@ -454,8 +447,7 @@ mod tests {
                     format: Format::Single,
                     shape: Shape::Scalar,
                     destination: LAST_VECTOR_REGISTER,
-                    left: 1,
-                    right: 2,
+                    inputs: Inputs::Elementwise { left: 1, right: 2 },
                 }
                 .into(),
             )
@@ -481,8 +473,7 @@ mod tests {
                     format,
                     shape: Shape::Scalar,
                     destination: LAST_VECTOR_REGISTER,
-                    left: 1,
-                    right: 2,
+                    inputs: Inputs::Elementwise { left: 1, right: 2 },
                 };
                 complete(&mut state, &operand.into()).unwrap();
                 assert_eq!(state, expected, "{operand:?}, exception={exception:#x}");
@@ -512,8 +503,10 @@ mod tests {
                         format,
                         shape: Shape::Scalar,
                         destination: LAST_VECTOR_REGISTER,
-                        left: LAST_VECTOR_REGISTER,
-                        right: LAST_VECTOR_REGISTER,
+                        inputs: Inputs::Elementwise {
+                            left: LAST_VECTOR_REGISTER,
+                            right: LAST_VECTOR_REGISTER,
+                        },
                     };
                     assert_eq!(
                         complete(&mut state, &operand.into()),
@@ -570,8 +563,7 @@ mod tests {
                         format,
                         shape,
                         destination,
-                        left,
-                        right,
+                        inputs: Inputs::Elementwise { left, right },
                     };
                     complete(&mut state, &operand.into()).unwrap();
                     assert_eq!(state, expected, "{operand:?}, NEP={nep}");
@@ -605,8 +597,7 @@ mod tests {
                     format: Format::Single,
                     shape: Shape::Vector128,
                     destination,
-                    left: 1,
-                    right: 2,
+                    inputs: Inputs::Elementwise { left: 1, right: 2 },
                 }
                 .into(),
             )
@@ -636,8 +627,7 @@ mod tests {
                         format,
                         shape,
                         destination,
-                        left,
-                        right,
+                        inputs: Inputs::Elementwise { left, right },
                     };
                     assert_eq!(
                         complete(&mut state, &operand.into()),

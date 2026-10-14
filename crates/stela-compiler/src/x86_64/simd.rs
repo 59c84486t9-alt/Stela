@@ -9,6 +9,7 @@ mod comparison;
 mod estimate;
 mod floating;
 mod fused;
+mod half;
 mod halving;
 mod immediates;
 mod integer_conversion;
@@ -156,7 +157,7 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
         simd::conversion::Operand,
     };
     match operation {
-        FloatingPointOperation::Binary(operand) => operand.format == Format::Half,
+        FloatingPointOperation::Binary(operand) => arithmetic::always_exits(operand),
         FloatingPointOperation::Fused(operand) => operand.format == Format::Half,
         FloatingPointOperation::Conversion(operand) => match operand {
             Operand::Precision(operand) => operand.mode.destination_format() == Format::Half,
@@ -189,7 +190,7 @@ pub(super) fn emit_numerical(
             refinement::emit(code, operand, pc, target);
         }
         crate::aarch64::FloatingPointOperation::Binary(operand) => {
-            arithmetic::emit(code, operand, pc)
+            arithmetic::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::Fused(operand) => {
             fused::emit(code, operand, pc, target)
