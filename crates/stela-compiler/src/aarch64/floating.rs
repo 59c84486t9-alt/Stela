@@ -1,7 +1,9 @@
 //! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
 //! FP/FP16/AFP enabled, non-streaming; enabled numerical traps are explicit errors.
+pub mod comparison;
 pub mod fused;
 pub mod integer;
+pub mod minmax;
 pub mod precision;
 
 use rustc_apfloat::{
@@ -96,6 +98,14 @@ pub struct UnsupportedControl {
 #[derive(Clone, Copy)]
 struct Control(u32);
 impl Control {
+    fn checked(fpcr: u32) -> Result<Self, UnsupportedControl> {
+        let enabled_exceptions = (fpcr >> FPCR_EXCEPTION_ENABLE_SHIFT) & EXCEPTIONS;
+        if enabled_exceptions != 0 {
+            Err(UnsupportedControl { enabled_exceptions })
+        } else {
+            Ok(Self(fpcr))
+        }
+    }
     fn alternative(self) -> bool {
         self.0 & FPCR_AH != 0
     }
@@ -182,6 +192,41 @@ fn unpack(format: Format, bits: u64, control: Control, exceptions: &mut u32) -> 
         bits,
         class,
         negative,
+    }
+}
+
+/// Compare already unpacked, non-NaN values without numerical host effects.
+fn compare_operands(left: Operand, right: Operand) -> std::cmp::Ordering {
+    debug_assert!(!left.class.nan() && !right.class.nan());
+    if left.class == Class::Zero && right.class == Class::Zero {
+        std::cmp::Ordering::Equal
+    } else if left.negative != right.negative {
+        if left.negative {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    } else if left.negative {
+        right.bits.cmp(&left.bits)
+    } else {
+        left.bits.cmp(&right.bits)
+    }
+}
+
+/// Post-operation IDC is separate from unpack-time flushing and is skipped by
+/// NaN/other early branches according to each instruction's architectural helper.
+fn process_denormals(
+    format: Format,
+    control: Control,
+    left: Operand,
+    right: Operand,
+    exceptions: &mut u32,
+) {
+    if format != Format::Half
+        && control.alternative()
+        && (left.class == Class::Denormal || right.class == Class::Denormal)
+    {
+        *exceptions |= INPUT_DENORMAL;
     }
 }
 

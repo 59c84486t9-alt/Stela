@@ -3,12 +3,14 @@
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
 pub mod arithmetic;
+pub mod comparison;
 pub mod conversion;
 pub mod floating;
 pub mod fused;
 pub mod halving;
 pub mod immediates;
 pub mod memory;
+pub mod minmax;
 pub mod products;
 pub mod rearrange;
 pub mod reductions;

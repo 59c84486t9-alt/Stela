@@ -79,6 +79,8 @@ pub enum FloatingPointOperation {
     Binary(simd::arithmetic::Operand),
     Fused(simd::fused::Operand),
     Conversion(simd::conversion::Operand),
+    Comparison(simd::comparison::Operand),
+    MinMax(simd::minmax::Operand),
 }
 
 impl FloatingPointOperation {
@@ -88,8 +90,12 @@ impl FloatingPointOperation {
             Some(result.map(Self::Binary))
         } else if let Some(result) = simd::fused::decode(word) {
             Some(result.map(Self::Fused))
+        } else if let Some(result) = simd::conversion::decode(word) {
+            Some(result.map(Self::Conversion))
+        } else if let Some(result) = simd::comparison::decode(word) {
+            Some(result.map(Self::Comparison))
         } else {
-            simd::conversion::decode(word).map(|result| result.map(Self::Conversion))
+            simd::minmax::decode(word).map(|result| result.map(Self::MinMax))
         }
     }
 }
@@ -107,6 +113,16 @@ impl From<simd::fused::Operand> for FloatingPointOperation {
 impl From<simd::conversion::Operand> for FloatingPointOperation {
     fn from(operand: simd::conversion::Operand) -> Self {
         Self::Conversion(operand)
+    }
+}
+impl From<simd::comparison::Operand> for FloatingPointOperation {
+    fn from(operand: simd::comparison::Operand) -> Self {
+        Self::Comparison(operand)
+    }
+}
+impl From<simd::minmax::Operand> for FloatingPointOperation {
+    fn from(operand: simd::minmax::Operand) -> Self {
+        Self::MinMax(operand)
     }
 }
 

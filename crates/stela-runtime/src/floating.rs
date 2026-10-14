@@ -1,4 +1,7 @@
 //! Transactional scalar/vector numerical completion over saved guest state.
+mod comparison;
+mod minmax;
+
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -62,6 +65,10 @@ pub(crate) fn complete(
             FloatingPointOperation::Conversion(operand) => {
                 return complete_conversion(state, operand);
             }
+            FloatingPointOperation::Comparison(operand) => {
+                return comparison::complete(state, operand);
+            }
+            FloatingPointOperation::MinMax(operand) => return minmax::complete(state, operand),
         };
     // Snapshot every source before evaluating any lane, including an indexed
     // source outside a vector64 destination's active lanes.
@@ -89,8 +96,10 @@ pub(crate) fn complete(
                 left,
                 right,
             )?,
-            FloatingPointOperation::Conversion(_) => {
-                unreachable!("conversion dispatched before arithmetic")
+            FloatingPointOperation::Conversion(_)
+            | FloatingPointOperation::Comparison(_)
+            | FloatingPointOperation::MinMax(_) => {
+                unreachable!("non-arithmetic numerical family dispatched above")
             }
         };
         write_lane(&mut result, format.bits(), lane, outcome.bits);

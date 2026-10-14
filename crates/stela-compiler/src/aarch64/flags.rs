@@ -1,5 +1,32 @@
-//! Scalar FlagM/FlagM2 encodings from the pinned Arm 2026-06 reference.
+//! Architectural NZCV predicates and scalar FlagM/FlagM2 encodings.
 use super::{Register, register};
+
+pub const NZCV_N: u32 = 1 << 31;
+pub const NZCV_Z: u32 = 1 << 30;
+pub const NZCV_C: u32 = 1 << 29;
+pub const NZCV_V: u32 = 1 << 28;
+pub const NZCV_SHIFT: u32 = 28;
+
+/// AArch64 ConditionHolds, including the unconditional AL and NV encodings.
+pub fn condition_holds(condition: u8, nzcv: u32) -> bool {
+    assert!(condition < 16, "decoded four-bit condition");
+    let n = nzcv & NZCV_N != 0;
+    let z = nzcv & NZCV_Z != 0;
+    let c = nzcv & NZCV_C != 0;
+    let v = nzcv & NZCV_V != 0;
+    let positive = match condition >> 1 {
+        0 => z,
+        1 => c,
+        2 => n,
+        3 => v,
+        4 => c && !z,
+        5 => n == v,
+        6 => n == v && !z,
+        7 => true,
+        _ => unreachable!("four-bit condition"),
+    };
+    positive ^ (condition & 1 != 0 && condition != 15)
+}
 
 const PSTATE_MASK: u32 = 0xfffff0ff;
 const CFINV: u32 = 0xd500401f;
@@ -79,6 +106,26 @@ pub fn decode(word: u32) -> Option<Operand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_condition_matches_the_architectural_truth_table() {
+        // Bit k describes the condition at NZCV nibble k, independently of the
+        // implementation's predicate expressions. AL and NV are unconditional.
+        const TRUTH: [u16; 16] = [
+            0xf0f0, 0x0f0f, 0xcccc, 0x3333, 0xff00, 0x00ff, 0xaaaa, 0x5555, 0x0c0c, 0xf3f3, 0xaa55,
+            0x55aa, 0x0a05, 0xf5fa, 0xffff, 0xffff,
+        ];
+        for (condition, expected) in TRUTH.into_iter().enumerate() {
+            for nibble in 0..16 {
+                let nzcv = (nibble << NZCV_SHIFT) | ((1 << NZCV_SHIFT) - 1);
+                assert_eq!(
+                    condition_holds(condition as u8, nzcv),
+                    expected & (1 << nibble) != 0,
+                    "condition={condition}, NZCV={nibble:x}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn ignored_crm_bits_and_all_rotate_operands_decode() {

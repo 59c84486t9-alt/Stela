@@ -5,12 +5,14 @@ use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 pub(super) mod arithmetic;
+mod comparison;
 mod floating;
 mod fused;
 mod halving;
 mod immediates;
 mod integer_conversion;
 pub(super) mod memory;
+mod minmax;
 mod numerical;
 mod precision;
 mod products;
@@ -160,6 +162,7 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
             }
             Operand::JavaScript { .. } => false,
         },
+        FloatingPointOperation::Comparison(_) | FloatingPointOperation::MinMax(_) => false,
     }
 }
 
@@ -176,6 +179,10 @@ pub(super) fn emit_numerical(
         crate::aarch64::FloatingPointOperation::Fused(operand) => {
             fused::emit(code, operand, pc, target)
         }
+        crate::aarch64::FloatingPointOperation::Comparison(operand) => {
+            comparison::emit(code, operand, pc)
+        }
+        crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
             match operand {

@@ -29,6 +29,10 @@ pub(super) const MINIMUM_EXPONENT_VECTOR: u8 = 5;
 const SINGLE_VECTOR_MASK: u8 = 0x0f;
 const SINGLE_LOW_VECTOR_MASK: u8 = 0x03;
 const DOUBLE_VECTOR_MASK: u8 = 0x05;
+const SCALAR_VECTOR_MASK: u8 = 1;
+const HALF_SCALAR_BYTE_MASK: u32 = 3;
+const HALF_LOW_BYTE_MASK: u32 = 0xff;
+const HALF_VECTOR_BYTE_MASK: u32 = 0xffff;
 const SIGN_BITS: u8 = 1;
 pub(super) const SINGLE_EXPONENT_BIAS_BITS: u8 = 7;
 pub(super) const MOVLHPS_XMM1_XMM2: &[u8] = &[0x0f, 0x16, 0xca];
@@ -110,13 +114,13 @@ pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
 /// Below is allocated normal; zero/all-ones exponents fail one unsigned test.
 pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
     code.extend(match (format, source) {
-        (Format::Single, 0) => MOVD_EAX_XMM0,
-        (Format::Single, 1) => MOVD_EAX_XMM1,
+        (Format::Half | Format::Single, 0) => MOVD_EAX_XMM0,
+        (Format::Half | Format::Single, 1) => MOVD_EAX_XMM1,
         (Format::Double, 0) => MOVQ_RAX_XMM0,
         (Format::Double, 1) => MOVQ_RAX_XMM1,
-        (Format::Single, 6) => MOVD_EAX_XMM6,
+        (Format::Half | Format::Single, 6) => MOVD_EAX_XMM6,
         (Format::Double, 6) => MOVQ_RAX_XMM6,
-        _ => unreachable!("half arithmetic always requests the exact core"),
+        _ => unreachable!("allocated numerical source register"),
     });
     code.extend(if format == Format::Double {
         SHR_RAX_IMM8
@@ -190,7 +194,7 @@ pub(super) fn commit_inexact(code: &mut Vec<u8>) {
     code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
-/// Extract positive exponents into dwords, then compare against an open range.
+/// Extract positive exponents into words/dwords and compare an open range.
 /// Double exponents occupy the low dword of each qword; their high dwords and
 /// inactive S lanes are excluded from the dword sign mask. No numerical FP runs here.
 pub(super) fn vector_exponent_range(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
@@ -198,7 +202,7 @@ pub(super) fn vector_exponent_range(code: &mut Vec<u8>, format: Format, shape: S
     let (left, right) = match format {
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
         Format::Double => (ShiftOpcode::LeftQword, ShiftOpcode::RightQword),
-        Format::Half => unreachable!("half arithmetic always requests the exact core"),
+        Format::Half => (ShiftOpcode::LeftWord, ShiftOpcode::RightWord),
     };
     left.emit(code, EXPONENT_VECTOR, SIGN_BITS);
     right.emit(
@@ -212,16 +216,34 @@ pub(super) fn vector_exponent_range(code: &mut Vec<u8>, format: Format, shape: S
         VALIDITY_VECTOR,
         MAXIMUM_EXPONENT_VECTOR,
     );
-    packed(code, Host::GreaterDword, VALIDITY_VECTOR, EXPONENT_VECTOR);
-    packed(
-        code,
-        Host::GreaterDword,
-        EXPONENT_VECTOR,
-        MINIMUM_EXPONENT_VECTOR,
-    );
+    let compare = if format == Format::Half {
+        Host::GreaterWord
+    } else {
+        Host::GreaterDword
+    };
+    packed(code, compare, VALIDITY_VECTOR, EXPONENT_VECTOR);
+    packed(code, compare, EXPONENT_VECTOR, MINIMUM_EXPONENT_VECTOR);
     packed(code, Host::And, EXPONENT_VECTOR, VALIDITY_VECTOR);
+    if format == Format::Half {
+        Host::ByteSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
+        let mask = match shape {
+            Shape::Scalar => HALF_SCALAR_BYTE_MASK,
+            Shape::Vector64 => HALF_LOW_BYTE_MASK,
+            Shape::Vector128 => HALF_VECTOR_BYTE_MASK,
+        };
+        code.push(AND_EAX_IMM32);
+        code.extend(mask.to_le_bytes());
+        code.push(CMP_EAX_IMM32);
+        code.extend(mask.to_le_bytes());
+        return;
+    }
     Host::DwordSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
     let mask = match (shape, format) {
+        (Shape::Scalar, _) => {
+            code.extend(AND_EAX_IMM8);
+            code.push(SCALAR_VECTOR_MASK);
+            SCALAR_VECTOR_MASK
+        }
         (Shape::Vector64, Format::Single) => {
             code.extend(AND_EAX_IMM8);
             code.push(SINGLE_LOW_VECTOR_MASK);
@@ -256,11 +278,12 @@ pub(super) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
         MAXIMUM_EXPONENT_VECTOR,
     );
     let exponent_bits = format.bits() - format.fraction_bits() - u32::from(SIGN_BITS);
-    ShiftOpcode::RightDword.emit(
-        code,
-        MAXIMUM_EXPONENT_VECTOR,
-        (u32::BITS - exponent_bits) as u8,
-    );
+    let (shift, width) = if format == Format::Half {
+        (ShiftOpcode::RightWord, u16::BITS)
+    } else {
+        (ShiftOpcode::RightDword, u32::BITS)
+    };
+    shift.emit(code, MAXIMUM_EXPONENT_VECTOR, (width - exponent_bits) as u8);
     packed(
         code,
         Host::Xor,
@@ -335,6 +358,10 @@ pub(super) fn clear_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
             0x7e,
             REGISTER_DIRECT | (xmm << MODRM_REGISTER_SHIFT),
         ]);
+        if format == Format::Half {
+            code.push(AND_EAX_IMM32);
+            code.extend(u32::from(u16::MAX).to_le_bytes());
+        }
         code.extend([
             0x66,
             0x0f,

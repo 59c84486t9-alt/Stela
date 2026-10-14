@@ -14,6 +14,109 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_comparison_minmax_forms_shapes_and_fixed_encodings_are_complete(self):
+        functions = suite.comparison_minmax_functions()
+        self.assertEqual(len(functions), 2590)
+        self.assertEqual(len({op['word'] for op in functions}), 2590)
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 102)
+        self.assertEqual(len({suite.comparison_minmax_shape(op) for op in functions}), 174)
+        checklist = json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        facts = {row['id']: row for row in checklist['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for operation in functions:
+            fact = facts[operation['canonical_id']]
+            self.assertEqual(operation['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            instruction, = decoder.disasm(struct.pack('<I', operation['word']), 0)
+            self.assertEqual(instruction.mnemonic, operation['name'])
+        for name in ('fcmp', 'fcmpe'):
+            for lane in (2, 4, 8):
+                self.assertEqual({op['m'] for op in functions if op['name'] == name and op['lane'] == lane and op['zero_form']}, set(range(32)))
+
+    def test_comparison_condition_table_covers_all_flags_and_al_nv_are_true(self):
+        for nibble in range(16):
+            n, z, c, v = (bool(nibble & mask) for mask in (8, 4, 2, 1))
+            expected = (z, not z, c, not c, n, not n, v, not v,
+                c and not z, not c or z, n == v, n != v, not z and n == v, z or n != v, True, True)
+            self.assertEqual(tuple(suite.numerical_condition_holds(condition, nibble << 28) for condition in range(16)), expected)
+        with self.assertRaises(ValueError):
+            suite.numerical_condition_holds(16, 0)
+
+    def test_comparison_minmax_scalar_merge_sources_and_clear_forms_are_distinct(self):
+        initial = State()
+        initial.fpcr = suite.NUMERICAL_NEP
+        initial.v[0][:], initial.v[1][:], initial.v[2][:] = [1, 2], [3, 4], [5, 6]
+        predicate = suite.comparison_minmax_operation('fcmeq', 4, 4, True)
+        original = State.from_buffer_copy(initial)
+        original.v[0][:] = [5 & ~0xffffffff, 6]
+        suite.validate_comparison_minmax_original_effects(initial, original, predicate)
+        original.v[0][1] = 4
+        with self.assertRaises(AssertionError):
+            suite.validate_comparison_minmax_original_effects(initial, original, predicate)
+        binary = suite.comparison_minmax_operation('fmin', 4, 4, True, family='minmax_binary')
+        original.v[0][:] = [3 & ~0xffffffff, 4]
+        suite.validate_comparison_minmax_original_effects(initial, original, binary)
+        zero = suite.comparison_minmax_operation('fcmeq', 4, 4, True, zero=True)
+        original.v[0][:] = [0, 0]
+        suite.validate_comparison_minmax_original_effects(initial, original, zero)
+        pair = suite.comparison_minmax_operation('fminp', 2, 2, True, family='minmax_pair')
+        self.assertEqual(pair['source_lane_count'], 2)
+        self.assertEqual(pair['source_bytes'], 4)
+        suite.validate_comparison_minmax_original_effects(initial, original, pair)
+
+    def test_conditional_failed_effect_validation_requires_exact_fallback_and_status(self):
+        operation = suite.comparison_minmax_operation('fccmp', 4, 4, True, family='flag_compare', condition=0, immediate=13)
+        initial = State()
+        initial.fpcr, initial.fpsr = suite.NUMERICAL_TRAP_ENABLE_MASK, 0x80
+        original = State.from_buffer_copy(initial)
+        original.nzcv = 13 << 28
+        suite.validate_comparison_minmax_original_effects(initial, original, operation)
+        original.fpsr |= 1
+        with self.assertRaises(AssertionError):
+            suite.validate_comparison_minmax_original_effects(initial, original, operation)
+        original.fpsr, original.nzcv = initial.fpsr, 12 << 28
+        with self.assertRaises(AssertionError):
+            suite.validate_comparison_minmax_original_effects(initial, original, operation)
+
+    def test_comparison_minmax_reduction_layouts_contain_genuine_fold_discriminators(self):
+        for name, expected in (('fminnmv', [0x3f800000, 0x40000000, 0x7f80002b, 0x40400000]),
+                               ('fmaxnmv', [0x40000000, 0x40400000, 0x7f80002b, 0x3f800000])):
+            operation = suite.comparison_minmax_operation(name, 4, 16, True, family='minmax_reduce')
+            layouts = suite.comparison_minmax_layouts(operation)
+            self.assertEqual(len(layouts), 64)
+            self.assertIn(expected, [left for left, _ in layouts])
+        operation = suite.comparison_minmax_operation('fminnmv', 2, 16, True, family='minmax_reduce')
+        signaling = suite.comparison_minmax_values(2)[0][8]
+        layouts = suite.comparison_minmax_layouts(operation)
+        self.assertEqual({left.index(signaling) for left, _ in layouts if left.count(signaling) == 1}, set(range(8)))
+
+    def test_comparison_minmax_corpus_retains_exact_policy_classes_and_full_enable_scope(self):
+        functions, records = suite.comparison_minmax_corpus()
+        self.assertEqual(len(records), 39724)
+        classes = {'compatible': 0, 'refusal': 0, 'policy': 0}
+        refusal_forms, failed_conditions, sticky = set(), set(), 0
+        imported = []
+        for record in records:
+            operation = functions[record['function']]
+            initial = State.from_buffer_copy(record['initial'])
+            enabled = bool(initial.fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)
+            taken = operation['condition'] is None or suite.numerical_condition_holds(operation['condition'], initial.nzcv)
+            refusal, policy = enabled and taken, enabled and not taken
+            classes['refusal' if refusal else 'policy' if policy else 'compatible'] += 1
+            if refusal:
+                refusal_forms.add(operation['canonical_id'])
+            if policy:
+                failed_conditions.add(operation['condition'])
+            sticky += bool(initial.fpsr)
+            imported.append({**record, 'operation': operation, 'unsupported': refusal, 'control_policy_success': policy})
+        self.assertEqual(classes, {'compatible': 37768, 'refusal': 1356, 'policy': 600})
+        self.assertEqual(len(refusal_forms), 102)
+        self.assertEqual(failed_conditions, set(range(14)))
+        self.assertEqual(sticky, 918)
+        selected = suite.comparison_minmax_runtime_cases(imported)
+        self.assertEqual({record['operation']['canonical_id'] for record in selected}, {op['canonical_id'] for op in functions})
+        self.assertTrue(any(record['control_policy_success'] for record in selected))
+        self.assertEqual(suite.comparison_minmax_helpers(imported, set()), [])
+
     def test_conversion_encodings_cover_all_classic_forms_and_match_pinned_fixed_bits(self):
         functions = suite.conversion_numerical_functions()
         self.assertEqual(len(functions), 1416)
