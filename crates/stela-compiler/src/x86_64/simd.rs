@@ -6,6 +6,7 @@ use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 pub(super) mod arithmetic;
 mod comparison;
+mod estimate;
 mod floating;
 mod fused;
 mod halving;
@@ -18,6 +19,7 @@ mod precision;
 mod products;
 mod rearrange;
 mod reductions;
+mod refinement;
 mod rounding;
 mod saturating;
 mod shifts;
@@ -167,7 +169,9 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
         FloatingPointOperation::Comparison(_)
         | FloatingPointOperation::MinMax(_)
         | FloatingPointOperation::Rounding(_)
-        | FloatingPointOperation::SquareRoot(_) => false,
+        | FloatingPointOperation::SquareRoot(_)
+        | FloatingPointOperation::Estimate(_)
+        | FloatingPointOperation::Refinement(_) => false,
     }
 }
 
@@ -178,6 +182,12 @@ pub(super) fn emit_numerical(
     target: crate::TargetCpu,
 ) {
     match operation {
+        crate::aarch64::FloatingPointOperation::Estimate(operand) => {
+            estimate::emit(code, operand, pc, target);
+        }
+        crate::aarch64::FloatingPointOperation::Refinement(operand) => {
+            refinement::emit(code, operand, pc, target);
+        }
         crate::aarch64::FloatingPointOperation::Binary(operand) => {
             arithmetic::emit(code, operand, pc)
         }

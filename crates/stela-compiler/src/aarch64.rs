@@ -83,6 +83,8 @@ pub enum FloatingPointOperation {
     MinMax(simd::minmax::Operand),
     Rounding(simd::rounding::Operand),
     SquareRoot(simd::sqrt::Operand),
+    Estimate(simd::estimate::Operand),
+    Refinement(simd::refinement::Operand),
 }
 
 impl FloatingPointOperation {
@@ -100,8 +102,12 @@ impl FloatingPointOperation {
             Some(result.map(Self::MinMax))
         } else if let Some(result) = simd::rounding::decode(word) {
             Some(result.map(Self::Rounding))
+        } else if let Some(result) = simd::sqrt::decode(word) {
+            Some(result.map(Self::SquareRoot))
+        } else if let Some(result) = simd::estimate::decode(word) {
+            Some(result.map(Self::Estimate))
         } else {
-            simd::sqrt::decode(word).map(|result| result.map(Self::SquareRoot))
+            simd::refinement::decode(word).map(|result| result.map(Self::Refinement))
         }
     }
 }
@@ -139,6 +145,16 @@ impl From<simd::rounding::Operand> for FloatingPointOperation {
 impl From<simd::sqrt::Operand> for FloatingPointOperation {
     fn from(operand: simd::sqrt::Operand) -> Self {
         Self::SquareRoot(operand)
+    }
+}
+impl From<simd::estimate::Operand> for FloatingPointOperation {
+    fn from(operand: simd::estimate::Operand) -> Self {
+        Self::Estimate(operand)
+    }
+}
+impl From<simd::refinement::Operand> for FloatingPointOperation {
+    fn from(operand: simd::refinement::Operand) -> Self {
+        Self::Refinement(operand)
     }
 }
 

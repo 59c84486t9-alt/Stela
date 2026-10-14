@@ -1,10 +1,12 @@
 //! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
-//! FP/FP16/AFP enabled, non-streaming; enabled numerical traps are explicit errors.
+//! FP/FP16/AFP enabled, non-streaming; numerical trap delivery remains unsupported.
 pub mod comparison;
+pub mod estimate;
 pub mod fused;
 pub mod integer;
 pub mod minmax;
 pub mod precision;
+pub mod refinement;
 pub mod rounding;
 pub mod sqrt;
 
@@ -63,13 +65,13 @@ impl Format {
     pub(crate) const fn exponent_bias(self) -> u32 {
         (self.exponent_mask() >> (self.fraction_bits() + 1)) as u32
     }
-    const fn sign_mask(self) -> u64 {
+    pub(crate) const fn sign_mask(self) -> u64 {
         1 << (self.bits() - 1)
     }
-    const fn fraction_mask(self) -> u64 {
+    pub(crate) const fn fraction_mask(self) -> u64 {
         (1 << self.fraction_bits()) - 1
     }
-    const fn exponent_mask(self) -> u64 {
+    pub(crate) const fn exponent_mask(self) -> u64 {
         (self.sign_mask() - 1) & !self.fraction_mask()
     }
     const fn quiet_bit(self) -> u64 {
@@ -197,6 +199,17 @@ fn unpack(format: Format, bits: u64, control: Control, exceptions: &mut u32) -> 
         bits,
         class,
         negative,
+    }
+}
+
+/// Arm FPNeg preserves NaN signs under AH before arithmetic unpacking.
+fn negate(format: Format, bits: u64, control: Control) -> u64 {
+    let nan = bits & format.exponent_mask() == format.exponent_mask()
+        && bits & format.fraction_mask() != 0;
+    if control.alternative() && nan {
+        bits
+    } else {
+        bits ^ format.sign_mask()
     }
 }
 

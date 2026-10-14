@@ -16,6 +16,152 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_fullframe_fma_expectations_follow_family_and_independent_host_capability(self):
+        families = suite.FULL_FRAME_NUMERICAL_COHORTS
+        fused = families[suite.FUSED_NUMERICAL_FOCUS]['native_fma_operations']
+        refinement = families[suite.REFINEMENT_NUMERICAL_FOCUS]['native_fma_operations']
+        self.assertIs(fused, suite.FUSED_NATIVE_OPERATIONS)
+        self.assertEqual(refinement, {'frecps': 'vfnmadd', 'frsqrts': 'vfnmadd'})
+        single = suite.refinement_operation('frecps', 4, 4, True)
+        double = suite.refinement_operation('frsqrts', 8, 16, False)
+        half = suite.refinement_operation('frecps', 2, 2, True)
+        self.assertEqual(suite.numerical_fma_expectation(single, 'x86_64-baseline+fma', refinement), {'vfnmadd132ss': 1})
+        self.assertEqual(suite.numerical_fma_expectation(double, 'x86_64-baseline+fma', refinement), {'vfnmadd132pd': 1})
+        self.assertEqual(suite.numerical_fma_expectation(half, 'x86_64-baseline+fma+f16c', refinement), {})
+        self.assertEqual(suite.numerical_fma_expectation(single, 'x86_64-baseline+f16c', refinement), {})
+        self.assertEqual(suite.numerical_fma_expectation(single, 'x86_64-baseline', refinement), {})
+        estimate = families[suite.ESTIMATE_NUMERICAL_FOCUS].get('native_fma_operations')
+        self.assertIsNone(estimate)
+        self.assertEqual(suite.numerical_fma_expectation(single, 'x86_64-baseline+fma', estimate), {})
+
+    def test_estimate_and_refinement_words_match_all_reviewed_forms(self):
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for functions, words, forms, arrangements in ((suite.estimate_functions(), 92, 12, 23), (suite.refinement_functions(), 96, 8, 16)):
+            self.assertEqual((len(functions), len({op['word'] for op in functions})), (words, words))
+            self.assertEqual(len({op['canonical_id'] for op in functions}), forms)
+            self.assertEqual(len({suite.numerical_unary_shape(op) for op in functions}), arrangements)
+            for op in functions:
+                fact = facts[op['canonical_id']]
+                self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+                decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+                self.assertEqual(len(decoded), 1)
+                self.assertEqual(decoded[0].mnemonic, op['name'])
+        for args in (('urecpe', 4, 4, True), ('ursqrte', 8, 16, False), ('frecpx', 4, 8, False), ('frecpe', 8, 8, False)):
+            with self.assertRaises(ValueError):
+                suite.estimate_operation(*args)
+
+    def test_estimate_integer_profile_split_preserves_raw_controls_status_and_nep(self):
+        op = suite.estimate_operation('frecpe', 4, 4, True)
+        initial = suite.numerical_unary_state(op, 0, [0x3f800000], suite.NUMERICAL_AH | suite.NUMERICAL_NEP | suite.NUMERICAL_TRAP_ENABLE_MASK, 0x0800009f)
+        standard = suite.estimate_single_profile_state(op, initial, False)
+        enhanced = suite.estimate_single_profile_state(op, initial, True)
+        self.assertEqual(standard.v[0][0] & 0xffffffff, 0x3f7f8000)
+        self.assertEqual(enhanced.v[0][0] & 0xffffffff, 0x3f7ff000)
+        self.assertEqual(standard.fpsr, initial.fpsr)
+        self.assertEqual(standard.fpcr, initial.fpcr)
+        self.assertEqual(standard.v[0][1], initial.v[0][1])
+        enhanced.fpcr &= ~suite.NUMERICAL_TRAP_ENABLE_MASK
+        derived = suite.estimate_profile_expectation(op, initial, enhanced, {'cpu_registers': {'ID_AA64ISAR2_EL1': '0x110012'}})
+        self.assertEqual(bytes(derived), bytes(standard))
+        enhanced.v[31][0] ^= 1
+        with self.assertRaises(AssertionError):
+            suite.estimate_profile_expectation(op, initial, enhanced, {'cpu_registers': {'ID_AA64ISAR2_EL1': '0x110012'}})
+        for name in ('frecpe', 'frsqrte'):
+            op = suite.estimate_operation(name, 4, 4, True)
+            for raw, expected in ((0x80000001, 0xff800000), (0, 0x7f800000), (0x7f800005, 0x7fc00005)):
+                state = suite.numerical_unary_state(op, 0, [raw], suite.NUMERICAL_AH)
+                self.assertEqual(suite.estimate_single_profile_state(op, state, False).v[0][0], expected)
+            coincident = suite.numerical_unary_state(op, 0, [0], suite.NUMERICAL_AH)
+            original = suite.estimate_single_profile_state(op, coincident, True)
+            self.assertIsNotNone(suite.estimate_profile_expectation(op, coincident, original, {'cpu_registers': {'ID_AA64ISAR2_EL1': '0x110012'}}))
+
+    def test_estimate_and_refinement_enabled_control_boundaries_are_operation_specific(self):
+        initial = State()
+        initial.fpcr = suite.NUMERICAL_TRAP_ENABLE_MASK
+        for name in ('urecpe', 'ursqrte'):
+            self.assertTrue(suite.numerical_suppressed_enables(suite.estimate_operation(name, 4, 8, False), initial))
+        for op in (suite.estimate_operation('frecpx', 4, 4, True), suite.refinement_operation('frsqrts', 4, 4, True)):
+            self.assertFalse(suite.numerical_suppressed_enables(op, initial))
+            initial.fpcr |= suite.NUMERICAL_AH
+            self.assertTrue(suite.numerical_suppressed_enables(op, initial))
+            initial.fpcr &= ~suite.NUMERICAL_AH
+
+    def test_refinement_scalar_merges_original_left_and_rejects_unsuppressed_ah_status(self):
+        op = suite.refinement_operation('frecps', 4, 4, True)
+        initial = suite.vector_numerical_state(op, 0, [(0x3f800000, 0x3f800000)], suite.NUMERICAL_NEP)
+        original = State.from_buffer_copy(initial)
+        original.v[0][:] = initial.v[1]
+        original.v[0][0] = original.v[0][0] & ~0xffffffff | 0x3f800000
+        suite.validate_refinement_original_effects(initial, original, op)
+        original.v[0][1] = initial.v[0][1]
+        with self.assertRaises(AssertionError):
+            suite.validate_refinement_original_effects(initial, original, op)
+        initial.fpcr = suite.NUMERICAL_AH
+        original = State.from_buffer_copy(initial)
+        original.v[0][:] = [0, 0]
+        original.fpsr = 1
+        with self.assertRaises(AssertionError):
+            suite.validate_refinement_original_effects(initial, original, op)
+        self.assertEqual(suite.refinement_pairs(2)[34], (0x3c01, 0x3ffe))
+        self.assertEqual(suite.refinement_pairs(2)[35], (0x3c02, 0x41fd))
+        self.assertEqual(suite.refinement_pairs(2)[36], (0x5c00, 0x5c00))
+
+    def test_reciprocal_corpus_and_cli_budgets_remain_bounded(self):
+        for generate, select, expected_frames, expected_selected in ((suite.estimate_corpus, suite.estimate_runtime_cases, 36734, 272),
+                (suite.refinement_corpus, suite.refinement_runtime_cases, 12720, 324)):
+            functions, records = generate()
+            self.assertEqual(len(records), expected_frames)
+            imported, refused, accepted = [], 0, 0
+            for record in records:
+                op, initial = functions[record['function']], State.from_buffer_copy(record['initial'])
+                if initial.fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK:
+                    allowed = suite.numerical_suppressed_enables(op, initial)
+                    accepted += allowed
+                    refused += not allowed
+                imported.append(dict(record, operation=op))
+            self.assertEqual((refused, accepted), (70, 98) if expected_frames==36734 else (56, 56))
+            selected = select(imported)
+            self.assertEqual(len(selected), expected_selected)
+            self.assertLessEqual(len(selected)+6*len(suite.estimate_refinement_helpers(imported)), 425)
+            self.assertEqual(suite.estimate_refinement_helpers(imported, set()), [])
+        functions, records = suite.estimate_corpus()
+        tables = {op['name']: set() for op in functions if op['name'] != 'frecpx'}
+        for record in records:
+            if record['label'].startswith('table_'):
+                tables[functions[record['function']]['name']].add(int(record['label'].split('_')[1]))
+        for name, keys in tables.items():
+            self.assertEqual(keys, set(range(256 if name in ('frecpe', 'urecpe') else 128, 512)))
+
+    def test_model_and_control_policy_inline_counts_are_separate_even_for_coincident_states(self):
+        initial = State()
+        initial.x[30] = suite.STOP
+        op = suite.estimate_operation('frecpe', 4, 4, True)
+        records = []
+        for basis, control, policy in (('direct_original', 0, False),
+                ('requested_control_policy', suite.NUMERICAL_AH|suite.NUMERICAL_TRAP_ENABLE_MASK, True),
+                ('standard_profile_model', suite.NUMERICAL_AH|suite.NUMERICAL_TRAP_ENABLE_MASK, True)):
+            state = State.from_buffer_copy(initial)
+            state.fpcr = control
+            records.append({'function': 0, 'operation': op, 'initial': bytes(state), 'expected': bytes(state),
+                'equality_basis': basis, 'control_policy_success': policy, 'unsupported': False, 'case': len(records), 'producer': 'unit_accounting'})
+        batch = {'source': struct.pack('<II', op['word'], suite.RET), 'native': b''}
+        def wrapper(state, address, mxcsr, exit_pointer):
+            observed = ctypes.cast(exit_pointer, ctypes.POINTER(suite.NumericalNativeExit)).contents
+            observed.kind, observed.next_pc = suite.NUMERICAL_RETURN_EXIT, suite.STOP
+            observed.mxcsr_before = observed.mxcsr_after = mxcsr
+        machine = Mock()
+        machine.reg_read.return_value = suite.STOP
+        with patch.object(suite, 'executable', side_effect=lambda _:nullcontext(0)), \
+                patch.object(suite.ctypes, 'CFUNCTYPE', return_value=lambda _:wrapper), \
+                patch.object(suite, 'Uc', return_value=machine), patch.object(suite, 'initialize_arm'), \
+                patch.object(suite, 'capture_arm', return_value=State.from_buffer_copy(records[0]['expected'])):
+            counts = suite.execute_numerical_batches([batch], {'records': records})
+        self.assertEqual(counts['raw_inline_complete_state_comparisons'], 3)
+        self.assertEqual(counts['raw_inline_original_complete_state_comparisons'], 1)
+        self.assertEqual(counts['raw_inline_control_policy_comparisons'], 1)
+        self.assertEqual(counts['raw_inline_profile_model_comparisons'], 1)
+
     def test_numerical_and_fp_register_workers_visit_every_caller_mxcsr_environment(self):
         initial = State()
         initial.x[30] = suite.STOP

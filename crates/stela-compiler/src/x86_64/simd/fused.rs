@@ -1,8 +1,8 @@
 //! Fused arithmetic: checked FMA3 or an exact-product guarded SSE2 mapping.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT, branch,
-    clear_scalar, commit_inexact, emit_opcode, environment, exponent_range,
+    ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,
+    branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment, exponent_range,
     prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
     reject_other_status, reject_product_status, resolve, restore_environment,
     restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
@@ -29,49 +29,15 @@ const DOUBLE_PREFIX: u8 = 0xf2;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 const SHUFFLE_LOW_DWORD: u8 = 0;
-const FMA_VEX3: u8 = 0xc4;
-const FMA_MAP_0F38: u8 = 0xe2;
-const FMA_128_ADDEND_XMM6: u8 = 0x49;
-const FMA_DOUBLE_W: u8 = 0x80;
-const FMA_SCALAR_OPCODE_BIT: u8 = 1;
 
-#[repr(u8)]
-enum FusedOpcode {
-    MultiplyAdd = 0x98,
-    MultiplySubtract = 0x9a,
-    NegativeMultiplyAdd = 0x9c,
-    NegativeMultiplySubtract = 0x9e,
-}
-
-fn emit_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
-    assert!(
-        target.supports(TargetCpu::Fma),
-        "FMA3 requires usable AVX/FMA state"
-    );
+fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     let opcode = match operand.operation {
         FusedOperation::Add => FusedOpcode::MultiplyAdd,
         FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
         FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
         FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
     };
-    // 132 order: XMM0 = XMM0 * XMM1 + XMM6, with the selected sign variant.
-    code.extend([
-        FMA_VEX3,
-        FMA_MAP_0F38,
-        FMA_128_ADDEND_XMM6
-            | if operand.format == Format::Double {
-                FMA_DOUBLE_W
-            } else {
-                0
-            },
-        opcode as u8
-            | if operand.shape == Shape::Scalar {
-                FMA_SCALAR_OPCODE_BIT
-            } else {
-                0
-            },
-        REGISTER_DIRECT | RIGHT,
-    ]);
+    emit_fma(code, operand.format, operand.shape, opcode, target);
 }
 
 fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
@@ -157,7 +123,7 @@ pub(in crate::x86_64) fn emit(
     };
     environment(code);
     if native_fma {
-        emit_fma(code, operand, target);
+        emit_checked_fma(code, operand, target);
         restore_environment(code);
     } else {
         emit_opcode(

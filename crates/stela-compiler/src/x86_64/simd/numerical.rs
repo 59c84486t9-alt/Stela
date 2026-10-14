@@ -67,6 +67,13 @@ const LDMXCSR_CONTROL: &[u8] = &[0x0f, 0xae, 0x54, 0x24, 4];
 const STMXCSR_STATUS: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, 8];
 const LDMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x14, 0x24];
 const MOV_ECX_STATUS: &[u8] = &[0x8b, 0x4c, 0x24, 8];
+const MOV_EAX_IMM32: u8 = 0xb8;
+
+const FMA_VEX3: u8 = 0xc4;
+const FMA_MAP_0F38: u8 = 0xe2;
+const FMA_128_ADDEND_XMM6: u8 = 0x49;
+const FMA_DOUBLE_W: u8 = 0x80;
+const FMA_SCALAR_OPCODE_BIT: u8 = 1;
 
 #[repr(u8)]
 pub(super) enum Condition {
@@ -85,6 +92,14 @@ pub(super) enum ArithmeticOpcode {
     Divide = 0x5e,
 }
 
+#[repr(u8)]
+pub(super) enum FusedOpcode {
+    MultiplyAdd = 0x98,
+    MultiplySubtract = 0x9a,
+    NegativeMultiplyAdd = 0x9c,
+    NegativeMultiplySubtract = 0x9e,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Rounding {
     Fpcr,
@@ -92,6 +107,40 @@ pub(super) enum Rounding {
     Positive,
     Negative,
     Zero,
+}
+
+/// Checked FMA132 with the shared numerical allocation: XMM0 is the product
+/// destination, XMM1 the multiplier and XMM6 the addend. All are caller-volatile.
+pub(super) fn emit_fma(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    opcode: FusedOpcode,
+    target: crate::TargetCpu,
+) {
+    const REGISTER_DIRECT: u8 = 0xc0;
+    assert!(
+        target.supports(crate::TargetCpu::Fma),
+        "FMA3 requires usable AVX/FMA state"
+    );
+    // 132 order: XMM0 = XMM0 * XMM1 + XMM6, with the selected sign variant.
+    code.extend([
+        FMA_VEX3,
+        FMA_MAP_0F38,
+        FMA_128_ADDEND_XMM6
+            | if format == Format::Double {
+                FMA_DOUBLE_W
+            } else {
+                0
+            },
+        opcode as u8
+            | if shape == Shape::Scalar {
+                FMA_SCALAR_OPCODE_BIT
+            } else {
+                0
+            },
+        REGISTER_DIRECT | RIGHT_VECTOR,
+    ]);
 }
 
 pub(super) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
@@ -115,12 +164,25 @@ pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
 /// Leave flags from (exponent-minimum) versus the exclusive range length.
 /// Below is allocated normal; zero/all-ones exponents fail one unsigned test.
 pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
-    exponent_range_impl(code, format, source, minimum, false);
+    let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
+    exponent_range_impl(code, format, source, minimum, maximum, false);
+}
+
+/// A stricter exclusive upper exponent bounds finite arithmetic outputs too.
+pub(super) fn exponent_range_below(
+    code: &mut Vec<u8>,
+    format: Format,
+    source: u8,
+    minimum: u8,
+    maximum: u32,
+) {
+    exponent_range_impl(code, format, source, minimum, maximum, false);
 }
 
 /// Keep the sign alongside the exponent so every negative input also fails.
 pub(super) fn positive_exponent_range(code: &mut Vec<u8>, format: Format, source: u8, minimum: u8) {
-    exponent_range_impl(code, format, source, minimum, true);
+    let maximum = (format.exponent_mask() >> format.fraction_bits()) as u32;
+    exponent_range_impl(code, format, source, minimum, maximum, true);
 }
 
 fn exponent_range_impl(
@@ -128,6 +190,7 @@ fn exponent_range_impl(
     format: Format,
     source: u8,
     minimum: u8,
+    maximum: u32,
     positive_only: bool,
 ) {
     code.extend(match (format, source) {
@@ -156,7 +219,7 @@ fn exponent_range_impl(
     code.extend(SUB_EAX_IMM8);
     code.push(minimum);
     code.push(CMP_EAX_IMM32);
-    code.extend((exponent_mask - u32::from(minimum)).to_le_bytes());
+    code.extend((maximum - u32::from(minimum)).to_le_bytes());
 }
 
 pub(super) fn environment(code: &mut Vec<u8>) {
@@ -184,7 +247,6 @@ pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
         code.push(OR_EAX_IMM32);
         code.extend(MXCSR_EXCEPTION_MASKS.to_le_bytes());
     } else {
-        const MOV_EAX_IMMEDIATE: u8 = 0xb8;
         let direction = match rounding {
             Rounding::NearestEven => 0,
             Rounding::Positive => MXCSR_POSITIVE_ROUNDING,
@@ -192,7 +254,7 @@ pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
             Rounding::Zero => MXCSR_POSITIVE_ROUNDING | MXCSR_NEGATIVE_ROUNDING,
             Rounding::Fpcr => unreachable!("FPCR control emitted above"),
         };
-        code.push(MOV_EAX_IMMEDIATE);
+        code.push(MOV_EAX_IMM32);
         code.extend((MXCSR_EXCEPTION_MASKS | direction).to_le_bytes());
     }
     code.extend(MOV_CONTROL_EAX);
@@ -337,6 +399,34 @@ pub(super) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
         MINIMUM_EXPONENT_VECTOR,
     );
 }
+/// Initialize a bounded exclusive maximum while preserving the normal lower
+/// bound used by vector_exponent_range. Half repeats the limit in both words.
+pub(super) fn prepare_vector_input_range_below(code: &mut Vec<u8>, format: Format, maximum: u32) {
+    const MOVD_MAXIMUM_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xe0];
+    const BROADCAST_LOW_DWORD: u8 = 0;
+    let limit = if format == Format::Half {
+        maximum | maximum << u16::BITS
+    } else {
+        maximum
+    };
+    code.push(MOV_EAX_IMM32);
+    code.extend(limit.to_le_bytes());
+    code.extend(MOVD_MAXIMUM_EAX);
+    packed(
+        code,
+        Host::ShuffleDword,
+        MAXIMUM_EXPONENT_VECTOR,
+        MAXIMUM_EXPONENT_VECTOR,
+    );
+    code.push(BROADCAST_LOW_DWORD);
+    packed(
+        code,
+        Host::Xor,
+        MINIMUM_EXPONENT_VECTOR,
+        MINIMUM_EXPONENT_VECTOR,
+    );
+}
+
 pub(super) fn prepare_vector_result_range(code: &mut Vec<u8>) {
     packed(
         code,
@@ -353,6 +443,18 @@ pub(super) fn emit_opcode(
     opcode: ArithmeticOpcode,
     right: u8,
 ) {
+    emit_opcode_to(code, format, shape, opcode, LEFT_VECTOR, right);
+}
+
+/// Shared arithmetic encoding with an explicitly allocated destination.
+pub(super) fn emit_opcode_to(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    opcode: ArithmeticOpcode,
+    destination: u8,
+    source: u8,
+) {
     if shape == Shape::Scalar {
         code.push(if format == Format::Single {
             SCALAR_SINGLE_PREFIX
@@ -362,8 +464,13 @@ pub(super) fn emit_opcode(
     } else if format == Format::Double {
         code.push(PACKED_DOUBLE_PREFIX);
     }
-    const DESTINATION_XMM0: u8 = 0xc0;
-    code.extend([SSE_ESCAPE, opcode as u8, DESTINATION_XMM0 | right]);
+    const REGISTER_DIRECT: u8 = 0xc0;
+    const MODRM_REGISTER_SHIFT: u8 = 3;
+    code.extend([
+        SSE_ESCAPE,
+        opcode as u8,
+        REGISTER_DIRECT | destination << MODRM_REGISTER_SHIFT | source,
+    ]);
 }
 pub(super) fn reject_other_status(code: &mut Vec<u8>) -> usize {
     code.extend(TEST_ECX_IMM32);

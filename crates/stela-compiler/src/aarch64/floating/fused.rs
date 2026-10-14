@@ -1,7 +1,7 @@
 //! Three-operand Arm fused arithmetic with one architectural rounding.
 use super::{
     Class, Control, EXCEPTIONS, FPCR_DN, FPCR_EXCEPTION_ENABLE_SHIFT, Format, INPUT_DENORMAL,
-    INVALID, Operand, Outcome, UnsupportedControl, rounded_outcome, unpack, widen,
+    INVALID, Operand, Outcome, UnsupportedControl, negate, rounded_outcome, unpack, widen,
 };
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,
@@ -22,17 +22,6 @@ impl FusedOperation {
     }
     pub const fn negate_left(self) -> bool {
         matches!(self, Self::Subtract | Self::NegatedAdd)
-    }
-}
-
-/// Arm FPNeg leaves NaN signs untouched under AH, before arithmetic unpacking.
-fn negate(format: Format, bits: u64, control: Control) -> u64 {
-    let nan = bits & format.exponent_mask() == format.exponent_mask()
-        && bits & format.fraction_mask() != 0;
-    if control.alternative() && nan {
-        bits
-    } else {
-        bits ^ format.sign_mask()
     }
 }
 

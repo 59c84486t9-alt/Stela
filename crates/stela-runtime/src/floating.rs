@@ -1,6 +1,8 @@
 //! Transactional scalar/vector numerical completion over saved guest state.
 mod comparison;
+mod estimate;
 mod minmax;
+mod refinement;
 mod rounding;
 mod sqrt;
 
@@ -73,6 +75,10 @@ pub(crate) fn complete(
             FloatingPointOperation::MinMax(operand) => return minmax::complete(state, operand),
             FloatingPointOperation::Rounding(operand) => return rounding::complete(state, operand),
             FloatingPointOperation::SquareRoot(operand) => return sqrt::complete(state, operand),
+            FloatingPointOperation::Estimate(operand) => return estimate::complete(state, operand),
+            FloatingPointOperation::Refinement(operand) => {
+                return refinement::complete(state, operand);
+            }
         };
     // Snapshot every source before evaluating any lane, including an indexed
     // source outside a vector64 destination's active lanes.
@@ -104,7 +110,9 @@ pub(crate) fn complete(
             | FloatingPointOperation::Comparison(_)
             | FloatingPointOperation::MinMax(_)
             | FloatingPointOperation::Rounding(_)
-            | FloatingPointOperation::SquareRoot(_) => {
+            | FloatingPointOperation::SquareRoot(_)
+            | FloatingPointOperation::Estimate(_)
+            | FloatingPointOperation::Refinement(_) => {
                 unreachable!("non-arithmetic numerical family dispatched above")
             }
         };

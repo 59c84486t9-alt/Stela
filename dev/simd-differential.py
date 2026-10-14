@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -2707,9 +2707,11 @@ def execute_numerical_batches(batches, oracle=None):
         for record in oracle['records']:
             path = invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
             counts[path] += 1
-            if path == 'helper' and batches[0].get('cohort') in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
+            if path == 'helper' and FULL_FRAME_NUMERICAL_COHORTS.get(batches[0].get('cohort'), {}).get('actual_helpers'):
                 helper_cases.append(record['case'])
-            if path == 'inline' and record.get('control_policy_success'):
+            if path == 'inline' and record.get('equality_basis') == 'standard_profile_model':
+                counts['inline_profile_model'] += 1
+            elif path == 'inline' and record.get('control_policy_success'):
                 counts['inline_policy'] += 1
             corpus.update(record['initial']);corpus.update(struct.pack('<I', record['operation']['word']))
             shape = (record['operation']['name'], record['operation']['lane'], path, record['operation']['bytes'])
@@ -2748,7 +2750,8 @@ def execute_numerical_batches(batches, oracle=None):
     return {'raw_native_state_and_exit_comparisons': len(oracle['records']),
             'raw_helper_case_ids': helper_cases,
             'raw_inline_complete_state_comparisons': counts['inline'],
-            'raw_inline_original_complete_state_comparisons': counts['inline'] - counts['inline_policy'],
+            'raw_inline_original_complete_state_comparisons': counts['inline'] - counts['inline_policy'] - counts['inline_profile_model'],
+            'raw_inline_profile_model_comparisons': counts['inline_profile_model'],
             'raw_inline_control_policy_comparisons': counts['inline_policy'],
             'raw_helper_unchanged_state_comparisons': counts['helper'],
             'raw_unsupported_unchanged_state_comparisons': counts['unsupported'],
@@ -3075,7 +3078,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -3316,6 +3319,7 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
             or receipt['cases'] != expected_cases or pointer['directory'] != receipt['directory']):
         raise AssertionError('Complete passing numerical original full-frame capture required')
     directory = ROOT / receipt['directory']
+    family = FULL_FRAME_NUMERICAL_COHORTS[focus]
     for name, identity in receipt['files'].items():
         if Path(name).name != name:
             raise AssertionError('Full-frame original file is not one path component')
@@ -3351,7 +3355,10 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
                 or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
             raise AssertionError(f'Full-frame original instruction/EL0/control evidence changed: {index}')
         untouched = State.from_buffer_copy(original)
-        if focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
+        if family.get('original_effects'):
+            family['original_effects'](initial, original, operation)
+            untouched.v[operation['d']][:] = initial.v[operation['d']]
+        elif focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
             validate_numerical_unary_original_effects(initial, original, operation)
             untouched.v[operation['d']][:] = initial.v[operation['d']]
         elif focus == COMPARISON_MINMAX_FOCUS:
@@ -3387,23 +3394,32 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
         readbacks[(initial.fpcr, actual_fpcr)] += 1
         # Only LR changes to let the native/runtime and Unicorn paths execute
         # the actual RET. The original subject instruction left every GPR intact.
+        profile_expected = family['profile_expectation'](operation, initial, original, receipt) if family.get('profile_expectation') else None
+        enabled = bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)
+        policy_success = enabled and bool(family.get('accepts_enabled_control') and family['accepts_enabled_control'](operation, initial))
         return_register = operation.get('return_register', 30)
         initial.x[return_register] = original.x[return_register] = STOP
-        taken = focus != COMPARISON_MINMAX_FOCUS or operation['condition'] is None or numerical_condition_holds(operation['condition'], initial.nzcv)
-        enabled = bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)
-        policy_success = focus == COMPARISON_MINMAX_FOCUS and enabled and not taken
         primary_expected = bytes(original)
-        if policy_success:
-            original.fpcr = initial.fpcr
-        records.append({'function': function, 'initial': bytes(initial), 'expected': bytes(original),
-            'primary_expected': primary_expected, 'control_policy_success': policy_success,
+        if profile_expected is not None:
+            profile_expected.x[return_register] = STOP
+            expected = bytes(profile_expected)
+            basis = 'standard_profile_model'
+        else:
+            expected_state = State.from_buffer_copy(original)
+            if policy_success:
+                expected_state.fpcr = initial.fpcr
+            expected = bytes(expected_state)
+            basis = 'requested_control_policy' if policy_success else 'direct_original'
+        records.append({'function': function, 'initial': bytes(initial), 'expected': expected,
+            'primary_expected': primary_expected, 'profile_expected': bytes(profile_expected) if profile_expected is not None else None,
+            'equality_basis': basis, 'control_policy_success': policy_success,
             'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0' if focus == VECTOR_NUMERICAL_FOCUS else focus + '_el0',
-            'unsupported': enabled and taken})
+            'unsupported': enabled and not policy_success})
     return {'records': records, 'functions': expected_functions, 'receipt_sha256': receipt_hash,
             'pointer_sha256': pointer_hash,
             'producer': receipt, 'control_readbacks': [{'requested': requested, 'actual': actual, 'cases': count}
                 for (requested, actual), count in sorted(readbacks.items())],
-            'input_derivation': ('Only the per-function unused return register becomes STOP for actual guest RET. Conversion input and output GPRs remain unchanged by transport derivation. ' if focus == CONVERSION_NUMERICAL_FOCUS else 'Only X30 becomes STOP for actual guest RET. All other imported bytes remain unchanged. ') + 'Original requested trap enables are retained; QEMU RAZ/WI readback is classified without successful native equality credit.'}
+            'input_derivation': ('Only the per-function unused return register becomes STOP for actual guest RET. Conversion input and output GPRs remain unchanged by transport derivation. ' if focus == CONVERSION_NUMERICAL_FOCUS else 'Only X30 becomes STOP for actual guest RET. All other imported bytes remain unchanged. ') + 'Original requested trap enables are retained. QEMU RAZ/WI readbacks, accepted requested-control policy and standard-versus-enhanced profile expectations are classified separately from direct original equality.'}
 
 
 def vector_numerical_runtime_cases(records):
@@ -4894,25 +4910,467 @@ def sqrt_numerical_helpers(records, case_ids=None):
     return list(selected.values())
 
 
+ESTIMATE_NUMERICAL_FOCUS = 'estimate_numerical'
+REFINEMENT_NUMERICAL_FOCUS = 'refinement_numerical'
+ESTIMATE_NUMERICAL_ORACLE = ROOT / '.stela/research/estimates/oracle/receipt.json'
+REFINEMENT_NUMERICAL_ORACLE = ROOT / '.stela/research/refinements/oracle/receipt.json'
+ESTIMATE_BASES = {'frecpe': (0x5ea1d800, 0x5ef9d800, 0x0ea1d800, 0x0ef9d800),
+    'frsqrte': (0x7ea1d800, 0x7ef9d800, 0x2ea1d800, 0x2ef9d800),
+    'frecpx': (0x5ea1f800, 0x5ef9f800, None, None),
+    'urecpe': (None, None, 0x0ea1c800, None), 'ursqrte': (None, None, 0x2ea1c800, None)}
+REFINEMENT_BASES = {'frecps': (0x0e20fc00, 0x0e403c00), 'frsqrts': (0x0ea0fc00, 0x0ec03c00)}
+ESTIMATE_NUMERICAL_CASES = 36734
+REFINEMENT_NUMERICAL_CASES = 12720
+ESTIMATE_RPRES_SHIFT = 4
+ESTIMATE_RPRES_MASK = 15
+ESTIMATE_SINGLE_BITS = 32
+ESTIMATE_SINGLE_FRACTION_BITS = 23
+ESTIMATE_SINGLE_EXPONENT_MASK = 255
+ESTIMATE_SINGLE_SIGN = 1 << (ESTIMATE_SINGLE_BITS - 1)
+ESTIMATE_SINGLE_MASK = (1 << ESTIMATE_SINGLE_BITS) - 1
+ESTIMATE_SINGLE_FRACTION_MASK = (1 << ESTIMATE_SINGLE_FRACTION_BITS) - 1
+ESTIMATE_SINGLE_QUIET = 1 << (ESTIMATE_SINGLE_FRACTION_BITS - 1)
+ESTIMATE_SINGLE_INFINITY = ESTIMATE_SINGLE_EXPONENT_MASK << ESTIMATE_SINGLE_FRACTION_BITS
+ESTIMATE_SINGLE_NEGATIVE_DEFAULT_NAN = ESTIMATE_SINGLE_SIGN | ESTIMATE_SINGLE_INFINITY | ESTIMATE_SINGLE_QUIET
+ESTIMATE_SINGLE_RECIP_EXPONENT_BASE = 2 * 127 - 1
+ESTIMATE_SINGLE_RSQRT_EXPONENT_BASE = 3 * 127 - 1
+ESTIMATE_TABLE_FRACTION_BITS = {False: 8, True: 11}
+ESTIMATE_RESULT_FRACTION_BITS = {False: 8, True: 12}
+ESTIMATE_RECIP_NUMERATOR_BITS = {False: 19, True: 26}
+ESTIMATE_RSQRT_NUMERATOR_BITS = {False: 28, True: 39}
+ESTIMATE_RANDOM_SEED = 0x455354494d415445
+REFINEMENT_RANDOM_SEED = 0x524546494e454d45
+ESTIMATE_UNSIGNED_VALUES = (0, 1, 0x3fffffff, 0x40000000, 0x7fffffff, 0x80000000, 0xff800000, 0xffffffff)
+
+
+def estimate_operation(name, lane, width, scalar, d=0, n=1):
+    unsigned = name.startswith('u')
+    if (name not in ESTIMATE_BASES or lane not in (2, 4, 8)
+            or any(not 0 <= register < 32 for register in (d, n))
+            or scalar and width != lane or not scalar and (lane, width) not in VECTOR_NUMERICAL_SHAPES
+            or unsigned and (scalar or lane != 4) or name == 'frecpx' and not scalar):
+        raise ValueError('Unallocated estimate arrangement')
+    base = ESTIMATE_BASES[name][(0 if scalar else 2) + int(lane == 2)]
+    if base is None:
+        raise ValueError('Unallocated estimate format')
+    word = base | (int(lane == 8) << 22) | (int(not scalar and width == 16) << 30) | n << 5 | d
+    canonical = name.upper() + ('_asisdmisc' if scalar else '_asimdmisc') + ('fp16_R' if lane == 2 else '_R')
+    return {'name': name, 'word': word, 'lane': lane, 'bytes': width, 'scalar': scalar, 'd': d, 'n': n,
+        'is_unsigned': unsigned, 'canonical_id': canonical, 'source_lane_count': 1 if scalar else width // lane,
+        'output_kind': 'vector', 'merge': 'old_destination_if_nep' if scalar else 'none', 'cohort_family': 'estimate'}
+
+
+def refinement_operation(name, lane, width, scalar, d=0, n=1, m=2):
+    if (name not in REFINEMENT_BASES or lane not in (2, 4, 8)
+            or any(not 0 <= register < 32 for register in (d, n, m))
+            or scalar and width != lane or not scalar and (lane, width) not in VECTOR_NUMERICAL_SHAPES):
+        raise ValueError('Unallocated refinement arrangement')
+    word = REFINEMENT_BASES[name][int(lane == 2)] | int(lane == 8) << 22
+    word |= 0x50000000 if scalar else int(width == 16) << 30
+    word |= m << 16 | n << 5 | d
+    canonical = name.upper() + ('_asisdsame' if scalar else '_asimdsame') + ('fp16_only' if lane == 2 else '_only')
+    return {'name': name, 'word': word, 'lane': lane, 'bytes': width, 'scalar': scalar, 'd': d, 'n': n, 'm': m,
+        'canonical_id': canonical, 'source_lane_count': 1 if scalar else width // lane,
+        'output_kind': 'vector', 'merge': 'left_if_nep' if scalar else 'none', 'cohort_family': 'refinement'}
+
+
+def estimate_functions():
+    functions = []
+    for name in ESTIMATE_BASES:
+        shapes = [(lane, lane, True) for lane in (2, 4, 8)] if not name.startswith('u') else []
+        if name != 'frecpx':
+            shapes += [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES if not name.startswith('u') or lane == 4]
+        functions.extend(estimate_operation(name, lane, width, scalar, d, n) for lane, width, scalar in shapes for d, n in NUMERICAL_UNARY_ROLES)
+    return functions
+
+
+def refinement_functions():
+    shapes = [(lane, lane, True) for lane in (2, 4, 8)] + [(lane, width, False) for lane, width in VECTOR_NUMERICAL_SHAPES]
+    return [refinement_operation(name, lane, width, scalar, d, n, m) for name in REFINEMENT_BASES
+            for lane, width, scalar in shapes for d, n, m in COMPARISON_MINMAX_BINARY_ROLES]
+
+
+def estimate_table_input(operation, key, poison):
+    if operation['is_unsigned']:
+        return key << 23 | ((1 << 23) - 1 if poison else 0)
+    fraction, bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[operation['lane']]
+    reciprocal = operation['name'] == 'frecpe'
+    shift = fraction - (8 if reciprocal or key >= 256 else 7)
+    base = 256 if reciprocal or key >= 256 else 128
+    exponent = bias if reciprocal or key < 256 else bias + 1
+    return exponent << fraction | (key - base) << shift | ((1 << shift) - 1 if poison else 0)
+
+
+def numerical_suppressed_enables(operation, initial):
+    return operation.get('is_unsigned', False) or bool(initial.fpcr & NUMERICAL_AH)
+
+
+def comparison_minmax_enabled_control(operation, initial):
+    return operation['condition'] is not None and not numerical_condition_holds(operation['condition'], initial.nzcv)
+
+
+def estimate_single_profile_state(operation, initial, enhanced):
+    """Closed integer rules for the AH Single profile split; no host FP."""
+    if operation['lane'] != 4 or operation['name'] not in ('frecpe', 'frsqrte') or not initial.fpcr & NUMERICAL_AH:
+        raise ValueError('Only AH Single estimates have this profile split')
+    expected = State.from_buffer_copy(initial)
+    packed = 0
+    input_precision = ESTIMATE_TABLE_FRACTION_BITS[enhanced]
+    precision = ESTIMATE_RESULT_FRACTION_BITS[enhanced]
+    for position in range(operation['source_lane_count']):
+        source = initial.v[operation['n']][position // 2] >> (position % 2 * ESTIMATE_SINGLE_BITS) & ESTIMATE_SINGLE_MASK
+        sign, exponent, fraction = source & ESTIMATE_SINGLE_SIGN, source >> ESTIMATE_SINGLE_FRACTION_BITS & ESTIMATE_SINGLE_EXPONENT_MASK, source & ESTIMATE_SINGLE_FRACTION_MASK
+        if exponent == ESTIMATE_SINGLE_EXPONENT_MASK and fraction:
+            result = ESTIMATE_SINGLE_NEGATIVE_DEFAULT_NAN if initial.fpcr & NUMERICAL_DN else source | ESTIMATE_SINGLE_QUIET
+        elif exponent == 0:
+            result = sign | ESTIMATE_SINGLE_INFINITY  # AH forces FIZ, including every subnormal.
+        elif operation['name'] == 'frecpe':
+            if exponent == ESTIMATE_SINGLE_EXPONENT_MASK or exponent >= ESTIMATE_SINGLE_RECIP_EXPONENT_BASE:
+                result = sign  # AH forces output FZ and suppresses UFC.
+            else:
+                scaled = (1 << input_precision) + (fraction >> (ESTIMATE_SINGLE_FRACTION_BITS - input_precision))
+                estimate = (((1 << ESTIMATE_RECIP_NUMERATOR_BITS[enhanced]) // (2 * scaled + 1)) + 1) // 2
+                result = sign | (ESTIMATE_SINGLE_RECIP_EXPONENT_BASE - exponent) << ESTIMATE_SINGLE_FRACTION_BITS | (estimate & ((1 << precision) - 1)) << (ESTIMATE_SINGLE_FRACTION_BITS - precision)
+        elif sign:
+            result = ESTIMATE_SINGLE_NEGATIVE_DEFAULT_NAN
+        elif exponent == ESTIMATE_SINGLE_EXPONENT_MASK:
+            result = 0
+        else:
+            if exponent & 1:
+                scaled = (1 << (input_precision - 1)) + (fraction >> (ESTIMATE_SINGLE_FRACTION_BITS - input_precision + 1))
+                transformed = 2 * scaled + 1
+            else:
+                scaled = (1 << input_precision) + (fraction >> (ESTIMATE_SINGLE_FRACTION_BITS - input_precision))
+                transformed = 2 * ((scaled & ~1) + 1)
+            estimate = (math.isqrt(((1 << ESTIMATE_RSQRT_NUMERATOR_BITS[enhanced]) - 1) // transformed) + 1) // 2
+            result = ((ESTIMATE_SINGLE_RSQRT_EXPONENT_BASE - exponent) // 2) << ESTIMATE_SINGLE_FRACTION_BITS | (estimate & ((1 << precision) - 1)) << (ESTIMATE_SINGLE_FRACTION_BITS - precision)
+        packed |= result << (position * ESTIMATE_SINGLE_BITS)
+    if operation['scalar'] and initial.fpcr & NUMERICAL_NEP:
+        old = initial.v[operation['d']][0] | initial.v[operation['d']][1] << 64
+        packed |= old & ~ESTIMATE_SINGLE_MASK
+    expected.v[operation['d']][:] = [packed & MASK, packed >> 64]
+    return expected
+
+
+def estimate_profile_expectation(operation, initial, original, producer):
+    if operation['lane'] != 4 or operation['name'] not in ('frecpe', 'frsqrte') or not initial.fpcr & NUMERICAL_AH:
+        return None
+    rpres = int(producer['cpu_registers']['ID_AA64ISAR2_EL1'], 16) >> ESTIMATE_RPRES_SHIFT & ESTIMATE_RPRES_MASK
+    if rpres != 1:
+        raise AssertionError('Estimate original capture no longer has calibrated RPRES1 profile')
+    enhanced = estimate_single_profile_state(operation, initial, True)
+    enhanced.fpcr = original.fpcr
+    if bytes(enhanced) != bytes(original):
+        raise AssertionError('Raw enhanced original estimate disagrees with independent full-state integer model')
+    return estimate_single_profile_state(operation, initial, False)
+
+
+def validate_refinement_original_effects(initial, original, operation):
+    if operation['scalar']:
+        lane = operation['lane']
+        merge = struct.pack('<2Q', *initial.v[operation['n']]) if initial.fpcr & NUMERICAL_NEP else bytes(16)
+        if struct.pack('<2Q', *original.v[operation['d']])[lane:] != merge[lane:]:
+            raise AssertionError('Scalar refinement did not merge original Vn')
+    elif operation['bytes'] == 8 and original.v[operation['d']][1]:
+        raise AssertionError('Vector64 refinement did not clear upper64')
+    if initial.fpcr & NUMERICAL_AH and original.fpsr != initial.fpsr:
+        raise AssertionError('AH refinement generated unsuppressed status')
+
+
+def validate_estimate_original_effects(initial, original, operation):
+    validate_numerical_unary_original_effects(initial, original, operation)
+    if numerical_suppressed_enables(operation, initial) and original.fpsr != initial.fpsr:
+        raise AssertionError('Unsigned or AH estimate generated unsuppressed status')
+
+
+def estimate_corpus():
+    functions, records, enable_forms = estimate_functions(), [], set()
+    rng = random.Random(ESTIMATE_RANDOM_SEED)
+    def append(function, label, values, control=0, sticky=0):
+        initial = numerical_unary_state(functions[function], len(records), values, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function in range(0, len(functions), len(NUMERICAL_UNARY_ROLES)):
+        op = functions[function]
+        count, lane, unsigned = op['source_lane_count'], op['lane'], op['is_unsigned']
+        fraction, bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[lane]
+        values = [(f'unsigned_{i}', value) for i, value in enumerate(ESTIMATE_UNSIGNED_VALUES)] if unsigned else numerical_unary_values(lane)
+        catalog = dict(values)
+        if op['name'] != 'frecpx':
+            start = 256 if op['name'] in ('frecpe', 'urecpe') else 128
+            for key in range(start, 512):
+                for poison in (False, True):
+                    append(function, f'table_{key}_{int(poison)}', [estimate_table_input(op, key, poison)] * count)
+        else:
+            for exponent in range((bias + 1) * 2):
+                for tail in (0, 1):
+                    for sign in (0, 1 << (lane * 8 - 1)):
+                        append(function, f'exponent_{exponent}_{tail}_{int(bool(sign))}', [sign | exponent << fraction | tail])
+        if not unsigned:
+            for mode in range(4):
+                for label, value in values:
+                    append(function, 'value_' + label, [value] * count, mode << NUMERICAL_ROUND_SHIFT)
+            controlled = [(label, catalog[label]) for stem in ('qnan', 'snan', 'minsubnormal', 'maxsubnormal',
+                          'minnormal', 'zero', 'infinity', 'one') for label in (stem + '_positive', stem + '_negative')]
+            for control in NUMERICAL_UNARY_CONTROLS:
+                for label, value in controlled:
+                    append(function, 'control_' + label, [value] * count, control)
+            for mode in range(4):
+                for label in ('one_positive', 'one_negative', 'minsubnormal_positive', 'minsubnormal_negative',
+                              'snan_positive', 'snan_negative', 'maxfinite_positive', 'maxfinite_negative'):
+                    append(function, 'ah_round_' + label, [catalog[label]] * count, NUMERICAL_AH | mode << NUMERICAL_ROUND_SHIFT)
+            if op['name'] == 'frecpe':
+                flush = NUMERICAL_FZ16 if lane == 2 else NUMERICAL_FZ
+                for boundary, exponent in (('overflow', {2: -16, 4: -128, 8: -1024}[lane]),
+                                           ('flush', {2: 14, 4: 126, 8: 1022}[lane])):
+                    threshold = conversion_exact_positive_bits(lane, 1, exponent)
+                    for offset in (-1, 0, 1):
+                        for sign in (0, 1 << (lane * 8 - 1)):
+                            for control in (0, flush, NUMERICAL_AH, NUMERICAL_AH | flush):
+                                for mode in range(4):
+                                    append(function, f'threshold_{boundary}_{offset}_{int(bool(sign))}',
+                                           [(threshold + offset) | sign] * count, control | mode << NUMERICAL_ROUND_SHIFT)
+            if op['name'] == 'frsqrte':
+                for position in range(fraction):
+                    for sign in (0, 1 << (lane * 8 - 1)):
+                        for control in (0, NUMERICAL_AH, NUMERICAL_FZ16 if lane == 2 else NUMERICAL_FZ):
+                            append(function, f'leading_{position}_{int(bool(sign))}', [(1 << position) | sign] * count, control)
+        else:
+            for control in NUMERICAL_UNARY_CONTROLS:
+                for label, value in values:
+                    append(function, 'control_' + label, [value] * count, control)
+        selected_values = values[:4] if unsigned else [(label, catalog[label]) for label in
+                          ('one_positive', 'snan_negative', 'minsubnormal_negative', 'zero_negative')]
+        if op['canonical_id'] not in enable_forms:
+            enable_forms.add(op['canonical_id'])
+            for enable in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                for ah in (0, NUMERICAL_AH):
+                    append(function, 'enabled_suppression', [selected_values[1][1]] * count, enable | ah)
+        for role in range(1, len(NUMERICAL_UNARY_ROLES)):
+            for control in (0, NUMERICAL_NEP, NUMERICAL_AH):
+                for label, value in selected_values:
+                    append(function + role, 'alias_' + label, [value] * count, control)
+        if not op['scalar']:
+            patterns = values[:4] if unsigned else [(label, catalog[label]) for label in
+                       ('qnan_negative', 'snan_positive', 'minsubnormal_negative', 'infinity_positive')]
+            for control in (0, NUMERICAL_AH, NUMERICAL_FZ16 if lane == 2 else NUMERICAL_FZ):
+                for pattern, (_, value) in enumerate(patterns):
+                    for position in range(count):
+                        active = [values[1][1] if unsigned else catalog['one_positive']] * count
+                        active[position] = value
+                        append(function, f'mixed_{pattern}_{position}', active, control)
+        for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+            for control in (0, NUMERICAL_AH):
+                for label, value in selected_values:
+                    append(function, 'sticky_' + label, [value] * count, control, sticky)
+        for iteration in range(16):
+            value = rng.getrandbits(lane * 8)
+            for control in (0, NUMERICAL_AH):
+                append(function, f'bounded_random_{iteration}', [value] * count, control)
+    if len(records) != ESTIMATE_NUMERICAL_CASES:
+        raise AssertionError(f'Estimate corpus exceeded approved scope: {len(records)}')
+    return functions, records
+
+
+def refinement_pairs(lane):
+    v = dict(numerical_unary_values(lane))
+    def positive(label):
+        return v[label + '_positive']
+    pairs = []
+    for zero in (v['zero_positive'], v['zero_negative']):
+        for infinity in (v['infinity_positive'], v['infinity_negative']):
+            pairs.extend(((zero, infinity), (infinity, zero)))
+    for one in (v['one_positive'], v['one_negative']):
+        for infinity in (v['infinity_positive'], v['infinity_negative']):
+            pairs.extend(((one, infinity), (infinity, one)))
+    for left, right in (('one_positive', 'one_positive'), ('two_positive', 'one_positive'), ('one_positive', 'two_positive'),
+            ('one_positive', 'onehalf_positive'), ('one_negative', 'one_positive'), ('one_positive', 'one_negative'),
+            ('two_negative', 'one_negative'), ('half_positive', 'half_positive'), ('onehalf_positive', 'two_positive'),
+            ('quarter_positive', 'fourhalf_positive'), ('fourhalf_positive', 'twohalf_positive'), ('two_positive', 'two_positive')):
+        pairs.append((v[left], v[right]))
+    one, two = positive('one'), positive('two')
+    three = conversion_exact_positive_bits(lane, 3, 0)
+    pairs.extend(((three, one), (one, three), (one+1, one-1), (one-1, one+1), (two+1, one), (three+1, one)))
+    overflow = {2: 0x5c00, 4: 0x5f800000, 8: 0x5ff0000000000000}[lane]
+    pairs.extend(((one+1, two-2), (one+2, three-3), (overflow, overflow),
+                  (positive('minsubnormal'), positive('maxfinite')), (positive('minnormal'), positive('maxfinite')),
+                  (positive('maxfinite'), positive('maxfinite'))))
+    for label in ('qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+        pairs.extend(((v[label], one), (one, v[label])))
+    if len(pairs) != 48:
+        raise AssertionError('Refinement directed foundation changed')
+    return pairs
+
+
+def refinement_corpus():
+    functions, records, enable_forms = refinement_functions(), [], set()
+    rng = random.Random(REFINEMENT_RANDOM_SEED)
+    def append(function, label, pairs, control=0, sticky=0):
+        initial = vector_numerical_state(functions[function], len(records), pairs, control)
+        initial.fpsr = sticky
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function in range(0, len(functions), len(COMPARISON_MINMAX_BINARY_ROLES)):
+        op = functions[function]
+        count, lane = op['source_lane_count'], op['lane']
+        pairs, v = refinement_pairs(lane), dict(numerical_unary_values(lane))
+        for control in (0, NUMERICAL_AH):
+            for mode in range(4):
+                for index, pair in enumerate(pairs):
+                    append(function, f'directed_{index}', [pair] * count, control | mode << NUMERICAL_ROUND_SHIFT)
+        matrix = [v[label] for label in ('qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative', 'one_positive', 'one_negative')]
+        for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+            for left, x in enumerate(matrix):
+                for right, y in enumerate(matrix):
+                    append(function, f'nan_{left}_{right}', [(x, y)] * count, control)
+        boundaries = [pairs[0], (v['minsubnormal_positive'], v['infinity_positive']),
+            (v['minsubnormal_negative'], v['infinity_positive']), (v['infinity_positive'], v['minsubnormal_positive']),
+            pairs[30], pairs[34 if op['name'] == 'frecps' else 35], pairs[36], (v['qnan_positive'], v['snan_negative'])]
+        for control in NUMERICAL_UNARY_CONTROLS:
+            for index, pair in enumerate(boundaries):
+                append(function, f'control_{index}', [pair] * count, control)
+        for role in range(1, len(COMPARISON_MINMAX_BINARY_ROLES)):
+            for control in (0, NUMERICAL_NEP, NUMERICAL_AH):
+                for index in (0, 30, 36, 40):
+                    append(function + role, f'alias_{index}', [pairs[index]] * count, control)
+        if not op['scalar']:
+            flush = NUMERICAL_FZ16 if lane == 2 else NUMERICAL_FZ
+            for control in (0, NUMERICAL_AH, flush, NUMERICAL_AH | flush):
+                for pattern, pair in enumerate((pairs[39], pairs[44], boundaries[1], pairs[34 if op['name'] == 'frecps' else 35])):
+                    for position in range(count):
+                        active = [pairs[16]] * count
+                        active[position] = pair
+                        append(function, f'mixed_{pattern}_{position}', active, control)
+        if op['canonical_id'] not in enable_forms:
+            enable_forms.add(op['canonical_id'])
+            for enable in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                for ah in (0, NUMERICAL_AH):
+                    append(function, 'enabled_suppression', [pairs[44]] * count, enable | ah)
+        for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+            for control in (0, NUMERICAL_AH):
+                for index in (0, 30, 36, 44):
+                    append(function, f'sticky_{index}', [pairs[index]] * count, control, sticky)
+        for iteration in range(16):
+            pair = (rng.getrandbits(lane * 8), rng.getrandbits(lane * 8))
+            for control in (0, NUMERICAL_AH):
+                append(function, f'bounded_random_{iteration}', [pair] * count, control)
+    if len(records) != REFINEMENT_NUMERICAL_CASES:
+        raise AssertionError(f'Refinement corpus exceeded approved scope: {len(records)}')
+    return functions, records
+
+
+def prepare_estimate_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *estimate_corpus(), ESTIMATE_NUMERICAL_FOCUS)
+
+
+def prepare_refinement_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *refinement_corpus(), REFINEMENT_NUMERICAL_FOCUS)
+
+
+def load_estimate_oracle(path=ESTIMATE_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, estimate_functions(), ESTIMATE_NUMERICAL_CASES, ESTIMATE_NUMERICAL_FOCUS)
+
+
+def load_refinement_oracle(path=REFINEMENT_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, refinement_functions(), REFINEMENT_NUMERICAL_CASES, REFINEMENT_NUMERICAL_FOCUS)
+
+
+def estimate_refinement_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (case_ids is not None and record['case'] not in case_ids or initial.fpcr or initial.fpsr
+                or op['d'] != 0 or op['n'] != 1):
+            continue
+        selected.setdefault(numerical_unary_shape(op), record)
+    return list(selected.values())
+
+
+def estimate_runtime_cases(records):
+    selected = {}
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        form, shape = op['canonical_id'], numerical_unary_shape(op)
+        if label == 'enabled_suppression':
+            key = ('enable', form if initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK == NUMERICAL_TRAP_ENABLE_MASK else op['name'], initial.fpcr)
+            selected.setdefault(key, record)
+        elif initial.fpcr == 0 and initial.fpsr == 0 and label in ('table_256_0', 'exponent_0_0_0'):
+            selected.setdefault(('shape', shape), record)
+        elif label == 'control_snan_negative' and initial.fpcr in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+            selected.setdefault(('nan', form, initial.fpcr), record)
+        elif label in ('control_minsubnormal_negative', 'control_one_positive') and initial.fpcr in (NUMERICAL_NEP, NUMERICAL_FZ16, NUMERICAL_FZ, NUMERICAL_FIZ):
+            selected.setdefault(('control', op['name'], initial.fpcr, label), record)
+        elif label.startswith('threshold_') and initial.fpcr in (0, NUMERICAL_AH):
+            selected.setdefault(('threshold', op['lane'], label, initial.fpcr), record)
+        elif label == 'ah_round_one_positive':
+            selected.setdefault(('ah_mode', op['name'], initial.fpcr), record)
+        elif label.startswith('alias_'):
+            selected.setdefault(('alias', op['name'], op['d'], op['n']), record)
+        elif label.startswith('sticky_'):
+            selected.setdefault(('sticky', form), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def refinement_runtime_cases(records):
+    selected = {}
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        form, shape = op['canonical_id'], numerical_unary_shape(op)
+        if label == 'enabled_suppression':
+            selected.setdefault(('enable', form if initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK == NUMERICAL_TRAP_ENABLE_MASK else 'all', initial.fpcr), record)
+        elif label in ('directed_17', 'directed_28', 'directed_36') or label in ('directed_34', 'directed_35') and op['lane'] == 2 and not initial.fpcr & NUMERICAL_AH:
+            selected.setdefault(('directed', op['name'], op['lane'], label, initial.fpcr), record)
+        elif label in ('nan_0_3', 'nan_2_1'):
+            selected.setdefault(('nan', op['name'], op['lane'], label, initial.fpcr), record)
+        elif (label in ('control_1', 'control_2') or label == 'control_7' and initial.fpcr == NUMERICAL_NEP) and initial.fpcr in (NUMERICAL_NEP, NUMERICAL_FZ16, NUMERICAL_FZ, NUMERICAL_FIZ):
+            selected.setdefault(('control', op['name'], op['lane'], label, initial.fpcr), record)
+        elif label.startswith('alias_') and initial.fpcr == NUMERICAL_NEP:
+            selected.setdefault(('alias', op['name'], op['d'], op['n'], op['m']), record)
+        elif label.startswith('sticky_'):
+            selected.setdefault(('sticky', op['name'], op['lane']), record)
+        elif label == 'mixed_3_0' and op['lane'] == 2 and initial.fpcr in (NUMERICAL_FZ16, NUMERICAL_AH | NUMERICAL_FZ16):
+            selected.setdefault(('half_output_flush', shape, initial.fpcr), record)
+        elif label == 'mixed_0_0' and initial.fpcr == 0:
+            selected.setdefault(('shape', shape), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
     VECTOR_NUMERICAL_FOCUS: {'loader': load_vector_numerical_oracle, 'runtime_cases': vector_numerical_runtime_cases,
         'helpers': vector_numerical_helpers, 'forms': 8,
         'limits': 'Enabled nonstreaming H/S/D vector arithmetic only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'},
     FUSED_NUMERICAL_FOCUS: {'loader': load_fused_numerical_oracle, 'runtime_cases': fused_numerical_runtime_cases,
+        'native_fma_operations': FUSED_NATIVE_OPERATIONS,
         'helpers': fused_numerical_helpers, 'forms': 24,
         'limits': 'Enabled nonstreaming scalar/vector/indexed H/S/D fused arithmetic only. Full-frame original observations compare under compatible controls; trap-delivery, disabled-feature, Apple hardware, complete application, OS and performance claims remain outside this cohort.'},
     CONVERSION_NUMERICAL_FOCUS: {'loader': load_conversion_numerical_oracle, 'runtime_cases': conversion_numerical_runtime_cases,
         'helpers': conversion_numerical_helpers, 'forms': 163,
         'limits': 'Enabled nonstreaming classic precision/integer/fixed-point conversion and JSCVT profile only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'},
     COMPARISON_MINMAX_FOCUS: {'loader': load_comparison_minmax_oracle, 'runtime_cases': comparison_minmax_runtime_cases,
+        'accepts_enabled_control': comparison_minmax_enabled_control, 'actual_helpers': True,
         'helpers': comparison_minmax_helpers, 'forms': 102,
         'limits': 'Enabled nonstreaming scalar/AdvSIMD comparison and minmax only. Direct full-frame original equality excludes failed-FCCMP retained-enable control-policy successes. No enabled trap delivery, disabled FP access, Apple hardware, process, OS or performance claim.'},
     ROUND_INTEGRAL_FOCUS: {'loader': load_round_integral_oracle, 'runtime_cases': round_integral_runtime_cases,
+        'actual_helpers': True,
         'helpers': round_integral_helpers, 'forms': 47,
         'limits': 'Enabled nonstreaming scalar/AdvSIMD H/S/D integral rounding, including bounded 32/64-bit rounding, only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, disabled FP access, Apple hardware, application, OS or performance claim.'},
     SQRT_NUMERICAL_FOCUS: {'loader': load_sqrt_numerical_oracle, 'runtime_cases': sqrt_numerical_runtime_cases,
+        'actual_helpers': True,
         'helpers': sqrt_numerical_helpers, 'forms': 5,
         'limits': 'Enabled nonstreaming scalar/AdvSIMD H/S/D square root only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, disabled FP access, Apple hardware, application, OS or performance claim.'},
+    ESTIMATE_NUMERICAL_FOCUS: {'loader': load_estimate_oracle, 'runtime_cases': estimate_runtime_cases,
+        'helpers': estimate_refinement_helpers, 'forms': 12, 'actual_helpers': True,
+        'original_effects': validate_estimate_original_effects, 'accepts_enabled_control': numerical_suppressed_enables,
+        'profile_expectation': estimate_profile_expectation, 'status_merge_source': 'd',
+        'limits': 'Enabled nonstreaming standard RPRES-absent H/S/D estimates/exponent and unsigned 32-bit estimates only. All AH1 Single FRECPE/FRSQRTE states are separately counted standard-profile model comparisons against preserved, independently validated enhanced QEMU observations, including coincident results. Accepted AH1/unsigned retained enables use separate requested-FPCR control-policy comparisons; AH0 floating enables precisely refuse. No enabled trap delivery, RPRES-enabled guest CPU, Apple hardware, process/OS or performance claim.'},
+    REFINEMENT_NUMERICAL_FOCUS: {'loader': load_refinement_oracle, 'runtime_cases': refinement_runtime_cases,
+        'native_fma_operations': {'frecps': 'vfnmadd', 'frsqrts': 'vfnmadd'},
+        'helpers': estimate_refinement_helpers, 'forms': 8, 'actual_helpers': True,
+        'original_effects': validate_refinement_original_effects, 'accepts_enabled_control': numerical_suppressed_enables,
+        'status_merge_source': 'n',
+        'limits': 'Enabled nonstreaming H/S/D fused reciprocal and reciprocal-square-root refinements only. AH1 suppresses fresh status and accepts retained enables with separately counted requested-FPCR control-policy comparisons; AH0 enables precisely refuse. Original full frames and source/profile/control expectations remain distinct. No enabled trap delivery, Apple hardware, process/OS or performance claim.'},
 }
 
 
@@ -4926,8 +5384,11 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
     fused = focus == FUSED_NUMERICAL_FOCUS
     conversion = focus == CONVERSION_NUMERICAL_FOCUS
     comparison_minmax = focus == COMPARISON_MINMAX_FOCUS
-    unary = focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS)
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
+    unary = focus in (ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS)
+    merge_source = family.get('status_merge_source')
+    modern = conversion or comparison_minmax or unary or bool(merge_source)
+    reuse_reference = comparison_minmax or unary or bool(merge_source)
     source = b''.join(struct.pack('<II', operation['word'], numerical_return_word(operation)) for operation in oracle['functions'])
     source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
     ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
@@ -4997,12 +5458,14 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 raise AssertionError('Vector requested trap enables were lost or refusal was imprecise')
         else:
             require(report, actual, State.from_buffer_copy(record['expected']))
-            if record.get('control_policy_success'):
+            if record.get('equality_basis') == 'standard_profile_model':
+                counts['profile_model_success_checks'] += 1
+            elif record.get('control_policy_success'):
                 counts['control_policy_success_checks'] += 1
 
-    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if comparison_minmax or unary
+    helpers = (family['helpers'](oracle['records'], oracle.get('raw_helper_case_ids')) if family.get('actual_helpers')
                else family['helpers'](oracle['records']))
-    if not comparison_minmax and not unary and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
+    if not family.get('actual_helpers') and (not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)))):
         raise AssertionError('Numerical helper boundary fixture omits an arrangement')
     for record in helpers:
         initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
@@ -5031,22 +5494,23 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         check_original(loop, loop_initial, loop_expected)
         counts['memory_cache_loop_checks'] += 1
 
-        for control in ((NUMERICAL_NEP, 0) if conversion or comparison_minmax or unary else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
-            reference = record if comparison_minmax or unary else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
+        for control in ((NUMERICAL_NEP, 0) if modern else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
+            reference = record if reuse_reference else next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
                 and candidate['label'] == record['label'] and State.from_buffer_copy(candidate['initial']).fpcr == control)
             chain_initial = State.from_buffer_copy(reference['initial'])
-            control_register, status_register, clear_register = (20, 21, 22) if conversion or comparison_minmax or unary else (0, 3, 4)
+            control_register, status_register, clear_register = (20, 21, 22) if modern else (0, 3, 4)
             chain_initial.x[control_register] = control
             chain_initial.fpcr, chain_initial.fpsr = 0, FP_REGISTER_MASKS['fpsr']
             chain_expected = State.from_buffer_copy(reference['expected'])
-            if conversion or comparison_minmax or unary:
+            if modern:
                 chain_expected.x[control_register] = control
-                if comparison_minmax or unary:
+                if reuse_reference:
                     chain_expected.fpcr = control
-                    if unary and operation['scalar'] and control & NUMERICAL_NEP:
+                    if (unary or merge_source) and operation['scalar'] and control & NUMERICAL_NEP:
                         bits = operation['lane'] * 8
                         active_mask = (1 << bits) - 1
-                        merged = chain_initial.v[operation['d']][0] | chain_initial.v[operation['d']][1] << 64
+                        merge_register = operation[merge_source] if merge_source else operation['d']
+                        merged = chain_initial.v[merge_register][0] | chain_initial.v[merge_register][1] << 64
                         result = chain_expected.v[operation['d']][0] & active_mask | merged & ~active_mask
                         chain_expected.v[operation['d']][:] = [result & MASK, result >> 64]
                     elif operation['output_kind'] == 'vector' and operation['scalar'] and operation['merge'] != 'none' and control & NUMERICAL_NEP:
@@ -5090,8 +5554,8 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 'fpcr': NUMERICAL_INVALID_ENABLE, 'enabled_exceptions': 1}:
             raise AssertionError('Interior fused refusal did not preserve exact pending instruction and enable')
         counts['interior_fused_precise_refusal_checks'] += 1
-    transcript_name = f'{focus}-{target_id}' if fused or conversion or comparison_minmax or unary else focus
-    for name in ('budget_helper_resume_checks', 'disk_cache_checks', 'memory_cache_loop_checks', 'control_status_chain_checks', 'control_policy_success_checks'):
+    transcript_name = f'{focus}-{target_id}' if fused or modern else focus
+    for name in ('budget_helper_resume_checks', 'disk_cache_checks', 'memory_cache_loop_checks', 'control_status_chain_checks', 'control_policy_success_checks', 'profile_model_success_checks'):
         counts.setdefault(name, 0)
     snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
     return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
@@ -5106,6 +5570,13 @@ def run_conversion_numerical_cohort(cli, oracle_path):
     return run_full_frame_numerical_cohort(cli, oracle_path, CONVERSION_NUMERICAL_FOCUS)
 
 
+def numerical_fma_expectation(operation, target_id, operations):
+    if not operations or 'fma' not in target_id.split('+')[1:] or operation['lane'] == 2:
+        return {}
+    suffix = ('s' if operation['scalar'] else 'p') + ('s' if operation['lane'] == 4 else 'd')
+    return {operations[operation['name']] + '132' + suffix: 1}
+
+
 def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     fused = focus == FUSED_NUMERICAL_FOCUS
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
@@ -5114,7 +5585,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -5151,15 +5622,12 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
                 histogram = artifact['accounting']['static_opcode_histogram']
                 fused_mnemonics = {mnemonic: count for mnemonic, count in histogram.items()
                                    if mnemonic.startswith(FUSED_NATIVE_PREFIXES)}
-                expected = {}
-                if fused and 'fma' in target_id.split('+')[1:] and operation['lane'] != 2:
-                    suffix = ('s' if operation['scalar'] else 'p') + ('s' if operation['lane'] == 4 else 'd')
-                    expected[FUSED_NATIVE_OPERATIONS[operation['name']] + '132' + suffix] = 1
+                expected = numerical_fma_expectation(operation, target_id, family.get('native_fma_operations'))
                 if fused_mnemonics != expected:
                     raise AssertionError(f'FMA3 opcode/feature guard failed: {target_id} {operation} {fused_mnemonics}')
             raw = bounded_cases(batches)
-            raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested trap enables remain intact and their RAZ/WI observations receive no successful native equality credit.'
-            if focus in (COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS):
+            raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested enables remain intact in native inputs. QEMU RAZ/WI observations receive no direct-original equality credit; accepted control-policy and standard-profile model successes are counted separately.'
+            if family.get('actual_helpers'):
                 oracle['raw_helper_case_ids'] = set(raw['raw_helper_case_ids'])
             runtime = full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 focus, cpu_target, target_id)
@@ -5185,6 +5653,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
         'raw_helper_unchanged_state_comparisons': sums('raw_native', 'raw_helper_unchanged_state_comparisons'),
         'raw_unsupported_unchanged_state_comparisons': sums('raw_native', 'raw_unsupported_unchanged_state_comparisons'),
         'original_full_frame_captures': len(oracle['records']), 'canonical_forms': family['forms'],
+        'original_reference_classifications': dict(Counter('precise_refusal' if record['unsupported'] else record.get('equality_basis', 'direct_original') for record in oracle['records'])),
         'native_mxcsr_preservation_comparisons': sums('raw_native', 'caller_mxcsr_preservation_comparisons'),
         'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
         'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
@@ -5193,9 +5662,11 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
         'profiles': profiles, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
         'verification_wall_seconds': time.monotonic() - started,
         'limits': family['limits']}
-    if focus == COMPARISON_MINMAX_FOCUS:
+    if family.get('accepts_enabled_control'):
         report['runtime_control_policy_success_checks'] = sums('rust_runtime', 'control_policy_success_checks')
         report['raw_inline_control_policy_comparisons'] = sums('raw_native', 'raw_inline_control_policy_comparisons')
+        report['runtime_profile_model_success_checks'] = sums('rust_runtime', 'profile_model_success_checks')
+        report['raw_inline_profile_model_comparisons'] = sums('raw_native', 'raw_inline_profile_model_comparisons')
     write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     print(json.dumps(report, indent=2))
 
@@ -5206,7 +5677,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -5427,7 +5898,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -5551,7 +6022,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -5566,6 +6037,8 @@ def main():
                         help='Pinned full-frame original integral rounding receipt')
     parser.add_argument('--sqrt-oracle', type=Path, default=SQRT_NUMERICAL_ORACLE,
                         help='Pinned full-frame original square-root receipt')
+    parser.add_argument('--estimate-oracle', type=Path, default=ESTIMATE_NUMERICAL_ORACLE)
+    parser.add_argument('--refinement-oracle', type=Path, default=REFINEMENT_NUMERICAL_ORACLE)
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -5575,6 +6048,10 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus in (ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS):
+        oracle_path = arguments.estimate_oracle if arguments.focus == ESTIMATE_NUMERICAL_FOCUS else arguments.refinement_oracle
+        run_full_frame_numerical_cohort(cli, oracle_path, arguments.focus)
         return
     if arguments.focus == SQRT_NUMERICAL_FOCUS:
         run_full_frame_numerical_cohort(cli, arguments.sqrt_oracle, SQRT_NUMERICAL_FOCUS)
