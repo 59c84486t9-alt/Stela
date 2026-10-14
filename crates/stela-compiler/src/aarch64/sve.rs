@@ -3,12 +3,14 @@
 
 pub mod integer_arithmetic;
 pub mod integer_logic;
+pub mod integer_saturation;
 pub mod sign;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     IntegerArithmetic(integer_arithmetic::Operand),
     IntegerLogic(integer_logic::Operand),
+    IntegerSaturation(integer_saturation::Operand),
     Sign(sign::Operand),
 }
 
@@ -18,6 +20,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .map(|operand| operand.map(Operand::IntegerLogic))
         .or_else(|| {
             integer_arithmetic::decode(word).map(|operand| operand.map(Operand::IntegerArithmetic))
+        })
+        .or_else(|| {
+            integer_saturation::decode(word).map(|operand| operand.map(Operand::IntegerSaturation))
         })
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
 }

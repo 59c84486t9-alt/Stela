@@ -2,4 +2,5 @@
 
 pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_logic;
+pub(crate) mod integer_saturation;
 pub(crate) mod sign;

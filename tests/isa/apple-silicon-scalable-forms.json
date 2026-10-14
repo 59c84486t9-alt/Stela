@@ -37,6 +37,7 @@
     "crates/stela-compiler/src/aarch64/sve.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+    "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
     "crates/stela-compiler/src/aarch64/sme.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
@@ -44,6 +45,7 @@
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_logic.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
     "crates/stela-compiler/src/x86_64/sme.rs",
     "crates/stela-compiler/src/x86_64/sme/length.rs",
@@ -263,6 +265,31 @@
         "unavailable_enable_storage_policy_cases": 180,
         "body_bridges": 180
       },
+      "require_current_executable": true
+    },
+    "sve_integer_saturation": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sve-integer/arithmetic/integration/saturation39/production-transfer-v3/receipt.json",
+      "kind": "arm64_streaming_integer_saturation_original_native_differential",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "comparison_field": "retained_direct_original_native_comparisons",
+      "required_shared_sources": [
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/saturation.py"
+      ],
+      "required_measurements": {
+        "canonical_forms": 39,
+        "genuine_original_inputs": 5328,
+        "retained_direct_original_native_comparisons": 10656,
+        "production_body_bridge_comparisons": 10656,
+        "fresh_affected_original_native_comparisons": 0,
+        "retained_affected_original_native_comparisons": 424,
+        "current_complete_body_map_transfers": 5032
+      },
+      "required_positive_counts": [
+        "retained_affected_original_native_comparisons"
+      ],
       "require_current_executable": true
     }
   },
@@ -4638,6 +4665,1605 @@
           "svcr": 1
         }
       ]
+    },
+    {
+      "id": "saba_z_zzz_",
+      "mnemonic": "SABA",
+      "category": "sve",
+      "source_file": "saba_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c6a2c87abe6bde2397e72894e31e5afbcbf5d871ccb8e4be0bc32fb5af2d70b3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4500f820",
+          "expected_mnemonics": [
+            "saba"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sabalb_z_zzz_",
+      "mnemonic": "SABALB",
+      "category": "sve",
+      "source_file": "sabalb_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d4e57121756a00220ae902b378ef208f3bdec14bb2d654bc77cd1e295e30819d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4540c020",
+          "expected_mnemonics": [
+            "sabalb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sabalt_z_zzz_",
+      "mnemonic": "SABALT",
+      "category": "sve",
+      "source_file": "sabalt_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2cd3bd00ffa077b25a541703950cee3e73d70648e233755fd5816c04063a6791",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4540c420",
+          "expected_mnemonics": [
+            "sabalt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sabd_z_p_zz_",
+      "mnemonic": "SABD",
+      "category": "sve",
+      "source_file": "sabd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x040c0000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "7105c5b58ed576c06ffe9b9a74369fa1ea03e2eb79b82564cc4bd3cf11bf8cb1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x040c0020",
+          "expected_mnemonics": [
+            "sabd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sabdlb_z_zz_",
+      "mnemonic": "SABDLB",
+      "category": "sve",
+      "source_file": "sabdlb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45003000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "4f65685612b4233179dc0db87d3b6a1c5ea21764800f75beee0469ca27bdaad3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45403020",
+          "expected_mnemonics": [
+            "sabdlb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sabdlt_z_zz_",
+      "mnemonic": "SABDLT",
+      "category": "sve",
+      "source_file": "sabdlt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45003400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9091d71ab164c2a7896c8b60b9953cff6995090a8bebeb8f6d3c224a8dee5324",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45403420",
+          "expected_mnemonics": [
+            "sabdlt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "shadd_z_p_zz_",
+      "mnemonic": "SHADD",
+      "category": "sve",
+      "source_file": "shadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44108000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "79d5ac35cdaa063c37bc46dfb5854211fbf9572e330b18f3bbadb17f4d46f9a6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44108020",
+          "expected_mnemonics": [
+            "shadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "shsub_z_p_zz_",
+      "mnemonic": "SHSUB",
+      "category": "sve",
+      "source_file": "shsub_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44128000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "a00a0a5fca3ed65e05e6488bc56c4f23c38822d52da4d640904fd9b42ffae724",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44128020",
+          "expected_mnemonics": [
+            "shsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "shsubr_z_p_zz_",
+      "mnemonic": "SHSUBR",
+      "category": "sve",
+      "source_file": "shsubr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44168000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "47bb13044c57168616b45f069bea5085a14ff5e04ebf576fc6dd11982c73e71d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44168020",
+          "expected_mnemonics": [
+            "shsubr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqabs_z_p_z_m",
+      "mnemonic": "SQABS",
+      "category": "sve",
+      "source_file": "sqabs_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4408a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "39db5312150c7efd9feb2b03c28c84a861ef96797a4179cc325ca1fd79df262d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4408a020",
+          "expected_mnemonics": [
+            "sqabs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqadd_z_p_zz_",
+      "mnemonic": "SQADD",
+      "category": "sve",
+      "source_file": "sqadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44188000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "87da13ea166880aa36c08bfd7dc22ed7910aa642e2c6373348ef94f31369545c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44188020",
+          "expected_mnemonics": [
+            "sqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqadd_z_zi_",
+      "mnemonic": "SQADD",
+      "category": "sve",
+      "source_file": "sqadd_z_zi.xml",
+      "encoding_mask": "0xff3fc000",
+      "encoding_value": "0x2524c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ba7b8e7909707de775dc0c0a51e2b936723688ed46939198c1288c8d85b4b9b1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2524c020",
+          "expected_mnemonics": [
+            "sqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqadd_z_zz_",
+      "mnemonic": "SQADD",
+      "category": "sve",
+      "source_file": "sqadd_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04201000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6abb791b4833ebe1a2d627c6b6c59e3b0233c74853c1c714423d92d3635d58ab",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04201020",
+          "expected_mnemonics": [
+            "sqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqcadd_z_zz_",
+      "mnemonic": "SQCADD",
+      "category": "sve",
+      "source_file": "sqcadd_z_zz.xml",
+      "encoding_mask": "0xff3ff800",
+      "encoding_value": "0x4501d800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c8edfcba529848a7cbbd83906c8b202945019c6801d8cb0078a18532b8d5aad2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4501d820",
+          "expected_mnemonics": [
+            "sqcadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqneg_z_p_z_m",
+      "mnemonic": "SQNEG",
+      "category": "sve",
+      "source_file": "sqneg_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4409a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c8c6364ee1091b09752d8d0f8eb8f2b1d5ca205a49192d0d75064348b3ff4352",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4409a020",
+          "expected_mnemonics": [
+            "sqneg"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqsub_z_p_zz_",
+      "mnemonic": "SQSUB",
+      "category": "sve",
+      "source_file": "sqsub_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441a8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5d7aaaf7aaca75a0f66c07d6be8f10e47af233a09e88f0e4f72f84b4149bd1f6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441a8020",
+          "expected_mnemonics": [
+            "sqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqsub_z_zi_",
+      "mnemonic": "SQSUB",
+      "category": "sve",
+      "source_file": "sqsub_z_zi.xml",
+      "encoding_mask": "0xff3fc000",
+      "encoding_value": "0x2526c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "528791a096b85a08c21d1cf872b494a63e38ce356df879693f2e1b83feb21ec9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2526c020",
+          "expected_mnemonics": [
+            "sqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqsub_z_zz_",
+      "mnemonic": "SQSUB",
+      "category": "sve",
+      "source_file": "sqsub_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04201800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5fd1472867d6880cf275592b72b60fb3f1adc5b4072ab50b25ff9e44ebe1a87a",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04201820",
+          "expected_mnemonics": [
+            "sqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sqsubr_z_p_zz_",
+      "mnemonic": "SQSUBR",
+      "category": "sve",
+      "source_file": "sqsubr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441e8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9bae0494a5f27a02bbdc98f418a5ee08af8766ad76f481b5d7942d20c01c527a",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441e8020",
+          "expected_mnemonics": [
+            "sqsubr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "srhadd_z_p_zz_",
+      "mnemonic": "SRHADD",
+      "category": "sve",
+      "source_file": "srhadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44148000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "a8852beb118b045175e1d0bd6995960ca8ed1cf519c4af964a60500bd73d8d5f",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44148020",
+          "expected_mnemonics": [
+            "srhadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "suqadd_z_p_zz_",
+      "mnemonic": "SUQADD",
+      "category": "sve",
+      "source_file": "suqadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441c8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6b8c0ed73c17acf2d8a6e0908100fb5e8b4c8811cd0b003c44e3b163fe751206",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441c8020",
+          "expected_mnemonics": [
+            "suqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uaba_z_zzz_",
+      "mnemonic": "UABA",
+      "category": "sve",
+      "source_file": "uaba_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "412fbfddb01f9366cb3cd9a175a5ee30ae7baff7a495e2415ffa55ddd4ef3032",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4500fc20",
+          "expected_mnemonics": [
+            "uaba"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uabalb_z_zzz_",
+      "mnemonic": "UABALB",
+      "category": "sve",
+      "source_file": "uabalb_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500c800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "404ee98538702fc39c8733cca633aeeb3c160f7d9eeea34a5d0119e47945e253",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4540c820",
+          "expected_mnemonics": [
+            "uabalb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uabalt_z_zzz_",
+      "mnemonic": "UABALT",
+      "category": "sve",
+      "source_file": "uabalt_z_zzz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500cc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2d8ad2a85ecc8e37da43be28216eb244ee9963ef14340e4d1c52aa36c02a16e0",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x4540cc20",
+          "expected_mnemonics": [
+            "uabalt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uabd_z_p_zz_",
+      "mnemonic": "UABD",
+      "category": "sve",
+      "source_file": "uabd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x040d0000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "53327302978d81377344bea0d7895caaa0d0adf13519aa17b87fa408ede9648d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x040d0020",
+          "expected_mnemonics": [
+            "uabd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uabdlb_z_zz_",
+      "mnemonic": "UABDLB",
+      "category": "sve",
+      "source_file": "uabdlb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45003800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "cfa36afe966d27aaaa2fc2190ef270760875c58c5c26745c60eb109b41bd1f1c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45403820",
+          "expected_mnemonics": [
+            "uabdlb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uabdlt_z_zz_",
+      "mnemonic": "UABDLT",
+      "category": "sve",
+      "source_file": "uabdlt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45003c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "88e89a5366cae87e39adfdfe49cc0f90b19a4dc6f183960111ffa08eb7227cd2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45403c20",
+          "expected_mnemonics": [
+            "uabdlt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uhadd_z_p_zz_",
+      "mnemonic": "UHADD",
+      "category": "sve",
+      "source_file": "uhadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44118000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "397333426413977ab30443c34aac961bcc92adfa46329478c03ce875bcfb66b3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44118020",
+          "expected_mnemonics": [
+            "uhadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uhsub_z_p_zz_",
+      "mnemonic": "UHSUB",
+      "category": "sve",
+      "source_file": "uhsub_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44138000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "b34bc15c12d8649326d8b8e1a1e0bd6273e7d427a4e646d5519af1d5d616dee4",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44138020",
+          "expected_mnemonics": [
+            "uhsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uhsubr_z_p_zz_",
+      "mnemonic": "UHSUBR",
+      "category": "sve",
+      "source_file": "uhsubr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44178000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "82ad2e9fda71d13b781efbee94640f1060179fde8ed0446ad62098cc4a811583",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44178020",
+          "expected_mnemonics": [
+            "uhsubr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqadd_z_p_zz_",
+      "mnemonic": "UQADD",
+      "category": "sve",
+      "source_file": "uqadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44198000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "fb23d50201127b6145305efeb6acb57e1ade12a62d713b7f404926b862037d68",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44198020",
+          "expected_mnemonics": [
+            "uqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqadd_z_zi_",
+      "mnemonic": "UQADD",
+      "category": "sve",
+      "source_file": "uqadd_z_zi.xml",
+      "encoding_mask": "0xff3fc000",
+      "encoding_value": "0x2525c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "956b362b0a54621b4f2519523432e2821ba9bc0ede6dd32835e0b29525af1a37",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2525c020",
+          "expected_mnemonics": [
+            "uqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqadd_z_zz_",
+      "mnemonic": "UQADD",
+      "category": "sve",
+      "source_file": "uqadd_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04201400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2e2863fc39e65087f746248cccd2f0d1f0b14ecca267f202397dc9ba6eeee89d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04201420",
+          "expected_mnemonics": [
+            "uqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqsub_z_p_zz_",
+      "mnemonic": "UQSUB",
+      "category": "sve",
+      "source_file": "uqsub_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441b8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "74e613f61e907d3a1e32ad1f87e7ce528950b0008499d094736311fd58030ee2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441b8020",
+          "expected_mnemonics": [
+            "uqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqsub_z_zi_",
+      "mnemonic": "UQSUB",
+      "category": "sve",
+      "source_file": "uqsub_z_zi.xml",
+      "encoding_mask": "0xff3fc000",
+      "encoding_value": "0x2527c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d39abda194ce3cb7db29ec0b25f347b4f2cfe346bf47656ace5981fb870131ba",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2527c020",
+          "expected_mnemonics": [
+            "uqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqsub_z_zz_",
+      "mnemonic": "UQSUB",
+      "category": "sve",
+      "source_file": "uqsub_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04201c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "617085565b425ffd48711039a352ce58f7d2b5d469ffea17dac9d09fe6d3a98e",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04201c20",
+          "expected_mnemonics": [
+            "uqsub"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "uqsubr_z_p_zz_",
+      "mnemonic": "UQSUBR",
+      "category": "sve",
+      "source_file": "uqsubr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441f8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "767ea5542593e27e583aeb746e0658207ee6f49e032812ed4a5686053c230d9f",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441f8020",
+          "expected_mnemonics": [
+            "uqsubr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "urhadd_z_p_zz_",
+      "mnemonic": "URHADD",
+      "category": "sve",
+      "source_file": "urhadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44158000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "40153e64d186c2efdf995cc19830f9fb506b5ba447de4dffa96c693f05ac1e4f",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x44158020",
+          "expected_mnemonics": [
+            "urhadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "usqadd_z_p_zz_",
+      "mnemonic": "USQADD",
+      "category": "sve",
+      "source_file": "usqadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x441d8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "35215a1309a240cdfa16ea6a29c1cb2981a9de7fed5c45e97b4fe44906c13f54",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "sve_integer_saturation"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x441d8020",
+          "expected_mnemonics": [
+            "usqadd"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
+      "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
     }
   ]
 }
