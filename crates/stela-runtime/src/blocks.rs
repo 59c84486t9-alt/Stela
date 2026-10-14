@@ -1134,7 +1134,7 @@ fn validate_numerical_exit(
     region_base: u64,
     source: &[u8],
 ) -> Result<(
-    stela_compiler::aarch64::simd::arithmetic::Operand,
+    stela_compiler::aarch64::FloatingPointOperation,
     GuestAddress,
 )> {
     ensure!(
@@ -1174,7 +1174,7 @@ fn validate_numerical_exit(
         .checked_add(relative)
         .context("numerical source offset overflow")?;
     let word = u32::from_le_bytes(source[offset..offset + INSTRUCTION_BYTES].try_into()?);
-    let operand = stela_compiler::aarch64::simd::arithmetic::decode(word)
+    let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
         .context("numerical exit does not identify arithmetic")?
         .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
     let next = GuestAddress(
@@ -1296,6 +1296,9 @@ mod numerical_validation_tests {
             &bytes,
         )
         .unwrap();
+        let stela_compiler::aarch64::FloatingPointOperation::Binary(operand) = operand else {
+            panic!("binary instruction decoded as another numerical family");
+        };
         assert_eq!(
             (operand.destination, operand.left, operand.right),
             (0, 1, 2)

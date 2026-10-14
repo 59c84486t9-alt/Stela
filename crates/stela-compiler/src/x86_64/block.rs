@@ -64,7 +64,7 @@ pub(crate) fn emit_for_target(
     for instruction in instructions {
         block.source_map.push((instruction.pc, code.len()));
         if let Operation::FloatingPoint(operand) = &instruction.operation {
-            super::simd::arithmetic::emit(code, operand, instruction.pc);
+            super::simd::emit_numerical(code, operand, instruction.pc, target);
         } else {
             super::emit_instruction(code, instruction, &mut fixups, target);
         }
@@ -77,7 +77,7 @@ pub(crate) fn emit_for_target(
         block.source_map.push((*pc, code.len()));
         match terminal {
             Terminator::FloatingPoint(operand) => {
-                super::simd::arithmetic::emit(code, operand, *pc);
+                super::simd::emit_numerical(code, operand, *pc, target);
             }
             Terminator::Clock(request) => {
                 // MRS results and ISB synchronization belong to the explicit

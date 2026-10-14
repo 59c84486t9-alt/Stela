@@ -24,6 +24,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/flags.rs"),
     include_str!("x86_64/flags.rs"),
     include_str!("aarch64/floating.rs"),
+    include_str!("aarch64/floating/fused.rs"),
     include_str!("aarch64/fp_register.rs"),
     include_str!("x86_64/fp_register.rs"),
     include_str!("aarch64/integer_math.rs"),
@@ -43,6 +44,9 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/simd/floating.rs"),
     include_str!("aarch64/simd/arithmetic.rs"),
     include_str!("x86_64/simd/arithmetic.rs"),
+    include_str!("aarch64/simd/fused.rs"),
+    include_str!("x86_64/simd/fused.rs"),
+    include_str!("x86_64/simd/numerical.rs"),
     include_str!("x86_64/isa.rs"),
     include_str!("aarch64/simd/rearrange.rs"),
     include_str!("x86_64/simd/rearrange.rs"),
@@ -63,11 +67,12 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
 );
 
 /// Explicit host requirements bind generated code and persistent cache identity.
-/// SSE tiers are nested; PCLMULQDQ is independent. No AVX/OSXSAVE assumption.
+/// SSE tiers are nested; PCLMULQDQ and usable AVX/FMA are independent requirements.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TargetCpu {
     tier: SseTier,
     pclmulqdq: bool,
+    fma: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,21 +90,27 @@ impl TargetCpu {
     pub const Baseline: Self = Self {
         tier: SseTier::Baseline,
         pclmulqdq: false,
+        fma: false,
     };
     pub const Ssse3: Self = Self {
         tier: SseTier::Ssse3,
         pclmulqdq: false,
+        fma: false,
     };
     pub const Sse41: Self = Self {
         tier: SseTier::Sse41,
         pclmulqdq: false,
+        fma: false,
     };
     pub const Sse42: Self = Self {
         tier: SseTier::Sse42,
         pclmulqdq: false,
+        fma: false,
     };
     /// Minimum requirements for legacy XMM PCLMULQDQ, independent of SSE tiers.
     pub const Pclmulqdq: Self = Self::Baseline.with_pclmulqdq();
+    /// Minimum requirements for VEX FMA3, including OS-enabled AVX register state.
+    pub const Fma: Self = Self::Baseline.with_fma();
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -107,18 +118,25 @@ impl TargetCpu {
             ..self
         }
     }
+    pub const fn with_fma(self) -> Self {
+        Self { fma: true, ..self }
+    }
     /// True only when every required feature is present in this target.
     pub fn supports(self, required: Self) -> bool {
-        self.tier >= required.tier && (!required.pclmulqdq || self.pclmulqdq)
+        self.tier >= required.tier
+            && (!required.pclmulqdq || self.pclmulqdq)
+            && (!required.fma || self.fma)
     }
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
-            Self::for_features(
+            Self::for_features_with_fma(
                 std::is_x86_feature_detected!("ssse3"),
                 std::is_x86_feature_detected!("sse4.1"),
                 std::is_x86_feature_detected!("sse4.2"),
                 std::is_x86_feature_detected!("pclmulqdq"),
+                std::is_x86_feature_detected!("avx"),
+                std::is_x86_feature_detected!("fma"),
             )
         }
         #[cfg(not(target_arch = "x86_64"))]
@@ -134,18 +152,46 @@ impl TargetCpu {
             (true, true, false) => SseTier::Sse41,
             (true, true, true) => SseTier::Sse42,
         };
-        Self { tier, pclmulqdq }
+        Self {
+            tier,
+            pclmulqdq,
+            fma: false,
+        }
+    }
+    #[cfg(any(target_arch = "x86_64", test))]
+    fn for_features_with_fma(
+        ssse3: bool,
+        sse41: bool,
+        sse42: bool,
+        pclmulqdq: bool,
+        avx: bool,
+        fma: bool,
+    ) -> Self {
+        // Rust's AVX detector checks XSAVE, OSXSAVE and XCR0's SSE/AVX state.
+        // Require both detected features even when a CPU reports FMA separately.
+        Self {
+            fma: avx && fma,
+            ..Self::for_features(ssse3, sse41, sse42, pclmulqdq)
+        }
     }
     pub fn id(self) -> &'static str {
-        match (self.tier, self.pclmulqdq) {
-            (SseTier::Baseline, false) => "x86_64-baseline",
-            (SseTier::Ssse3, false) => "x86_64-baseline+ssse3",
-            (SseTier::Sse41, false) => "x86_64-baseline+ssse3+sse4.1",
-            (SseTier::Sse42, false) => "x86_64-baseline+ssse3+sse4.1+sse4.2",
-            (SseTier::Baseline, true) => "x86_64-baseline+pclmulqdq",
-            (SseTier::Ssse3, true) => "x86_64-baseline+ssse3+pclmulqdq",
-            (SseTier::Sse41, true) => "x86_64-baseline+ssse3+sse4.1+pclmulqdq",
-            (SseTier::Sse42, true) => "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq",
+        match (self.tier, self.pclmulqdq, self.fma) {
+            (SseTier::Baseline, false, false) => "x86_64-baseline",
+            (SseTier::Ssse3, false, false) => "x86_64-baseline+ssse3",
+            (SseTier::Sse41, false, false) => "x86_64-baseline+ssse3+sse4.1",
+            (SseTier::Sse42, false, false) => "x86_64-baseline+ssse3+sse4.1+sse4.2",
+            (SseTier::Baseline, true, false) => "x86_64-baseline+pclmulqdq",
+            (SseTier::Ssse3, true, false) => "x86_64-baseline+ssse3+pclmulqdq",
+            (SseTier::Sse41, true, false) => "x86_64-baseline+ssse3+sse4.1+pclmulqdq",
+            (SseTier::Sse42, true, false) => "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq",
+            (SseTier::Baseline, false, true) => "x86_64-baseline+fma",
+            (SseTier::Ssse3, false, true) => "x86_64-baseline+ssse3+fma",
+            (SseTier::Sse41, false, true) => "x86_64-baseline+ssse3+sse4.1+fma",
+            (SseTier::Sse42, false, true) => "x86_64-baseline+ssse3+sse4.1+sse4.2+fma",
+            (SseTier::Baseline, true, true) => "x86_64-baseline+pclmulqdq+fma",
+            (SseTier::Ssse3, true, true) => "x86_64-baseline+ssse3+pclmulqdq+fma",
+            (SseTier::Sse41, true, true) => "x86_64-baseline+ssse3+sse4.1+pclmulqdq+fma",
+            (SseTier::Sse42, true, true) => "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma",
         }
     }
     pub fn supported(self) -> bool {
@@ -153,8 +199,8 @@ impl TargetCpu {
     }
 }
 
-// Ordering means feature containment, not an arbitrary rank. In particular,
-// baseline+PCLMUL and SSE4.2 without PCLMUL are incomparable requirements.
+// Ordering means feature containment, not an arbitrary rank.
+// Independent PCLMUL and FMA requirements can make targets incomparable.
 impl PartialOrd for TargetCpu {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self.supports(*other), other.supports(*self)) {
@@ -169,9 +215,13 @@ impl PartialOrd for TargetCpu {
 impl std::str::FromStr for TargetCpu {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (tier_name, pclmulqdq) = match value.strip_suffix("+pclmulqdq") {
-            Some(tier_name) => (tier_name, true),
+        let (without_fma, fma) = match value.strip_suffix("+fma") {
+            Some(target) => (target, true),
             None => (value, false),
+        };
+        let (tier_name, pclmulqdq) = match without_fma.strip_suffix("+pclmulqdq") {
+            Some(tier_name) => (tier_name, true),
+            None => (without_fma, false),
         };
         let tier = [Self::Baseline, Self::Ssse3, Self::Sse41, Self::Sse42]
             .into_iter()
@@ -179,13 +229,39 @@ impl std::str::FromStr for TargetCpu {
             .find(|(target, alias)| target.id() == tier_name || *alias == tier_name)
             .map(|(target, _)| target)
             .ok_or_else(|| format!("unknown x86-64 CPU target {value}"))?;
-        Ok(Self { pclmulqdq, ..tier })
+        Ok(Self {
+            pclmulqdq,
+            fma,
+            ..tier
+        })
     }
 }
 
 #[cfg(test)]
 mod target_tests {
     use super::*;
+
+    const TIERS: [TargetCpu; 4] = [
+        TargetCpu::Baseline,
+        TargetCpu::Ssse3,
+        TargetCpu::Sse41,
+        TargetCpu::Sse42,
+    ];
+
+    fn targets() -> Vec<TargetCpu> {
+        TIERS
+            .into_iter()
+            .flat_map(|tier| {
+                [
+                    tier,
+                    tier.with_pclmulqdq(),
+                    tier.with_fma(),
+                    tier.with_pclmulqdq().with_fma(),
+                ]
+            })
+            .collect()
+    }
+
     #[test]
     fn targets_require_every_feature_in_the_declared_tier() {
         for bits in 0..16 {
@@ -198,57 +274,106 @@ mod target_tests {
                 features.0 && features.1 && features.2
             );
             assert_eq!(target.supports(TargetCpu::Pclmulqdq), features.3);
-            assert_eq!(target >= TargetCpu::Pclmulqdq, features.3);
+            assert!(!target.supports(TargetCpu::Fma));
+        }
+    }
+
+    #[test]
+    fn fma_detection_requires_both_avx_state_and_fma() {
+        for bits in 0..64 {
+            let ssse3 = bits & 1 != 0;
+            let sse41 = bits & 2 != 0;
+            let sse42 = bits & 4 != 0;
+            let pclmulqdq = bits & 8 != 0;
+            let avx = bits & 16 != 0;
+            let fma = bits & 32 != 0;
+            let target = TargetCpu::for_features_with_fma(ssse3, sse41, sse42, pclmulqdq, avx, fma);
+            let previous = TargetCpu::for_features(ssse3, sse41, sse42, pclmulqdq);
+            assert_eq!(
+                target,
+                if avx && fma {
+                    previous.with_fma()
+                } else {
+                    previous
+                }
+            );
+            assert_eq!(target.supports(TargetCpu::Fma), avx && fma);
+            assert_eq!(target.supports(TargetCpu::Pclmulqdq), pclmulqdq);
+            assert_eq!(target >= TargetCpu::Sse42, ssse3 && sse41 && sse42);
+        }
+    }
+
+    #[test]
+    fn canonical_ids_and_aliases_round_trip_without_ambiguous_extensions() {
+        let mut ids = std::collections::BTreeSet::new();
+        for target in targets() {
+            assert!(ids.insert(target.id()));
             assert_eq!(target.id().parse::<TargetCpu>().unwrap(), target);
         }
-        assert!("x86_64-baseline+avx2".parse::<TargetCpu>().is_err());
-        assert!("sse4.2+pclmulqdq+pclmulqdq".parse::<TargetCpu>().is_err());
+        assert_eq!(ids.len(), 16);
+        for (tier, alias) in TIERS
+            .into_iter()
+            .zip(["baseline", "ssse3", "sse4.1", "sse4.2"])
+        {
+            for (suffix, target) in [
+                ("", tier),
+                ("+pclmulqdq", tier.with_pclmulqdq()),
+                ("+fma", tier.with_fma()),
+                ("+pclmulqdq+fma", tier.with_pclmulqdq().with_fma()),
+            ] {
+                assert_eq!(
+                    format!("{alias}{suffix}").parse::<TargetCpu>().unwrap(),
+                    target
+                );
+            }
+        }
+        for invalid in [
+            "",
+            "fma",
+            "avx",
+            "x86_64-baseline+avx2",
+            "baseline+avx+fma",
+            "sse4.2+pclmulqdq+pclmulqdq",
+            "baseline+fma+fma",
+            "baseline+pclmulqdq+fma+fma",
+            "baseline+fma+pclmulqdq",
+            "x86_64-baseline+sse4.2+fma",
+            "baseline+fma+unknown",
+        ] {
+            assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
+        }
+        assert_eq!(TargetCpu::Fma.id(), "x86_64-baseline+fma");
         assert_eq!(
-            "baseline+pclmulqdq".parse::<TargetCpu>().unwrap(),
-            TargetCpu::Pclmulqdq
-        );
-        assert_eq!(
-            "sse4.2+pclmulqdq".parse::<TargetCpu>().unwrap(),
-            TargetCpu::Sse42.with_pclmulqdq()
+            TargetCpu::Sse42.with_pclmulqdq().with_fma().id(),
+            "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma"
         );
     }
+
     #[test]
     fn independent_features_require_full_containment() {
-        for host_tier in [
-            TargetCpu::Baseline,
-            TargetCpu::Ssse3,
-            TargetCpu::Sse41,
-            TargetCpu::Sse42,
-        ] {
-            for required_tier in [
-                TargetCpu::Baseline,
-                TargetCpu::Ssse3,
-                TargetCpu::Sse41,
-                TargetCpu::Sse42,
-            ] {
-                for host_pclmul in [false, true] {
-                    for required_pclmul in [false, true] {
-                        let host = if host_pclmul {
-                            host_tier.with_pclmulqdq()
-                        } else {
-                            host_tier
-                        };
-                        let required = if required_pclmul {
-                            required_tier.with_pclmulqdq()
-                        } else {
-                            required_tier
-                        };
-                        let expected =
-                            host_tier >= required_tier && (!required_pclmul || host_pclmul);
-                        assert_eq!(host.supports(required), expected);
-                        assert_eq!(host >= required, expected);
-                    }
-                }
+        for host in targets() {
+            for required in targets() {
+                let expected = host.tier >= required.tier
+                    && (!required.pclmulqdq || host.pclmulqdq)
+                    && (!required.fma || host.fma);
+                assert_eq!(host.supports(required), expected);
+                assert_eq!(host >= required, expected);
+                let reverse = required.supports(host);
+                let ordering = match (expected, reverse) {
+                    (true, true) => Some(std::cmp::Ordering::Equal),
+                    (true, false) => Some(std::cmp::Ordering::Greater),
+                    (false, true) => Some(std::cmp::Ordering::Less),
+                    (false, false) => None,
+                };
+                assert_eq!(host.partial_cmp(&required), ordering);
             }
         }
         assert_eq!(TargetCpu::Sse42.partial_cmp(&TargetCpu::Pclmulqdq), None);
+        assert_eq!(TargetCpu::Fma.partial_cmp(&TargetCpu::Pclmulqdq), None);
+        assert_eq!(TargetCpu::Sse42.partial_cmp(&TargetCpu::Fma), None);
         assert!(!TargetCpu::Sse42.supports(TargetCpu::Pclmulqdq));
         assert!(!TargetCpu::Pclmulqdq.supports(TargetCpu::Ssse3));
+        assert!(!TargetCpu::Sse42.with_pclmulqdq().supports(TargetCpu::Fma));
     }
 }
 

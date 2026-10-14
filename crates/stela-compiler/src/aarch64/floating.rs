@@ -1,5 +1,7 @@
 //! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
 //! FP/FP16/AFP enabled, non-streaming; enabled numerical traps are explicit errors.
+pub mod fused;
+
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,
     ieee::{Double, Half, Quad, Single},
@@ -272,27 +274,24 @@ fn clamped_overflow<F: Float + FloatConvert<Quad>>(
     if !result.value.abs().bitwise_eq(F::largest()) || !result.status.contains(Status::INEXACT) {
         return false;
     }
-    let widen = |value: F| {
-        let mut loses_info = false;
-        let converted: StatusAnd<Quad> = value.convert(&mut loses_info);
-        debug_assert!(!loses_info && converted.status == Status::OK);
-        converted.value
-    };
     let extended = apply(operation, widen(left), widen(right), Round::TowardZero);
     extended.value.abs() >= Quad::from_u128(1).value.scalbn(F::MAX_EXP + 1)
 }
 
-fn finite<F: Float + FloatConvert<Quad>>(
+fn widen<F: Float + FloatConvert<Quad>>(value: F) -> Quad {
+    let mut loses_info = false;
+    let converted: StatusAnd<Quad> = value.convert(&mut loses_info);
+    debug_assert!(!loses_info && converted.status == Status::OK);
+    converted.value
+}
+
+fn rounded_outcome<F: Float>(
     format: Format,
-    operation: BinaryOperation,
-    left: u64,
-    right: u64,
     control: Control,
+    result: StatusAnd<F>,
+    tiny: bool,
+    overflow: bool,
 ) -> Outcome {
-    let left = F::from_bits(u128::from(left));
-    let right = F::from_bits(u128::from(right));
-    let result = apply(operation, left, right, control.round());
-    let tiny = tiny(operation, left, right, result, control);
     if tiny && control.flush_output(format) {
         return Outcome {
             bits: if result.value.is_negative() {
@@ -304,8 +303,7 @@ fn finite<F: Float + FloatConvert<Quad>>(
         };
     }
     let mut exceptions = 0;
-    if result.status.contains(Status::OVERFLOW) || clamped_overflow(operation, left, right, result)
-    {
+    if overflow {
         exceptions |= OVERFLOW;
     }
     if result.status.contains(Status::INEXACT) {
@@ -323,6 +321,22 @@ fn finite<F: Float + FloatConvert<Quad>>(
         bits: result.value.to_bits() as u64,
         exceptions,
     }
+}
+
+fn finite<F: Float + FloatConvert<Quad>>(
+    format: Format,
+    operation: BinaryOperation,
+    left: u64,
+    right: u64,
+    control: Control,
+) -> Outcome {
+    let left = F::from_bits(u128::from(left));
+    let right = F::from_bits(u128::from(right));
+    let result = apply(operation, left, right, control.round());
+    let tiny = tiny(operation, left, right, result, control);
+    let overflow = result.status.contains(Status::OVERFLOW)
+        || clamped_overflow(operation, left, right, result);
+    rounded_outcome(format, control, result, tiny, overflow)
 }
 
 /// Evaluate one scalar arithmetic lane. No caller state or host FP environment

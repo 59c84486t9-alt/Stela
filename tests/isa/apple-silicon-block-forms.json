@@ -45,6 +45,7 @@
     "crates/stela-compiler/src/aarch64/flags.rs",
     "crates/stela-compiler/src/x86_64/flags.rs",
     "crates/stela-compiler/src/aarch64/floating.rs",
+    "crates/stela-compiler/src/aarch64/floating/fused.rs",
     "crates/stela-compiler/src/aarch64/fp_register.rs",
     "crates/stela-compiler/src/x86_64/fp_register.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
@@ -64,6 +65,9 @@
     "crates/stela-compiler/src/x86_64/simd/floating.rs",
     "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
     "crates/stela-compiler/src/x86_64/simd/arithmetic.rs",
+    "crates/stela-compiler/src/aarch64/simd/fused.rs",
+    "crates/stela-compiler/src/x86_64/simd/fused.rs",
+    "crates/stela-compiler/src/x86_64/simd/numerical.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
@@ -82,12 +86,12 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v5",
+  "registry_version": "apple-silicon-block-forms-v6",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
     "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
-    "description": "Reviewed ordinary control flow and scalar and vector numerical FP under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind returns in RAX/RDX. The nonwrapping, non-streaming profile enables FP/FP16/AFP, disables GCS, uses unguarded executable pages and private direct RAM. Numerical S/D common paths execute inline with preserved caller MXCSR; vectors evaluate only active lanes, clear the upper half for 64-bit shapes and aggregate sticky status transactionally. H and exceptional values complete through an immutable-source-validated kind-9 interior boundary. Any numerical exception enable declines before effects. SVC/BRK partially support a precise typed kind-5 boundary retaining kind, imm16 and preferred exception return PC; architectural exception entry is pending.",
+    "description": "Reviewed ordinary control flow and scalar and vector numerical FP under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind returns in RAX/RDX. The nonwrapping, non-streaming profile enables FP/FP16/AFP, disables GCS, uses unguarded executable pages and private direct RAM. Numerical S/D common paths execute inline with preserved caller MXCSR; fused S/D uses an exact-product-checked baseline or capability-checked FMA3; vectors evaluate only active lanes, clear the upper half for 64-bit shapes and aggregate sticky status transactionally. H and exceptional values complete through an immutable-source-validated kind-9 interior boundary. Any numerical exception enable declines before effects. SVC/BRK partially support a precise typed kind-5 boundary retaining kind, imm16 and preferred exception return PC; architectural exception entry is pending.",
     "outside_scope": [
       "PAC and tagged/authenticated pointers",
       "GCS, guarded-page BTI checks and PSTATE.BTYPE",
@@ -190,6 +194,45 @@
         "raw_helper_unchanged_state_comparisons": 17707,
         "raw_unsupported_unchanged_state_comparisons": 140
       }
+    },
+    "fused_numerical_fp": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-fused_numerical-differential-report.json",
+      "kind": "simd_fused_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 24,
+        "original_full_frame_captures": 18402,
+        "raw_native_state_and_exit_comparisons": 36804,
+        "raw_original_complete_state_comparisons": 2390,
+        "raw_inline_complete_state_comparisons": 2390,
+        "raw_helper_unchanged_state_comparisons": 33882,
+        "raw_unsupported_unchanged_state_comparisons": 532,
+        "runtime_complete_state_comparisons": 714,
+        "runtime_typed_unsupported_state_checks": 86,
+        "native_mxcsr_preservation_comparisons": 2368
+      },
+      "review": "Both target profiles retain 18,402 raw comparisons each: baseline completes 568 inline, exits to helpers unchanged 17,568 times and refuses 266 controls; checked FMA3 completes 1,822 inline, exits to helpers unchanged 16,314 times and refuses 266 controls. Actual emitted binaries receive 648 feature-containment checks per profile (1,296 total). Each profile completes 357 Rust state comparisons and 43 precise refusal checks. The original full-frame producer and actual runtime completion are distinct evidence."
     }
   },
   "forms": [
@@ -2042,6 +2085,1480 @@
       ],
       "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
       "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FMADD_H_floatdp3",
+      "mnemonic": "FMADD",
+      "category": "fp_simd",
+      "source_file": "fmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1fc00000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmadd_float.xml",
+      "source_sha256": "6a6c764eb97f446b8f3b9ec6f896eba34a0506e2273148dff6233254654e0463",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMADD",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1fc20c20",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x1fdf7fff",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMADD_S_floatdp3",
+      "mnemonic": "FMADD",
+      "category": "fp_simd",
+      "source_file": "fmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f000000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmadd_float.xml",
+      "source_sha256": "6a6c764eb97f446b8f3b9ec6f896eba34a0506e2273148dff6233254654e0463",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMADD",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f020c20",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f1f7fff",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMADD_D_floatdp3",
+      "mnemonic": "FMADD",
+      "category": "fp_simd",
+      "source_file": "fmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f400000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmadd_float.xml",
+      "source_sha256": "6a6c764eb97f446b8f3b9ec6f896eba34a0506e2273148dff6233254654e0463",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMADD",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f420c20",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f5f7fff",
+          "expected_mnemonics": [
+            "fmadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMSUB_H_floatdp3",
+      "mnemonic": "FMSUB",
+      "category": "fp_simd",
+      "source_file": "fmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1fc08000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmsub_float.xml",
+      "source_sha256": "65a116f226b8fced81be08ed87455b9444dc2d9b4fab423e2841518c90bff800",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMSUB",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1fc28c20",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x1fdfffff",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMSUB_S_floatdp3",
+      "mnemonic": "FMSUB",
+      "category": "fp_simd",
+      "source_file": "fmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f008000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmsub_float.xml",
+      "source_sha256": "65a116f226b8fced81be08ed87455b9444dc2d9b4fab423e2841518c90bff800",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMSUB",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f028c20",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f1fffff",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMSUB_D_floatdp3",
+      "mnemonic": "FMSUB",
+      "category": "fp_simd",
+      "source_file": "fmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f408000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmsub_float.xml",
+      "source_sha256": "65a116f226b8fced81be08ed87455b9444dc2d9b4fab423e2841518c90bff800",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FMSUB",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f428c20",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f5fffff",
+          "expected_mnemonics": [
+            "fmsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMADD_H_floatdp3",
+      "mnemonic": "FNMADD",
+      "category": "fp_simd",
+      "source_file": "fnmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1fe00000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmadd_float.xml",
+      "source_sha256": "84acd05108e78c9e6e1eb60865d0d72a925ba63571368071f60710a292d2760c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMADD",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1fe20c20",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x1fff7fff",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMADD_S_floatdp3",
+      "mnemonic": "FNMADD",
+      "category": "fp_simd",
+      "source_file": "fnmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f200000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmadd_float.xml",
+      "source_sha256": "84acd05108e78c9e6e1eb60865d0d72a925ba63571368071f60710a292d2760c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMADD",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f220c20",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f3f7fff",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMADD_D_floatdp3",
+      "mnemonic": "FNMADD",
+      "category": "fp_simd",
+      "source_file": "fnmadd_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f600000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmadd_float.xml",
+      "source_sha256": "84acd05108e78c9e6e1eb60865d0d72a925ba63571368071f60710a292d2760c",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMADD",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f620c20",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f7f7fff",
+          "expected_mnemonics": [
+            "fnmadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMSUB_H_floatdp3",
+      "mnemonic": "FNMSUB",
+      "category": "fp_simd",
+      "source_file": "fnmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1fe08000",
+      "features": [
+        {
+          "feature": "FEAT_FP16",
+          "name": "v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmsub_float.xml",
+      "source_sha256": "90887c0167c8a27a905d95df7fca7cc0061236a3346448102ec71f46040d35ab",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMSUB",
+        "datatype": "half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1fe28c20",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x1fffffff",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMSUB_S_floatdp3",
+      "mnemonic": "FNMSUB",
+      "category": "fp_simd",
+      "source_file": "fnmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f208000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmsub_float.xml",
+      "source_sha256": "90887c0167c8a27a905d95df7fca7cc0061236a3346448102ec71f46040d35ab",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMSUB",
+        "datatype": "single"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f228c20",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f3fffff",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FNMSUB_D_floatdp3",
+      "mnemonic": "FNMSUB",
+      "category": "fp_simd",
+      "source_file": "fnmsub_float.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x1f608000",
+      "features": [
+        {
+          "feature": "FEAT_FP",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fnmsub_float.xml",
+      "source_sha256": "90887c0167c8a27a905d95df7fca7cc0061236a3346448102ec71f46040d35ab",
+      "docvars": {
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "FNMSUB",
+        "datatype": "double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x1f628c20",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1f7fffff",
+          "expected_mnemonics": [
+            "fnmsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All four V-register roles and aliases, including V31; NEP merges original Va. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asimdsamefp16_only",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e400c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_vec.xml",
+      "source_sha256": "dd311cab575f11110db26f6bc3a3c794c54ff4eeb0c777014ea4430cddfba2af",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e420c20",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4e5f0fff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "Allocated 4H/8H, 2S/4S and 2D arrangements, all V-register roles and aliases; Vd is the addend, active lanes alone execute and Q=0 clears the upper half independently of NEP. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asimdsame_only",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_vec.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0e20cc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_vec.xml",
+      "source_sha256": "dd311cab575f11110db26f6bc3a3c794c54ff4eeb0c777014ea4430cddfba2af",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e3fcfff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e22cc20",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e7fcc1f",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "Allocated 4H/8H, 2S/4S and 2D arrangements, all V-register roles and aliases; Vd is the addend, active lanes alone execute and Q=0 clears the upper half independently of NEP. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asimdsamefp16_only",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ec00c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_vec.xml",
+      "source_sha256": "9f4c156bbeddca46756ed9bc9fc5003d4ba5b21a3e0009d7796c632e1d947906",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ec20c20",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4edf0fff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "Allocated 4H/8H, 2S/4S and 2D arrangements, all V-register roles and aliases; Vd is the addend, active lanes alone execute and Q=0 clears the upper half independently of NEP. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asimdsame_only",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_vec.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0ea0cc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_vec.xml",
+      "source_sha256": "9f4c156bbeddca46756ed9bc9fc5003d4ba5b21a3e0009d7796c632e1d947906",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ebfcfff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea2cc20",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4effcc1f",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "Allocated 4H/8H, 2S/4S and 2D arrangements, all V-register roles and aliases; Vd is the addend, active lanes alone execute and Q=0 clears the upper half independently of NEP. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asisdelem_RH_H",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_elt.xml",
+      "encoding_mask": "0xffc0f400",
+      "encoding_value": "0x5f001000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_elt.xml",
+      "source_sha256": "8bc443a01bbd9f481e86fb0eb9ce3044b05708f618bee9f3c1e174601fbd2c54",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "half",
+        "reguse-datatype": "2reg-scalar-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f0013ff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x5f3f1800",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asisdelem_R_SD",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_elt.xml",
+      "encoding_mask": "0xff80f400",
+      "encoding_value": "0x5f801000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_elt.xml",
+      "source_sha256": "8bc443a01bbd9f481e86fb0eb9ce3044b05708f618bee9f3c1e174601fbd2c54",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-scalar-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f8013ff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fbf1800",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fdf181f",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asimdelem_RH_H",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f001000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_elt.xml",
+      "source_sha256": "8bc443a01bbd9f481e86fb0eb9ce3044b05708f618bee9f3c1e174601fbd2c54",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "half",
+        "reguse-datatype": "2reg-element-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f3f1be0",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4f0013ff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLA_asimdelem_R_SD",
+      "mnemonic": "FMLA",
+      "category": "fp_simd",
+      "source_file": "fmla_advsimd_elt.xml",
+      "encoding_mask": "0xbf80f400",
+      "encoding_value": "0x0f801000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmla_advsimd_elt.xml",
+      "source_sha256": "8bc443a01bbd9f481e86fb0eb9ce3044b05708f618bee9f3c1e174601fbd2c54",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLA",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-element-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0fbf181f",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8013e0",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdf1bff",
+          "expected_mnemonics": [
+            "fmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asisdelem_RH_H",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_elt.xml",
+      "encoding_mask": "0xffc0f400",
+      "encoding_value": "0x5f005000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_elt.xml",
+      "source_sha256": "8481cdb2fb4e7567b89927db7ebff31e2b09ef74b394317031f754c094afbf8d",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-datatype": "sisd-half",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "half",
+        "reguse-datatype": "2reg-scalar-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f0053ff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x5f3f5800",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asisdelem_R_SD",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_elt.xml",
+      "encoding_mask": "0xff80f400",
+      "encoding_value": "0x5f805000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_elt.xml",
+      "source_sha256": "8481cdb2fb4e7567b89927db7ebff31e2b09ef74b394317031f754c094afbf8d",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-datatype": "sisd-single-and-double",
+        "advsimd-reguse": "2reg-scalar",
+        "advsimd-type": "sisd",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-scalar-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x5f8053ff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fbf5800",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x5fdf581f",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asimdelem_RH_H",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f005000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_elt.xml",
+      "source_sha256": "8481cdb2fb4e7567b89927db7ebff31e2b09ef74b394317031f754c094afbf8d",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "half",
+        "reguse-datatype": "2reg-element-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f3f5be0",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4f0053ff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
+    },
+    {
+      "id": "FMLS_asimdelem_R_SD",
+      "mnemonic": "FMLS",
+      "category": "fp_simd",
+      "source_file": "fmls_advsimd_elt.xml",
+      "encoding_mask": "0xbf80f400",
+      "encoding_value": "0x0f805000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmls_advsimd_elt.xml",
+      "source_sha256": "8481cdb2fb4e7567b89927db7ebff31e2b09ef74b394317031f754c094afbf8d",
+      "docvars": {
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLS",
+        "advsimd-reguse": "2reg-element",
+        "datatype": "single-and-double",
+        "reguse-datatype": "2reg-element-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/fused.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0fbf581f",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8053e0",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdf5bff",
+          "expected_mnemonics": [
+            "fmls"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "fused_numerical_fp"
+      ],
+      "review": "Exact June canonical forms and reserved fields are reviewed. Completed raw native execution is compared with full-frame original captures; unchanged helper/refusal exits and Rust completion remain separate checks. Both baseline and checked-FMA3 binaries retain source maps, MXCSR, runtime control/status, cache and budget evidence.",
+      "scope": "All allocated indexed lanes and aliases; H selects V0\u2013V15, S/D selects V0\u2013V31. Vd is the addend; scalar NEP merges original Vd, vectors evaluate active lanes and Q=0 clears the upper half. Enabled FP/FP16/AFP, AArch64, non-streaming H/S/D fused arithmetic with one final rounding, architectural NaN/flush/tininess behavior and transactional sticky FPSR. S/D uses an exact-product-checked baseline or FMA3 after usable AVX OS state and FMA capability checks; H and exceptional cases use the immutable-source-validated integer core. Any numerical exception enable declines before effects. Numerical trap delivery, disabled-FP access, streaming SME and the numerical leaf ABI remain outside this profile."
     }
   ]
 }

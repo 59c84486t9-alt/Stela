@@ -6,9 +6,11 @@ use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 pub(super) mod arithmetic;
 mod floating;
+mod fused;
 mod halving;
 mod immediates;
 pub(super) mod memory;
+mod numerical;
 mod products;
 mod rearrange;
 mod reductions;
@@ -137,6 +139,22 @@ pub(super) fn greater(
     shuffle(code, 0, 0, 0xa0);
     packed(code, Host::And, 0, 3);
     packed(code, Host::Or, 0, 2);
+}
+
+pub(super) fn emit_numerical(
+    code: &mut Vec<u8>,
+    operation: &crate::aarch64::FloatingPointOperation,
+    pc: crate::GuestAddress,
+    target: crate::TargetCpu,
+) {
+    match operation {
+        crate::aarch64::FloatingPointOperation::Binary(operand) => {
+            arithmetic::emit(code, operand, pc)
+        }
+        crate::aarch64::FloatingPointOperation::Fused(operand) => {
+            fused::emit(code, operand, pc, target)
+        }
+    }
 }
 
 #[cfg(test)]

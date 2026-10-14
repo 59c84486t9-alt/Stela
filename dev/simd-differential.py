@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -409,6 +409,8 @@ def worker(pipe, batches):
             result = execute_numerical_batches(batches)
         elif batches[0].get('cohort') == 'fp_registers':
             result = execute_fp_register_batches(batches)
+        elif batches[0].get('cohort') == 'fused_numerical':
+            result = execute_numerical_batches(batches, load_fused_numerical_oracle(batches[0]['oracle_path']))
         elif batches[0].get('cohort') == 'vector_numerical':
             result = execute_numerical_batches(batches, load_vector_numerical_oracle(batches[0]['oracle_path']))
         else:
@@ -2512,6 +2514,8 @@ NUMERICAL_EXCEPTION_ENABLE_SHIFT = 8
 NUMERICAL_TRAP_ENABLE_MASK = NUMERICAL_EXCEPTION_FLAGS << NUMERICAL_EXCEPTION_ENABLE_SHIFT
 NUMERICAL_NEP = 1 << 2
 NUMERICAL_AH = 1 << 1
+NUMERICAL_FIZ = 1
+NUMERICAL_DN = 1 << 25
 NUMERICAL_FZ16 = 1 << 19
 NUMERICAL_FZ = 1 << 24
 NUMERICAL_ROUND_NEGATIVE = 2 << 22
@@ -3267,9 +3271,9 @@ def prepare_vector_numerical_oracle(directory, numerical_path=NUMERICAL_FOUNDATI
     return {'path': str(path.relative_to(ROOT)), 'sha256': digest(path.read_bytes()), **plan}
 
 
-def vector_numerical_original_state(initial, snapshot):
+def full_frame_numerical_original_state(initial, snapshot):
     if len(snapshot) != FP_REGISTER_RECORD_BYTES:
-        raise AssertionError('Truncated vector numerical original snapshot')
+        raise AssertionError('Truncated numerical original full-frame snapshot')
     state = State.from_buffer_copy(initial)
     state.x[:] = struct.unpack_from('<31Q', snapshot)
     state.sp, spsr, state.fpcr, state.fpsr = struct.unpack_from('<4Q', snapshot, VECTOR_NUMERICAL_STATUS_OFFSET)
@@ -3281,39 +3285,42 @@ def vector_numerical_original_state(initial, snapshot):
 
 
 def load_vector_numerical_oracle(path=VECTOR_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, vector_numerical_functions(), VECTOR_NUMERICAL_CASES, VECTOR_NUMERICAL_FOCUS)
+
+
+def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, focus):
     pointer, pointer_hash = numerical_json(path)
     receipt, receipt_hash = numerical_json(ROOT / pointer['receipt']['path'], pointer['receipt']['sha256'])
     if (receipt.get('passed_transport_and_architectural_frame_checks') is not True
-            or receipt['cases'] != VECTOR_NUMERICAL_CASES or pointer['directory'] != receipt['directory']):
-        raise AssertionError('Complete passing vector numerical original capture required')
+            or receipt['cases'] != expected_cases or pointer['directory'] != receipt['directory']):
+        raise AssertionError('Complete passing numerical original full-frame capture required')
     directory = ROOT / receipt['directory']
     for name, identity in receipt['files'].items():
         if Path(name).name != name:
-            raise AssertionError('Vector original file is not one path component')
+            raise AssertionError('Full-frame original file is not one path component')
         data = (directory / name).read_bytes()
         if digest(data) != identity['sha256'] or len(data) != identity['bytes']:
-            raise AssertionError(f'Vector original evidence changed: {name}')
+            raise AssertionError(f'Full-frame original evidence changed: {name}')
     functions = json.loads((directory / 'functions.json').read_bytes())
     cases = json.loads((directory / 'cases.json').read_bytes())
     inputs, results, elf = ((directory / name).read_bytes() for name in ('inputs.bin', 'results.bin', 'guest.elf'))
-    expected_functions = vector_numerical_functions()
-    if len(functions) != len(expected_functions) or len(cases) != VECTOR_NUMERICAL_CASES:
-        raise AssertionError('Vector original function/corpus count changed')
+    if len(functions) != len(expected_functions) or len(cases) != expected_cases:
+        raise AssertionError('Full-frame original function/corpus count changed')
     for actual, expected in zip(functions, expected_functions):
         if any(actual[key] != value for key, value in expected.items()) or actual['source_hex'] != struct.pack('<II', expected['word'], RET).hex():
-            raise AssertionError('Vector original operation differs from independent encoding facts')
+            raise AssertionError('Full-frame original operation differs from independent encoding facts')
     if len(inputs) != len(cases) * NUMERICAL_INPUT_STRIDE or len(results) != (len(cases) + 1) * FP_REGISTER_RECORD_BYTES:
-        raise AssertionError('Vector original state framing changed')
+        raise AssertionError('Full-frame original state framing changed')
     records, readbacks = [], Counter()
     for index, case in enumerate(cases):
         raw = inputs[index * NUMERICAL_INPUT_STRIDE:(index + 1) * NUMERICAL_INPUT_STRIDE]
         function = struct.unpack_from('<Q', raw)[0]
         initial = State.from_buffer_copy(raw[NUMERICAL_INPUT_HEADER:NUMERICAL_INPUT_HEADER + ctypes.sizeof(State)])
         if case['case'] != index or case['function_index'] != function or digest(bytes(initial)) != case['initial_state_sha256']:
-            raise AssertionError('Vector original metadata does not bind input state')
+            raise AssertionError('Full-frame original metadata does not bind input state')
         operation = expected_functions[function]
         snapshot = results[(index + 1) * FP_REGISTER_RECORD_BYTES:(index + 2) * FP_REGISTER_RECORD_BYTES]
-        original = vector_numerical_original_state(initial, snapshot)
+        original = full_frame_numerical_original_state(initial, snapshot)
         esr, elr, current_el, cpacr, marker = struct.unpack_from('<5Q', snapshot, VECTOR_NUMERICAL_EXCEPTION_OFFSET)
         actual_fpcr, actual_fpsr = struct.unpack_from('<2Q', snapshot, VECTOR_NUMERICAL_READBACK_OFFSET)
         if (esr >> 26 != FP_REGISTER_EC_SVC or current_el != 4 or cpacr != VECTOR_NUMERICAL_CPACR_FPEN or marker != VECTOR_NUMERICAL_ORIGINAL_MARKER
@@ -3321,20 +3328,27 @@ def load_vector_numerical_oracle(path=VECTOR_NUMERICAL_ORACLE):
                 or fp_register_elf_word(elf, elr - 4) != FP_REGISTER_SVC
                 or original.fpcr != actual_fpcr or actual_fpsr != initial.fpsr
                 or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
-            raise AssertionError(f'Vector original instruction/EL0/control evidence changed: {index}')
+            raise AssertionError(f'Full-frame original instruction/EL0/control evidence changed: {index}')
         untouched = State.from_buffer_copy(original)
         untouched.v[operation['d']][:] = initial.v[operation['d']]
         untouched.fpcr, untouched.fpsr = initial.fpcr, initial.fpsr
         if bytes(untouched) != bytes(initial) or original.fpsr & ~NUMERICAL_EXCEPTION_FLAGS != initial.fpsr & ~NUMERICAL_EXCEPTION_FLAGS:
             raise AssertionError('Original vector numerical operation changed unrelated state or QC')
-        if operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
+        if not operation['scalar'] and operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
             raise AssertionError('Original Q0 numerical instruction did not clear upper 64 bits')
+        if operation['scalar'] and 'a' in operation:
+            active = (1 << (operation['lane'] * 8)) - 1
+            result = original.v[operation['d']][0] | original.v[operation['d']][1] << 64
+            addend = initial.v[operation['a']][0] | initial.v[operation['a']][1] << 64
+            merge = addend if initial.fpcr & NUMERICAL_NEP else 0
+            if result & ~active != merge & ~active:
+                raise AssertionError('Original scalar fused upper state did not follow addend NEP merge')
         readbacks[(initial.fpcr, actual_fpcr)] += 1
         # Only LR changes to let the native/runtime and Unicorn paths execute
-        # the actual RET. The original vector instruction left every GPR intact.
+        # the actual RET. The original subject instruction left every GPR intact.
         initial.x[30] = original.x[30] = STOP
         records.append({'function': function, 'initial': bytes(initial), 'expected': bytes(original),
-            'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0',
+            'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0' if focus == VECTOR_NUMERICAL_FOCUS else focus + '_el0',
             'unsupported': bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)})
     return {'records': records, 'functions': expected_functions, 'receipt_sha256': receipt_hash,
             'pointer_sha256': pointer_hash,
@@ -3362,7 +3376,295 @@ def vector_numerical_runtime_cases(records):
     return list({record['case']: record for record in selected.values()}.values())
 
 
+FUSED_NUMERICAL_FOCUS = 'fused_numerical'
+FUSED_NUMERICAL_ORACLE = ROOT / '.stela/research/fused-numerical/oracle/receipt.json'
+FUSED_SCALAR_BASES = {'fmadd': 0x1f000000, 'fmsub': 0x1f008000,
+                      'fnmadd': 0x1f200000, 'fnmsub': 0x1f208000}
+FUSED_VECTOR_BASES = {'fmla': (0x0e400c00, 0x0e20cc00),
+                     'fmls': (0x0ec00c00, 0x0ea0cc00)}
+FUSED_INDEXED_BASES = {'fmla': 0x0f001000, 'fmls': 0x0f005000}
+FUSED_NATIVE_PREFIXES = ('vfmadd', 'vfmsub', 'vfnmadd', 'vfnmsub')
+FUSED_NATIVE_OPERATIONS = {'fmadd': 'vfmadd', 'fmla': 'vfmadd',
+                           'fmsub': 'vfnmadd', 'fmls': 'vfnmadd',
+                           'fnmadd': 'vfnmsub', 'fnmsub': 'vfmsub'}
+FUSED_SCALAR_ROLES = ((0, 1, 2, 3), (1, 1, 2, 3), (2, 1, 2, 3),
+                      (3, 1, 2, 3), (0, 1, 1, 3), (0, 1, 2, 1),
+                      (0, 1, 2, 2), (31, 31, 31, 31), (31, 30, 29, 28))
+FUSED_ACCUMULATE_ROLES = ((0, 1, 2), (1, 1, 2), (2, 1, 2),
+                          (0, 1, 1), (31, 31, 31), (31, 30, 29))
+FUSED_ROUNDING_CONTROLS = tuple(mode << 22 for mode in range(4))
+FUSED_EXTRA_CONTROLS = (NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_NEP,
+                        NUMERICAL_AH | NUMERICAL_FIZ | NUMERICAL_NEP,
+                        NUMERICAL_FZ16, NUMERICAL_FZ, NUMERICAL_DN,
+                        NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_DN)
+
+
+def fused_numerical_operation(name, lane, width, scalar, d, n, m, a=None, index=None):
+    if lane not in (2, 4, 8) or any(not 0 <= register < 32 for register in (d, n, m)):
+        raise ValueError('Invalid fused format or register')
+    if name in FUSED_SCALAR_BASES:
+        if not scalar or width != lane or index is not None or a is None or not 0 <= a < 32:
+            raise ValueError('Invalid scalar fused operand')
+        word = FUSED_SCALAR_BASES[name] | {2: 3, 4: 0, 8: 1}[lane] << 22 | a << 10
+    elif name in FUSED_VECTOR_BASES:
+        if a is not None and a != d:
+            raise ValueError('FMLA/FMLS addend must be destination')
+        a = d
+        if scalar:
+            if width != lane or index is None:
+                raise ValueError('Scalar FMLA/FMLS requires an indexed operand')
+        elif (lane, width) not in VECTOR_NUMERICAL_SHAPES:
+            raise ValueError('Invalid fused vector arrangement')
+        if index is None:
+            half, standard = FUSED_VECTOR_BASES[name]
+            word = half if lane == 2 else standard | int(lane == 8) << 22
+            word |= int(width == 16) << 30
+        else:
+            if not 0 <= index < 16 // lane or lane == 2 and m >= 16:
+                raise ValueError('Invalid fused indexed register or lane')
+            word = FUSED_INDEXED_BASES[name] | int(scalar) << 28
+            word |= int(scalar or width == 16) << 30
+            if lane == 2:
+                word |= ((index >> 2) & 1) << 11 | (index & 3) << 20
+            elif lane == 4:
+                word |= 1 << 23 | ((index >> 1) & 1) << 11 | (index & 1) << 21
+            else:
+                word |= 3 << 22 | index << 11
+    else:
+        raise ValueError('Invalid fused mnemonic')
+    word |= m << 16 | n << 5 | d
+    return {'name': name, 'lane': lane, 'bytes': width, 'scalar': scalar,
+            'd': d, 'n': n, 'm': m, 'a': a, 'index': index, 'word': word}
+
+
+def fused_numerical_functions():
+    functions = [fused_numerical_operation(name, lane, lane, True, *roles)
+                 for name in FUSED_SCALAR_BASES for lane in (2, 4, 8)
+                 for roles in FUSED_SCALAR_ROLES]
+    for name in FUSED_VECTOR_BASES:
+        for lane, width in VECTOR_NUMERICAL_SHAPES:
+            functions.extend(fused_numerical_operation(name, lane, width, False, *roles)
+                             for roles in FUSED_ACCUMULATE_ROLES)
+        for scalar, lane, width in ([(True, lane, lane) for lane in (2, 4, 8)]
+                                    + [(False, lane, width) for lane, width in VECTOR_NUMERICAL_SHAPES]):
+            for index in range(16 // lane):
+                for d, n, m in FUSED_ACCUMULATE_ROLES:
+                    # FP16 indexed Rm has four bits; Vd/Vn still reach V31.
+                    if lane == 2:
+                        m &= 15
+                    functions.append(fused_numerical_operation(name, lane, width, scalar, d, n, m, index=index))
+    if len({operation['word'] for operation in functions}) != len(functions):
+        raise AssertionError('Fused exact subject words must be unique')
+    return functions
+
+
+def fused_numerical_triples(lane):
+    bits, fraction = lane * 8, {2: 10, 4: 23, 8: 52}[lane]
+    exponent_bits = bits - fraction - 1
+    bias = (1 << (exponent_bits - 1)) - 1
+    sign = 1 << (bits - 1)
+    one, half, two = bias << fraction, (bias - 1) << fraction, (bias + 1) << fraction
+    infinity = ((1 << exponent_bits) - 1) << fraction
+    maximum, minimum = infinity - 1, 1 << fraction
+    quiet, signaling = infinity | 1 << (fraction - 1) | 0x15, infinity | 0x2b
+    cases = [('one_one_one', one, one, one), ('exact_product', one, two, one),
+             ('single_round_residual', one | sign, one + 1, one - 2),
+             ('single_round_positive', (one + 2) | sign, one + 1, one + 1),
+             ('product_overflow_cancel', maximum | sign, maximum, two),
+             ('product_underflow_accumulate', minimum, minimum, half),
+             ('normal_boundary', minimum - 1, minimum, half),
+             ('minimum_subnormal', 1, minimum, 1),
+             ('maximum_finite', maximum, maximum, one),
+             ('rounding_tie', one, (bias - fraction - 1) << fraction, one),
+             ('tiny_residual', 1 | sign, 1, one + 1),
+             ('inf_zero_qnan_addend', quiet, infinity, 0),
+             ('inf_zero_finite_addend', one, infinity, 0),
+             ('opposed_infinities', infinity | sign, infinity, one),
+             ('same_infinities', infinity, infinity, one),
+             ('snan_addend', signaling, one, one),
+             ('snan_left', one, signaling, one), ('snan_right', one, one, signaling),
+             ('qnan_addend_snan_left', quiet, signaling, one),
+             ('qnan_addend_snan_right', quiet, one, signaling),
+             ('qnan_left_snan_right', one, quiet, signaling),
+             ('qnan_priority', quiet, quiet | sign | 0x100, quiet | 0x200),
+             ('snan_priority', signaling, signaling | sign | 0x100, signaling | 0x200),
+             ('negative_qnan', quiet | sign, one, one),
+             ('denormal_addend', minimum - 1, one, half),
+             ('denormal_left', one, minimum - 1, half),
+             ('denormal_right', one, half, minimum - 1)]
+    cases.extend((f'zero_signs_{signs}', sign if signs & 1 else 0,
+                  sign if signs & 2 else 0, sign if signs & 4 else 0) for signs in range(8))
+    return cases
+
+
+def fused_numerical_state(operation, index, triples, control=0, sticky=False):
+    initial = State()
+    rng = random.Random(0x46555345444650 + index)
+    initial.x[:] = [rng.getrandbits(64) for _ in range(31)]
+    initial.sp = 0x48010000 + index % 16 * 16
+    seed_extended_state(initial, index * 31 + 17)
+    initial.reserved, initial.nzcv = VECTOR_NUMERICAL_CANARY, index % 16 << 28
+    initial.fpcr, initial.fpsr = control, FP_REGISTER_MASKS['fpsr'] if sticky else 0
+    lane, width = operation['lane'], operation['bytes']
+    bits, mask = lane * 8, (1 << (lane * 8)) - 1
+    count = 1 if operation['scalar'] else width // lane
+    if len(triples) != count or any(not 0 <= value <= mask for triple in triples for value in triple):
+        raise ValueError('Invalid fused input lane count/value')
+    signaling = next(triple[1] for triple in fused_numerical_triples(lane) if triple[0] == 'snan_addend')
+    poison = sum(signaling << (element * bits) for element in range(16 // lane))
+    # Deliberate aliases are resolved by these ordered writes. The frozen input
+    # frame, rather than the requested triple, is the original/native oracle input.
+    for register, side in ((operation['a'], 0), (operation['n'], 1), (operation['m'], 2)):
+        value = poison
+        if side == 2 and operation['index'] is not None:
+            element = operation['index']
+            value = (value & ~(mask << (element * bits))) | triples[0][side] << (element * bits)
+        else:
+            for element, triple in enumerate(triples):
+                value = (value & ~(mask << (element * bits))) | triple[side] << (element * bits)
+        initial.v[register][:] = [value & MASK, value >> 64]
+    return initial
+
+
+def fused_numerical_corpus():
+    functions, records = fused_numerical_functions(), []
+    primary = set()
+
+    def append(function, label, triples, control=0, sticky=False):
+        initial = fused_numerical_state(functions[function], len(records), triples, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records),
+            'label': label, 'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+
+    for function, operation in enumerate(functions):
+        shape = tuple(operation[key] for key in ('name', 'lane', 'bytes', 'scalar')) + (operation['index'] is not None,)
+        count = 1 if operation['scalar'] else operation['bytes'] // operation['lane']
+        triples = fused_numerical_triples(operation['lane'])
+        directed = {label: (a, n, m) for label, a, n, m in triples}
+        if shape not in primary:
+            primary.add(shape)
+            for control in FUSED_ROUNDING_CONTROLS:
+                for label, a, n, m in triples:
+                    append(function, label, [(a, n, m)] * count, control)
+            for control in FUSED_EXTRA_CONTROLS:
+                for label, a, n, m in triples:
+                    if label.startswith(('snan_', 'qnan_', 'denormal_', 'single_round_', 'product_', 'zero_signs_')):
+                        append(function, label, [(a, n, m)] * count, control)
+                a, n, m = directed['snan_addend']
+                append(function, 'sticky_snan_addend', [(a, n, m)] * count, control, True)
+            if not operation['scalar']:
+                for control in (0, NUMERICAL_AH, NUMERICAL_FZ16 if operation['lane'] == 2 else NUMERICAL_FZ):
+                    for position in range(count):
+                        for label in ('single_round_residual', 'product_underflow_accumulate', 'snan_addend'):
+                            active = [directed['one_one_one']] * count
+                            active[position] = directed[label]
+                            append(function, f'active_{label}_{position}', active, control)
+            for enable in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                a, n, m = directed['one_one_one']
+                append(function, 'trap_enable_readback_only', [(a, n, m)] * count, enable)
+        # Every alias and indexed selector sees exact arithmetic, single-round
+        # cancellation and signaling input under both scalar merge policies.
+        for control in (0, NUMERICAL_NEP):
+            for label in ('one_one_one', 'single_round_residual', 'snan_addend'):
+                a, n, m = directed[label]
+                append(function, 'roles_' + label, [(a, n, m)] * count, control)
+    if len(records) > 20000:
+        raise AssertionError('Fused corpus exceeded approved bounded scope')
+    return functions, records
+
+
+def prepare_fused_numerical_oracle(directory):
+    functions, records = fused_numerical_corpus()
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    files = {'functions.json': (json.dumps([{**operation, 'source_hex': struct.pack('<II', operation['word'], RET).hex()}
+                                            for operation in functions], indent=2) + '\n').encode(),
+             'cases.json': (json.dumps([{key: value for key, value in record.items() if key != 'initial'}
+                                       for record in records], indent=2) + '\n').encode(),
+             'inputs.bin': b''.join(struct.pack('<Q', record['function']) + record['initial'] + bytes(8) for record in records)}
+    for name, data in files.items():
+        path = directory / name
+        if path.exists() and path.read_bytes() != data:
+            raise AssertionError('Frozen fused original inputs changed')
+        if not path.exists():
+            with path.open('xb') as stream:
+                stream.write(data)
+    plan = {'kind': 'fused_numerical_original_input_plan', 'cases': len(records), 'functions': len(functions),
+            'harness_sha256': digest(Path(__file__).read_bytes()),
+            'files': {name: {'sha256': digest(data), 'bytes': len(data)} for name, data in files.items()}}
+    path = write_evidence(directory / 'input-plan.json', plan)
+    return {'path': str(path.relative_to(ROOT)), 'sha256': digest(path.read_bytes()), **plan}
+
+
+def load_fused_numerical_oracle(path=FUSED_NUMERICAL_ORACLE):
+    functions, records = fused_numerical_corpus()
+    return load_full_frame_numerical_oracle(path, functions, len(records), FUSED_NUMERICAL_FOCUS)
+
+
+def fused_numerical_shape(operation):
+    return tuple(operation[key] for key in ('name', 'lane', 'bytes', 'scalar')) + (operation['index'] is not None,)
+
+
+def fused_numerical_form(operation):
+    if operation['name'] in FUSED_SCALAR_BASES:
+        return operation['name'], operation['lane']
+    return (operation['name'], operation['scalar'], operation['index'] is not None,
+            'h' if operation['lane'] == 2 else 'sd')
+
+
+def fused_numerical_runtime_cases(records):
+    selected = {}
+    for record in records:
+        operation = record['operation']
+        initial = State.from_buffer_copy(record['initial'])
+        control, label = initial.fpcr, record['label']
+        form, shape = fused_numerical_form(operation), fused_numerical_shape(operation)
+        if record['unsupported']:
+            if control == NUMERICAL_TRAP_ENABLE_MASK:
+                selected.setdefault(('trap_form', form), record)
+            else:
+                selected.setdefault(('trap_format', operation['lane'], control), record)
+        elif initial.fpsr == 0:
+            if label == 'one_one_one' and control == 0:
+                selected.setdefault(('shape', shape), record)
+            if label == 'single_round_residual' and control in (*FUSED_ROUNDING_CONTROLS, NUMERICAL_AH, NUMERICAL_NEP):
+                selected.setdefault(('fused_control', form, control), record)
+            if label in ('snan_addend', 'product_overflow_cancel') and control == 0:
+                selected.setdefault(('semantic', form, label), record)
+            if label == 'product_underflow_accumulate' and control == 0 and operation['name'] == 'fmadd':
+                selected.setdefault(('underflow_format', operation['lane']), record)
+            if not operation['scalar'] and control == 0 and label.startswith('active_snan_addend_'):
+                selected[('mixed_status', shape)] = record
+            if (operation['name'] == 'fmla' and operation['index'] not in (None, 0)
+                    and (operation['scalar'] or operation['bytes'] == 16)
+                    and control == 0 and label == 'roles_one_one_one'):
+                selected.setdefault(('index', shape, operation['index']), record)
+            if operation['name'] == 'fmadd' and operation['lane'] == 4 and label == 'roles_single_round_residual' and control == NUMERICAL_NEP:
+                selected.setdefault(('alias', record['function']), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def fused_numerical_helpers(records):
+    selected = {}
+    for record in records:
+        operation = record['operation']
+        if record['label'] == 'snan_addend' and State.from_buffer_copy(record['initial']).fpcr == 0:
+            # One scalar, vector, scalar-indexed and vector-indexed representative
+            # per format covers each numerical boundary without duplicating aliases.
+            kind = ('scalar' if operation['name'] in FUSED_SCALAR_BASES
+                    else ('scalar_indexed' if operation['scalar'] else
+                          'vector_indexed' if operation['index'] is not None else 'vector'))
+            selected.setdefault((kind, operation['lane']), record)
+    return list(selected.values())
+
+
 def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
+    return full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler)
+
+
+def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
+                                      focus=VECTOR_NUMERICAL_FOCUS, cpu_target='baseline',
+                                      target_id='x86_64-baseline'):
+    fused = focus == FUSED_NUMERICAL_FOCUS
     source = b''.join(struct.pack('<II', operation['word'], RET) for operation in oracle['functions'])
     source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
     ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
@@ -3380,12 +3682,12 @@ def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
         source_path.write_bytes(code)
         state_path.write_text(json.dumps(state_dict(initial)))
         report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path),
-            '--guest-base', hex(BASE), '--entry', hex(entry), '--stop-pc', hex(STOP), '--cpu-target', 'baseline',
+            '--guest-base', hex(BASE), '--entry', hex(entry), '--stop-pc', hex(STOP), '--cpu-target', cpu_target,
             '--state', str(state_path), '--block-budget', str(budget), '--cache-dir', str(cache_dir),
             '--memory', str(memory_path), '--read-memory', f'{hex(ram_address)}:{len(ram)}'], timeout=30))
         if (report['kind'] != 'native_block_run' or report['source_sha256'] != digest(code)
-                or report['compiler_source_sha256'] != compiler or report['target_cpu'] != 'x86_64-baseline'):
-            raise AssertionError('Vector runtime source/compiler/target differs')
+                or report['compiler_source_sha256'] != compiler or report['target_cpu'] != target_id):
+            raise AssertionError('Numerical runtime source/compiler/target differs')
         memory = report['memory']
         if memory['memory_before'] != memory['memory_after'] or memory['memory_reads'][0]['hex'] != ram.hex():
             raise AssertionError('Vector runtime modified owned RAM')
@@ -3402,7 +3704,7 @@ def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
 
     def require(report, actual, expected, pc=STOP, reason='stop_address'):
         if report['pc'] != pc or report['outcome']['reason']['kind'] != reason or bytes(actual) != bytes(expected):
-            write_evidence(ROOT / '.stela/simd-vector_numerical-runtime-failure.json',
+            write_evidence(ROOT / f'.stela/simd-{focus}-runtime-failure.json',
                 {'kind': 'vector_numerical_runtime_failure', 'transcripts': transcripts,
                  'expected_state_hex': bytes(expected).hex(), 'expected_pc': pc, 'expected_reason': reason})
             raise AssertionError('Vector runtime complete-state mismatch; immutable failure retained')
@@ -3419,7 +3721,8 @@ def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
             raise AssertionError('Joined original vector complete state differs')
         counts['original_joined_complete_state_comparisons'] += 1
 
-    for record in vector_numerical_runtime_cases(oracle['records']):
+    selected = fused_numerical_runtime_cases(oracle['records']) if fused else vector_numerical_runtime_cases(oracle['records'])
+    for record in selected:
         initial = State.from_buffer_copy(record['initial'])
         entry = BASE + record['function'] * 8
         report, actual = invoke(source, initial, entry)
@@ -3431,9 +3734,10 @@ def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
         else:
             require(report, actual, State.from_buffer_copy(record['expected']))
 
-    helpers = [record for record in oracle['records'] if record['label'] == 'active_snan_left_0'
-        and State.from_buffer_copy(record['initial']).fpcr == 0]
-    if len(helpers) != len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES):
+    helpers = (fused_numerical_helpers(oracle['records']) if fused else
+        [record for record in oracle['records'] if record['label'] == 'active_snan_left_0'
+         and State.from_buffer_copy(record['initial']).fpcr == 0])
+    if len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)):
         raise AssertionError('Vector helper boundary fixture omits an arrangement')
     for record in helpers:
         initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
@@ -3480,9 +3784,118 @@ def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
             if control & 7 == 0:
                 check_original(chain, chain_initial, chain_expected)
             counts['control_status_chain_checks'] += 1
-    snapshot = write_evidence(ROOT / '.stela/simd-vector_numerical-runtime-records.json', transcripts)
+    if fused:
+        record = next(record for record in oracle['records'] if record['operation']['name'] == 'fmadd'
+                      and record['operation']['lane'] == 4 and record['label'] == 'single_round_residual'
+                      and State.from_buffer_copy(record['initial']).fpcr == 0)
+        operation = record['operation']
+        chain = struct.pack('<4I', NUMERICAL_ADD_X7_ONE, operation['word'], NUMERICAL_ADD_X8_TWO, RET)
+        initial = State.from_buffer_copy(record['initial'])
+        expected = State.from_buffer_copy(record['expected'])
+        expected.x[7], expected.x[8] = (expected.x[7] + 1) & MASK, (expected.x[8] + 2) & MASK
+        report, actual = invoke(chain, initial, BASE)
+        require(report, actual, expected)
+        check_original(chain, initial, expected)
+        counts['interior_fused_prefix_suffix_checks'] += 1
+        initial.fpcr = NUMERICAL_INVALID_ENABLE
+        expected = State.from_buffer_copy(initial)
+        expected.x[7] = (expected.x[7] + 1) & MASK
+        report, actual = invoke(chain, initial, BASE)
+        require(report, actual, expected, BASE + 4, 'floating_point_unsupported')
+        if report['outcome']['reason'] != {'kind': 'floating_point_unsupported', 'instruction_pc': BASE + 4,
+                'fpcr': NUMERICAL_INVALID_ENABLE, 'enabled_exceptions': 1}:
+            raise AssertionError('Interior fused refusal did not preserve exact pending instruction and enable')
+        counts['interior_fused_precise_refusal_checks'] += 1
+    transcript_name = f'{focus}-{target_id}' if fused else focus
+    snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
     return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
             'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())}}
+
+
+def run_fused_numerical_cohort(cli, oracle_path):
+    oracle = load_fused_numerical_oracle(oracle_path)
+    started = time.monotonic()
+    cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
+    shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
+                    'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
+    shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
+    cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
+    targets = [('baseline', 'x86_64-baseline')]
+    if cpu_info['detected_target'] != 'x86_64-baseline':
+        targets.append(('native', cpu_info['detected_target']))
+    profiles, compiler = [], None
+    with tempfile.TemporaryDirectory(prefix='stela-fused-numerical-') as temporary:
+        for cpu_target, target_id in targets:
+            directory = Path(temporary) / target_id
+            directory.mkdir()
+            batches, artifacts = [], []
+            for index, operation in enumerate(oracle['functions']):
+                batch = compile_batch(cli, directory, [{'operations': [operation]}], index,
+                    block=True, cpu_target=cpu_target, target_id=target_id, guest_base=BASE + index * 8)
+                batch.update(cohort=FUSED_NUMERICAL_FOCUS, oracle_path=str(oracle_path))
+                if compiler is not None and batch['compiler'] != compiler:
+                    raise AssertionError('Fused compiler changed during preparation')
+                compiler = batch['compiler']
+                accounting = numerical_native_accounting(batch)
+                if operation['lane'] == 2 and (len(batch['compiled_source']) != 4 or len(batch['native']) != NUMERICAL_HELPER_NATIVE_BYTES):
+                    raise AssertionError('Fused half instruction is not a terminal helper')
+                if operation['lane'] != 2 and len(batch['compiled_source']) != 8:
+                    raise AssertionError('Fused S/D instruction does not retain conditional fast path and guest RET')
+                retained = retain_native_evidence('simd-fused_numerical', batch['compiled_source'], batch['native'],
+                    batch['manifest'], accounting, Path(__file__).read_bytes())
+                batches.append(batch)
+                artifacts.append({'function': index, 'compilation': batch['receipt'], 'accounting': accounting, 'files': retained})
+            optional = {opcode['mnemonic'] for opcode in cpu_info['simd_opcodes'] if opcode['minimum_target'] != 'x86_64-baseline'}
+            if cpu_target == 'baseline' and any(optional & artifact['accounting']['static_opcode_histogram'].keys() for artifact in artifacts):
+                raise AssertionError('Baseline fused code contains optional host opcodes')
+            for artifact in artifacts:
+                operation = artifact['accounting']['shape']
+                histogram = artifact['accounting']['static_opcode_histogram']
+                fused_mnemonics = {mnemonic: count for mnemonic, count in histogram.items()
+                                   if mnemonic.startswith(FUSED_NATIVE_PREFIXES)}
+                expected = {}
+                if 'fma' in target_id.split('+')[1:] and operation['lane'] != 2:
+                    suffix = ('s' if operation['scalar'] else 'p') + ('s' if operation['lane'] == 4 else 'd')
+                    expected[FUSED_NATIVE_OPERATIONS[operation['name']] + '132' + suffix] = 1
+                if fused_mnemonics != expected:
+                    raise AssertionError(f'FMA3 opcode/feature guard failed: {target_id} {operation} {fused_mnemonics}')
+            raw = bounded_cases(batches)
+            raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested trap enables remain intact and their RAZ/WI observations receive no successful native equality credit.'
+            runtime = full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
+                FUSED_NUMERICAL_FOCUS, cpu_target, target_id)
+            profiles.append({'target_cpu': target_id, 'raw_native': raw, 'rust_runtime': runtime,
+                             'fma3_instruction_checks': len(artifacts), 'native_artifacts': artifacts})
+    if (digest(cli.read_bytes()) != cli_hash or digest(Path(__file__).read_bytes()) != harness_hash
+            or any(digest((ROOT / name).read_bytes()) != value for name, value in shared_hashes.items())):
+        raise AssertionError('Fused executable, harness or shared source changed during verification')
+    def sums(section, key):
+        return sum(profile[section][key] for profile in profiles)
+
+    report = {'kind': 'simd_fused_numerical_arm_vs_native_x86', 'passed': True, 'abi': BLOCK_ABI,
+        'state_comparisons': sums('rust_runtime', 'complete_state_comparisons'),
+        'runtime_complete_state_comparisons': sums('rust_runtime', 'complete_state_comparisons'),
+        'runtime_typed_unsupported_state_checks': sums('rust_runtime', 'typed_unsupported_state_checks'),
+        'runtime_budget_resume_checks': sums('rust_runtime', 'budget_helper_resume_checks'),
+        'runtime_disk_cache_checks': sums('rust_runtime', 'disk_cache_checks'),
+        'runtime_memory_cache_loop_checks': sums('rust_runtime', 'memory_cache_loop_checks'),
+        'runtime_control_status_chain_checks': sums('rust_runtime', 'control_status_chain_checks'),
+        'raw_native_state_and_exit_comparisons': sums('raw_native', 'raw_native_state_and_exit_comparisons'),
+        'raw_original_complete_state_comparisons': sums('raw_native', 'raw_inline_complete_state_comparisons'),
+        'raw_inline_complete_state_comparisons': sums('raw_native', 'raw_inline_complete_state_comparisons'),
+        'raw_helper_unchanged_state_comparisons': sums('raw_native', 'raw_helper_unchanged_state_comparisons'),
+        'raw_unsupported_unchanged_state_comparisons': sums('raw_native', 'raw_unsupported_unchanged_state_comparisons'),
+        'original_full_frame_captures': len(oracle['records']), 'canonical_forms': 24,
+        'native_mxcsr_preservation_comparisons': sums('raw_native', 'caller_mxcsr_preservation_comparisons'),
+        'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
+        'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
+        'original_oracle_receipt_sha256': oracle['receipt_sha256'], 'original_producer': oracle['producer'],
+        'control_readbacks': oracle['control_readbacks'], 'input_derivation': oracle['input_derivation'],
+        'profiles': profiles, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
+        'verification_wall_seconds': time.monotonic() - started,
+        'limits': 'Enabled nonstreaming scalar/vector/indexed H/S/D fused arithmetic only. Full-frame original observations compare under compatible controls; trap-delivery, disabled-feature, Apple hardware, complete application, OS and performance claims remain outside this cohort.'}
+    write_evidence(ROOT / '.stela/simd-fused_numerical-differential-report.json', report)
+    print(json.dumps(report, indent=2))
 
 
 def run_vector_numerical_cohort(cli, oracle_path):
@@ -3834,11 +4247,13 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
                         help='Pinned full-frame original vector numerical receipt')
+    parser.add_argument('--fused-oracle', type=Path, default=FUSED_NUMERICAL_ORACLE,
+                        help='Pinned full-frame original fused numerical receipt')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -3848,6 +4263,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == FUSED_NUMERICAL_FOCUS:
+        run_fused_numerical_cohort(cli, arguments.fused_oracle)
         return
     if arguments.focus == VECTOR_NUMERICAL_FOCUS:
         run_vector_numerical_cohort(cli, arguments.vector_oracle)

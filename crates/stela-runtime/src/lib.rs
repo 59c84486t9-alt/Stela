@@ -259,8 +259,14 @@ mod tests {
             TargetCpu::Sse42,
         ]
         .into_iter()
-        .flat_map(|tier| [tier, tier.with_pclmulqdq()])
-        {
+        .flat_map(|tier| {
+            [
+                tier,
+                tier.with_pclmulqdq(),
+                tier.with_fma(),
+                tier.with_pclmulqdq().with_fma(),
+            ]
+        }) {
             let leaf = prepare_leaf_for_target(&input, GuestAddress(0x1000), root.path(), target)?;
             let block = prepare_block_for_target(
                 &input,

@@ -4,6 +4,7 @@
 use super::{AddressMode, Register, register};
 pub mod arithmetic;
 pub mod floating;
+pub mod fused;
 pub mod halving;
 pub mod immediates;
 pub mod memory;

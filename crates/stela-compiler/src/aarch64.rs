@@ -72,9 +72,51 @@ pub enum AddressMode {
     PostIndex,
 }
 
+/// Numerical instructions share a precise block boundary and transactional
+/// completion, while each family keeps its own decoded operand contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingPointOperation {
+    Binary(simd::arithmetic::Operand),
+    Fused(simd::fused::Operand),
+}
+
+impl FloatingPointOperation {
+    pub const fn format(self) -> floating::Format {
+        match self {
+            Self::Binary(operand) => operand.format,
+            Self::Fused(operand) => operand.format,
+        }
+    }
+    pub const fn shape(self) -> simd::arithmetic::Shape {
+        match self {
+            Self::Binary(operand) => operand.shape,
+            Self::Fused(operand) => operand.shape,
+        }
+    }
+    #[allow(clippy::result_unit_err)]
+    pub fn decode(word: u32) -> Option<Result<Self, ()>> {
+        if let Some(result) = simd::arithmetic::decode(word) {
+            Some(result.map(Self::Binary))
+        } else {
+            simd::fused::decode(word).map(|result| result.map(Self::Fused))
+        }
+    }
+}
+
+impl From<simd::arithmetic::Operand> for FloatingPointOperation {
+    fn from(operand: simd::arithmetic::Operand) -> Self {
+        Self::Binary(operand)
+    }
+}
+impl From<simd::fused::Operand> for FloatingPointOperation {
+    fn from(operand: simd::fused::Operand) -> Self {
+        Self::Fused(operand)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
-    FloatingPoint(simd::arithmetic::Operand),
+    FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),
     Simd(simd::Operand),
     Bitfield(bitfield::Operand),
@@ -286,7 +328,7 @@ impl Lifter for Decoder {
             Operation::FloatingPointRegister(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
-        } else if let Some(decoded) = simd::arithmetic::decode(word) {
+        } else if let Some(decoded) = FloatingPointOperation::decode(word) {
             Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = literal::decode(pc, word) {
             Operation::Literal(decoded.map_err(|()| unsupported())?)

@@ -465,7 +465,7 @@ pub(crate) enum Terminator {
     Clock(ClockInstruction),
     ThreadRegister(ThreadRegisterInstruction),
     /// Scalar mapping that unconditionally returns to numerical completion.
-    FloatingPoint(crate::aarch64::simd::arithmetic::Operand),
+    FloatingPoint(crate::aarch64::FloatingPointOperation),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -728,7 +728,7 @@ fn parse(
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
         if let Operation::FloatingPoint(operand) = &instruction.operation
-            && operand.format == crate::aarch64::floating::Format::Half
+            && operand.format() == crate::aarch64::floating::Format::Half
         {
             terminal = Some((pc, Terminator::FloatingPoint(*operand)));
             break;

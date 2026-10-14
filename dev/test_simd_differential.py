@@ -14,6 +14,90 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_fused_encodings_cover_all_modes_register_roles_and_indexed_selectors(self):
+        functions = suite.fused_numerical_functions()
+        self.assertEqual(len(functions), 648)
+        self.assertEqual(len({op['word'] for op in functions}), len(functions))
+        self.assertEqual(len({suite.fused_numerical_form(op) for op in functions}), 24)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for operation in functions:
+            instruction, = decoder.disasm(struct.pack('<I', operation['word']), 0)
+            self.assertEqual(instruction.mnemonic, operation['name'])
+            letter = {2: 'h', 4: 's', 8: 'd'}[operation['lane']]
+            if operation['name'] in suite.FUSED_SCALAR_BASES:
+                operands = [f"{letter}{operation[role]}" for role in ('d', 'n', 'm', 'a')]
+            else:
+                arrangement = str(operation['bytes'] // operation['lane']) + letter
+                operands = [(f"{letter}{operation[role]}" if operation['scalar'] else
+                             f"v{operation[role]}.{arrangement}") for role in ('d', 'n')]
+                operands.append(f"v{operation['m']}.{letter}[{operation['index']}]" if operation['index'] is not None
+                                else f"v{operation['m']}.{arrangement}")
+            self.assertEqual(instruction.op_str, ', '.join(operands))
+        for lane in (2, 4, 8):
+            self.assertEqual({op['index'] for op in functions if op['index'] is not None and op['lane'] == lane},
+                             set(range(16 // lane)))
+        half = [op for op in functions if op['index'] is not None and op['lane'] == 2]
+        self.assertEqual(max(op['m'] for op in half), 15)
+        self.assertTrue(any(op['d'] == op['n'] == op['m'] == op['a'] == 31 for op in functions))
+
+    def test_fused_encoding_rejects_unallocated_shapes_and_indexed_fields(self):
+        for arguments in (('fmadd', 4, 4, True, 0, 1, 2, None, None),
+                          ('fmadd', 8, 8, True, 0, 1, 2, 3, 0),
+                          ('fmla', 8, 8, False, 0, 1, 2, None, None),
+                          ('fmla', 2, 16, False, 0, 1, 16, None, 0),
+                          ('fmls', 8, 16, False, 0, 1, 2, None, 2),
+                          ('fmla', 4, 4, True, 0, 1, 2, 3, 0)):
+            with self.assertRaises(ValueError):
+                suite.fused_numerical_operation(*arguments)
+
+    def test_fused_input_triples_preserve_selected_lane_and_poison_inactive_inputs(self):
+        for lane in (2, 4, 8):
+            index = 16 // lane - 1
+            operation = suite.fused_numerical_operation('fmla', lane, lane, True, 0, 1, 2, index=index)
+            initial = suite.fused_numerical_state(operation, 1, [(7, 11, 13)], suite.NUMERICAL_NEP, True)
+            bits, mask = lane * 8, (1 << (lane * 8)) - 1
+            self.assertEqual(initial.v[0][0] & mask, 7)
+            self.assertEqual(initial.v[1][0] & mask, 11)
+            right = initial.v[2][0] | initial.v[2][1] << 64
+            self.assertEqual(right >> (index * bits) & mask, 13)
+            poison = next(triple[1] for triple in suite.fused_numerical_triples(lane) if triple[0] == 'snan_addend')
+            self.assertEqual([right >> (element * bits) & mask for element in range(16 // lane) if element != index],
+                             [poison] * (16 // lane - 1))
+            self.assertEqual(initial.fpcr, suite.NUMERICAL_NEP)
+            self.assertEqual(initial.fpsr, suite.FP_REGISTER_MASKS['fpsr'])
+            self.assertNotEqual(initial.v[0][1], 0)
+
+    def test_fused_single_round_residual_fixture_is_nonzero_exact_arithmetic(self):
+        from fractions import Fraction
+        for lane, fraction in ((2, 10), (4, 23), (8, 52)):
+            label, a, n, m = suite.fused_numerical_triples(lane)[2]
+            self.assertEqual(label, 'single_round_residual')
+            ulp = Fraction(1, 1 << fraction)
+            self.assertEqual((1 + ulp) * (1 - ulp) - 1, -ulp * ulp)
+            self.assertEqual(n & ((1 << fraction) - 1), 1)
+            self.assertEqual(a ^ (1 << (lane * 8 - 1)), n - 1)
+            self.assertEqual(m, n - 3)
+
+    def test_fused_corpus_and_runtime_scope_include_controls_status_aliases_and_precise_declines(self):
+        functions, records = suite.fused_numerical_corpus()
+        self.assertEqual(len(records), 18402)
+        self.assertEqual({record['function'] for record in records}, set(range(len(functions))))
+        imported = [{**record, 'operation': functions[record['function']],
+                     'unsupported': bool(State.from_buffer_copy(record['initial']).fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)}
+                    for record in records]
+        selected = suite.fused_numerical_runtime_cases(imported)
+        self.assertEqual(len(selected), 326)
+        self.assertEqual(len({suite.fused_numerical_form(record['operation']) for record in selected}), 24)
+        declines = [record for record in selected if record['unsupported']]
+        self.assertEqual(len(declines), 42)
+        self.assertEqual({State.from_buffer_copy(record['initial']).fpcr for record in declines},
+                         {*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), suite.NUMERICAL_TRAP_ENABLE_MASK})
+        self.assertEqual(len(suite.fused_numerical_helpers(imported)), 12)
+        self.assertTrue(any(record['label'].startswith('active_snan_addend_') for record in selected))
+        self.assertEqual({State.from_buffer_copy(record['initial']).fpcr for record in selected
+                          if record['label'] == 'single_round_residual'},
+                         {*suite.FUSED_ROUNDING_CONTROLS, suite.NUMERICAL_AH, suite.NUMERICAL_NEP})
+
     def test_vector_numerical_encodings_cover_arrangements_aliases_and_v31(self):
         functions = suite.vector_numerical_functions()
         words = [operation['word'] for operation in functions]
@@ -58,7 +142,7 @@ class SimdDifferentialTests(unittest.TestCase):
         struct.pack_into('<4Q', snapshot, suite.VECTOR_NUMERICAL_STATUS_OFFSET,
                          0x48010100, 0xa0000005, suite.NUMERICAL_NEP, 0x08000012)
         struct.pack_into('<64Q', snapshot, suite.VECTOR_NUMERICAL_VECTORS_OFFSET, *vectors)
-        observed = suite.vector_numerical_original_state(initial, snapshot)
+        observed = suite.full_frame_numerical_original_state(initial, snapshot)
         self.assertEqual(list(observed.x), registers)
         self.assertEqual((observed.sp, observed.nzcv, observed.fpcr, observed.fpsr),
                          (0x48010100, 0xa0000000, suite.NUMERICAL_NEP, 0x08000012))
@@ -66,7 +150,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(observed.reserved, initial.reserved)
         for invalid in (snapshot[:-1], snapshot + bytes(1)):
             with self.assertRaises(AssertionError):
-                suite.vector_numerical_original_state(initial, invalid)
+                suite.full_frame_numerical_original_state(initial, invalid)
 
     def test_vector_runtime_selection_keeps_both_widths_semantic_lanes_aliases_and_traps(self):
         records = []
