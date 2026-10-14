@@ -54,6 +54,7 @@
     "crates/stela-compiler/src/aarch64/floating/widening.rs",
     "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
     "crates/stela-compiler/src/aarch64/floating/bfloat16/dot.rs",
+    "crates/stela-compiler/src/aarch64/floating/complex.rs",
     "crates/stela-compiler/src/aarch64/floating/precision.rs",
     "crates/stela-compiler/src/aarch64/floating/refinement.rs",
     "crates/stela-compiler/src/aarch64/floating/integer.rs",
@@ -94,6 +95,7 @@
     "crates/stela-compiler/src/aarch64/simd/fused.rs",
     "crates/stela-compiler/src/aarch64/simd/widening.rs",
     "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+    "crates/stela-compiler/src/aarch64/simd/complex.rs",
     "crates/stela-compiler/src/aarch64/simd/conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/fused.rs",
     "crates/stela-compiler/src/x86_64/simd/widening.rs",
@@ -101,6 +103,8 @@
     "crates/stela-compiler/src/x86_64/simd/bfloat16/conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/bfloat16/multiply.rs",
     "crates/stela-compiler/src/x86_64/simd/bfloat16/dot.rs",
+    "crates/stela-compiler/src/x86_64/simd/complex.rs",
+    "crates/stela-compiler/src/x86_64/simd/complex/half.rs",
     "crates/stela-compiler/src/x86_64/simd/precision.rs",
     "crates/stela-compiler/src/x86_64/simd/integer_conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/numerical.rs",
@@ -123,7 +127,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v14",
+  "registry_version": "apple-silicon-block-forms-v15",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -717,6 +721,63 @@
         "runtime_joined_original_unavailable_cases": 48
       },
       "review": "The two profiles retain 42,004 raw observations: 9,182 direct original inline equalities, 336 requested-control policy comparisons, 176 standard-profile model comparisons, 32,212 unchanged helper exits and 98 precise refusals. Runtime completes 742 full states, including 120 policy and 20 model successes, with 32 precise refusals. EBF16 is absent; every raw EBF1 dot/matrix observation, including coincident results, remains in the standard-profile model class, while raw EBF1 conversion/MLA and accepted retained enables use the policy class. Supplementary Unicorn cannot execute BF16: 20,464 single cases and 48 joined sequences remain explicitly unavailable with zero equality credit. Current emitted artifacts, feature checks and selected recipe bridges retain separate original, runtime and historical proof identities."
+    },
+    "complex_numerical": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-complex_numerical-differential-report.json",
+      "kind": "simd_complex_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/floating/comparison.rs",
+        "crates/stela-runtime/src/floating/minmax.rs",
+        "crates/stela-runtime/src/floating/rounding.rs",
+        "crates/stela-runtime/src/floating/sqrt.rs",
+        "crates/stela-runtime/src/floating/estimate.rs",
+        "crates/stela-runtime/src/floating/refinement.rs",
+        "crates/stela-runtime/src/floating/arithmetic.rs",
+        "crates/stela-runtime/src/floating/widening.rs",
+        "crates/stela-runtime/src/floating/bfloat16.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs",
+        "crates/stela-runtime/src/floating/complex.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 3,
+        "original_full_frame_captures": 14919,
+        "original_reference_classifications.direct_original": 14737,
+        "original_reference_classifications.precise_refusal": 182,
+        "raw_native_state_and_exit_comparisons": 29838,
+        "raw_original_complete_state_comparisons": 4379,
+        "raw_inline_complete_state_comparisons": 4379,
+        "raw_helper_unchanged_state_comparisons": 25095,
+        "raw_unsupported_unchanged_state_comparisons": 364,
+        "runtime_complete_state_comparisons": 726,
+        "runtime_typed_unsupported_state_checks": 84,
+        "runtime_budget_resume_checks": 26,
+        "runtime_disk_cache_checks": 26,
+        "runtime_memory_cache_loop_checks": 26,
+        "runtime_control_status_chain_checks": 52,
+        "native_mxcsr_preservation_comparisons": 960,
+        "unicorn_original_unavailable_cases": 12718,
+        "runtime_joined_original_unavailable_cases": 52
+      },
+      "review": "Primary 14,919 full captures separate 14,737 direct-compatible original successes from 182 precise retained-enable refusals. Current native direct inline equality, unchanged helpers and refusals remain distinct from actual Rust completion. No policy/model successes apply. Supplementary Unicorn has extra-IOC defects in Q0 indexed Half: 5,941 matching observations and 418 differences are retained with zero supplementary raw/joined equality credit. Strict runtime/cache checks use primary single-instruction expectations. Final raw checks separate 4,379 direct original inline equalities, 25,095 unchanged helper exits and 364 precise refusals; Rust completes 726 full states with 84 typed refusals and 960 caller-MXCSR checks. Baseline S/D uses packed SSE2 Add and an exact-product-guarded MLA. Independently checked FMA serves S/D MLA, including negative FMA for 180 degrees; Double pair swaps retain PSHUFD. Half uses the compact Double loop with one architectural Half rounding, checked F16C widening and direct indexed-pair broadcast; Half FMA remains excluded. Exceptional or inexact intermediate cases retain the precise core boundary. Selected single-instruction bytes, measured recipe bodies and cached blocks/suffixes require separate final bridges; timings remain bound to their original measured compiler/placement."
     }
   },
   "forms": [
@@ -31928,6 +31989,1023 @@
       ],
       "scope": "BF16 dot stages always suppress fresh flags/traps, treat every NaN as quiet and flush every exponent-zero input/result. AH affects default-NaN sign only. Two BFMulH products, their pair addition and accumulator addition each use the fixed standard-profile round-to-odd rules; overflow is signed infinity and exact cancellation is +0. Matrix output2*i+j accumulates k=0 then1 using original left lanes4*i+2*k/+1 and right lanes4*j+2*k/+1, retaining the first accumulated Single between stages. All four outputs commit together; FPSR remains unchanged. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
       "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "FCADD_asimdsame2_C",
+      "mnemonic": "FCADD",
+      "category": "fp_simd",
+      "source_file": "fcadd_advsimd_vec.xml",
+      "encoding_mask": "0xbf20ec00",
+      "encoding_value": "0x2e00e400",
+      "features": [
+        {
+          "feature": "FEAT_FCMA",
+          "name": "v8Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fcadd_advsimd_vec.xml",
+      "source_sha256": "6218277d5fd6f63f71b3e2f0192296906e6244d34379d37abef12fd6377e64f1",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FCADD"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x2e42e420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fe7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e42f420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5ff7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42e420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fe7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42f420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5ff7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82e420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9fe7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82f420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9ff7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82e420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9fe7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82f420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9ff7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2e420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfe7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2f420",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edff7ff",
+          "expected_mnemonics": [
+            "fcadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/aarch64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "complex_numerical"
+      ],
+      "scope": "Register H4/H8/S2/S4/D2 supports rotations 90/270. Adjacent real/imaginary components compute FPAdd(original N, rotated M), with one rounding per component. Original Vd is not an arithmetic input. Enabled nonstreaming FP/AdvSIMD/FP16/AFP/FCMA profile. H is IEEE Half and AHP is ignored; all retained numerical enables refuse under AH=0/1. Architectural FPNeg rotates original M before arithmetic unpacking, retaining AH-sensitive NaN signs and specified argument priority. Original sources are snapshotted; unselected components/pairs and inactive lanes have no effects. Q0 clears high64 and vector NEP is ignored. Destination and fresh sticky FPSR commit once after complete success, preserving FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET. Disabled-feature/access behavior, enabled trap delivery, streaming SME, Apple-hardware conformance, applications and OS execution remain outside scope.",
+      "review": "Exact June canonical fields and allocated width/rotation/pair-index layouts are reviewed. Current primary original, full-state native and Rust completion evidence preserve operand/NaN roles, transactional status and precise retained-enable refusals. Emitted family artifacts and selected source bridges retain separately identified original/core, supplementary-defect and historical mapping evidence.",
+      "status": "implemented"
+    },
+    {
+      "id": "FCMLA_asimdsame2_C",
+      "mnemonic": "FCMLA",
+      "category": "fp_simd",
+      "source_file": "fcmla_advsimd_vec.xml",
+      "encoding_mask": "0xbf20e400",
+      "encoding_value": "0x2e00c400",
+      "features": [
+        {
+          "feature": "FEAT_FCMA",
+          "name": "v8Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fcmla_advsimd_vec.xml",
+      "source_sha256": "45ea974946a4349e2ff3c8f562cf9b7326dbf348a6f9ee1ecafb6900764aa625",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FCMLA"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x2e42c420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fc7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e42cc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fcfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e42d420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fd7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e42dc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fdfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42c420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fc7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42cc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fcfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42d420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fd7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42dc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fdfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82c420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9fc7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82cc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9fcfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82d420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9fd7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e82dc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e9fdfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82c420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9fc7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82cc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9fcfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82d420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9fd7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e82dc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e9fdfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2c420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfc7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2cc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfcfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2d420",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfd7ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2dc20",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfdfff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/aarch64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "complex_numerical"
+      ],
+      "scope": "Register H4/H8/S2/S4/D2 supports rotations 0/90/180/270. Each component computes fused Add(original Vd, selected N component, rotated M); rotations 0/180 select N real and 90/270 select N imaginary. Each instruction performs one partial complex multiply-add and retains its own rounding boundary. Enabled nonstreaming FP/AdvSIMD/FP16/AFP/FCMA profile. H is IEEE Half and AHP is ignored; all retained numerical enables refuse under AH=0/1. Architectural FPNeg rotates original M before arithmetic unpacking, retaining AH-sensitive NaN signs and specified argument priority. Original sources are snapshotted; unselected components/pairs and inactive lanes have no effects. Q0 clears high64 and vector NEP is ignored. Destination and fresh sticky FPSR commit once after complete success, preserving FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET. Disabled-feature/access behavior, enabled trap delivery, streaming SME, Apple-hardware conformance, applications and OS execution remain outside scope.",
+      "review": "Exact June canonical fields and allocated width/rotation/pair-index layouts are reviewed. Current primary original, full-state native and Rust completion evidence preserve operand/NaN roles, transactional status and precise retained-enable refusals. Emitted family artifacts and selected source bridges retain separately identified original/core, supplementary-defect and historical mapping evidence.",
+      "status": "implemented"
+    },
+    {
+      "id": "FCMLA_advsimd_elt",
+      "mnemonic": "FCMLA",
+      "category": "fp_simd",
+      "source_file": "fcmla_advsimd_elt.xml",
+      "encoding_mask": "0xbf009400",
+      "encoding_value": "0x2f001000",
+      "features": [
+        {
+          "feature": "FEAT_FCMA",
+          "name": "v8Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fcmla_advsimd_elt.xml",
+      "source_sha256": "491caf062e8ad6191ead6b48997ac01f5f334920e138117883b2b3d1d71c7c39",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FCMLA"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x2f421020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f5f13ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f621020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f7f13ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f423020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f5f33ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f623020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f7f33ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f425020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f5f53ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f625020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f7f53ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f427020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f5f73ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f627020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f7f73ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f421020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f13ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f621020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f13ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f421820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f1bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f621820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f1bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f423020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f33ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f623020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f33ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f423820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f3bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f623820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f3bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f425020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f53ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f625020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f53ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f425820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f5bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f625820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f5bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f427020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f73ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f627020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f73ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f427820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f5f7bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f627820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f7f7bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f821020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f13ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f821820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f1bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f823020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f33ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f823820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f3bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f825020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f53ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f825820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f5bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f827020",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f73ff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f827820",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f7bff",
+          "expected_mnemonics": [
+            "fcmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/simd/half.rs",
+        "crates/stela-compiler/src/aarch64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex.rs",
+        "crates/stela-compiler/src/x86_64/simd/complex/half.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "complex_numerical"
+      ],
+      "scope": "Indexed H4/H8/S4 supports rotations 0/90/180/270 and all Vm registers V0\u2013V31, including Half. Vm selects a complete pair: Q0 Half index 0..1, Q1 Half index 0..3; Single requires Q1/L=0 with index H0..1. Each component computes fused Add(original Vd, selected N component, rotated M pair); rotations 0/180 select N real and 90/270 select N imaginary. The pinned indexed missing-FP16 predicate tests size 10 despite Half width size 01; this enabled-FP16 profile bounds that source discrepancy without correcting it. Enabled nonstreaming FP/AdvSIMD/FP16/AFP/FCMA profile. H is IEEE Half and AHP is ignored; all retained numerical enables refuse under AH=0/1. Architectural FPNeg rotates original M before arithmetic unpacking, retaining AH-sensitive NaN signs and specified argument priority. Original sources are snapshotted; unselected components/pairs and inactive lanes have no effects. Q0 clears high64 and vector NEP is ignored. Destination and fresh sticky FPSR commit once after complete success, preserving FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET. Disabled-feature/access behavior, enabled trap delivery, streaming SME, Apple-hardware conformance, applications and OS execution remain outside scope.",
+      "review": "Exact June canonical fields and allocated width/rotation/pair-index layouts are reviewed. Current primary original, full-state native and Rust completion evidence preserve operand/NaN roles, transactional status and precise retained-enable refusals. Emitted family artifacts and selected source bridges retain separately identified original/core, supplementary-defect and historical mapping evidence.",
       "status": "implemented"
     }
   ]

@@ -124,6 +124,7 @@ pub enum ShiftOpcode {
     RightQword,
     ArithmeticWord,
     ArithmeticDword,
+    LeftBytes,
     RightBytes,
 }
 impl ShiftOpcode {
@@ -136,6 +137,7 @@ impl ShiftOpcode {
         Self::RightQword,
         Self::ArithmeticWord,
         Self::ArithmeticDword,
+        Self::LeftBytes,
         Self::RightBytes,
     ];
     pub fn mnemonic(self) -> &'static str {
@@ -157,6 +159,7 @@ impl ShiftOpcode {
             Self::RightQword => ("psrlq", 0x73, 2),
             Self::ArithmeticWord => ("psraw", 0x71, 4),
             Self::ArithmeticDword => ("psrad", 0x72, 4),
+            Self::LeftBytes => ("pslldq", 0x73, 7),
             Self::RightBytes => ("psrldq", 0x73, 3),
         }
     }

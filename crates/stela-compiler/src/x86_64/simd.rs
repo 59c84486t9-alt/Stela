@@ -7,6 +7,7 @@ use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 pub(super) mod arithmetic;
 mod bfloat16;
 mod comparison;
+mod complex;
 mod estimate;
 mod floating;
 mod fused;
@@ -161,7 +162,9 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
     match operation {
         FloatingPointOperation::Binary(operand) => arithmetic::always_exits(operand),
         FloatingPointOperation::Fused(operand) => operand.format == Format::Half,
-        FloatingPointOperation::Widening(_) | FloatingPointOperation::BFloat16(_) => false,
+        FloatingPointOperation::Widening(_)
+        | FloatingPointOperation::BFloat16(_)
+        | FloatingPointOperation::Complex(_) => false,
         FloatingPointOperation::Conversion(operand) => match operand {
             Operand::Precision(operand) => operand.mode.destination_format() == Format::Half,
             Operand::FromInteger(operand) => operand.format == Format::Half,
@@ -203,6 +206,9 @@ pub(super) fn emit_numerical(
         }
         crate::aarch64::FloatingPointOperation::BFloat16(operand) => {
             bfloat16::emit(code, operand, pc, target)
+        }
+        crate::aarch64::FloatingPointOperation::Complex(operand) => {
+            complex::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::Comparison(operand) => {
             comparison::emit(code, operand, pc)

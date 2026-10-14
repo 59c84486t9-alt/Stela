@@ -2,6 +2,7 @@
 mod arithmetic;
 mod bfloat16;
 mod comparison;
+mod complex;
 mod estimate;
 mod minmax;
 mod refinement;
@@ -54,6 +55,7 @@ pub(crate) fn complete(
             FloatingPointOperation::Binary(operand) => return arithmetic::complete(state, operand),
             FloatingPointOperation::Widening(operand) => return widening::complete(state, operand),
             FloatingPointOperation::BFloat16(operand) => return bfloat16::complete(state, operand),
+            FloatingPointOperation::Complex(operand) => return complex::complete(state, operand),
             FloatingPointOperation::Fused(operand) => (
                 operand.destination,
                 operand.addend,
@@ -103,6 +105,7 @@ pub(crate) fn complete(
             FloatingPointOperation::Binary(_)
             | FloatingPointOperation::Widening(_)
             | FloatingPointOperation::BFloat16(_)
+            | FloatingPointOperation::Complex(_)
             | FloatingPointOperation::Conversion(_)
             | FloatingPointOperation::Comparison(_)
             | FloatingPointOperation::MinMax(_)

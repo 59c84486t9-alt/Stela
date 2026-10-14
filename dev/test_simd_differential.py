@@ -16,6 +16,104 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_complex_encodings_cover_all_forms_widths_rotations_indices_and_aliases(self):
+        functions = suite.complex_functions()
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (372, 372))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 3)
+        self.assertEqual(len({suite.complex_shape(op) for op in functions}), 13)
+        self.assertEqual(len({(suite.complex_shape(op), op['rotation'], op['index']) for op in functions}), 62)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            self.assertEqual([i.mnemonic for i in decoder.disasm(struct.pack('<I', op['word']), 0)], [op['name']])
+            self.assertFalse(op['scalar'])
+            self.assertEqual(op['merge'], 'none')
+            self.assertEqual(op['selected_left_component'], int(op['rotation'] in (90, 270)))
+        self.assertTrue(any(op['lane'] == 2 and op['index'] is not None and op['m'] == 31 for op in functions))
+        for args, options in ((('fcadd', 4, 8, 0), {}), (('fcmla', 8, 8, 0), {}),
+                (('fcmla', 4, 8, 0), {'index': 0}), (('fcmla', 2, 8, 0), {'index': 2}),
+                (('fcmla', 4, 16, 0), {'index': 2}), (('fcadd', 2, 8, 90), {'index': 0})):
+            with self.assertRaises(ValueError):
+                suite.complex_operation(*args, **options)
+
+    def test_complex_mnemonics_reach_mocked_compiler_for_every_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(suite.subprocess, 'check_output', side_effect=RuntimeError('reached mocked compiler')) as compile_call:
+                for index, op in enumerate(suite.complex_functions()):
+                    with self.assertRaisesRegex(RuntimeError, 'reached mocked compiler'):
+                        suite.compile_batch(Path('mock-stela'), Path(temporary), [{'operations': [op]}], index, block=True)
+                self.assertEqual(compile_call.call_count, 372)
+
+    def test_complex_state_keeps_selected_components_pairs_and_poison_separate(self):
+        op = suite.complex_operation('fcmla', 2, 16, 90, m=31, index=3)
+        pairs = [(1, 2, 3, 4, 5, 6), (7, 8, 9, 10, 11, 12),
+            (13, 14, 15, 16, 17, 18), (19, 20, 21, 22, 23, 24)]
+        initial = suite.complex_state(op, 0, pairs, poison_unselected=True)
+        left = struct.unpack('<8H', struct.pack('<2Q', *initial.v[1]))
+        right = struct.unpack('<8H', struct.pack('<2Q', *initial.v[31]))
+        self.assertEqual(left[1::2], (4, 10, 16, 22))
+        poison = dict(suite.numerical_unary_values(2))['snan_positive']
+        self.assertEqual(left[::2], (poison,) * 4)
+        self.assertEqual(right[:6], (poison,) * 6)
+        self.assertEqual(right[6:], (5, 6))
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *initial.v[0])), (1, 2, 7, 8, 13, 14, 19, 20))
+        narrow = suite.complex_operation('fcmla', 2, 8, 0, index=1)
+        initial = suite.complex_state(narrow, 1, pairs[:2])
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *initial.v[1]))[4:], (poison,) * 4)
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *initial.v[2]))[2:4], (5, 6))
+        with self.assertRaises(ValueError):
+            suite.complex_state(narrow, 0, pairs)
+
+    def test_complex_inverse_rotation_prepares_exact_cancel_and_preserves_raw_nan_signs(self):
+        for rotation in suite.COMPLEX_ROTATIONS:
+            right = suite.complex_inverse_rotation(rotation, 0x3f800000, 0x40000000, 1 << 31)
+            rotated = (right if rotation == 0 else (right[1] ^ (1 << 31), right[0]) if rotation == 90
+                else (right[0] ^ (1 << 31), right[1] ^ (1 << 31)) if rotation == 180
+                else (right[1], right[0] ^ (1 << 31)))
+            self.assertEqual(rotated, (0x3f800000, 0x40000000))
+        op = suite.complex_operation('fcmla', 4, 16, 180)
+        initial = suite.complex_state(op, 0, [(0, 0, 0x7f800003, 0xff800005, 0x7fc00007, 0xffc00009)] * 2, suite.NUMERICAL_AH)
+        self.assertEqual(initial.v[1][0], 0xff8000057f800003)
+        self.assertEqual(initial.v[2][0], 0xffc000097fc00007)
+
+    def test_complex_fma_accounting_obeys_rotation_width_and_capability(self):
+        family = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.COMPLEX_NUMERICAL_FOCUS]
+        self.assertFalse(family['supplementary_original_available'])
+        self.assertEqual(family['supplementary_original_evidence']['sha256'], 'ade2714deaff2e35245ecaddf0ae22c3d62d5dd385cdeb3b60b279f2bddfaa60')
+        for op in suite.complex_functions():
+            for target in ('x86_64-baseline', 'x86_64-baseline+f16c', 'x86_64-baseline+fma'):
+                expected = {}
+                if op['name'] == 'fcmla' and op['lane'] != 2 and target.endswith('+fma'):
+                    mnemonic = 'vfnmadd' if op['rotation'] == 180 else 'vfmadd'
+                    expected = {mnemonic + '132p' + ('s' if op['lane'] == 4 else 'd'): 1}
+                self.assertEqual(suite.complex_native_fma_expectation(op, target), expected)
+                self.assertTrue(suite.numerical_fma_accounting_matches(op, target, expected, family))
+                self.assertFalse(suite.numerical_fma_accounting_matches(op, target, {'vfmadd231ps': 1}, family))
+        self.assertNotIn('accepts_enabled_control', family)
+        self.assertNotIn('profile_expectation', family)
+        self.assertNotIn('original_control_policy', family)
+
+    def test_complex_corpus_budget_and_helper_sources_are_explicit(self):
+        functions, cases = suite.complex_corpus()
+        imported = [dict(record, operation=functions[record['function']]) for record in cases]
+        self.assertEqual(len(cases), 14919)
+        self.assertEqual({r['function'] for r in cases}, set(range(372)))
+        self.assertEqual(sum(bool(State.from_buffer_copy(r['initial']).fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK) for r in cases), 182)
+        self.assertEqual((len(suite.complex_runtime_cases(imported)), len(suite.complex_helpers(imported))), (327, 13))
+        self.assertLessEqual(327 + 6 * 13, 425)
+        self.assertEqual(suite.complex_helpers(imported, set()), [])
+        self.assertEqual({State.from_buffer_copy(r['initial']).fpcr for r in cases if r['label'] == 'control_subnormal'}, set(suite.COMPLEX_CONTROLS))
+        for record in suite.complex_helpers(imported):
+            op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+            self.assertEqual((op['d'], op['n'], op['m']), (0, 1, 2))
+            self.assertEqual((initial.fpcr, initial.fpsr), (0, 0))
+            quiet = dict(suite.numerical_unary_values(op['lane']))['qnan_positive']
+            source = op['d'] if op['name'] == 'fcmla' else op['n']
+            mask = (1 << (op['lane'] * 8)) - 1
+            self.assertEqual(initial.v[source][0] & mask, quiet)
+
     def test_bfloat16_inventory_covers_all_shapes_indices_and_alias_roles(self):
         functions = suite.bfloat16_functions()
         facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}

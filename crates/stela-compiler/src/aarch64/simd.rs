@@ -5,6 +5,7 @@ use super::{AddressMode, Register, register};
 pub mod arithmetic;
 pub mod bfloat16;
 pub mod comparison;
+pub mod complex;
 pub mod conversion;
 pub mod estimate;
 pub mod floating;

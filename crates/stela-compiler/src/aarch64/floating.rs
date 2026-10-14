@@ -2,6 +2,7 @@
 //! FP/FP16/AFP enabled, non-streaming; numerical trap delivery remains unsupported.
 pub mod bfloat16;
 pub mod comparison;
+pub mod complex;
 pub mod estimate;
 pub mod fused;
 pub mod integer;
