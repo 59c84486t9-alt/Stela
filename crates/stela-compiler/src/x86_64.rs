@@ -30,6 +30,12 @@ fn offset(register: Register) -> Option<u32> {
     }
 }
 
+/// Backend policy shared by block parsing and emission. Terminal numerical
+/// mappings consume only their own word; conditional mappings retain a suffix.
+pub(crate) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
+    simd::numerical_always_exits(operation)
+}
+
 fn load(code: &mut Vec<u8>, register: Register) {
     if let Some(offset) = offset(register) {
         code.extend([0x48, 0x8b, 0x87]); // mov rax,[rdi+disp32]

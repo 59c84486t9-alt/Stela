@@ -1,6 +1,8 @@
 //! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
 //! FP/FP16/AFP enabled, non-streaming; enabled numerical traps are explicit errors.
 pub mod fused;
+pub mod integer;
+pub mod precision;
 
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,

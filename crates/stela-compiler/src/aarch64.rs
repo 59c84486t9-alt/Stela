@@ -78,27 +78,18 @@ pub enum AddressMode {
 pub enum FloatingPointOperation {
     Binary(simd::arithmetic::Operand),
     Fused(simd::fused::Operand),
+    Conversion(simd::conversion::Operand),
 }
 
 impl FloatingPointOperation {
-    pub const fn format(self) -> floating::Format {
-        match self {
-            Self::Binary(operand) => operand.format,
-            Self::Fused(operand) => operand.format,
-        }
-    }
-    pub const fn shape(self) -> simd::arithmetic::Shape {
-        match self {
-            Self::Binary(operand) => operand.shape,
-            Self::Fused(operand) => operand.shape,
-        }
-    }
     #[allow(clippy::result_unit_err)]
     pub fn decode(word: u32) -> Option<Result<Self, ()>> {
         if let Some(result) = simd::arithmetic::decode(word) {
             Some(result.map(Self::Binary))
+        } else if let Some(result) = simd::fused::decode(word) {
+            Some(result.map(Self::Fused))
         } else {
-            simd::fused::decode(word).map(|result| result.map(Self::Fused))
+            simd::conversion::decode(word).map(|result| result.map(Self::Conversion))
         }
     }
 }
@@ -111,6 +102,11 @@ impl From<simd::arithmetic::Operand> for FloatingPointOperation {
 impl From<simd::fused::Operand> for FloatingPointOperation {
     fn from(operand: simd::fused::Operand) -> Self {
         Self::Fused(operand)
+    }
+}
+impl From<simd::conversion::Operand> for FloatingPointOperation {
+    fn from(operand: simd::conversion::Operand) -> Self {
+        Self::Conversion(operand)
     }
 }
 

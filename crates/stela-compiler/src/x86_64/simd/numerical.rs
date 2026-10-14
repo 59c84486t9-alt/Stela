@@ -25,7 +25,7 @@ pub(super) const RIGHT_VECTOR: u8 = 1;
 pub(super) const EXPONENT_VECTOR: u8 = 2;
 const VALIDITY_VECTOR: u8 = 3;
 const MAXIMUM_EXPONENT_VECTOR: u8 = 4;
-const MINIMUM_EXPONENT_VECTOR: u8 = 5;
+pub(super) const MINIMUM_EXPONENT_VECTOR: u8 = 5;
 const SINGLE_VECTOR_MASK: u8 = 0x0f;
 const SINGLE_LOW_VECTOR_MASK: u8 = 0x03;
 const DOUBLE_VECTOR_MASK: u8 = 0x05;
@@ -80,6 +80,15 @@ pub(super) enum ArithmeticOpcode {
     Divide = 0x5e,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Rounding {
+    Fpcr,
+    NearestEven,
+    Positive,
+    Negative,
+    Zero,
+}
+
 pub(super) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
     code.extend([SSE_ESCAPE, condition as u8]);
     let patch = code.len();
@@ -125,22 +134,41 @@ pub(super) fn exponent_range(code: &mut Vec<u8>, format: Format, source: u8, min
 }
 
 pub(super) fn environment(code: &mut Vec<u8>) {
+    environment_round(code, Rounding::Fpcr);
+}
+
+/// Save the complete caller environment and install masked, nonflushing SSE
+/// control. Conversion instructions may select rounding independently of FPCR.
+pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
     code.extend(SUB_RSP_16);
     code.extend(STMXCSR_SAVED);
-    code.extend(MOV_ECX_STATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(MOV_EAX_ECX);
-    code.extend(SHR_EAX_IMM8);
-    code.push(FPCR_POSITIVE_TO_MXCSR_SHIFT);
-    code.push(AND_EAX_IMM32);
-    code.extend(MXCSR_POSITIVE_ROUNDING.to_le_bytes());
-    code.extend(SHR_ECX_IMM8);
-    code.push(FPCR_NEGATIVE_TO_MXCSR_SHIFT);
-    code.extend(AND_ECX_IMM32);
-    code.extend(MXCSR_NEGATIVE_ROUNDING.to_le_bytes());
-    code.extend(OR_EAX_ECX);
-    code.push(OR_EAX_IMM32);
-    code.extend(MXCSR_EXCEPTION_MASKS.to_le_bytes());
+    if matches!(rounding, Rounding::Fpcr) {
+        code.extend(MOV_ECX_STATE);
+        code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+        code.extend(MOV_EAX_ECX);
+        code.extend(SHR_EAX_IMM8);
+        code.push(FPCR_POSITIVE_TO_MXCSR_SHIFT);
+        code.push(AND_EAX_IMM32);
+        code.extend(MXCSR_POSITIVE_ROUNDING.to_le_bytes());
+        code.extend(SHR_ECX_IMM8);
+        code.push(FPCR_NEGATIVE_TO_MXCSR_SHIFT);
+        code.extend(AND_ECX_IMM32);
+        code.extend(MXCSR_NEGATIVE_ROUNDING.to_le_bytes());
+        code.extend(OR_EAX_ECX);
+        code.push(OR_EAX_IMM32);
+        code.extend(MXCSR_EXCEPTION_MASKS.to_le_bytes());
+    } else {
+        const MOV_EAX_IMMEDIATE: u8 = 0xb8;
+        let direction = match rounding {
+            Rounding::NearestEven => 0,
+            Rounding::Positive => MXCSR_POSITIVE_ROUNDING,
+            Rounding::Negative => MXCSR_NEGATIVE_ROUNDING,
+            Rounding::Zero => MXCSR_POSITIVE_ROUNDING | MXCSR_NEGATIVE_ROUNDING,
+            Rounding::Fpcr => unreachable!("FPCR control emitted above"),
+        };
+        code.push(MOV_EAX_IMMEDIATE);
+        code.extend((MXCSR_EXCEPTION_MASKS | direction).to_le_bytes());
+    }
     code.extend(MOV_CONTROL_EAX);
     code.extend(LDMXCSR_CONTROL);
 }
@@ -152,6 +180,7 @@ pub(super) fn restore_environment(code: &mut Vec<u8>) {
     code.extend(ADD_RSP_16);
 }
 
+/// Accumulate status and leave ECX holding only fresh guest IXC (zero or INEXACT).
 pub(super) fn commit_inexact(code: &mut Vec<u8>) {
     code.extend(AND_ECX_IMM32);
     code.extend(MXCSR_INEXACT.to_le_bytes());

@@ -728,7 +728,7 @@ fn parse(
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
         if let Operation::FloatingPoint(operand) = &instruction.operation
-            && operand.format() == crate::aarch64::floating::Format::Half
+            && crate::x86_64::numerical_always_exits(operand)
         {
             terminal = Some((pc, Terminator::FloatingPoint(*operand)));
             break;

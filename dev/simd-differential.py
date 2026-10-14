@@ -248,10 +248,10 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
     for function in functions:
         entries.append(len(words))
         words.extend(operation['word'] for operation in function['operations'])
-        words.append(RET)
+        words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -409,6 +409,8 @@ def worker(pipe, batches):
             result = execute_numerical_batches(batches)
         elif batches[0].get('cohort') == 'fp_registers':
             result = execute_fp_register_batches(batches)
+        elif batches[0].get('cohort') == CONVERSION_NUMERICAL_FOCUS:
+            result = execute_numerical_batches(batches, load_conversion_numerical_oracle(batches[0]['oracle_path']))
         elif batches[0].get('cohort') == 'fused_numerical':
             result = execute_numerical_batches(batches, load_fused_numerical_oracle(batches[0]['oracle_path']))
         elif batches[0].get('cohort') == 'vector_numerical':
@@ -2653,7 +2655,7 @@ def numerical_native_accounting(batch):
     decoded = decode_native_stream(batch['native'])
     operation = batch['functions'][0]['operations'][0]
     compiled = batch['compiled_source']
-    mapped_ret = struct.unpack_from('<I', compiled, len(compiled) - 4)[0] == RET
+    mapped_ret = struct.unpack_from('<I', compiled, len(compiled) - 4)[0] == numerical_return_word(operation)
     split = batch['instruction_offsets'][-1] if mapped_ret else len(batch['native'])
     if split not in {instruction.address for instruction in decoded} | {len(batch['native'])}:
         raise AssertionError('Numerical source map splits a native instruction')
@@ -2675,7 +2677,7 @@ def execute_numerical_batches(batches, oracle=None):
     machine.mem_write(BASE, source)
     machine.mem_map(STOP, 4096)
     counts, corpus = Counter(), hashlib.sha256()
-    examples, mxcsr_examples = {}, []
+    examples, mxcsr_examples, unicorn_divergences = {}, [], []
     with ExitStack() as mappings:
         addresses = [mappings.enter_context(executable(batch['native'])) for batch in batches]
         wrapper_address = mappings.enter_context(executable(NUMERICAL_MXCSR_WRAPPER))
@@ -2716,10 +2718,22 @@ def execute_numerical_batches(batches, oracle=None):
                 initialize_arm(machine, initial)
                 machine.emu_start(BASE + record['function'] * 8, STOP, count=3)
                 original = capture_arm(machine, initial)
-                if machine.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(original) != record['expected']:
-                    raise AssertionError(json.dumps({'ordinary_original_case': record['case'], 'operation': record['operation'],
-                        'original': state_dict(original), 'expected': state_dict(State.from_buffer_copy(record['expected']))}))
-                counts['unicorn_complete_state'] += 1
+                if machine.reg_read(arm.UC_ARM64_REG_PC) != STOP:
+                    raise AssertionError('Supplementary numerical original did not execute the guest RET')
+                if bytes(original) != record['expected']:
+                    expected = State.from_buffer_copy(record['expected'])
+                    classification = conversion_unicorn_difference(record['operation'], initial, original, expected)
+                    if classification is None:
+                        raise AssertionError(json.dumps({'ordinary_original_case': record['case'], 'operation': record['operation'],
+                            'original': state_dict(original), 'expected': state_dict(expected)}))
+                    counts['unicorn_exact_control_divergences'] += 1
+                    if len(unicorn_divergences) < 8:
+                        unicorn_divergences.append({'case': record['case'], 'operation': record['operation'],
+                            'classification': classification,
+                            'initial_state_hex': record['initial'].hex(), 'unicorn_state_hex': bytes(original).hex(),
+                            'primary_qemu_state_hex': record['expected'].hex()})
+                else:
+                    counts['unicorn_complete_state'] += 1
         for shape, record in sorted(examples.items()):
             for masks in (0, NUMERICAL_MXCSR_ALL_MASKS):
                 for status in (0, NUMERICAL_MXCSR_ALL_STATUS):
@@ -2735,6 +2749,8 @@ def execute_numerical_batches(batches, oracle=None):
             'raw_helper_unchanged_state_comparisons': counts['helper'],
             'raw_unsupported_unchanged_state_comparisons': counts['unsupported'],
             'unicorn_original_complete_state_comparisons': counts['unicorn_complete_state'],
+            'unicorn_exact_control_divergences': counts['unicorn_exact_control_divergences'],
+            'unicorn_exact_divergence_examples': unicorn_divergences,
             'caller_mxcsr_preservation_comparisons': counts['mxcsr_checks'],
             'caller_mxcsr_examples': mxcsr_examples, 'state_corpus_sha256': corpus.hexdigest(),
             'state_bytes': ctypes.sizeof(State), 'ram_canary_bytes_per_case': NUMERICAL_GUARD_BYTES * 2,
@@ -3307,7 +3323,7 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
     if len(functions) != len(expected_functions) or len(cases) != expected_cases:
         raise AssertionError('Full-frame original function/corpus count changed')
     for actual, expected in zip(functions, expected_functions):
-        if any(actual[key] != value for key, value in expected.items()) or actual['source_hex'] != struct.pack('<II', expected['word'], RET).hex():
+        if any(actual[key] != value for key, value in expected.items()) or actual['source_hex'] != struct.pack('<II', expected['word'], numerical_return_word(expected)).hex():
             raise AssertionError('Full-frame original operation differs from independent encoding facts')
     if len(inputs) != len(cases) * NUMERICAL_INPUT_STRIDE or len(results) != (len(cases) + 1) * FP_REGISTER_RECORD_BYTES:
         raise AssertionError('Full-frame original state framing changed')
@@ -3330,11 +3346,22 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
                 or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
             raise AssertionError(f'Full-frame original instruction/EL0/control evidence changed: {index}')
         untouched = State.from_buffer_copy(original)
-        untouched.v[operation['d']][:] = initial.v[operation['d']]
+        if focus == CONVERSION_NUMERICAL_FOCUS:
+            validate_conversion_original_effects(initial, original, operation)
+            if operation['destination_bank'] == 'general':
+                if operation['d'] != 31:
+                    untouched.x[operation['d']] = initial.x[operation['d']]
+            else:
+                untouched.v[operation['d']][:] = initial.v[operation['d']]
+            if operation['writes_nzcv']:
+                untouched.nzcv = initial.nzcv
+        else:
+            untouched.v[operation['d']][:] = initial.v[operation['d']]
         untouched.fpcr, untouched.fpsr = initial.fpcr, initial.fpsr
         if bytes(untouched) != bytes(initial) or original.fpsr & ~NUMERICAL_EXCEPTION_FLAGS != initial.fpsr & ~NUMERICAL_EXCEPTION_FLAGS:
             raise AssertionError('Original vector numerical operation changed unrelated state or QC')
-        if not operation['scalar'] and operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
+        if (focus != CONVERSION_NUMERICAL_FOCUS and not operation['scalar']
+                and operation['bytes'] == 8 and original.v[operation['d']][1] != 0):
             raise AssertionError('Original Q0 numerical instruction did not clear upper 64 bits')
         if operation['scalar'] and 'a' in operation:
             active = (1 << (operation['lane'] * 8)) - 1
@@ -3346,7 +3373,8 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
         readbacks[(initial.fpcr, actual_fpcr)] += 1
         # Only LR changes to let the native/runtime and Unicorn paths execute
         # the actual RET. The original subject instruction left every GPR intact.
-        initial.x[30] = original.x[30] = STOP
+        return_register = operation.get('return_register', 30)
+        initial.x[return_register] = original.x[return_register] = STOP
         records.append({'function': function, 'initial': bytes(initial), 'expected': bytes(original),
             'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0' if focus == VECTOR_NUMERICAL_FOCUS else focus + '_el0',
             'unsupported': bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)})
@@ -3354,7 +3382,7 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
             'pointer_sha256': pointer_hash,
             'producer': receipt, 'control_readbacks': [{'requested': requested, 'actual': actual, 'cases': count}
                 for (requested, actual), count in sorted(readbacks.items())],
-            'input_derivation': 'Only X30 becomes STOP for actual guest RET. All other imported bytes remain unchanged. Original requested trap enables are retained; QEMU RAZ/WI readback is classified without successful native equality credit.'}
+            'input_derivation': ('Only the per-function unused return register becomes STOP for actual guest RET. Conversion input and output GPRs remain unchanged by transport derivation. ' if focus == CONVERSION_NUMERICAL_FOCUS else 'Only X30 becomes STOP for actual guest RET. All other imported bytes remain unchanged. ') + 'Original requested trap enables are retained; QEMU RAZ/WI readback is classified without successful native equality credit.'}
 
 
 def vector_numerical_runtime_cases(records):
@@ -3572,11 +3600,10 @@ def fused_numerical_corpus():
     return functions, records
 
 
-def prepare_fused_numerical_oracle(directory):
-    functions, records = fused_numerical_corpus()
+def prepare_full_frame_numerical_oracle(directory, functions, records, focus):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    files = {'functions.json': (json.dumps([{**operation, 'source_hex': struct.pack('<II', operation['word'], RET).hex()}
+    files = {'functions.json': (json.dumps([{**operation, 'source_hex': struct.pack('<II', operation['word'], numerical_return_word(operation)).hex()}
                                             for operation in functions], indent=2) + '\n').encode(),
              'cases.json': (json.dumps([{key: value for key, value in record.items() if key != 'initial'}
                                        for record in records], indent=2) + '\n').encode(),
@@ -3584,21 +3611,453 @@ def prepare_fused_numerical_oracle(directory):
     for name, data in files.items():
         path = directory / name
         if path.exists() and path.read_bytes() != data:
-            raise AssertionError('Frozen fused original inputs changed')
+            raise AssertionError('Frozen original numerical inputs changed')
         if not path.exists():
             with path.open('xb') as stream:
                 stream.write(data)
-    plan = {'kind': 'fused_numerical_original_input_plan', 'cases': len(records), 'functions': len(functions),
+    plan = {'kind': focus + '_original_input_plan', 'cases': len(records), 'functions': len(functions),
             'harness_sha256': digest(Path(__file__).read_bytes()),
             'files': {name: {'sha256': digest(data), 'bytes': len(data)} for name, data in files.items()}}
     path = write_evidence(directory / 'input-plan.json', plan)
     return {'path': str(path.relative_to(ROOT)), 'sha256': digest(path.read_bytes()), **plan}
 
 
+def prepare_fused_numerical_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *fused_numerical_corpus(), FUSED_NUMERICAL_FOCUS)
+
+
 def load_fused_numerical_oracle(path=FUSED_NUMERICAL_ORACLE):
     functions, records = fused_numerical_corpus()
     return load_full_frame_numerical_oracle(path, functions, len(records), FUSED_NUMERICAL_FOCUS)
 
+
+CONVERSION_NUMERICAL_FOCUS = 'conversion_numerical'
+CONVERSION_NUMERICAL_ORACLE = ROOT / '.stela/research/conversion-numerical/oracle-expanded/receipt.json'
+CONVERSION_ROLES = ((0, 1), (1, 1), (31, 31), (30, 30))
+CONVERSION_PRECISION_BASES = {(2, 4): 0x1ee24000, (2, 8): 0x1ee2c000,
+    (4, 2): 0x1e23c000, (4, 8): 0x1e22c000, (8, 2): 0x1e63c000, (8, 4): 0x1e624000}
+CONVERSION_GENERAL_BASES = {'fcvtns': 0x1e200000, 'fcvtps': 0x1e280000,
+    'fcvtms': 0x1e300000, 'fcvtzs': 0x1e380000, 'fcvtas': 0x1e240000,
+    'scvtf': 0x1e220000}
+CONVERSION_VECTOR_BASES = {'fcvtns': 0x0e21a800, 'fcvtps': 0x0ea1a800,
+    'fcvtms': 0x0e21b800, 'fcvtzs': 0x0ea1b800, 'fcvtas': 0x0e21c800,
+    'scvtf': 0x0e21d800}
+CONVERSION_ROUNDING = {'fcvtn': 'fpcr', 'fcvtl': 'fpcr', 'fcvt': 'fpcr',
+    'fcvtxn': 'to_odd', 'fcvtns': 'nearest_ties_even', 'fcvtps': 'toward_positive',
+    'fcvtms': 'toward_negative', 'fcvtzs': 'toward_zero', 'fcvtas': 'nearest_ties_away',
+    'scvtf': 'fpcr', 'fjcvtzs': 'toward_zero_modulo_2pow32'}
+CONVERSION_AHP = 1 << 26
+CONVERSION_EXTRA_CONTROLS = (NUMERICAL_NEP, NUMERICAL_AH, NUMERICAL_FIZ,
+    NUMERICAL_FZ, NUMERICAL_FZ16, NUMERICAL_DN, CONVERSION_AHP,
+    NUMERICAL_AH | NUMERICAL_FZ, NUMERICAL_AH | NUMERICAL_DN,
+    CONVERSION_AHP | NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_FIZ | NUMERICAL_NEP)
+CONVERSION_RET_BASE = 0xd65f0000
+CONVERSION_REGISTER_SHIFT = 5
+
+
+def numerical_return_word(operation):
+    register = operation.get('return_register', 30)
+    if not 0 <= register < 31:
+        raise ValueError('Numerical return register must be a general register')
+    return CONVERSION_RET_BASE | register << CONVERSION_REGISTER_SHIFT
+
+
+def conversion_numerical_operation(name, source_lane, destination_lane, shape, d, n,
+                                   integer_bits=0, fracbits=0, unsigned=False, part=0):
+    if source_lane not in (2, 4, 8) or destination_lane not in (2, 4, 8):
+        raise ValueError('Conversion requires H/S/D or integer16/32/64 lanes')
+    if any(not 0 <= register < 32 for register in (d, n)) or part not in (0, 1):
+        raise ValueError('Invalid conversion register or half selector')
+    source_bank = destination_bank = 'simd'
+    source_part, destination_part = 0, 0
+    source_bytes = destination_bytes = source_lane
+    signed_name = 'scvtf' if name == 'ucvtf' else name[:-1] + 's' if name.endswith('u') else name
+    precision = name in ('fcvt', 'fcvtl', 'fcvtn', 'fcvtxn')
+    int_to_fp = name in ('scvtf', 'ucvtf')
+    if precision:
+        if integer_bits or fracbits or unsigned:
+            raise ValueError('Precision conversion has no integer or fixed operand')
+        if name == 'fcvt':
+            if shape != 'scalar' or part or (source_lane, destination_lane) not in CONVERSION_PRECISION_BASES:
+                raise ValueError('Invalid scalar precision conversion')
+            word = CONVERSION_PRECISION_BASES[source_lane, destination_lane]
+            form = f"FCVT_{ {2:'H',4:'S',8:'D'}[destination_lane]}{ {2:'H',4:'S',8:'D'}[source_lane]}_floatdp1"
+        elif name == 'fcvtl':
+            if shape != 'vector' or (source_lane, destination_lane) not in ((2, 4), (4, 8)):
+                raise ValueError('Invalid widening precision conversion')
+            word = 0x0e217800 | int(source_lane == 4) << 22 | part << 30
+            source_part, source_bytes, destination_bytes = part, 8, 16
+            form = 'FCVTL_asimdmisc_L'
+        else:
+            if (source_lane, destination_lane) not in ((4, 2), (8, 4)) or (name == 'fcvtxn' and source_lane != 8):
+                raise ValueError('Invalid narrowing precision conversion')
+            if shape == 'scalar':
+                if name != 'fcvtxn' or part:
+                    raise ValueError('Only FCVTXN has a scalar narrowing form')
+                word, form = 0x7e616800, 'FCVTXN_asisdmisc_N'
+            elif shape == 'vector':
+                word = (0x2e616800 if name == 'fcvtxn' else 0x0e216800 | int(source_lane == 8) << 22) | part << 30
+                source_bytes, destination_bytes, destination_part = 16, 8, part
+                form = name.upper() + '_asimdmisc_N'
+            else:
+                raise ValueError('Invalid narrowing shape')
+    elif name == 'fjcvtzs':
+        if (source_lane, destination_lane, shape, integer_bits, fracbits, unsigned, part) != (8, 4, 'general', 32, 0, False, 0):
+            raise ValueError('FJCVTZS converts D to W')
+        word, form, destination_bank = 0x1e7e0000, 'FJCVTZS_32D_float2int', 'general'
+    elif signed_name in CONVERSION_GENERAL_BASES:
+        if unsigned != (name == 'ucvtf' or name.endswith('u')) or part:
+            raise ValueError('Conversion mnemonic and signedness disagree')
+        if shape == 'general':
+            if integer_bits not in (32, 64) or not 0 <= fracbits <= integer_bits:
+                raise ValueError('Invalid general integer or fraction width')
+            integer_lane = source_lane if int_to_fp else destination_lane
+            if integer_lane * 8 != integer_bits:
+                raise ValueError('Integer lane width differs from general register width')
+            fp_lane = destination_lane if int_to_fp else source_lane
+            word = CONVERSION_GENERAL_BASES[signed_name] | int(unsigned) << 16
+            if fracbits:
+                if signed_name not in ('scvtf', 'fcvtzs'):
+                    raise ValueError('Fixed conversions require SCVTF/UCVTF/FCVTZS/FCVTZU')
+                word &= ~(1 << 21)
+                word |= (64 - fracbits) << 10
+            word |= int(integer_bits == 64) << 31 | {2: 3, 4: 0, 8: 1}[fp_lane] << 22
+            source_bank, destination_bank = ('general', 'simd') if int_to_fp else ('simd', 'general')
+            source_bytes, destination_bytes = source_lane, destination_lane
+            widths = ({2: 'H', 4: 'S', 8: 'D'}[fp_lane] + str(integer_bits) if int_to_fp
+                      else str(integer_bits) + {2: 'H', 4: 'S', 8: 'D'}[fp_lane])
+            form = f"{name.upper()}_{widths}_float2{'fix' if fracbits else 'int'}"
+        else:
+            if integer_bits or source_lane != destination_lane or shape not in ('scalar', 'vector64', 'vector128'):
+                raise ValueError('SIMD integer conversion requires equal lane widths')
+            if shape == 'vector64' and source_lane == 8 or not 0 <= fracbits <= source_lane * 8:
+                raise ValueError('Unallocated SIMD arrangement or fixed scale')
+            if fracbits:
+                if signed_name not in ('scvtf', 'fcvtzs'):
+                    raise ValueError('Unallocated fixed conversion mnemonic')
+                word = (0x0f00e400 if int_to_fp else 0x0f00fc00) | int(unsigned) << 29
+                word |= (2 * source_lane * 8 - fracbits) << 16
+                suffix = 'asisdshf_C' if shape == 'scalar' else 'asimdshf_C'
+            else:
+                word = CONVERSION_VECTOR_BASES[signed_name] | int(unsigned) << 29
+                word |= 0x00580000 if source_lane == 2 else int(source_lane == 8) << 22
+                suffix = ('asisdmisc' if shape == 'scalar' else 'asimdmisc') + ('fp16_R' if source_lane == 2 else '_R')
+            word |= 0x50000000 if shape == 'scalar' else int(shape == 'vector128') << 30
+            source_bytes = destination_bytes = source_lane if shape == 'scalar' else 8 if shape == 'vector64' else 16
+            form = name.upper() + '_' + suffix
+    else:
+        raise ValueError('Unknown conversion mnemonic')
+    scalar = shape in ('scalar', 'general')
+    if scalar:
+        destination_bytes = destination_lane
+    merge = ('replace_destination' if destination_bank == 'general' else 'original_destination_if_nep' if scalar
+             else 'preserve_low64' if destination_part else 'zero_upper64' if destination_bytes == 8 else 'replace_all128')
+    used = {register for bank, register in ((source_bank, n), (destination_bank, d)) if bank == 'general' and register != 31}
+    return_register = next(register for register in (30, 29, 28) if register not in used)
+    return {'name': name, 'canonical_id': form, 'source_lane': source_lane, 'destination_lane': destination_lane,
+        'source_bank': source_bank, 'destination_bank': destination_bank, 'source_bytes': source_bytes,
+        'source_part': source_part, 'destination_part': destination_part, 'merge': merge,
+        'integer_bits': integer_bits or (source_lane * 8 if not precision else 0), 'unsigned': unsigned,
+        'fracbits': fracbits, 'rounding': CONVERSION_ROUNDING[signed_name if not precision else name],
+        'lane': destination_lane, 'bytes': destination_bytes, 'scalar': scalar,
+        'd': d, 'n': n, 'word': word | n << 5 | d, 'return_register': return_register,
+        'writes_nzcv': name == 'fjcvtzs'}
+
+
+def conversion_numerical_functions():
+    specifications = [('fcvt', source, destination, 'scalar', 0, 0, False, 0)
+                      for source, destination in CONVERSION_PRECISION_BASES]
+    for name, pairs in (('fcvtl', ((2, 4), (4, 8))), ('fcvtn', ((4, 2), (8, 4))), ('fcvtxn', ((8, 4),))):
+        specifications.extend((name, source, destination, 'vector', 0, 0, False, part)
+                              for source, destination in pairs for part in (0, 1))
+    specifications.append(('fcvtxn', 8, 4, 'scalar', 0, 0, False, 0))
+    specifications.append(('fjcvtzs', 8, 4, 'general', 32, 0, False, 0))
+    for signed_name in CONVERSION_GENERAL_BASES:
+        for unsigned in (False, True):
+            name = 'ucvtf' if signed_name == 'scvtf' and unsigned else signed_name[:-1] + 'u' if unsigned else signed_name
+            int_to_fp = signed_name == 'scvtf'
+            for integer_bits in (32, 64):
+                for fp_lane in (2, 4, 8):
+                    source, destination = (integer_bits // 8, fp_lane) if int_to_fp else (fp_lane, integer_bits // 8)
+                    scales = (0, 1, integer_bits // 2, integer_bits) if signed_name in ('scvtf', 'fcvtzs') else (0,)
+                    specifications.extend((name, source, destination, 'general', integer_bits, scale, unsigned, 0) for scale in scales)
+            for lane, shape in ([(lane, 'scalar') for lane in (2, 4, 8)] +
+                                [(lane, 'vector64') for lane in (2, 4)] + [(lane, 'vector128') for lane in (2, 4, 8)]):
+                scales = (0, 1, lane * 4, lane * 8) if signed_name in ('scvtf', 'fcvtzs') else (0,)
+                specifications.extend((name, lane, lane, shape, 0, scale, unsigned, 0) for scale in scales)
+    functions = [conversion_numerical_operation(name, source, destination, shape, d, n, width, scale, unsigned, part)
+                 for name, source, destination, shape, width, scale, unsigned, part in specifications for d, n in CONVERSION_ROLES]
+    if len({operation['word'] for operation in functions}) != len(functions) or len({operation['canonical_id'] for operation in functions}) != 163:
+        raise AssertionError('Conversion inventory has duplicate words or omits classic forms')
+    return functions
+
+
+def conversion_numerical_shape(operation):
+    return tuple(operation[key] for key in ('canonical_id', 'source_lane', 'destination_lane', 'source_bank',
+        'destination_bank', 'source_bytes', 'bytes', 'scalar', 'source_part', 'destination_part', 'fracbits'))
+
+
+def conversion_exact_positive_bits(lane, significand, exponent):
+    """Encode an exactly representable positive dyadic input using integers only."""
+    fraction, bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[lane]
+    leading = significand.bit_length() - 1
+    biased = leading + exponent + bias
+    maximum_exponent = bias * 2 + 1
+    if biased >= maximum_exponent:
+        return None
+    shift = leading - fraction if biased > 0 else 1 - bias - exponent - fraction
+    if shift > 0 and significand & ((1 << shift) - 1):
+        return None
+    encoded = significand >> shift if shift > 0 else significand << -shift
+    if biased <= 0:
+        return encoded if 0 < encoded < 1 << fraction else None
+    return biased << fraction | encoded & ((1 << fraction) - 1)
+
+
+def conversion_numerical_values(operation):
+    bits, lane = operation['source_lane'] * 8, operation['source_lane']
+    if operation['name'] in ('scvtf', 'ucvtf'):
+        sign, mask = 1 << (bits - 1), (1 << bits) - 1
+        precision = {2: 11, 4: 24, 8: 53}[operation['destination_lane']]
+        values = [('exact', 2), ('zero', 0), ('one', 1), ('minus_one', mask), ('input_min', sign),
+            ('input_max', mask if operation['unsigned'] else sign - 1), ('signed_max', sign - 1),
+            ('signed_min_plus_one', sign + 1), ('unsigned_max_minus_one', mask - 1)]
+        if precision < bits:
+            values.extend((label, (1 << precision) + increment) for label, increment in
+                          (('inexact', 1), ('tie_even', 1), ('tie_odd', 3), ('above_tie', 5)))
+        else:
+            values.append(('inexact', sign - 1))
+        return values
+    fraction = {2: 10, 4: 23, 8: 52}[lane]
+    bias = {2: 15, 4: 127, 8: 1023}[lane]
+    sign, one = 1 << (bits - 1), bias << fraction
+    infinity = ((1 << (bits - fraction - 1)) - 1) << fraction
+    values = [('exact', one + (1 << fraction)), ('zero', 0), ('negative_zero', sign),
+        ('one', one), ('minus_one', one | sign), ('half', (bias - 1) << fraction),
+        ('negative_half', ((bias - 1) << fraction) | sign), ('tie_even', one | (1 << (fraction - 1))),
+        ('tie_odd', one + (1 << fraction) + (1 << (fraction - 1))), ('above_tie', one | (1 << (fraction - 1)) | 1),
+        ('below_tie', (one | (1 << (fraction - 1))) - 1), ('inexact', one + 1),
+        ('minimum_normal', 1 << fraction), ('maximum_subnormal', (1 << fraction) - 1),
+        ('minimum_subnormal', 1), ('negative_subnormal', sign | 1), ('maximum_finite', infinity - 1),
+        ('positive_infinity', infinity), ('negative_infinity', infinity | sign),
+        ('qnan', infinity | 1 << (fraction - 1) | 0x15), ('negative_qnan', infinity | sign | 1 << (fraction - 1) | 0x15),
+        ('snan', infinity | 0x2b), ('negative_snan', infinity | sign | 0x2b)]
+    exponents = ({2: 10, 4: 23, 8: 52}[operation['destination_lane']] + 1,) if operation['name'] in ('fcvt', 'fcvtn', 'fcvtxn') else (
+        operation['integer_bits'] - int(not operation['unsigned']) - operation['fracbits'],)
+    for exponent in exponents:
+        biased = exponent + bias
+        if 0 < biased < infinity >> fraction:
+            boundary = biased << fraction
+            values.extend((f'range_{side}_{offset:+}', ((boundary + offset) | (sign if side == 'negative' else 0)))
+                          for side in ('positive', 'negative') for offset in (-1, 0, 1))
+    if operation['name'] in ('fcvt', 'fcvtl', 'fcvtn', 'fcvtxn'):
+        for exponent in (-25, -24, -14, 15, 16, 17, -150, -149, -126, 127, 128):
+            if 0 < exponent + bias < infinity >> fraction:
+                boundary = (exponent + bias) << fraction
+                values.extend((f'precision_boundary_{exponent}_{offset:+}', boundary + offset) for offset in (-1, 0, 1))
+    dyadics = []
+    if operation['name'] in ('fcvt', 'fcvtn', 'fcvtxn'):
+        target_fraction, target_bias = {2: (10, 15), 4: (23, 127), 8: (52, 1023)}[operation['destination_lane']]
+        dyadics.extend((('target_max_finite', (1 << (target_fraction + 1)) - 1, target_bias - target_fraction),
+                       ('target_overflow_tie', (1 << (target_fraction + 2)) - 1, target_bias - target_fraction - 1),
+                       ('target_zero_tie', 1, 1 - target_bias - target_fraction - 1),
+                       ('target_normal_tie', (1 << (target_fraction + 1)) - 1, 1 - target_bias - target_fraction - 1)))
+        if operation['destination_lane'] == 2:
+            dyadics.extend((('alternative_half_max', 131008, 0), ('alternative_half_overflow_tie', 131040, 0)))
+    elif operation['name'] not in ('scvtf', 'ucvtf', 'fcvtl'):
+        integer_bits = 32 if operation['writes_nzcv'] else operation['integer_bits']
+        limit = integer_bits - int(not operation['unsigned'])
+        scale = operation['fracbits']
+        dyadics.extend((('integer_max', (1 << limit) - 1, -scale),
+                       ('integer_limit_below_tie', (1 << (limit + 1)) - 1, -scale - 1),
+                       ('integer_limit_above_tie', (1 << (limit + 1)) + 1, -scale - 1)))
+    for label, significand, exponent in dyadics:
+        raw = conversion_exact_positive_bits(lane, significand, exponent)
+        if raw is not None:
+            values.extend(((label, raw), ('negative_' + label, raw | sign)))
+    return values
+
+
+def conversion_numerical_state(operation, index, values, control=0, sticky=False):
+    initial = State()
+    rng = random.Random(0x434f4e56455254 + index)
+    initial.x[:] = [rng.getrandbits(64) for _ in range(31)]
+    initial.sp = 0x48010000 + index % 16 * 16
+    seed_extended_state(initial, index * 31 + 19)
+    initial.reserved, initial.nzcv = VECTOR_NUMERICAL_CANARY, index % 16 << 28
+    initial.fpcr, initial.fpsr = control, FP_REGISTER_MASKS['fpsr'] if sticky else 0
+    lane, bits = operation['source_lane'], operation['source_lane'] * 8
+    count = 1 if operation['scalar'] else operation['source_bytes'] // lane
+    if len(values) != count or any(not 0 <= value < 1 << bits for value in values):
+        raise ValueError('Invalid conversion input lanes')
+    if operation['source_bank'] == 'general':
+        if operation['n'] != 31:
+            initial.x[operation['n']] = values[0] | (rng.getrandbits(32) << 32 if bits == 32 else 0)
+    else:
+        poison = ((1 << bits) - 1) if operation['name'] in ('scvtf', 'ucvtf') else next(
+            value for label, value in conversion_numerical_values(operation) if label == 'snan')
+        packed = sum(poison << (position * bits) for position in range(16 // lane))
+        start = operation['source_part'] * (8 // lane)
+        for position, value in enumerate(values, start):
+            mask = ((1 << bits) - 1) << (position * bits)
+            packed = (packed & ~mask) | value << (position * bits)
+        initial.v[operation['n']][:] = [packed & MASK, packed >> 64]
+    return initial
+
+
+def conversion_numerical_corpus():
+    functions, records, primary, declines = conversion_numerical_functions(), [], set(), set()
+    def append(function, label, values, control=0, sticky=False):
+        initial = conversion_numerical_state(functions[function], len(records), values, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function, operation in enumerate(functions):
+        shape = conversion_numerical_shape(operation)
+        count = 1 if operation['scalar'] else operation['source_bytes'] // operation['source_lane']
+        values = dict(conversion_numerical_values(operation))
+        if shape not in primary:
+            primary.add(shape)
+            for label, value in values.items():
+                append(function, label, [value] * count)
+            for control in FUSED_ROUNDING_CONTROLS[1:]:
+                for label in ('half', 'negative_half', 'tie_even', 'tie_odd', 'inexact'):
+                    if label in values:
+                        append(function, label, [values[label]] * count, control)
+            for label, value in values.items():
+                if label.startswith(('target_', 'negative_target_')):
+                    for control in FUSED_ROUNDING_CONTROLS[1:]:
+                        append(function, label, [value] * count, control)
+                if label.startswith(('alternative_half_', 'negative_alternative_half_')):
+                    for control in FUSED_ROUNDING_CONTROLS:
+                        append(function, label, [value] * count, control | CONVERSION_AHP)
+            for control in CONVERSION_EXTRA_CONTROLS:
+                for label in (('input_max', 'input_min', 'inexact') if operation['name'] in ('scvtf', 'ucvtf') else
+                              ('snan', 'minimum_subnormal', 'inexact')):
+                    append(function, label, [values[label]] * count, control)
+            for control in (0, NUMERICAL_NEP):
+                label = 'input_max' if operation['name'] in ('scvtf', 'ucvtf') else 'snan'
+                append(function, 'sticky_' + label, [values[label]] * count, control, True)
+            if count > 1:
+                for position in range(count):
+                    active = [values['exact']] * count
+                    label = 'input_max' if operation['name'] in ('scvtf', 'ucvtf') else 'snan'
+                    active[position] = values[label]
+                    append(function, f'active_{label}_{position}', active)
+            form = operation['canonical_id']
+            if form not in declines:
+                declines.add(form)
+                for enable in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                    append(function, 'trap_enable_readback_only', [values['exact']] * count, enable)
+        for control in (0, NUMERICAL_NEP):
+            for label in ('exact', 'inexact'):
+                append(function, 'roles_' + label, [values[label]] * count, control)
+    if len(records) > 35000:
+        raise AssertionError('Conversion corpus exceeded the approved bounded scope')
+    return functions, records
+
+
+def prepare_conversion_numerical_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *conversion_numerical_corpus(), CONVERSION_NUMERICAL_FOCUS)
+
+
+def load_conversion_numerical_oracle(path=CONVERSION_NUMERICAL_ORACLE):
+    functions, records = conversion_numerical_corpus()
+    return load_full_frame_numerical_oracle(path, functions, len(records), CONVERSION_NUMERICAL_FOCUS)
+
+
+def conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected):
+    if (operation['name'] != 'fjcvtzs' or not initial.fpcr & NUMERICAL_FZ
+            or initial.fpcr & NUMERICAL_AH or observed.nzcv != 0x40000000 or expected.nzcv != 0):
+        return False
+    source = initial.v[operation['n']][0]
+    fraction_mask, exponent_mask = (1 << 52) - 1, 0x7ff << 52
+    if source & exponent_mask or not source & fraction_mask:
+        return False
+    copied = State.from_buffer_copy(observed)
+    copied.nzcv = expected.nzcv
+    return bytes(copied) == bytes(expected)
+
+
+def conversion_unicorn_difference(operation, initial, observed, expected):
+    if conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected):
+        return 'Unicorn FJCVTZS sets Z for a flushed subnormal; pinned source and full-frame QEMU clear Z'
+    if (operation['name'] != 'fcvtzs' or not operation.get('fracbits')
+            or operation.get('source_lane') != 2 or operation.get('destination_lane') != 2
+            or operation.get('destination_bank') != 'simd' or not operation['scalar']
+            or initial.fpcr & NUMERICAL_NEP):
+        return None
+    destination = operation['d']
+    result = expected.v[destination][0]
+    if not result & (1 << 15) or result >> 16 or observed.v[destination][0] != result | 0xffff0000:
+        return None
+    copied = State.from_buffer_copy(observed)
+    copied.v[destination][0] = result
+    if bytes(copied) != bytes(expected):
+        return None
+    return 'Unicorn signed scalar FP16 fixed FCVTZS sign-extends through bit31; pinned source and full-frame QEMU clear inactive bits'
+
+
+def validate_conversion_original_effects(initial, original, operation):
+    destination, lane = operation['d'], operation['destination_lane']
+    if operation['destination_bank'] == 'general':
+        if destination != 31 and lane == 4 and original.x[destination] >> 32:
+            raise AssertionError('Original W conversion did not zero-extend')
+        if operation['writes_nzcv'] and original.nzcv not in (0, 0x40000000):
+            raise AssertionError('FJCVTZS wrote NZCV bits other than Z')
+        return
+    original_bytes = struct.pack('<2Q', *original.v[destination])
+    initial_bytes = struct.pack('<2Q', *initial.v[destination])
+    if operation['scalar']:
+        upper = initial_bytes[lane:] if initial.fpcr & NUMERICAL_NEP else bytes(16 - lane)
+        if original_bytes[lane:] != upper:
+            raise AssertionError('Original scalar conversion did not merge old Vd or clear upper bits')
+    elif operation['destination_part']:
+        if original_bytes[:8] != initial_bytes[:8]:
+            raise AssertionError('Original narrowing2 conversion changed preserved low64')
+    elif operation['bytes'] == 8 and original_bytes[8:] != bytes(8):
+        raise AssertionError('Original vector64 conversion did not clear upper64')
+
+
+def conversion_numerical_runtime_cases(records):
+    selected = {}
+    for record in records:
+        operation, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        form, shape = operation['canonical_id'], conversion_numerical_shape(operation)
+        direction = ('precision' if operation['name'] in ('fcvt', 'fcvtl', 'fcvtn', 'fcvtxn') else
+                     'from_integer' if operation['name'] in ('scvtf', 'ucvtf') else
+                     'javascript' if operation['writes_nzcv'] else 'to_integer')
+        if record['unsupported']:
+            if initial.fpcr == NUMERICAL_TRAP_ENABLE_MASK:
+                selected.setdefault(('decline_form', form), record)
+            else:
+                selected.setdefault(('decline_control', initial.fpcr), record)
+        elif initial.fpsr == 0:
+            if label == 'exact' and initial.fpcr == 0:
+                selected.setdefault(('shape', shape), record)
+            if label == 'inexact' and initial.fpcr == 0:
+                selected.setdefault(('corner', form), record)
+            if label in ('snan', 'input_max') and initial.fpcr == 0:
+                selected.setdefault(('status', direction, operation['source_lane'], operation['destination_lane']), record)
+            if label == 'inexact' and initial.fpcr in (NUMERICAL_NEP, NUMERICAL_AH, CONVERSION_AHP):
+                selected.setdefault(('control', direction, operation['source_lane'], operation['destination_lane'], initial.fpcr), record)
+            if operation['return_register'] != 30 and label == 'roles_inexact' and initial.fpcr == 0:
+                selected.setdefault(('lr_operand', form), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def conversion_numerical_helpers(records):
+    selected = {}
+    for record in records:
+        operation = record['operation']
+        if operation['d'] != 0 or operation['n'] != 1 or State.from_buffer_copy(record['initial']).fpcr != 0:
+            continue
+        if operation['name'] in ('scvtf', 'ucvtf') or record['label'] != 'snan':
+            continue
+        key = (operation['source_bank'], operation['destination_bank'], operation['source_lane'],
+               operation['destination_lane'], operation['scalar'], operation['source_part'], operation['destination_part'])
+        selected.setdefault(key, record)
+    return list(selected.values())
 
 def fused_numerical_shape(operation):
     return tuple(operation[key] for key in ('name', 'lane', 'bytes', 'scalar')) + (operation['index'] is not None,)
@@ -3665,7 +4124,8 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                                       focus=VECTOR_NUMERICAL_FOCUS, cpu_target='baseline',
                                       target_id='x86_64-baseline'):
     fused = focus == FUSED_NUMERICAL_FOCUS
-    source = b''.join(struct.pack('<II', operation['word'], RET) for operation in oracle['functions'])
+    conversion = focus == CONVERSION_NUMERICAL_FOCUS
+    source = b''.join(struct.pack('<II', operation['word'], numerical_return_word(operation)) for operation in oracle['functions'])
     source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
     ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
     memory_path = directory / 'vector-runtime-memory.json'
@@ -3721,7 +4181,8 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
             raise AssertionError('Joined original vector complete state differs')
         counts['original_joined_complete_state_comparisons'] += 1
 
-    selected = fused_numerical_runtime_cases(oracle['records']) if fused else vector_numerical_runtime_cases(oracle['records'])
+    selector = conversion_numerical_runtime_cases if conversion else fused_numerical_runtime_cases if fused else vector_numerical_runtime_cases
+    selected = selector(oracle['records'])
     for record in selected:
         initial = State.from_buffer_copy(record['initial'])
         entry = BASE + record['function'] * 8
@@ -3734,10 +4195,10 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         else:
             require(report, actual, State.from_buffer_copy(record['expected']))
 
-    helpers = (fused_numerical_helpers(oracle['records']) if fused else
+    helpers = (conversion_numerical_helpers(oracle['records']) if conversion else fused_numerical_helpers(oracle['records']) if fused else
         [record for record in oracle['records'] if record['label'] == 'active_snan_left_0'
          and State.from_buffer_copy(record['initial']).fpcr == 0])
-    if len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES)):
+    if not helpers or (not conversion and len(helpers) != (12 if fused else len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES))):
         raise AssertionError('Vector helper boundary fixture omits an arrangement')
     for record in helpers:
         initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
@@ -3766,19 +4227,23 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         check_original(loop, loop_initial, loop_expected)
         counts['memory_cache_loop_checks'] += 1
 
-        for control in (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO):
+        for control in ((NUMERICAL_NEP, 0) if conversion else (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO)):
             reference = next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
                 and candidate['label'] == record['label'] and State.from_buffer_copy(candidate['initial']).fpcr == control)
             chain_initial = State.from_buffer_copy(reference['initial'])
-            chain_initial.x[0] = control
+            control_register, status_register, clear_register = (20, 21, 22) if conversion else (0, 3, 4)
+            chain_initial.x[control_register] = control
             chain_initial.fpcr, chain_initial.fpsr = 0, FP_REGISTER_MASKS['fpsr']
             chain_expected = State.from_buffer_copy(reference['expected'])
-            chain_expected.x[:] = chain_initial.x
-            chain_expected.x[3], chain_expected.x[4], chain_expected.fpsr = chain_expected.fpsr, 0, 0
-            chain = struct.pack('<7I', fp_register_operation('msr_fpcr', 0)['word'],
+            if conversion:
+                chain_expected.x[control_register] = control
+            else:
+                chain_expected.x[:] = chain_initial.x
+            chain_expected.x[status_register], chain_expected.x[clear_register], chain_expected.fpsr = chain_expected.fpsr, 0, 0
+            chain = struct.pack('<7I', fp_register_operation('msr_fpcr', control_register)['word'],
                 fp_register_operation('msr_fpsr', 31)['word'], operation['word'],
-                fp_register_operation('mrs_fpsr', 3)['word'], fp_register_operation('msr_fpsr', 31)['word'],
-                fp_register_operation('mrs_fpsr', 4)['word'], RET)
+                fp_register_operation('mrs_fpsr', status_register)['word'], fp_register_operation('msr_fpsr', 31)['word'],
+                fp_register_operation('mrs_fpsr', clear_register)['word'], numerical_return_word(operation))
             joined, actual = invoke(chain, chain_initial, BASE)
             require(joined, actual, chain_expected)
             if control & 7 == 0:
@@ -3806,14 +4271,23 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
                 'fpcr': NUMERICAL_INVALID_ENABLE, 'enabled_exceptions': 1}:
             raise AssertionError('Interior fused refusal did not preserve exact pending instruction and enable')
         counts['interior_fused_precise_refusal_checks'] += 1
-    transcript_name = f'{focus}-{target_id}' if fused else focus
+    transcript_name = f'{focus}-{target_id}' if fused or conversion else focus
     snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
     return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
             'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())}}
 
 
 def run_fused_numerical_cohort(cli, oracle_path):
-    oracle = load_fused_numerical_oracle(oracle_path)
+    return run_full_frame_numerical_cohort(cli, oracle_path, FUSED_NUMERICAL_FOCUS)
+
+
+def run_conversion_numerical_cohort(cli, oracle_path):
+    return run_full_frame_numerical_cohort(cli, oracle_path, CONVERSION_NUMERICAL_FOCUS)
+
+
+def run_full_frame_numerical_cohort(cli, oracle_path, focus):
+    fused = focus == FUSED_NUMERICAL_FOCUS
+    oracle = (load_fused_numerical_oracle if fused else load_conversion_numerical_oracle)(oracle_path)
     started = time.monotonic()
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
@@ -3825,7 +4299,7 @@ def run_fused_numerical_cohort(cli, oracle_path):
     if cpu_info['detected_target'] != 'x86_64-baseline':
         targets.append(('native', cpu_info['detected_target']))
     profiles, compiler = [], None
-    with tempfile.TemporaryDirectory(prefix='stela-fused-numerical-') as temporary:
+    with tempfile.TemporaryDirectory(prefix=f'stela-{focus}-') as temporary:
         for cpu_target, target_id in targets:
             directory = Path(temporary) / target_id
             directory.mkdir()
@@ -3833,16 +4307,16 @@ def run_fused_numerical_cohort(cli, oracle_path):
             for index, operation in enumerate(oracle['functions']):
                 batch = compile_batch(cli, directory, [{'operations': [operation]}], index,
                     block=True, cpu_target=cpu_target, target_id=target_id, guest_base=BASE + index * 8)
-                batch.update(cohort=FUSED_NUMERICAL_FOCUS, oracle_path=str(oracle_path))
+                batch.update(cohort=focus, oracle_path=str(oracle_path))
                 if compiler is not None and batch['compiler'] != compiler:
                     raise AssertionError('Fused compiler changed during preparation')
                 compiler = batch['compiler']
                 accounting = numerical_native_accounting(batch)
-                if operation['lane'] == 2 and (len(batch['compiled_source']) != 4 or len(batch['native']) != NUMERICAL_HELPER_NATIVE_BYTES):
+                if fused and operation['lane'] == 2 and (len(batch['compiled_source']) != 4 or len(batch['native']) != NUMERICAL_HELPER_NATIVE_BYTES):
                     raise AssertionError('Fused half instruction is not a terminal helper')
-                if operation['lane'] != 2 and len(batch['compiled_source']) != 8:
+                if fused and operation['lane'] != 2 and len(batch['compiled_source']) != 8:
                     raise AssertionError('Fused S/D instruction does not retain conditional fast path and guest RET')
-                retained = retain_native_evidence('simd-fused_numerical', batch['compiled_source'], batch['native'],
+                retained = retain_native_evidence(f'simd-{focus}', batch['compiled_source'], batch['native'],
                     batch['manifest'], accounting, Path(__file__).read_bytes())
                 batches.append(batch)
                 artifacts.append({'function': index, 'compilation': batch['receipt'], 'accounting': accounting, 'files': retained})
@@ -3855,7 +4329,7 @@ def run_fused_numerical_cohort(cli, oracle_path):
                 fused_mnemonics = {mnemonic: count for mnemonic, count in histogram.items()
                                    if mnemonic.startswith(FUSED_NATIVE_PREFIXES)}
                 expected = {}
-                if 'fma' in target_id.split('+')[1:] and operation['lane'] != 2:
+                if fused and 'fma' in target_id.split('+')[1:] and operation['lane'] != 2:
                     suffix = ('s' if operation['scalar'] else 'p') + ('s' if operation['lane'] == 4 else 'd')
                     expected[FUSED_NATIVE_OPERATIONS[operation['name']] + '132' + suffix] = 1
                 if fused_mnemonics != expected:
@@ -3863,16 +4337,16 @@ def run_fused_numerical_cohort(cli, oracle_path):
             raw = bounded_cases(batches)
             raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested trap enables remain intact and their RAZ/WI observations receive no successful native equality credit.'
             runtime = full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
-                FUSED_NUMERICAL_FOCUS, cpu_target, target_id)
+                focus, cpu_target, target_id)
             profiles.append({'target_cpu': target_id, 'raw_native': raw, 'rust_runtime': runtime,
-                             'fma3_instruction_checks': len(artifacts), 'native_artifacts': artifacts})
+                             ('fma3_instruction_checks' if fused else 'feature_emission_checks'): len(artifacts), 'native_artifacts': artifacts})
     if (digest(cli.read_bytes()) != cli_hash or digest(Path(__file__).read_bytes()) != harness_hash
             or any(digest((ROOT / name).read_bytes()) != value for name, value in shared_hashes.items())):
         raise AssertionError('Fused executable, harness or shared source changed during verification')
     def sums(section, key):
         return sum(profile[section][key] for profile in profiles)
 
-    report = {'kind': 'simd_fused_numerical_arm_vs_native_x86', 'passed': True, 'abi': BLOCK_ABI,
+    report = {'kind': f'simd_{focus}_arm_vs_native_x86', 'passed': True, 'abi': BLOCK_ABI,
         'state_comparisons': sums('rust_runtime', 'complete_state_comparisons'),
         'runtime_complete_state_comparisons': sums('rust_runtime', 'complete_state_comparisons'),
         'runtime_typed_unsupported_state_checks': sums('rust_runtime', 'typed_unsupported_state_checks'),
@@ -3885,7 +4359,7 @@ def run_fused_numerical_cohort(cli, oracle_path):
         'raw_inline_complete_state_comparisons': sums('raw_native', 'raw_inline_complete_state_comparisons'),
         'raw_helper_unchanged_state_comparisons': sums('raw_native', 'raw_helper_unchanged_state_comparisons'),
         'raw_unsupported_unchanged_state_comparisons': sums('raw_native', 'raw_unsupported_unchanged_state_comparisons'),
-        'original_full_frame_captures': len(oracle['records']), 'canonical_forms': 24,
+        'original_full_frame_captures': len(oracle['records']), 'canonical_forms': 24 if fused else 163,
         'native_mxcsr_preservation_comparisons': sums('raw_native', 'caller_mxcsr_preservation_comparisons'),
         'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
         'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
@@ -3894,7 +4368,9 @@ def run_fused_numerical_cohort(cli, oracle_path):
         'profiles': profiles, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
         'verification_wall_seconds': time.monotonic() - started,
         'limits': 'Enabled nonstreaming scalar/vector/indexed H/S/D fused arithmetic only. Full-frame original observations compare under compatible controls; trap-delivery, disabled-feature, Apple hardware, complete application, OS and performance claims remain outside this cohort.'}
-    write_evidence(ROOT / '.stela/simd-fused_numerical-differential-report.json', report)
+    if not fused:
+        report['limits'] = 'Enabled nonstreaming classic precision/integer/fixed-point conversion and JSCVT profile only. Full-frame original captures and retained-enable refusals remain separate; no enabled FP trap delivery, Apple hardware, application, OS or performance claim.'
+    write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     print(json.dumps(report, indent=2))
 
 
@@ -4247,13 +4723,15 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
                         help='Pinned full-frame original vector numerical receipt')
     parser.add_argument('--fused-oracle', type=Path, default=FUSED_NUMERICAL_ORACLE,
                         help='Pinned full-frame original fused numerical receipt')
+    parser.add_argument('--conversion-oracle', type=Path, default=CONVERSION_NUMERICAL_ORACLE,
+                        help='Pinned full-frame original precision/integer conversion receipt')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -4263,6 +4741,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == CONVERSION_NUMERICAL_FOCUS:
+        run_conversion_numerical_cohort(cli, arguments.conversion_oracle)
         return
     if arguments.focus == FUSED_NUMERICAL_FOCUS:
         run_fused_numerical_cohort(cli, arguments.fused_oracle)

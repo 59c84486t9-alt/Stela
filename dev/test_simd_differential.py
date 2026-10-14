@@ -14,6 +14,147 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_conversion_encodings_cover_all_classic_forms_and_match_pinned_fixed_bits(self):
+        functions = suite.conversion_numerical_functions()
+        self.assertEqual(len(functions), 1416)
+        self.assertEqual(len({op['word'] for op in functions}), len(functions))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 163)
+        checklist = json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        facts = {row['id']: row for row in checklist['forms']}
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for operation in functions:
+            fact = facts[operation['canonical_id']]
+            self.assertEqual(operation['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            instruction, = decoder.disasm(struct.pack('<I', operation['word']), 0)
+            suffix = '2' if operation['source_part'] or operation['destination_part'] else ''
+            self.assertEqual(instruction.mnemonic, operation['name'] + suffix)
+            self.assertEqual(operation['word'] & 31, operation['d'])
+            self.assertEqual(operation['word'] >> 5 & 31, operation['n'])
+        self.assertTrue(any(op['name'] == 'fjcvtzs' for op in functions))
+
+    def test_conversion_fixed_scales_and_returns_preserve_source_and_destination_gprs(self):
+        for operation in suite.conversion_numerical_functions():
+            bits = operation['integer_bits']
+            if operation['fracbits']:
+                self.assertIn(operation['fracbits'], (1, bits // 2, bits))
+            used = {operation[role] for bank, role in (('source_bank', 'n'), ('destination_bank', 'd'))
+                    if operation[bank] == 'general' and operation[role] != 31}
+            self.assertNotIn(operation['return_register'], used)
+            word = suite.numerical_return_word(operation)
+            instruction, = Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(struct.pack('<I', word), 0)
+            self.assertEqual(instruction.mnemonic, 'ret')
+            self.assertEqual(word >> 5 & 31, operation['return_register'])
+        self.assertEqual(suite.numerical_return_word({}), suite.RET)
+        with self.assertRaises(ValueError):
+            suite.numerical_return_word({'return_register': 31})
+
+    def test_conversion_rejects_unallocated_shapes_widths_and_fixed_modes(self):
+        invalid = (('fcvt', 4, 4, 'scalar', 0, 1), ('fcvtl', 4, 2, 'vector', 0, 1),
+                   ('fcvtxn', 4, 2, 'vector', 0, 1), ('fcvtn', 8, 4, 'scalar', 0, 1),
+                   ('fcvtzs', 8, 8, 'vector64', 0, 1), ('fcvtzs', 4, 4, 'general', 0, 1, 64),
+                   ('fcvtns', 4, 4, 'general', 0, 1, 32, 1),
+                   ('ucvtf', 4, 4, 'general', 0, 1, 32, 0, False),
+                   ('fjcvtzs', 4, 4, 'general', 0, 1, 32))
+        for arguments in invalid:
+            with self.assertRaises(ValueError):
+                suite.conversion_numerical_operation(*arguments)
+
+    def test_conversion_exact_dyadic_inputs_cover_half_overflow_and_normal_ties(self):
+        self.assertEqual(suite.conversion_exact_positive_bits(4, 131040, 0), 0x47fff000)
+        self.assertEqual(suite.conversion_exact_positive_bits(8, 131040, 0), 0x40fffe0000000000)
+        self.assertIsNone(suite.conversion_exact_positive_bits(2, 131040, 0))
+        self.assertEqual(suite.conversion_exact_positive_bits(2, 1, -24), 1)
+        self.assertIsNone(suite.conversion_exact_positive_bits(2, 1, -25))
+        operation = suite.conversion_numerical_operation('fcvt', 8, 2, 'scalar', 0, 1)
+        values = dict(suite.conversion_numerical_values(operation))
+        self.assertEqual(values['alternative_half_overflow_tie'], 0x40fffe0000000000)
+        self.assertEqual(values['target_overflow_tie'], 0x40effe0000000000)
+
+    def test_conversion_source_halves_inactive_poison_and_general_w_input(self):
+        for part in (0, 1):
+            operation = suite.conversion_numerical_operation('fcvtl', 2, 4, 'vector', 0, 1, part=part)
+            state = suite.conversion_numerical_state(operation, 17, [1, 2, 3, 4])
+            packed = state.v[1][0] | state.v[1][1] << 64
+            self.assertEqual([(packed >> ((part * 4 + index) * 16)) & 65535 for index in range(4)], [1, 2, 3, 4])
+            poison = dict(suite.conversion_numerical_values(operation))['snan']
+            self.assertEqual([(packed >> (((1 - part) * 4 + index) * 16)) & 65535 for index in range(4)], [poison] * 4)
+        operation = suite.conversion_numerical_operation('scvtf', 4, 8, 'general', 0, 30, 32)
+        state = suite.conversion_numerical_state(operation, 17, [0x80000001])
+        self.assertEqual(state.x[30] & 0xffffffff, 0x80000001)
+        self.assertNotEqual(state.x[30] >> 32, 0)
+        self.assertEqual(operation['return_register'], 29)
+
+    def test_conversion_supplementary_unicorn_difference_is_exact_flushed_subnormal_z_only(self):
+        operation = suite.conversion_numerical_operation('fjcvtzs', 8, 4, 'general', 0, 1, 32)
+        initial = State()
+        initial.fpcr, initial.v[1][0] = suite.NUMERICAL_FZ, 1
+        expected = State.from_buffer_copy(initial)
+        observed = State.from_buffer_copy(expected)
+        observed.nzcv = 0x40000000
+        self.assertTrue(suite.conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected))
+        initial.v[1][0] |= 1 << 63
+        self.assertTrue(suite.conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected))
+        observed.x[7] = 1
+        self.assertFalse(suite.conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected))
+        observed.x[7], initial.v[1][0] = 0, 0
+        self.assertFalse(suite.conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected))
+        initial.v[1][0], initial.fpcr = 1, suite.NUMERICAL_FZ | suite.NUMERICAL_AH
+        self.assertFalse(suite.conversion_unicorn_flushed_javascript_difference(operation, initial, observed, expected))
+
+    def test_conversion_supplementary_fixed_half_difference_only_allows_exact_upper16_extension(self):
+        operation = suite.conversion_numerical_operation('fcvtzs', 2, 2, 'scalar', 0, 1, fracbits=1)
+        initial = State()
+        expected = State.from_buffer_copy(initial)
+        expected.v[0][0] = 0xfffe
+        observed = State.from_buffer_copy(expected)
+        observed.v[0][0] = 0xfffffffe
+        self.assertIsNotNone(suite.conversion_unicorn_difference(operation, initial, observed, expected))
+        observed.fpsr = 1
+        self.assertIsNone(suite.conversion_unicorn_difference(operation, initial, observed, expected))
+        observed.fpsr, observed.v[0][0] = 0, 0xffff7fff
+        expected.v[0][0] = 0x7fff
+        self.assertIsNone(suite.conversion_unicorn_difference(operation, initial, observed, expected))
+        initial.fpcr, expected.v[0][0], observed.v[0][0] = suite.NUMERICAL_NEP, 0xfffe, 0xfffffffe
+        self.assertIsNone(suite.conversion_unicorn_difference(operation, initial, observed, expected))
+
+    def test_conversion_effect_validation_enforces_old_destination_nep_and_narrow2(self):
+        initial = State()
+        initial.v[0][:] = [0x123456789abcdef0, 0xfedcba9876543210]
+        initial.fpcr = suite.NUMERICAL_NEP
+        operation = suite.conversion_numerical_operation('fcvt', 8, 4, 'scalar', 0, 1)
+        original = State.from_buffer_copy(initial)
+        original.v[0][0] = original.v[0][0] & ~0xffffffff | 0x3f800000
+        suite.validate_conversion_original_effects(initial, original, operation)
+        original.v[0][1] ^= 1
+        with self.assertRaises(AssertionError):
+            suite.validate_conversion_original_effects(initial, original, operation)
+        operation = suite.conversion_numerical_operation('fcvtn', 8, 4, 'vector', 0, 1, part=1)
+        original = State.from_buffer_copy(initial)
+        original.v[0][1] = 0
+        suite.validate_conversion_original_effects(initial, original, operation)
+        original.v[0][0] ^= 1
+        with self.assertRaises(AssertionError):
+            suite.validate_conversion_original_effects(initial, original, operation)
+        operation = suite.conversion_numerical_operation('fcvtzs', 8, 4, 'general', 0, 1, 32)
+        original = State.from_buffer_copy(initial)
+        original.x[0] = 1 << 32
+        with self.assertRaises(AssertionError):
+            suite.validate_conversion_original_effects(initial, original, operation)
+
+    def test_conversion_corpus_scope_keeps_all_controls_precise_enables_and_lr_operands(self):
+        functions, records = suite.conversion_numerical_corpus()
+        self.assertEqual(len(records), 33380)
+        self.assertEqual({record['function'] for record in records}, set(range(1416)))
+        imported = [{**record, 'operation': functions[record['function']],
+            'unsupported': bool(State.from_buffer_copy(record['initial']).fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK)} for record in records]
+        selected = suite.conversion_numerical_runtime_cases(imported)
+        self.assertEqual(len(selected), 867)
+        self.assertEqual(len({record['operation']['canonical_id'] for record in selected}), 163)
+        self.assertEqual({State.from_buffer_copy(record['initial']).fpcr for record in selected if record['unsupported']},
+                         {*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), suite.NUMERICAL_TRAP_ENABLE_MASK})
+        self.assertTrue(any(record['operation']['return_register'] == 29 for record in selected))
+        self.assertEqual(len(suite.conversion_numerical_helpers(imported)), 26)
+
     def test_fused_encodings_cover_all_modes_register_roles_and_indexed_selectors(self):
         functions = suite.fused_numerical_functions()
         self.assertEqual(len(functions), 648)
