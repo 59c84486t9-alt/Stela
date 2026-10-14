@@ -17,21 +17,22 @@ import time
 
 from differential import ROOT, BASE, State, state_dict, parse_fault_record, move
 from evidence import write_evidence
-from simd_fixtures import structure_memory as family, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory
+from simd_fixtures import structure_memory as family, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory, limited_ordered_memory
 import simd_original
 
 BATCH_FUNCTIONS = 256
 FOCUS = family.FOCUS
-ATOMIC_FAMILIES = (atomic_memory, atomic_pair_memory, ordered_unscaled_memory)
+ATOMIC_FAMILIES = (atomic_memory, atomic_pair_memory, ordered_unscaled_memory, limited_ordered_memory)
 ATOMIC_ORACLE_REVIEW = ROOT / '.stela/research/atomic-implementation/contracts/unicorn-signed-minmax/review-receipt.json'
 ATOMIC_SMP_POINTER = ROOT / '.stela/research/atomic-implementation/smp/oracle/receipt.json'
 PAIR_SMP_POINTER = ROOT / '.stela/research/casp-implementation/smp/oracle/receipt.json'
 ORACLE_DIRECTORY = ROOT / '.stela/research/structured-memory-implementation/fixtures/oracle'
-FAMILIES = {FOCUS: family, ordinary_memory.FOCUS: ordinary_memory, atomic_memory.FOCUS: atomic_memory, atomic_pair_memory.FOCUS: atomic_pair_memory, ordered_unscaled_memory.FOCUS: ordered_unscaled_memory}
+FAMILIES = {FOCUS: family, ordinary_memory.FOCUS: ordinary_memory, atomic_memory.FOCUS: atomic_memory, atomic_pair_memory.FOCUS: atomic_pair_memory, ordered_unscaled_memory.FOCUS: ordered_unscaled_memory, limited_ordered_memory.FOCUS: limited_ordered_memory}
 ORACLE_DIRECTORIES = {FOCUS: ORACLE_DIRECTORY, ordinary_memory.FOCUS: ROOT / '.stela/research/ordinary-memory/fixtures/oracle',
                       atomic_memory.FOCUS: ROOT / '.stela/research/atomic-implementation/fixtures/oracle',
                       atomic_pair_memory.FOCUS: ROOT / '.stela/research/casp-implementation/fixtures/oracle',
-                      ordered_unscaled_memory.FOCUS: ROOT / '.stela/research/ordered-unscaled-implementation/fixtures/oracle'}
+                      ordered_unscaled_memory.FOCUS: ROOT / '.stela/research/ordered-unscaled-implementation/fixtures/oracle',
+                      limited_ordered_memory.FOCUS: ROOT / '.stela/research/coverage-race/nonstreaming/limited-ordering/fixtures/oracle'}
 
 
 def family_module(focus):
@@ -48,7 +49,7 @@ def dependencies(engine, family=family):
         paths += [ROOT / 'dev/memory-faults.py', ROOT / 'dev/simd_fixtures/structure_memory.py', ROOT / 'dev/a64_checklist.py']
     if family in ATOMIC_FAMILIES:
         paths += [ROOT / 'dev/simd_fixtures/memory_history.py']
-    if family in (atomic_pair_memory, ordered_unscaled_memory):
+    if family in (atomic_pair_memory, ordered_unscaled_memory, limited_ordered_memory):
         paths += [Path(atomic_memory.__file__)]
     if family is atomic_pair_memory:
         paths += [ROOT / 'dev/simd_atomic_original.py']
@@ -656,7 +657,7 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
     smp = load_atomic_smp_original(engine, smp_pointer, family) if family in (atomic_memory, atomic_pair_memory) else None
     sources, cli_sha, started = dependencies(engine, family), engine.digest(cli.read_bytes()), time.monotonic()
     cpu = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
-    if family in (atomic_memory, ordered_unscaled_memory) and not cpu.get('atomic_load16'):
+    if family in (atomic_memory, ordered_unscaled_memory, limited_ordered_memory) and not cpu.get('atomic_load16'):
         raise AssertionError('Full atomic proof requires checked AtomicLoad16 host capability; baseline is a bounded subset')
     if family is atomic_pair_memory and (not cpu.get('cx16') or 'cx16' not in cpu['detected_target'].split('+')[1:]):
         raise AssertionError('Full CASP proof requires independent checked Cx16 capability and target identity')
@@ -726,7 +727,7 @@ def run(engine, cli, pointer=None, focus=FOCUS, atomic_smp_pointer=None):
         **({'declined_encodings': declines} if declines is not None else {}),
         **({'original_smp': smp} if smp is not None else {}),
         'verification_wall_seconds': time.monotonic() - started,
-        'limits': ('CASP complete individual State/RAM, runtime/cache, faults, normal-return host ABI and separate bounded native/two-PE original byte histories in EL0 Normal-WB/LSE2/SCA16. No host fault resumption, whole-program concurrent runtime, complete memory-model or performance claim.' if family is atomic_pair_memory else 'Unscaled acquire/release complete State/RAM, runtime/cache, faults and bounded native byte histories in EL0 Normal-WB/LSE2/SCA16/LRCPC2. No original concurrent ordering, model-completeness or guest exception delivery claim.' if family is ordered_unscaled_memory else 'Declared EL0 shared coherent Normal-WB/LSE2/SCA16 cohort; individual original semantics, native/source fault checks and bounded native/original concurrent outcomes remain separate evidence. No complete memory-model, production concurrent runtime, guest exception delivery, Apple hardware, application or performance claim.' if family is atomic_memory else 'Declared private little-endian RAM/nonstreaming AdvSIMD profile. Success primary originals and native/source-policy faults are separate evidence. No guest exception delivery, concurrency, Apple hardware, application or performance credit.')}
+        'limits': ('Limited ordering complete State/RAM, runtime/cache, faults and bounded native byte histories under FEAT_LOR with LORID/LORC0 and no matching regions, Normal-WB/LSE2/SCA16. No configured-region, original concurrent ordering, guest exception delivery or application claim.' if family is limited_ordered_memory else 'CASP complete individual State/RAM, runtime/cache, faults, normal-return host ABI and separate bounded native/two-PE original byte histories in EL0 Normal-WB/LSE2/SCA16. No host fault resumption, whole-program concurrent runtime, complete memory-model or performance claim.' if family is atomic_pair_memory else 'Unscaled acquire/release complete State/RAM, runtime/cache, faults and bounded native byte histories in EL0 Normal-WB/LSE2/SCA16/LRCPC2. No original concurrent ordering, model-completeness or guest exception delivery claim.' if family is ordered_unscaled_memory else 'Declared EL0 shared coherent Normal-WB/LSE2/SCA16 cohort; individual original semantics, native/source fault checks and bounded native/original concurrent outcomes remain separate evidence. No complete memory-model, production concurrent runtime, guest exception delivery, Apple hardware, application or performance claim.' if family is atomic_memory else 'Declared private little-endian RAM/nonstreaming AdvSIMD profile. Success primary originals and native/source-policy faults are separate evidence. No guest exception delivery, concurrency, Apple hardware, application or performance credit.')}
     path = write_evidence(ROOT / f'.stela/simd-{focus}-differential-report.json', report)
     return path, report
 

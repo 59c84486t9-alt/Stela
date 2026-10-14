@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v32",
+  "registry_version": "apple-silicon-reviewed-forms-v33",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -838,6 +838,41 @@
         "direct_original_math_native_comparisons": 6786,
         "requested_storage_native_policy_comparisons": 764,
         "soft_fixed_execute_as_native_policy_comparisons": 108
+      }
+    },
+    "limited_ordered_memory": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-limited_ordered_memory-differential-report.json",
+      "kind": "simd_limited_ordered_memory_arm_vs_native_x86",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/simd-differential.py",
+        "dev/simd_memory_runner.py",
+        "dev/simd_fixtures/limited_ordered_memory.py",
+        "dev/simd_original.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/native-memory-faults.c",
+        "dev/test_simd_fixtures.py",
+        "dev/memory-faults.py",
+        "dev/simd_fixtures/structure_memory.py",
+        "dev/a64_checklist.py",
+        "dev/simd_fixtures/memory_history.py",
+        "dev/simd_fixtures/atomic_memory.py"
+      ],
+      "comparison_field": "direct_original_math_native_comparisons",
+      "required_positive_counts": [
+        "runtime_complete_state_RAM_comparisons",
+        "native_source_policy_fault_checks"
+      ],
+      "required_measurements": {
+        "canonical_forms": 8,
+        "functions": 744,
+        "state_bytes": 784,
+        "ram_bytes": 8192,
+        "success_cases": 978,
+        "fault_cases": 342,
+        "declined_encodings.declined_before_execution": 6
       }
     }
   },
@@ -47421,6 +47456,430 @@
         "crates/stela-compiler/src/x86_64.rs",
         "crates/stela-compiler/src/aarch64/tag_arithmetic.rs",
         "crates/stela-compiler/src/x86_64/tag_arithmetic.rs"
+      ]
+    },
+    {
+      "id": "LDLARB_LR32_ldstord",
+      "mnemonic": "LDLARB",
+      "category": "base_integer_system",
+      "source_file": "ldlarb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08c00000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldlarb.xml",
+      "source_sha256": "bad3b0e588e594cbe9697e9f08f7c047dc29ac2af28e514e5b416c07eba2e781",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x08df7ca1",
+          "expected_mnemonics": [
+            "ldlarb"
+          ]
+        },
+        {
+          "word": "0x08df7fff",
+          "expected_mnemonics": [
+            "ldlarb"
+          ]
+        },
+        {
+          "word": "0x08df7ce7",
+          "expected_mnemonics": [
+            "ldlarb"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDLARH_LR32_ldstord",
+      "mnemonic": "LDLARH",
+      "category": "base_integer_system",
+      "source_file": "ldlarh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48c00000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldlarh.xml",
+      "source_sha256": "656bd1549c40cbe466b56cd1869c31d38e515fe03c85da4b21959bde804a4f57",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x48df7ca1",
+          "expected_mnemonics": [
+            "ldlarh"
+          ]
+        },
+        {
+          "word": "0x48df7fff",
+          "expected_mnemonics": [
+            "ldlarh"
+          ]
+        },
+        {
+          "word": "0x48df7ce7",
+          "expected_mnemonics": [
+            "ldlarh"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDLAR_LR32_ldstord",
+      "mnemonic": "LDLAR",
+      "category": "base_integer_system",
+      "source_file": "ldlar.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88c00000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldlar.xml",
+      "source_sha256": "cebcfc6796f39d703fadb59360ee5fd3d5b9d569f574c12a1390b98116584cf3",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x88df7ca1",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        },
+        {
+          "word": "0x88df7fff",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        },
+        {
+          "word": "0x88df7ce7",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "LDLAR_LR64_ldstord",
+      "mnemonic": "LDLAR",
+      "category": "base_integer_system",
+      "source_file": "ldlar.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8c00000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/ldlar.xml",
+      "source_sha256": "cebcfc6796f39d703fadb59360ee5fd3d5b9d569f574c12a1390b98116584cf3",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc8df7ca1",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        },
+        {
+          "word": "0xc8df7fff",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        },
+        {
+          "word": "0xc8df7ce7",
+          "expected_mnemonics": [
+            "ldlar"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLLRB_SL32_ldstord",
+      "mnemonic": "STLLRB",
+      "category": "base_integer_system",
+      "source_file": "stllrb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08800000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stllrb.xml",
+      "source_sha256": "6f103282e8df769e3a674ddcff743ffa31ab5d6b565aa4e8898e04787d6e5f2b",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x089f7ca1",
+          "expected_mnemonics": [
+            "stllrb"
+          ]
+        },
+        {
+          "word": "0x089f7fff",
+          "expected_mnemonics": [
+            "stllrb"
+          ]
+        },
+        {
+          "word": "0x089f7ce7",
+          "expected_mnemonics": [
+            "stllrb"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLLRH_SL32_ldstord",
+      "mnemonic": "STLLRH",
+      "category": "base_integer_system",
+      "source_file": "stllrh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48800000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stllrh.xml",
+      "source_sha256": "da47a257f5ebb4946de3d06d9bf449b9a5a2edf9f98a08c4661365cb828d8ef7",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x489f7ca1",
+          "expected_mnemonics": [
+            "stllrh"
+          ]
+        },
+        {
+          "word": "0x489f7fff",
+          "expected_mnemonics": [
+            "stllrh"
+          ]
+        },
+        {
+          "word": "0x489f7ce7",
+          "expected_mnemonics": [
+            "stllrh"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLLR_SL32_ldstord",
+      "mnemonic": "STLLR",
+      "category": "base_integer_system",
+      "source_file": "stllr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88800000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stllr.xml",
+      "source_sha256": "47c9d60bd0960a61f134da32a32380935d35f45ed98f3fe3c89e9c525a901ef6",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0x889f7ca1",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        },
+        {
+          "word": "0x889f7fff",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        },
+        {
+          "word": "0x889f7ce7",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
+      ]
+    },
+    {
+      "id": "STLLR_SL64_ldstord",
+      "mnemonic": "STLLR",
+      "category": "base_integer_system",
+      "source_file": "stllr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8800000",
+      "features": [
+        {
+          "feature": "FEAT_LOR",
+          "name": "v8Ap1 && PROFILE_A"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/stllr.xml",
+      "source_sha256": "47c9d60bd0960a61f134da32a32380935d35f45ed98f3fe3c89e9c525a901ef6",
+      "status": "implemented",
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "limited_ordered_memory"
+      ],
+      "scope": "EL0 little-endian coherent shared Normal-WB RAM, FEAT_LOR with no implemented/enabled LORegions (LORID/LORC/LORSA/LOREA/LORN zero), LSE2, A=0/nAA=0 and a 16-byte SCA granule. Unmatched limited-order accesses have ordinary full acquire/release semantics. All B/H/W/X widths, GPR/SP/ZR roles and base/data aliases; no writeback or flag/FP effects. SBO fields select execute-as-one source policy. Generic-base multibyte loads require independent AtomicLoad16 for possible cross 8 bytes within 16 bytes; byte and aligned-SP loads retain baseline support. Access still occurs for ZR loads and stores; stores require write permission. No configured-region, guest exception delivery, full Arm memory-model or Apple hardware claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc89f7ca1",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        },
+        {
+          "word": "0xc89f7fff",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        },
+        {
+          "word": "0xc89f7ce7",
+          "expected_mnemonics": [
+            "stllr"
+          ]
+        }
+      ],
+      "review": "Pinned June 2026 source/profile review; 978 fresh genuine original full frames and 1,598 actual native State/RAM comparisons. Complete emitted LOR bytes equal the corresponding reviewed LDAR/STLR mappings in 5,196 leaf/block comparisons across eight target profiles. Fault, runtime/cache and bounded byte histories remain explicitly scoped.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/target.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/aarch64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/ordered.rs",
+        "crates/stela-compiler/src/x86_64/atomic.rs"
       ]
     }
   ],

@@ -12,7 +12,7 @@ from contextlib import nullcontext
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from differential import ROOT, BASE, State, seed_extended_state
-from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory, tag_arithmetic
+from simd_fixtures import aes, sha12, sha512, sha3, i8mm, structure_memory, ordinary_memory, atomic_memory, atomic_pair_memory, ordered_unscaled_memory, limited_ordered_memory, tag_arithmetic
 import simd_fixture_runner as runner
 import simd_original
 import simd_memory_runner
@@ -468,6 +468,77 @@ class OrderedUnscaledFixtureTests(unittest.TestCase):
             initial.sp = family.RAM_ADDRESS + 16
             state, ram, fault = family.expected(op, initial, bytes(64), accessible=0)
             self.assertEqual(fault['kind'], 'sca_alignment')
+
+
+class LimitedOrderedFixtureTests(unittest.TestCase):
+    def test_original_source_and_canonical_coverage(self):
+        family = limited_ordered_memory
+        operations, cases = family.corpus()
+        self.assertEqual(len(family.CANONICAL_FORMS), 8)
+        self.assertEqual({op['canonical_id'] for op in operations}, set(family.CANONICAL_FORMS))
+        source = b''.join(struct.pack('<II', op['word'], family.RET) for op in operations)
+        report = family.validate_source_words(source, [{'operations': [op]} for op in operations], set())
+        self.assertEqual(report['capstone_decode_fallback_words'], 0)
+        memory = family.memory_template()
+        for case in cases:
+            state = State.from_buffer_copy(case['initial'])
+            _, _, fault = family.expected(operations[case['function']], state, memory)
+            self.assertIsNone(fault)
+
+    def test_zero_destination_retains_access_and_zero_store_requires_write(self):
+        family = limited_ordered_memory
+        memory = family.memory_template()
+        for kind in ('ldlar', 'stllr'):
+            for width in atomic_memory.WIDTHS:
+                op = family.operation(kind, width, rt=31)
+                state = family.initial_state(op, width, 512)
+                actual, ram, fault = family.expected(op, state, memory, readonly=True)
+                if kind == 'ldlar':
+                    self.assertIsNone(fault)
+                    self.assertEqual(bytes(actual), bytes(state))
+                else:
+                    self.assertEqual(fault['kind'], 'memory')
+                self.assertEqual(ram, memory)
+                actual, ram, fault = family.expected(op, state, memory, accessible=0)
+                self.assertEqual(fault['kind'], 'memory')
+                self.assertEqual(bytes(actual), bytes(state))
+                self.assertEqual(ram, memory)
+
+    def test_alias_store_reads_original_base_and_load_only_changes_destination(self):
+        family = limited_ordered_memory
+        memory = family.memory_template()
+        for width in atomic_memory.WIDTHS:
+            op = family.operation('stllr', width, rt=5, rn=5)
+            initial = family.initial_state(op, width, 512)
+            actual, ram, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            self.assertEqual(bytes(actual), bytes(initial))
+            self.assertEqual(ram[512:512 + width], initial.x[5].to_bytes(8, 'little')[:width])
+            self.assertEqual(ram[:512] + ram[512 + width:], memory[:512] + memory[512 + width:])
+            op = family.operation('ldlar', width, rt=5, rn=5)
+            actual, ram, fault = family.expected(op, initial, memory)
+            self.assertIsNone(fault)
+            expected = State.from_buffer_copy(initial)
+            expected.x[5] = int.from_bytes(memory[512:512 + width], 'little')
+            self.assertEqual(bytes(actual), bytes(expected))
+            self.assertEqual(ram, memory)
+
+    def test_lor_controls_are_readbacks_and_reject_profile_changes(self):
+        header = bytearray(simd_original.HEADER_BYTES)
+        registers = [0] * len(simd_original.CPU_REGISTERS)
+        registers[3], registers[6], registers[8] = 2 << 20, 1 << 16, 3 << 20
+        struct.pack_into('<9Q', header, 0, *registers)
+        struct.pack_into('<4Q', header, simd_original.MEMORY_CONTROL_HEADER_OFFSET,
+                         *simd_original.MEMORY_CONTROLS.values())
+        struct.pack_into('<Q', header, simd_original.ATOMIC_FEATURE_HEADER_OFFSET, 1 << 32)
+        features = simd_original.validate_atomic_features(header, limited_ordered_memory.FOCUS)
+        self.assertEqual(features['limited_ordering']['LO'], 1)
+        for offset in (6 * 8, *(simd_original.LIMITED_CONTROL_HEADER_OFFSET + index * 8
+                                for index in range(len(simd_original.LIMITED_CONTROLS)))):
+            changed = bytearray(header)
+            struct.pack_into('<Q', changed, offset, 0 if offset == 6 * 8 else 1)
+            with self.assertRaises(AssertionError):
+                simd_original.validate_atomic_features(changed, limited_ordered_memory.FOCUS)
 
 
 class AtomicMemoryFixtureTests(unittest.TestCase):

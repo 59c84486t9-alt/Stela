@@ -4,6 +4,8 @@ use super::{Register, Width, register};
 const TRANSFER_MASK: u32 = 0x3fe0_8000;
 const ACQUIRE_CLASS: u32 = 0x08c0_8000;
 const RELEASE_CLASS: u32 = 0x0880_8000;
+const LIMITED_ACQUIRE_CLASS: u32 = 0x08c0_0000;
+const LIMITED_RELEASE_CLASS: u32 = 0x0880_0000;
 const ACQUIRE_PC_MASK: u32 = 0x3fe0_fc00;
 const ACQUIRE_PC_CLASS: u32 = 0x38a0_c000;
 const UNSCALED_MASK: u32 = 0x3f20_0c00;
@@ -69,6 +71,8 @@ pub enum Operand {
 
 /// SBO fields select the documented execute-as-one constrained behavior.
 /// They do not become register inputs; data31 is ZR and base31 is SP.
+/// With no matching LORegion, limited accesses have full acquire/release order.
+/// The declared EL0 profile has FEAT_LOR and no enabled regions.
 /// Reserved DMB options with low bits00 have the specified SY behavior.
 pub fn decode(word: u32) -> Option<Operand> {
     if word & BARRIER_MASK == DMB_CLASS {
@@ -87,8 +91,8 @@ pub fn decode(word: u32) -> Option<Operand> {
         return decode_unscaled(word);
     }
     let kind = match word & TRANSFER_MASK {
-        ACQUIRE_CLASS => Kind::Acquire,
-        RELEASE_CLASS => Kind::Release,
+        ACQUIRE_CLASS | LIMITED_ACQUIRE_CLASS => Kind::Acquire,
+        RELEASE_CLASS | LIMITED_RELEASE_CLASS => Kind::Release,
         _ if word & ACQUIRE_PC_MASK == ACQUIRE_PC_CLASS => Kind::AcquirePc,
         _ => return None,
     };
@@ -134,10 +138,12 @@ mod tests {
     const SBO_SECOND: u32 = REGISTER_MASK << 10;
 
     #[test]
-    fn all_twelve_forms_preserve_register_roles_and_aliases() {
+    fn all_twenty_forms_preserve_register_roles_and_aliases() {
         for (class, kind) in [
             (ACQUIRE_CLASS, Kind::Acquire),
             (RELEASE_CLASS, Kind::Release),
+            (LIMITED_ACQUIRE_CLASS, Kind::Acquire),
+            (LIMITED_RELEASE_CLASS, Kind::Release),
             (ACQUIRE_PC_CLASS, Kind::AcquirePc),
         ] {
             for size in 0..4 {
@@ -161,7 +167,12 @@ mod tests {
 
     #[test]
     fn should_be_one_fields_choose_execute_as_one() {
-        for class in [ACQUIRE_CLASS, RELEASE_CLASS] {
+        for class in [
+            ACQUIRE_CLASS,
+            RELEASE_CLASS,
+            LIMITED_ACQUIRE_CLASS,
+            LIMITED_RELEASE_CLASS,
+        ] {
             let canonical = class | SBO_SOURCE | SBO_SECOND;
             for source in 0..=REGISTER_MASK {
                 for second in 0..=REGISTER_MASK {
@@ -292,12 +303,10 @@ mod tests {
 
     #[test]
     fn neighboring_instruction_classes_are_not_claimed() {
-        // Exclusives, limited-order, LRCPC3 writeback, CAS, SWP,
+        // Exclusives, LRCPC3 writeback, CAS, SWP,
         // DSB (including SSBB/PSSBB), nXS and ISB remain separate.
         for word in [
             0xc85f_7c20,
-            0xc89f_7c20,
-            0xc8df_7c20,
             0xd940_0820,
             0xd900_0820,
             0xc8a0_7c20,

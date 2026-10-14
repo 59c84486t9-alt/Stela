@@ -69,7 +69,10 @@ ATOMIC_FEATURE_HEADER_OFFSET = MEMORY_CONTROL_HEADER_OFFSET + len(MEMORY_CONTROL
 ATOMIC_FOCUS = 'atomic_memory'
 ATOMIC_PAIR_FOCUS = 'atomic_pair_memory'
 ORDERED_UNSCALED_FOCUS = 'ordered_unscaled_memory'
-ATOMIC_FEATURE_FOCUSES = (ATOMIC_FOCUS, ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS)
+LIMITED_ORDERED_FOCUS = 'limited_ordered_memory'
+LIMITED_CONTROL_HEADER_OFFSET = ATOMIC_FEATURE_HEADER_OFFSET + 8
+LIMITED_CONTROLS = ('LORID_EL1', 'LORC_EL1', 'LORSA_EL1', 'LOREA_EL1', 'LORN_EL1')
+ATOMIC_FEATURE_FOCUSES = (ATOMIC_FOCUS, ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS, LIMITED_ORDERED_FOCUS)
 TAG_ARITHMETIC_FOCUS = 'tag_arithmetic'
 TAG_ATA0 = 1 << 42
 TAG_TCF0_MASK = 3 << 38
@@ -236,10 +239,18 @@ def validate_atomic_features(results, focus=ATOMIC_FOCUS):
         raise AssertionError('Original ordered-unscaled requires actual FEAT_LRCPC2')
     if focus not in ATOMIC_FEATURE_FOCUSES:
         raise AssertionError('Unknown atomic original feature focus: ' + str(focus))
+    limited = {}
+    if focus == LIMITED_ORDERED_FOCUS:
+        lo = registers['ID_AA64MMFR1_EL1'] >> 16 & 15
+        values = dict(zip(LIMITED_CONTROLS, struct.unpack_from('<5Q', results, LIMITED_CONTROL_HEADER_OFFSET)))
+        if lo != 1 or any(values.values()):
+            raise AssertionError('Original limited ordering requires FEAT_LOR and no implemented/enabled regions: ' + str((lo, values)))
+        limited = {'LO': lo, 'controls': {name: hex(value) for name, value in values.items()}}
     validate_memory_controls(results)
     if MEMORY_SCTLR & ((1 << 1) | (1 << 6)):
         raise AssertionError('Atomic original requires A=0,nAA=0')
     return {'fields': fields, 'ID_AA64MMFR2_EL1': hex(mmfr2),
+            **({'limited_ordering': limited} if limited else {}),
             'profile': 'EL0_Normal_WB_LSE2_A0_nAA0_SCA16',
             'limits': 'Feature and MMU controls are actual readbacks. The original implementation SCA granule is not inferred from feature ID alone. SA0 remains0; native SP policy faults are separate.'}
 
@@ -287,6 +298,9 @@ def assembly(words, count, memory=None, focus=None):
         if memory is None:
             raise AssertionError('Atomic original requires Normal-memory controls')
         lines += ['mrs x0,ID_AA64MMFR2_EL1', f'str x0,[x1,#{ATOMIC_FEATURE_HEADER_OFFSET}]']
+    if focus == LIMITED_ORDERED_FOCUS:
+        for index, register in enumerate(LIMITED_CONTROLS):
+            lines += [f'mrs x0,{register}', f'str x0,[x1,#{LIMITED_CONTROL_HEADER_OFFSET + index * 8}]']
     if focus == TAG_ARITHMETIC_FOCUS:
         for index, register in enumerate(TAG_CONTROLS):
             lines += [f'mrs x0,{register}', f'str x0,[x1,#{TAG_CONTROL_HEADER_OFFSET + index * 8}]']
@@ -343,7 +357,10 @@ def assembly(words, count, memory=None, focus=None):
 
 
 def tools_and_bindings():
-    qemu = ROOT / '.tools/qemu/bin/qemu-system-aarch64'
+    qemu_override = os.environ.get('STELA_QEMU')
+    qemu = Path(qemu_override) if qemu_override else ROOT / '.tools/qemu/bin/qemu-system-aarch64'
+    if qemu_override and not qemu.is_file():
+        raise ValueError('STELA_QEMU must name an existing QEMU executable')
     if not qemu.is_file():
         qemu = Path(shutil.which('qemu-system-aarch64') or '')
     clang = Path(shutil.which('clang') or '')
@@ -410,7 +427,7 @@ def prepare(directory, focus, source_bindings):
             raise AssertionError("Frozen original source binding changed: " + name)
     files, functions, cases, inputs, words = load_corpus(directory)
     memory = memory_plan(directory)
-    if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS):
+    if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS, LIMITED_ORDERED_FOCUS):
         if memory is None or any(operation(function)['kind'] != focus for function in functions):
             raise AssertionError('New memory original requires its exact family corpus and RAM plan')
         for function in functions:
@@ -560,6 +577,12 @@ def memory_destinations(op):
         expected = ordered_unscaled_memory.operation(op['canonical_id'], op['rt'], op['rn'], op['offset'])
         if {key: value for key, value in op.items() if key != 'source_hex'} != expected:
             raise AssertionError('Original ordered-unscaled metadata differs from actual pure family')
+    elif op['kind'] == LIMITED_ORDERED_FOCUS:
+        from simd_fixtures import limited_ordered_memory
+        expected = limited_ordered_memory.operation('ldlar' if op['loading'] else 'stllr',
+            op['element_bytes'], op['rt'], op['rn'], op['sbo'], op['rt2'])
+        if {key: value for key, value in op.items() if key != 'source_hex'} != expected:
+            raise AssertionError('Original limited-order metadata differs from actual pure family')
     elif op['kind'] not in ('ordinary_memory', ATOMIC_FOCUS) or not 0 <= op['total_bytes'] <= (8 if op['kind'] == ATOMIC_FOCUS else 32):
         raise AssertionError('Invalid memory observer family/footprint')
     destinations = []
@@ -715,7 +738,7 @@ def capture(prepared, directory, focus):
                    'checks': ['Each exact original SIMD instruction runs at EL0t with all 31 GPRs, SP_EL0, 32 full vectors, NZCV, FPCR and FPSR restored from the retained input.',
                               'A genuine SVC follows the subject; the EL1 handler snapshots all GPRs before transport clobbers and all vectors before transport resumes.',
                               ('Only declared GPR/SP results and SUBPS NZCV may change; all vectors, FP controls/status and remaining GPR/SP/PSTATE bits preserve.' if focus == TAG_ARITHMETIC_FOCUS else
-                               'Only the actual pure family declared load/compare GPR destinations may change; SP, NZCV, vectors and FP controls/status preserve.' if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS) else
+                               'Only the actual pure family declared load/compare GPR destinations may change; SP, NZCV, vectors and FP controls/status preserve.' if focus in (ATOMIC_PAIR_FOCUS, ORDERED_UNSCALED_FOCUS, LIMITED_ORDERED_FOCUS) else
                                'All GPRs/SP, NZCV and non-destination vectors are unchanged. Scalars merge the declared original destination/left source under NEP or clear inactive bits; vector64 upper clears. QC and sticky flags preserve.'),
                               ('Actual preinstruction FPCR/FPSR readbacks and exact linked subject/next-SVC bytes identify every tag case. Successful executions have genuine SVC ESR/ELR; classified nonzero soft-field UNDEFINED cases have exact exception ESR/subject ELR and unchanged full frames.' if focus == TAG_ARITHMETIC_FOCUS else
                                'Actual preinstruction FPCR/FPSR readbacks, genuine SVC ESR, exact linked subject/SVC bytes and ELR identify every execution.')],
