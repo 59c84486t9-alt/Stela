@@ -244,7 +244,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
                                                'guest_base', 'target_cpu')} if mode == 'scalable' else {})}
 
 
-def smoke_decoding(decoder, word, identity, canonical_facts=None):
+def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_rows=None):
     instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
     if instruction is not None:
         return instruction.mnemonic, f'{instruction.mnemonic} {instruction.op_str}', 'capstone'
@@ -256,6 +256,11 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None):
             and word & int(fact['encoding_mask'], 16) == int(fact['encoding_value'], 16)):
         mnemonic = fact['mnemonic'].lower()
         return mnemonic, mnemonic, 'pinned_arm_cssc_fixed_encoding'
+    if word in (independent_rows or {}):
+        import a64_disassembly
+        if fact is None:
+            raise ValueError('Independent LLVM decoding requires validated canonical facts')
+        return a64_disassembly.validate_canonical(independent_rows[word], identity, fact)
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
 
 
@@ -272,12 +277,23 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
     results = []
+    independent_receipt = None
+    independent_rows = {}
+    if mode == 'scalable':
+        declined = sorted({validate_sample(forms[identity], sample)
+                          for identity, row in overrides.items() if row['status'] != 'unsupported'
+                          for sample in row['smoke_samples']
+                          if next(decoder.disasm(struct.pack('<I', int(sample['word'], 16)), 0), None) is None})
+        if declined:
+            import a64_disassembly
+            independent_receipt = a64_disassembly.decode_words(declined, directory / 'llvm-decoding')
+            independent_rows = {row['word']: row for row in independent_receipt['rows']}
     for identity, row in overrides.items():
         if row['status'] == 'unsupported':
             continue
         for index, sample in enumerate(row['smoke_samples']):
             word = validate_sample(forms[identity], sample)
-            mnemonic, assembly, basis = smoke_decoding(decoder, word, identity, canonical_facts)
+            mnemonic, assembly, basis = smoke_decoding(decoder, word, identity, canonical_facts, independent_rows)
             if mnemonic not in sample['expected_mnemonics']:
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
@@ -290,7 +306,9 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
             results.append({'id': identity, 'sample': index, 'assembly': assembly,
-                            'independent_decode_basis': basis, **probe})
+                            'independent_decode_basis': basis, **probe,
+                            **({'independent_decode_receipt': independent_receipt}
+                               if basis == 'apple_llvm21_objdump' else {})})
         for index, sample in enumerate(row.get('rejected_samples', [])):
             location = directory / f'{len(results)}-rejected'
             location.mkdir()

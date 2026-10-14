@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import a64_disassembly as disassembly
+
 SPEC = importlib.util.spec_from_file_location('translation_progress', Path(__file__).with_name('translation-progress.py'))
 progress = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(progress)
@@ -574,7 +576,9 @@ class ScalableProgressTests(unittest.TestCase):
                                run=self.fake_compiler(lambda manifest: manifest.update(change)))
 
     def test_empty_registry_uses_context_ret_identity_without_support_credit(self):
-        registry = json.loads((progress.ROOT / 'tests/isa/apple-silicon-scalable-forms.json').read_text())
+        registry = fixtures()
+        registry['forms'] = []
+        registry['profile'] = self.profile()
         rows = progress.validate_registry(registry)
         self.assertEqual(rows, {})
         self.assertEqual(progress.summarize(rows)['reviewed']['implemented'], 0)
@@ -689,6 +693,21 @@ class ScalableProgressTests(unittest.TestCase):
                 self.assertEqual(report['scalable_profile_evidence']['registry_sha256'],
                                  progress.sha256(registries[3]))
 
+    def test_actual_independent_length_decode_remains_canonical_and_word_bound(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        facts = progress.a64_checklist.validate(catalog)
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        word = 0x04615820
+        row = {'word': word, 'offset': 0, 'mnemonic': 'addspl',
+               'operands': 'x0, x1, #1', 'assembly': 'addspl x0, x1, #1'}
+        self.assertEqual(progress.smoke_decoding(decoder, word, 'addspl_r_ri_', facts, {word: row}),
+                         ('addspl', 'addspl x0, x1, #1', 'apple_llvm21_objdump'))
+        for identity, changed in (('addsvl_r_ri_', row),
+                                  ('addspl_r_ri_', {**row, 'word': word ^ (1 << 24)}),
+                                  ('addspl_r_ri_', {**row, 'mnemonic': 'unknown'})):
+            with self.subTest(identity=identity, changed=changed), self.assertRaises(ValueError):
+                progress.smoke_decoding(decoder, word, identity, facts, {word: changed})
+
     def test_unknown_scalable_encoding_still_requires_independent_decoder(self):
         decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
         catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
@@ -696,6 +715,63 @@ class ScalableProgressTests(unittest.TestCase):
         scalable = next(row for row in facts.values() if row['category'] == 'sme')
         with self.assertRaisesRegex(ValueError, 'Independent decoder declined'):
             progress.smoke_decoding(decoder, int(scalable['encoding_value'], 16), scalable['id'], facts)
+
+
+class LLVMDisassemblyGuards(unittest.TestCase):
+    def fact(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        return progress.a64_checklist.validate(catalog)['sdot_z32_zzz_']
+
+    def row(self):
+        word = int(self.fact()['encoding_value'], 16)
+        return disassembly.parse_disassembly(f' 0: {word:08x}\tsdot\tz0.s, z0.h, z0.h', [word])[0]
+
+    def test_exact_actual_word_and_assembly_are_retained(self):
+        row, fact = self.row(), self.fact()
+        self.assertEqual(disassembly.validate_canonical(row, fact['id'], fact),
+                         ('sdot', 'sdot z0.s, z0.h, z0.h', 'apple_llvm21_objdump'))
+
+    def test_unknown_missing_extra_and_mismatched_words_fail(self):
+        word = self.row()['word']
+        for output in ('', f' 0: {word:08x}\t<unknown>',
+                       f' 0: {word ^ 1:08x}\tsdot\tz0.s, z0.h, z0.h',
+                       f' 4: {word:08x}\tsdot\tz0.s, z0.h, z0.h',
+                       f' 0: {word:08x}\tsdot\tz0.s, z0.h, z0.h\n 4: {word:08x}\tsdot\tz0.s, z0.h, z0.h'):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                disassembly.parse_disassembly(output, [word])
+
+    def test_canonical_id_fixed_bits_and_mnemonic_are_independent_guards(self):
+        row, fact = self.row(), self.fact()
+        for changed, identity in ((row, 'udot_z32_zzz_'),
+                                  ({**row, 'word': row['word'] ^ (1 << 31)}, fact['id']),
+                                  ({**row, 'mnemonic': 'udot'}, fact['id'])):
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                disassembly.validate_canonical(changed, identity, fact)
+        with self.assertRaises(ValueError):
+            disassembly.validate_canonical(row, fact['id'], fact, ['udot'])
+
+    def test_tool_hash_and_version_are_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'llvm-tool'
+            path.write_bytes(b'pinned tool bytes')
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, 'hash differs'):
+                disassembly.tool_identity(disassembly.PinnedTool(path, '0' * 64, 'Apple LLVM version21'))
+            tool = disassembly.PinnedTool(path, digest, 'Apple LLVM version21')
+            with patch.object(disassembly.subprocess, 'check_output', return_value='Other LLVM version21\n'):
+                with self.assertRaisesRegex(ValueError, 'version differs'):
+                    disassembly.tool_identity(tool)
+            with patch.object(disassembly.subprocess, 'check_output', return_value='Apple LLVM version21\n'):
+                self.assertEqual(disassembly.tool_identity(tool)['sha256'], digest)
+
+    def test_invalid_words_and_feature_strings_fail_before_tool_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for words, features in (([], disassembly.DEFAULT_MATTRS), ([True], disassembly.DEFAULT_MATTRS),
+                                    ([1 << 32], disassembly.DEFAULT_MATTRS), ([0], ('+sme2,+all',))):
+                destination = Path(temporary) / 'unused'
+                with self.assertRaises(ValueError):
+                    disassembly.decode_words(words, destination, mattrs=features)
+                self.assertFalse(destination.exists())
 
 
 class EvidenceTests(unittest.TestCase):

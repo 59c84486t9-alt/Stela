@@ -179,22 +179,1674 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-scalable-forms-v1",
+  "registry_version": "apple-silicon-scalable-forms-v2",
   "profile": {
     "id": "apple-sme2-streaming-v1",
     "compiler_command": "compile-leaf",
     "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
     "svl_bytes": 16,
     "svcr": 3,
-    "description": "Uniform fixed SME2 guest execution profile with explicit streaming length and initial SM/ZA state; host capability selection is separate. Default controls select the empty-registry identity probe; every future form sample declares its own SVL and SVCR.",
+    "description": "Uniform fixed SME2 guest execution profile with explicit SVL and initial SM/ZA state, separate from host capabilities. Logic requires streaming mode; length arithmetic admits all SM/ZA combinations. Every smoke sample declares its own SVL and SVCR.",
     "outside_scope": [
       "general non-streaming SVE",
       "implicit later guest ISA features",
       "production block/cache context entry",
       "full guest exception delivery",
-      "Apple hardware conformance, applications and macOS boot"
+      "Apple hardware conformance, applications and macOS boot",
+      "both MOVPRFX forms and logic as a successor of MOVPRFX",
+      "architectural FFR/FPMR access inferred from diagnostic preservation"
     ]
   },
-  "evidence_groups": {},
-  "forms": []
+  "evidence_groups": {
+    "logic": {
+      "harness": ".stela/research/coverage-race/streaming-architecture/first29-publication-1/admission.py",
+      "report": ".stela/research/coverage-race/streaming-architecture/first29-publication-1/evidence/logic.json",
+      "kind": "scalable_historical_semantics_current_body_transfer",
+      "comparison_field": "historical_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_measurements": {
+        "historical_state_comparisons": 5460,
+        "fresh_body_matches": 1700,
+        "fresh_source_map_matches": 1700,
+        "fresh_semantic_replays": 0
+      }
+    },
+    "length": {
+      "harness": ".stela/research/coverage-race/streaming-architecture/first29-publication-1/admission.py",
+      "report": ".stela/research/coverage-race/streaming-architecture/first29-publication-1/evidence/length.json",
+      "kind": "scalable_historical_semantics_current_body_transfer",
+      "comparison_field": "historical_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_measurements": {
+        "historical_state_comparisons": 3000,
+        "fresh_body_matches": 1220,
+        "fresh_source_map_matches": 1220,
+        "fresh_semantic_replays": 0
+      }
+    }
+  },
+  "forms": [
+    {
+      "id": "and_z_p_zz_",
+      "instruction_id": "and_z_p_zz",
+      "mnemonic": "AND",
+      "category": "sve",
+      "source_file": "and_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041a0000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "d7d8f5c6e8fbb7ea77e8a7d8c57675e43b9be02cc8d9d62fd02ea05bfb6eb320",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x041a0040",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "and_z_zi_",
+      "instruction_id": "and_z_zi",
+      "mnemonic": "AND",
+      "category": "sve",
+      "source_file": "and_z_zi.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x05800000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "94099a1abb335d155160913b0d7a3cf92d0a7e9a80cffb5f51f0955f81477477",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0582001f",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "and_z_zz_",
+      "instruction_id": "and_z_zz",
+      "mnemonic": "AND",
+      "category": "sve",
+      "source_file": "and_z_zz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04203000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "1196ac59691436f3379c42ade61886eba49b1f8c15ec3e66f90f325fee71ca2e",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04223020",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bcax_z_zzz_",
+      "instruction_id": "bcax_z_zzz",
+      "mnemonic": "BCAX",
+      "category": "sve",
+      "source_file": "bcax_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04603800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "1a021d3e91cbcced9f6ed2f2c9ef0282e877523f8b9b30cad0563a3180b36879",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04613840",
+          "expected_mnemonics": [
+            "bcax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bic_z_p_zz_",
+      "instruction_id": "bic_z_p_zz",
+      "mnemonic": "BIC",
+      "category": "sve",
+      "source_file": "bic_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041b0000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "a64dd0cbf01699d5ff1460908cb205ebfcaeab78bcb31c73b90fd3be4e8ae574",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x041b0040",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bic_z_zz_",
+      "instruction_id": "bic_z_zz",
+      "mnemonic": "BIC",
+      "category": "sve",
+      "source_file": "bic_z_zz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04e03000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "d6c2f9f9d1cc1248b2dbd8e1ca5288230f98c8f71fea150d76f0f417953a1afd",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e23020",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bsl1n_z_zzz_",
+      "instruction_id": "bsl1n_z_zzz",
+      "mnemonic": "BSL1N",
+      "category": "sve",
+      "source_file": "bsl1n_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04603c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "2554199318be501a6720d36c31bcb866a67e904544571dba0498e14d2f24ad24",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04613c40",
+          "expected_mnemonics": [
+            "bsl1n"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bsl2n_z_zzz_",
+      "instruction_id": "bsl2n_z_zzz",
+      "mnemonic": "BSL2N",
+      "category": "sve",
+      "source_file": "bsl2n_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04a03c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "178d1c57e5f887299b46f6159ea246e606f6ee11ceb78f66b46feab2406aa69d",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a13c40",
+          "expected_mnemonics": [
+            "bsl2n"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "bsl_z_zzz_",
+      "instruction_id": "bsl_z_zzz",
+      "mnemonic": "BSL",
+      "category": "sve",
+      "source_file": "bsl_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04203c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "b5bf2456b980017ab8370d8abefbb829338f0dc021c46e18aa2a0f2b808d7e46",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04213c40",
+          "expected_mnemonics": [
+            "bsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "cnot_z_p_z_m",
+      "instruction_id": "cnot_z_p_z",
+      "mnemonic": "CNOT",
+      "category": "sve",
+      "source_file": "cnot_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041ba000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "fb890f64ec41f36d74df8e377b62db1d3ae3929abf021224e80f68c2fbbf530e",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x041ba020",
+          "expected_mnemonics": [
+            "cnot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "cpy_z_o_i_",
+      "instruction_id": "cpy_z_o_i",
+      "mnemonic": "CPY",
+      "category": "sve",
+      "source_file": "cpy_z_o_i.xml",
+      "encoding_mask": "0xff30c000",
+      "encoding_value": "0x05100000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "80725663a22ff18313e0e4efa92fff40a7ab92cdcd6b1a752a1ceddddcb06c48",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05171fe0",
+          "expected_mnemonics": [
+            "cpy",
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "cpy_z_p_i_",
+      "instruction_id": "cpy_z_p_i",
+      "mnemonic": "CPY",
+      "category": "sve",
+      "source_file": "cpy_z_p_i.xml",
+      "encoding_mask": "0xff30c000",
+      "encoding_value": "0x05104000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "fbde7fa40847b222cbff37ff781eec0372c5c5420ada652dd2ae99d86f8f5867",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05175fe0",
+          "expected_mnemonics": [
+            "cpy",
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "cpy_z_p_r_",
+      "instruction_id": "cpy_z_p_r",
+      "mnemonic": "CPY",
+      "category": "sve",
+      "source_file": "cpy_z_p_r.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0528a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "36fae2ebce8eff841c9adeceacbbebc6f3e6a39daa6ab2203181d48e116e418b",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0528bc20",
+          "expected_mnemonics": [
+            "cpy",
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "cpy_z_p_v_",
+      "instruction_id": "cpy_z_p_v",
+      "mnemonic": "CPY",
+      "category": "sve",
+      "source_file": "cpy_z_p_v.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05208000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "5b44eff1e3661d46958e62f024a3ce84c1262d666916590ae75325714e107e88",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05209c20",
+          "expected_mnemonics": [
+            "cpy",
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eor3_z_zzz_",
+      "instruction_id": "eor3_z_zzz",
+      "mnemonic": "EOR3",
+      "category": "sve",
+      "source_file": "eor3_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04203800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "44e92afabd591b2f44c1acacb73f2277b8087f87af01457719a9f028cac814fe",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04213840",
+          "expected_mnemonics": [
+            "eor3"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eor_z_p_zz_",
+      "instruction_id": "eor_z_p_zz",
+      "mnemonic": "EOR",
+      "category": "sve",
+      "source_file": "eor_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04190000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "9992abbae0011fc2a40f620c47909b147ca221c25ab3759c059a50b059c53960",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04190040",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eor_z_zi_",
+      "instruction_id": "eor_z_zi",
+      "mnemonic": "EOR",
+      "category": "sve",
+      "source_file": "eor_z_zi.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x05400000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "ab88e2254a503cce71cd31f4b30c2b1ab252e8566f175fd2ce663cd43c6008c1",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0542001f",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eor_z_zz_",
+      "instruction_id": "eor_z_zz",
+      "mnemonic": "EOR",
+      "category": "sve",
+      "source_file": "eor_z_zz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04a03000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "884c8f13748fb77150ca96c87f78b95f72c0ee89fe7c5b2b6aff16abc19683da",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a23020",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eorbt_z_zz_",
+      "instruction_id": "eorbt_z_zz",
+      "mnemonic": "EORBT",
+      "category": "sve",
+      "source_file": "eorbt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45009000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "954f8fe70121f4d01cf0757a72983d72c04c75bd6246b4af903e8440c2922acc",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45029020",
+          "expected_mnemonics": [
+            "eorbt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "eortb_z_zz_",
+      "instruction_id": "eortb_z_zz",
+      "mnemonic": "EORTB",
+      "category": "sve",
+      "source_file": "eortb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45009400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "ba2f320961193be638057d976e418449bc24f82dfa6b4c013d48621f39951e3b",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45029420",
+          "expected_mnemonics": [
+            "eortb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "nbsl_z_zzz_",
+      "instruction_id": "nbsl_z_zzz",
+      "mnemonic": "NBSL",
+      "category": "sve",
+      "source_file": "nbsl_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04e03c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3e8c9c7500af88558def1c8160e2bccf8d81ce7d9924ba6f92684f060f9e2ff0",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e13c40",
+          "expected_mnemonics": [
+            "nbsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "not_z_p_z_m",
+      "instruction_id": "not_z_p_z",
+      "mnemonic": "NOT",
+      "category": "sve",
+      "source_file": "not_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041ea000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "7f98e3d3efa8b90d93dde6591593b35ec164ad945a6186cd9e6ad0c9d8016e37",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x041ea020",
+          "expected_mnemonics": [
+            "not"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "orr_z_p_zz_",
+      "instruction_id": "orr_z_p_zz",
+      "mnemonic": "ORR",
+      "category": "sve",
+      "source_file": "orr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04180000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "25a9f7f1c342e7cf172e4aea842e4c8df8d384f16fb128c526a29d17d982950a",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04180040",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "orr_z_zi_",
+      "instruction_id": "orr_z_zi",
+      "mnemonic": "ORR",
+      "category": "sve",
+      "source_file": "orr_z_zi.xml",
+      "encoding_mask": "0xfffc0000",
+      "encoding_value": "0x05000000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "bbcb12200ebe80bbfa27b27a49eee73281882d58459af38417695f3c2758de44",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0502001f",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "orr_z_zz_",
+      "instruction_id": "orr_z_zz",
+      "mnemonic": "ORR",
+      "category": "sve",
+      "source_file": "orr_z_zz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x04603000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "228aa1fdc2340bb4533d96abb485119c7ce79ef30eef4a598f4612232de80de1",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04623020",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "sel_z_p_zz_",
+      "instruction_id": "sel_z_p_zz",
+      "mnemonic": "SEL",
+      "category": "sve",
+      "source_file": "sel_z_p_zz.xml",
+      "encoding_mask": "0xff20c000",
+      "encoding_value": "0x0520c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "ea97f26392d7a936c7c61fcdde77f35a809406bef2b295b0f1866a913e236884",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated standalone streaming Boolean, unary, selection, copy and cross-half form under fixed SME2 profile, all five supported SVLs. Source operands snapshot before writes; first element predicate bits govern merging/zeroing; aliases retain original values. Preserves unrelated primary state, predicates, SVCR/TPIDR2, ZA/ZT0, FPCR/FPSR/NZCV and RAM. Both MOVPRFX forms and execution as their successor are excluded; no paired-prefix claim. FFR/FPMR preservation is diagnostic only. Historical full-state original/model/native evidence transfers through fresh exact current-library body/maps, without semantic replay. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Consolidated Boolean/copy mapping and isolated full-state original/model/native evidence; actual frozen-library full body/map preservation links the selected recipe to the context leaf.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "logic"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0522c020",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "addspl_r_ri_",
+      "instruction_id": "addspl_r_ri",
+      "mnemonic": "ADDSPL",
+      "category": "sme",
+      "source_file": "addspl_r_ri.xml",
+      "encoding_mask": "0xffe0f800",
+      "encoding_value": "0x04605800",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "f0556e120dd1b5ebb1fab17012a87ba4de1ed96251f499a4f591ed5ed2a6dc2c",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated signed six-bit SME length arithmetic under fixed SME2 profile, all five supported SVLs and all four SM/ZA states. SME access enabled; SM/ZA not required. Wraps at64 bits, scales SVL bytes or predicate bytes, follows encoded SP/ZR roles and imposes no memory alignment check. Preserves all unrelated primary/scalable state and RAM. Historical complete snapshot original/model/native comparisons transfer through fresh exact current-library body/maps without semantic replay. FFR diagnostic storage is not architectural-access credit. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Independent length model, original/native complete snapshots, emitted baseline recipe and fresh current-library byte/map transfer over all SM/ZA states.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/length.rs",
+        "crates/stela-compiler/src/x86_64/sme/length.rs"
+      ],
+      "evidence_groups": [
+        "length"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 2
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 0
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 2
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 0
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 2
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 0
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 2
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 2
+        },
+        {
+          "word": "0x04615820",
+          "expected_mnemonics": [
+            "addspl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "addsvl_r_ri_",
+      "instruction_id": "addsvl_r_ri",
+      "mnemonic": "ADDSVL",
+      "category": "sme",
+      "source_file": "addsvl_r_ri.xml",
+      "encoding_mask": "0xffe0f800",
+      "encoding_value": "0x04205800",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "2c54b51c30d22054e896e50e2759fb59329cf3346e6bb63897bdb9fc0e4f2459",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated signed six-bit SME length arithmetic under fixed SME2 profile, all five supported SVLs and all four SM/ZA states. SME access enabled; SM/ZA not required. Wraps at64 bits, scales SVL bytes or predicate bytes, follows encoded SP/ZR roles and imposes no memory alignment check. Preserves all unrelated primary/scalable state and RAM. Historical complete snapshot original/model/native comparisons transfer through fresh exact current-library body/maps without semantic replay. FFR diagnostic storage is not architectural-access credit. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Independent length model, original/native complete snapshots, emitted baseline recipe and fresh current-library byte/map transfer over all SM/ZA states.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/length.rs",
+        "crates/stela-compiler/src/x86_64/sme/length.rs"
+      ],
+      "evidence_groups": [
+        "length"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 2
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 0
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 2
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 0
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 2
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 0
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 2
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 2
+        },
+        {
+          "word": "0x04215820",
+          "expected_mnemonics": [
+            "addsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "rdsvl_r_i_",
+      "instruction_id": "rdsvl_r_i",
+      "mnemonic": "RDSVL",
+      "category": "sme",
+      "source_file": "rdsvl_r_i.xml",
+      "encoding_mask": "0xfffff800",
+      "encoding_value": "0x04bf5800",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3b15a6ea7b9b6518341ab7f429a5a5b1f6069a5fa0d54d99ada944cd1457776d",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Complete allocated signed six-bit SME length arithmetic under fixed SME2 profile, all five supported SVLs and all four SM/ZA states. SME access enabled; SM/ZA not required. Wraps at64 bits, scales SVL bytes or predicate bytes, follows encoded SP/ZR roles and imposes no memory alignment check. Preserves all unrelated primary/scalable state and RAM. Historical complete snapshot original/model/native comparisons transfer through fresh exact current-library body/maps without semantic replay. FFR diagnostic storage is not architectural-access credit. Raw context leaf only; no block/cache, disabled-access traps, Apple hardware or application/macOS claim.",
+      "review": "Independent length model, original/native complete snapshots, emitted baseline recipe and fresh current-library byte/map transfer over all SM/ZA states.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/length.rs",
+        "crates/stela-compiler/src/x86_64/sme/length.rs"
+      ],
+      "evidence_groups": [
+        "length"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 2
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 0
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 2
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 0
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 2
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 0
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 2
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 2
+        },
+        {
+          "word": "0x04bf5820",
+          "expected_mnemonics": [
+            "rdsvl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "alias": false
+    }
+  ]
 }
