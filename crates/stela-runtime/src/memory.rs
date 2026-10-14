@@ -4,6 +4,8 @@
 //! region never receives host execute permission. Mapping must succeed at the
 //! requested address without replacing any existing allocation.
 
+mod allocation;
+
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -11,6 +13,11 @@ use std::fs::File;
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
+
+pub use allocation::{
+    AllocateDataError, AllocateDataRequest, AllocationOperation, DataAllocation, DataInheritance,
+    DataPermissions, DataPlacement, PendingDataAllocation,
+};
 
 pub const MAX_IMAGE_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 /// File-backed research mappings have a separate virtual-space budget. Safe
@@ -126,9 +133,13 @@ pub struct DataProtectionLimit {
 struct Allocation {
     base: u64,
     bytes: u64,
+    logical_bytes: u64,
     maximum_readable: bool,
     maximum_writable: bool,
+    maximum_executable: bool,
     executable: bool,
+    alias_tag: u8,
+    inheritance: DataInheritance,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectionError {
@@ -391,9 +402,13 @@ impl OwnedMemory {
             memory.allocations.push(Allocation {
                 base: spec.guest_address,
                 bytes: mapped_bytes,
+                logical_bytes: spec.virtual_bytes,
                 maximum_readable: limit.map_or(spec.readable, |l| l.readable),
                 maximum_writable: limit.map_or(spec.writable, |l| l.writable),
+                maximum_executable: spec.executable,
                 executable: spec.executable,
+                alias_tag: 0,
+                inheritance: DataInheritance::Copy,
             });
             memory.regions.push(MemoryRegion {
                 guest_address: spec.guest_address,
@@ -636,6 +651,12 @@ impl OwnedMemory {
             }
         }
         bail!("guest access reaches unmapped memory")
+    }
+
+    /// Validate one complete private data write without changing any bytes.
+    /// Platform copyout owners select whether whole-range preflight is appropriate.
+    pub fn validate_write(&self, address: u64, length: usize) -> Result<()> {
+        self.validate_access(address, length, true)
     }
 
     pub fn read_snapshot(&self, address: u64, length: usize) -> Result<Vec<u8>> {
