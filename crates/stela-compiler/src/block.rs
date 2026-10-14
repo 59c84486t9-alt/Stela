@@ -815,11 +815,19 @@ mod tests {
     fn unconditional_half_helpers_share_exact_consumption_analysis_and_emission() {
         const NOP: u32 = 0xd503201f;
         const UNSUPPORTED: u32 = 0xffffffff;
-        const HALF_OPERATIONS: [u32; 4] = [
+        const HALF_OPERATIONS: [u32; 12] = [
             0x1ee02800, // FADD H0,H0,H0
             0x1ee03800, // FSUB H0,H0,H0
             0x1ee00800, // FMUL H0,H0,H0
             0x1ee01800, // FDIV H0,H0,H0
+            0x0e401400, // FADD V0.4H,V0.4H,V0.4H
+            0x0ec01400, // FSUB V0.4H,V0.4H,V0.4H
+            0x2e401c00, // FMUL V0.4H,V0.4H,V0.4H
+            0x2e403c00, // FDIV V0.4H,V0.4H,V0.4H
+            0x4e401400, // FADD V0.8H,V0.8H,V0.8H
+            0x4ec01400, // FSUB V0.8H,V0.8H,V0.8H
+            0x6e401c00, // FMUL V0.8H,V0.8H,V0.8H
+            0x6e403c00, // FDIV V0.8H,V0.8H,V0.8H
         ];
         let base = GuestAddress(0x1000);
         let helper_pc = GuestAddress(base.0 + size_of::<u32>() as u64);

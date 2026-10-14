@@ -72,6 +72,7 @@ catalog! {
     PackSignedWordToByte => ("packsswb", Baseline, [0x66,0x0f,0x63]),
     PackUnsignedDwordToWord => ("packusdw", Sse41, [0x66,0x0f,0x38,0x2b]),
     ByteSignMask => ("pmovmskb", Baseline, [0x66,0x0f,0xd7]),
+    DwordSignMask => ("movmskps", Baseline, [0x0f,0x50]),
     MultiplyLowWord => ("pmullw", Baseline, [0x66,0x0f,0xd5]),
     MultiplyHighSignedWord => ("pmulhw", Baseline, [0x66,0x0f,0xe5]),
     MultiplyHighUnsignedWord => ("pmulhuw", Baseline, [0x66,0x0f,0xe4]),

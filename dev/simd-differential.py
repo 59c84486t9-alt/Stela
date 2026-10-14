@@ -406,9 +406,11 @@ def execute_batches(batches, pipe):
 def worker(pipe, batches):
     try:
         if batches[0].get('cohort') == 'scalar_numerical':
-            result = execute_scalar_numerical_batches(batches)
+            result = execute_numerical_batches(batches)
         elif batches[0].get('cohort') == 'fp_registers':
             result = execute_fp_register_batches(batches)
+        elif batches[0].get('cohort') == 'vector_numerical':
+            result = execute_numerical_batches(batches, load_vector_numerical_oracle(batches[0]['oracle_path']))
         else:
             result = execute_register_batches(batches) if batches[0].get('cohort') in REGISTER_COHORTS else execute_batches(batches, pipe)
         pipe.send({'result': result})
@@ -2660,8 +2662,8 @@ def numerical_native_accounting(batch):
             'limits': 'Static counts include every generated branch path once, including helper side exits; no dynamic instruction, timing or application-performance claim.'}
 
 
-def execute_scalar_numerical_batches(batches):
-    oracle = load_numerical_oracle(batches[0]['oracle_path'])
+def execute_numerical_batches(batches, oracle=None):
+    oracle = load_numerical_oracle(batches[0]['oracle_path']) if oracle is None else oracle
     machine = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     machine.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
     source = b''.join(batch['source'] for batch in batches)
@@ -2703,7 +2705,7 @@ def execute_scalar_numerical_batches(batches):
             path = invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
             counts[path] += 1
             corpus.update(record['initial']);corpus.update(struct.pack('<I', record['operation']['word']))
-            shape = (record['operation']['name'], record['operation']['lane'], path)
+            shape = (record['operation']['name'], record['operation']['lane'], path, record['operation']['bytes'])
             examples.setdefault(shape, record)
             initial = State.from_buffer_copy(record['initial'])
             if not record['unsupported'] and initial.fpcr & 7 == 0:
@@ -2722,7 +2724,7 @@ def execute_scalar_numerical_batches(batches):
                         if invoke(record, requested) != shape[2]:
                             raise AssertionError('Caller MXCSR changed native numerical path choice')
                         counts['mxcsr_checks'] += 1
-            mxcsr_examples.append({'name': shape[0], 'lane': shape[1], 'path': shape[2],
+            mxcsr_examples.append({'name': shape[0], 'lane': shape[1], 'path': shape[2], 'bytes': shape[3],
                                    'producer': record['producer'], 'case': record['case']})
     return {'raw_native_state_and_exit_comparisons': len(oracle['records']),
             'raw_inline_complete_state_comparisons': counts['inline'],
@@ -3112,6 +3114,445 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     print(json.dumps(report, indent=2))
 
 
+VECTOR_NUMERICAL_FOCUS = 'vector_numerical'
+VECTOR_NUMERICAL_ORACLE = ROOT / '.stela/research/vector-numerical/oracle/receipt.json'
+VECTOR_NUMERICAL_SHAPES = ((2, 8), (2, 16), (4, 8), (4, 16), (8, 16))
+VECTOR_NUMERICAL_BASES = {'fadd': (0x0e401400, 0x0e20d400),
+                        'fsub': (0x0ec01400, 0x0ea0d400),
+                        'fmul': (0x2e401c00, 0x2e20dc00),
+                        'fdiv': (0x2e403c00, 0x2e20fc00)}
+VECTOR_NUMERICAL_ROLES = ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 1),
+                         (31, 31, 31), (31, 29, 31), (31, 30, 29))
+VECTOR_NUMERICAL_CONTROLS = (0, 1, 2, 4, 7, 1 << 19, 1 << 24, 3 << 22)
+VECTOR_NUMERICAL_CASES = 21220
+VECTOR_NUMERICAL_CANARY = 0x51ad1234
+VECTOR_NUMERICAL_ROUND_ZERO = 3 << 22
+VECTOR_NUMERICAL_STATUS_OFFSET = 248
+VECTOR_NUMERICAL_EXCEPTION_OFFSET = 280
+VECTOR_NUMERICAL_VECTORS_OFFSET = 320
+VECTOR_NUMERICAL_READBACK_OFFSET = 832
+VECTOR_NUMERICAL_ORIGINAL_MARKER = 0x1234
+VECTOR_NUMERICAL_CPACR_FPEN = 3 << 20
+
+
+def vector_numerical_operation(name, lane, width, d, n, m):
+    if name not in VECTOR_NUMERICAL_BASES or (lane, width) not in VECTOR_NUMERICAL_SHAPES or any(not 0 <= register < 32 for register in (d, n, m)):
+        raise ValueError('Invalid vector numerical shape or operand')
+    half, standard = VECTOR_NUMERICAL_BASES[name]
+    word = (half if lane == 2 else standard | (int(lane == 8) << 22))
+    word |= int(width == 16) << 30 | m << 16 | n << 5 | d
+    return {'name': name, 'lane': lane, 'bytes': width, 'scalar': False,
+            'd': d, 'n': n, 'm': m, 'word': word}
+
+
+def vector_numerical_functions():
+    return [vector_numerical_operation(name, lane, width, *roles)
+            for name in VECTOR_NUMERICAL_BASES for lane, width in VECTOR_NUMERICAL_SHAPES
+            for roles in VECTOR_NUMERICAL_ROLES]
+
+
+def vector_numerical_state(operation, index, pairs, control=0, sticky=False):
+    initial = State()
+    rng = random.Random(0x564543544f52 + index)
+    initial.x[:] = [rng.getrandbits(64) for _ in range(31)]
+    initial.sp = 0x48010000 + (index % 16) * 16
+    seed_extended_state(initial, index * 31 + 11)
+    initial.reserved, initial.nzcv = VECTOR_NUMERICAL_CANARY, (index % 16) << 28
+    initial.fpcr, initial.fpsr = control, FP_REGISTER_MASKS['fpsr'] if sticky else 0
+    lane, width = operation['lane'], operation['bytes']
+    bits = lane * 8
+    if len(pairs) != width // lane or any(not 0 <= value < 1 << bits for pair in pairs for value in pair):
+        raise ValueError('Vector numerical input has an invalid lane count/value')
+    # Inactive lanes are signaling NaNs. They must not contribute status or
+    # make a Q0 instruction appear exceptional.
+    fraction = {2: 10, 4: 23, 8: 52}[lane]
+    signaling = ((1 << (bits - fraction - 1)) - 1) << fraction | 1
+    poison = sum(signaling << (element * bits) for element in range(16 // lane))
+    for register, side in ((operation['n'], 0), (operation['m'], 1)):
+        value = poison & ~((1 << (width * 8)) - 1)
+        value |= sum(pair[side] << (element * bits) for element, pair in enumerate(pairs))
+        initial.v[register][:] = [value & MASK, value >> 64]
+    return initial
+
+
+def vector_numerical_corpus(foundation):
+    """Pack the retained scalar directed pairs into active lanes. No native
+    result or host floating-point arithmetic participates in input generation.
+    """
+    functions = vector_numerical_functions()
+    directed, controls = {}, set()
+    for record in foundation['records']:
+        operation = record['operation']
+        initial = State.from_buffer_copy(record['initial'])
+        if (operation['d'], operation['n'], operation['m']) != (0, 1, 2) or record['unsupported'] or initial.fpsr:
+            continue
+        if record['label'] == 'zero_pp':
+            controls.add(initial.fpcr)
+        if initial.fpcr or record['label'].startswith(('alias_', 'bounded_', 'trap_')):
+            continue
+        mask = (1 << (operation['lane'] * 8)) - 1
+        pair = (initial.v[1][0] & mask, initial.v[2][0] & mask)
+        directed.setdefault((operation['name'], operation['lane']), {}).setdefault(record['label'], pair)
+    if len(controls) != 30 or any(len(pairs) != 64 for pairs in directed.values()) or len(directed) != 12:
+        raise AssertionError('Vector numerical corpus needs the complete retained scalar directed foundation')
+    records = []
+
+    def append(index, label, pairs, control=0, sticky=False):
+        operation = functions[index]
+        initial = vector_numerical_state(operation, len(records), pairs, control, sticky)
+        records.append({'function': index, 'function_index': index, 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+
+    rng = random.Random(0x564543465052414e)
+    for index in range(0, len(functions), len(VECTOR_NUMERICAL_ROLES)):
+        operation = functions[index]
+        count, bits = operation['bytes'] // operation['lane'], operation['lane'] * 8
+        pairs = directed[(operation['name'], operation['lane'])]
+        values = list(pairs.values())
+        for control in sorted(controls):
+            for first in range(0, len(values), count):
+                append(index, f'directed_pack_{first}', values[first:first + count], control)
+            append(index, 'sticky_pack', values[:count], control, True)
+        patterns = (('one_positive_halfulp', 'negative_one_positive_halfulp'),
+                    ('qnan_snan', 'reverse_qnan_qnan'),
+                    ('normal_boundary_midpoint', 'minimum_normal_half'))
+        for role in range(1, len(VECTOR_NUMERICAL_ROLES)):
+            for control in VECTOR_NUMERICAL_CONTROLS:
+                for pattern, labels in enumerate(patterns):
+                    active = [pairs[labels[element % len(labels)]] for element in range(count)]
+                    for sticky in (False, True):
+                        append(index + role, f'alias_pattern_{pattern}', active, control, sticky)
+        one = pairs['one_one'][0]
+        half = pairs['minimum_normal_half'][1]
+        for control in VECTOR_NUMERICAL_CONTROLS:
+            for label in ('snan_left', 'minimum_normal_half', 'maximum_maximum'):
+                for position in range(count):
+                    active = [(one, half)] * count
+                    active[position] = pairs[label]
+                    append(index, f'active_{label}_{position}', active, control)
+        for iteration in range(16):
+            active = [(rng.getrandbits(bits), rng.getrandbits(bits)) for _ in range(count)]
+            append(index, 'bounded_random', active, sorted(controls)[iteration])
+        for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+            append(index, 'trap_enable_readback_only', [(one, half)] * count, control)
+    if len(records) != VECTOR_NUMERICAL_CASES:
+        raise AssertionError('Vector numerical corpus exceeded its approved bounded scope')
+    return functions, records
+
+
+def prepare_vector_numerical_oracle(directory, numerical_path=NUMERICAL_FOUNDATION):
+    foundation = load_numerical_oracle(numerical_path)
+    functions, records = vector_numerical_corpus(foundation)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    inputs = b''.join(struct.pack('<Q', record['function']) + record['initial'] + bytes(8) for record in records)
+    functions = [{**operation, 'source_hex': struct.pack('<II', operation['word'], RET).hex()} for operation in functions]
+    metadata = [{key: value for key, value in record.items() if key != 'initial'} | {'case': index}
+                for index, record in enumerate(records)]
+    files = {'functions.json': (json.dumps(functions, indent=2) + '\n').encode(),
+             'cases.json': (json.dumps(metadata, indent=2) + '\n').encode(), 'inputs.bin': inputs}
+    for name, data in files.items():
+        path = directory / name
+        if path.exists():
+            if path.read_bytes() != data:
+                raise AssertionError('Frozen vector oracle inputs changed')
+        else:
+            with path.open('xb') as stream:
+                stream.write(data)
+    plan = {'kind': 'vector_numerical_original_input_plan', 'cases': len(records), 'functions': len(functions),
+            'scalar_foundation_sha256': foundation['foundation_sha256'],
+            'harness_sha256': digest(Path(__file__).read_bytes()),
+            'files': {name: {'sha256': digest(data), 'bytes': len(data)} for name, data in files.items()}}
+    path = write_evidence(directory / 'input-plan.json', plan)
+    return {'path': str(path.relative_to(ROOT)), 'sha256': digest(path.read_bytes()), **plan}
+
+
+def vector_numerical_original_state(initial, snapshot):
+    if len(snapshot) != FP_REGISTER_RECORD_BYTES:
+        raise AssertionError('Truncated vector numerical original snapshot')
+    state = State.from_buffer_copy(initial)
+    state.x[:] = struct.unpack_from('<31Q', snapshot)
+    state.sp, spsr, state.fpcr, state.fpsr = struct.unpack_from('<4Q', snapshot, VECTOR_NUMERICAL_STATUS_OFFSET)
+    state.nzcv = spsr & 0xf0000000
+    vectors = struct.unpack_from('<64Q', snapshot, VECTOR_NUMERICAL_VECTORS_OFFSET)
+    for register in range(32):
+        state.v[register][:] = vectors[register * 2:register * 2 + 2]
+    return state
+
+
+def load_vector_numerical_oracle(path=VECTOR_NUMERICAL_ORACLE):
+    pointer, pointer_hash = numerical_json(path)
+    receipt, receipt_hash = numerical_json(ROOT / pointer['receipt']['path'], pointer['receipt']['sha256'])
+    if (receipt.get('passed_transport_and_architectural_frame_checks') is not True
+            or receipt['cases'] != VECTOR_NUMERICAL_CASES or pointer['directory'] != receipt['directory']):
+        raise AssertionError('Complete passing vector numerical original capture required')
+    directory = ROOT / receipt['directory']
+    for name, identity in receipt['files'].items():
+        if Path(name).name != name:
+            raise AssertionError('Vector original file is not one path component')
+        data = (directory / name).read_bytes()
+        if digest(data) != identity['sha256'] or len(data) != identity['bytes']:
+            raise AssertionError(f'Vector original evidence changed: {name}')
+    functions = json.loads((directory / 'functions.json').read_bytes())
+    cases = json.loads((directory / 'cases.json').read_bytes())
+    inputs, results, elf = ((directory / name).read_bytes() for name in ('inputs.bin', 'results.bin', 'guest.elf'))
+    expected_functions = vector_numerical_functions()
+    if len(functions) != len(expected_functions) or len(cases) != VECTOR_NUMERICAL_CASES:
+        raise AssertionError('Vector original function/corpus count changed')
+    for actual, expected in zip(functions, expected_functions):
+        if any(actual[key] != value for key, value in expected.items()) or actual['source_hex'] != struct.pack('<II', expected['word'], RET).hex():
+            raise AssertionError('Vector original operation differs from independent encoding facts')
+    if len(inputs) != len(cases) * NUMERICAL_INPUT_STRIDE or len(results) != (len(cases) + 1) * FP_REGISTER_RECORD_BYTES:
+        raise AssertionError('Vector original state framing changed')
+    records, readbacks = [], Counter()
+    for index, case in enumerate(cases):
+        raw = inputs[index * NUMERICAL_INPUT_STRIDE:(index + 1) * NUMERICAL_INPUT_STRIDE]
+        function = struct.unpack_from('<Q', raw)[0]
+        initial = State.from_buffer_copy(raw[NUMERICAL_INPUT_HEADER:NUMERICAL_INPUT_HEADER + ctypes.sizeof(State)])
+        if case['case'] != index or case['function_index'] != function or digest(bytes(initial)) != case['initial_state_sha256']:
+            raise AssertionError('Vector original metadata does not bind input state')
+        operation = expected_functions[function]
+        snapshot = results[(index + 1) * FP_REGISTER_RECORD_BYTES:(index + 2) * FP_REGISTER_RECORD_BYTES]
+        original = vector_numerical_original_state(initial, snapshot)
+        esr, elr, current_el, cpacr, marker = struct.unpack_from('<5Q', snapshot, VECTOR_NUMERICAL_EXCEPTION_OFFSET)
+        actual_fpcr, actual_fpsr = struct.unpack_from('<2Q', snapshot, VECTOR_NUMERICAL_READBACK_OFFSET)
+        if (esr >> 26 != FP_REGISTER_EC_SVC or current_el != 4 or cpacr != VECTOR_NUMERICAL_CPACR_FPEN or marker != VECTOR_NUMERICAL_ORIGINAL_MARKER
+                or fp_register_elf_word(elf, elr - 8) != operation['word']
+                or fp_register_elf_word(elf, elr - 4) != FP_REGISTER_SVC
+                or original.fpcr != actual_fpcr or actual_fpsr != initial.fpsr
+                or actual_fpcr != initial.fpcr & ~NUMERICAL_TRAP_ENABLE_MASK):
+            raise AssertionError(f'Vector original instruction/EL0/control evidence changed: {index}')
+        untouched = State.from_buffer_copy(original)
+        untouched.v[operation['d']][:] = initial.v[operation['d']]
+        untouched.fpcr, untouched.fpsr = initial.fpcr, initial.fpsr
+        if bytes(untouched) != bytes(initial) or original.fpsr & ~NUMERICAL_EXCEPTION_FLAGS != initial.fpsr & ~NUMERICAL_EXCEPTION_FLAGS:
+            raise AssertionError('Original vector numerical operation changed unrelated state or QC')
+        if operation['bytes'] == 8 and original.v[operation['d']][1] != 0:
+            raise AssertionError('Original Q0 numerical instruction did not clear upper 64 bits')
+        readbacks[(initial.fpcr, actual_fpcr)] += 1
+        # Only LR changes to let the native/runtime and Unicorn paths execute
+        # the actual RET. The original vector instruction left every GPR intact.
+        initial.x[30] = original.x[30] = STOP
+        records.append({'function': function, 'initial': bytes(initial), 'expected': bytes(original),
+            'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0',
+            'unsupported': bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)})
+    return {'records': records, 'functions': expected_functions, 'receipt_sha256': receipt_hash,
+            'pointer_sha256': pointer_hash,
+            'producer': receipt, 'control_readbacks': [{'requested': requested, 'actual': actual, 'cases': count}
+                for (requested, actual), count in sorted(readbacks.items())],
+            'input_derivation': 'Only X30 becomes STOP for actual guest RET. All other imported bytes remain unchanged. Original requested trap enables are retained; QEMU RAZ/WI readback is classified without successful native equality credit.'}
+
+
+def vector_numerical_runtime_cases(records):
+    selected = {}
+    for record in records:
+        operation, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        shape = (operation['name'], operation['lane'], operation['bytes'])
+        if record['unsupported']:
+            selected.setdefault(('trap', *shape, initial.fpcr), record)
+        elif initial.fpsr == 0:
+            if initial.fpcr in VECTOR_NUMERICAL_CONTROLS:
+                selected.setdefault(('control', *shape, initial.fpcr), record)
+            if initial.fpcr == NUMERICAL_NEP:
+                selected.setdefault(('alias', record['function']), record)
+            flush = NUMERICAL_FZ16 if operation['lane'] == 2 else NUMERICAL_FZ
+            if initial.fpcr in (0, NUMERICAL_AH, flush) and record['label'] in (
+                    'active_snan_left_0', 'active_minimum_normal_half_0', 'active_maximum_maximum_0'):
+                selected.setdefault(('semantic', *shape, initial.fpcr, record['label']), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def vector_numerical_runtime_cohort(cli, directory, oracle, compiler):
+    source = b''.join(struct.pack('<II', operation['word'], RET) for operation in oracle['functions'])
+    source_path, state_path = directory / 'vector-runtime.arm64', directory / 'vector-runtime-state.json'
+    ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
+    memory_path = directory / 'vector-runtime-memory.json'
+    memory_path.write_text(json.dumps({'regions': [{'guest_address': ram_address, 'virtual_bytes': len(ram),
+        'initial_bytes': list(ram), 'readable': True, 'writable': True}]}))
+    counts, transcripts = Counter(), []
+    cache = directory / 'vector-runtime-cache'
+    original = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    original.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+    original.mem_map(BASE, 8192)
+    original.mem_map(STOP, 4096)
+
+    def invoke(code, initial, entry, budget=16, cache_dir=cache):
+        source_path.write_bytes(code)
+        state_path.write_text(json.dumps(state_dict(initial)))
+        report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path),
+            '--guest-base', hex(BASE), '--entry', hex(entry), '--stop-pc', hex(STOP), '--cpu-target', 'baseline',
+            '--state', str(state_path), '--block-budget', str(budget), '--cache-dir', str(cache_dir),
+            '--memory', str(memory_path), '--read-memory', f'{hex(ram_address)}:{len(ram)}'], timeout=30))
+        if (report['kind'] != 'native_block_run' or report['source_sha256'] != digest(code)
+                or report['compiler_source_sha256'] != compiler or report['target_cpu'] != 'x86_64-baseline'):
+            raise AssertionError('Vector runtime source/compiler/target differs')
+        memory = report['memory']
+        if memory['memory_before'] != memory['memory_after'] or memory['memory_reads'][0]['hex'] != ram.hex():
+            raise AssertionError('Vector runtime modified owned RAM')
+        for name in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits', 'floating_point_helpers'):
+            value = report['outcome'][name]
+            if not isinstance(value, int) or value < 0:
+                raise AssertionError(f'Vector runtime omitted {name}')
+            counts[name] += value
+        transcripts.append({'source_hex': code.hex() if code != source else None,
+            'source_sha256': digest(code), 'initial_state_hex': bytes(initial).hex(), 'entry': entry,
+            'budget': budget, 'report': report})
+        counts['invocations'] += 1
+        return report, numerical_report_state(report['state'])
+
+    def require(report, actual, expected, pc=STOP, reason='stop_address'):
+        if report['pc'] != pc or report['outcome']['reason']['kind'] != reason or bytes(actual) != bytes(expected):
+            write_evidence(ROOT / '.stela/simd-vector_numerical-runtime-failure.json',
+                {'kind': 'vector_numerical_runtime_failure', 'transcripts': transcripts,
+                 'expected_state_hex': bytes(expected).hex(), 'expected_pc': pc, 'expected_reason': reason})
+            raise AssertionError('Vector runtime complete-state mismatch; immutable failure retained')
+        if reason == 'stop_address' and report['outcome']['last_exit'] != [STOP, NUMERICAL_RETURN_EXIT]:
+            raise AssertionError('Vector runtime did not execute guest RET')
+        counts['typed_unsupported_state_checks' if reason == 'floating_point_unsupported' else 'complete_state_comparisons'] += 1
+
+    def check_original(code, initial, expected):
+        original.mem_write(BASE, code)
+        original.ctl_remove_cache(BASE, BASE + len(code))
+        initialize_arm(original, initial)
+        original.emu_start(BASE, STOP, count=64)
+        if original.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(capture_arm(original, initial)) != bytes(expected):
+            raise AssertionError('Joined original vector complete state differs')
+        counts['original_joined_complete_state_comparisons'] += 1
+
+    for record in vector_numerical_runtime_cases(oracle['records']):
+        initial = State.from_buffer_copy(record['initial'])
+        entry = BASE + record['function'] * 8
+        report, actual = invoke(source, initial, entry)
+        if record['unsupported']:
+            require(report, actual, initial, entry, 'floating_point_unsupported')
+            if report['outcome']['reason'] != {'kind': 'floating_point_unsupported', 'instruction_pc': entry,
+                    'fpcr': initial.fpcr, 'enabled_exceptions': (initial.fpcr >> NUMERICAL_EXCEPTION_ENABLE_SHIFT) & NUMERICAL_EXCEPTION_FLAGS}:
+                raise AssertionError('Vector requested trap enables were lost or refusal was imprecise')
+        else:
+            require(report, actual, State.from_buffer_copy(record['expected']))
+
+    helpers = [record for record in oracle['records'] if record['label'] == 'active_snan_left_0'
+        and State.from_buffer_copy(record['initial']).fpcr == 0]
+    if len(helpers) != len(VECTOR_NUMERICAL_BASES) * len(VECTOR_NUMERICAL_SHAPES):
+        raise AssertionError('Vector helper boundary fixture omits an arrangement')
+    for record in helpers:
+        initial, expected = State.from_buffer_copy(record['initial']), State.from_buffer_copy(record['expected'])
+        entry = BASE + record['function'] * 8
+        first, actual = invoke(source, initial, entry, budget=1)
+        require(first, actual, expected, entry + 4, 'budget_exhausted')
+        if first['outcome']['floating_point_helpers'] != 1:
+            raise AssertionError('Vector budget fixture did not complete exactly one helper')
+        final, actual = invoke(source, actual, entry + 4, budget=1)
+        require(final, actual, expected)
+        counts['budget_helper_resume_checks'] += 1
+        warm, actual = invoke(source, initial, entry)
+        require(warm, actual, expected)
+        if warm['outcome']['compiled_blocks'] != 0 or warm['outcome']['disk_cache_hits'] < 2:
+            raise AssertionError('Vector helper/RET did not reuse persistent cache')
+        counts['disk_cache_checks'] += 1
+        operation = record['operation']
+        loop = struct.pack('<4I', operation['word'], NUMERICAL_SUBS_X10_ONE, NUMERICAL_CBNZ_X10_BACK_TWO, RET)
+        loop_initial, loop_expected = State.from_buffer_copy(initial), State.from_buffer_copy(expected)
+        loop_initial.x[10] = NUMERICAL_CACHE_LOOP_ITERATIONS
+        loop_expected.x[10], loop_expected.nzcv = 0, NUMERICAL_ZERO_CARRY_FLAGS
+        repeated, actual = invoke(loop, loop_initial, BASE, budget=16)
+        require(repeated, actual, loop_expected)
+        if repeated['outcome']['floating_point_helpers'] != NUMERICAL_CACHE_LOOP_ITERATIONS or repeated['outcome']['memory_cache_hits'] < 2:
+            raise AssertionError('Vector loop did not repeat helper and live cache effects')
+        check_original(loop, loop_initial, loop_expected)
+        counts['memory_cache_loop_checks'] += 1
+
+        for control in (NUMERICAL_NEP, VECTOR_NUMERICAL_ROUND_ZERO):
+            reference = next(candidate for candidate in oracle['records'] if candidate['function'] == record['function']
+                and candidate['label'] == record['label'] and State.from_buffer_copy(candidate['initial']).fpcr == control)
+            chain_initial = State.from_buffer_copy(reference['initial'])
+            chain_initial.x[0] = control
+            chain_initial.fpcr, chain_initial.fpsr = 0, FP_REGISTER_MASKS['fpsr']
+            chain_expected = State.from_buffer_copy(reference['expected'])
+            chain_expected.x[:] = chain_initial.x
+            chain_expected.x[3], chain_expected.x[4], chain_expected.fpsr = chain_expected.fpsr, 0, 0
+            chain = struct.pack('<7I', fp_register_operation('msr_fpcr', 0)['word'],
+                fp_register_operation('msr_fpsr', 31)['word'], operation['word'],
+                fp_register_operation('mrs_fpsr', 3)['word'], fp_register_operation('msr_fpsr', 31)['word'],
+                fp_register_operation('mrs_fpsr', 4)['word'], RET)
+            joined, actual = invoke(chain, chain_initial, BASE)
+            require(joined, actual, chain_expected)
+            if control & 7 == 0:
+                check_original(chain, chain_initial, chain_expected)
+            counts['control_status_chain_checks'] += 1
+    snapshot = write_evidence(ROOT / '.stela/simd-vector_numerical-runtime-records.json', transcripts)
+    return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
+            'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())}}
+
+
+def run_vector_numerical_cohort(cli, oracle_path):
+    oracle = load_vector_numerical_oracle(oracle_path)
+    started = time.monotonic()
+    cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
+    shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
+                    'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
+    shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
+    batches, artifacts, checked, compiler = [], [], [], None
+    cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
+    with tempfile.TemporaryDirectory(prefix='stela-vector-numerical-') as temporary:
+        directory = Path(temporary)
+        for index, operation in enumerate(oracle['functions']):
+            batch = compile_batch(cli, directory, [{'operations': [operation]}], index,
+                block=True, guest_base=BASE + index * 8)
+            batch.update(cohort=VECTOR_NUMERICAL_FOCUS, oracle_path=str(oracle_path))
+            if compiler is not None and batch['compiler'] != compiler:
+                raise AssertionError('Vector compiler changed during preparation')
+            compiler = batch['compiler']
+            accounting = numerical_native_accounting(batch)
+            retained = retain_native_evidence('simd-vector_numerical', batch['compiled_source'], batch['native'],
+                batch['manifest'], accounting, Path(__file__).read_bytes())
+            batches.append(batch)
+            artifacts.append({'function': index, 'compilation': batch['receipt'], 'accounting': accounting, 'files': retained})
+        optional = {opcode['mnemonic'] for opcode in cpu_info['simd_opcodes'] if opcode['minimum_target'] != 'x86_64-baseline'}
+        if any(optional & artifact['accounting']['static_opcode_histogram'].keys() for artifact in artifacts):
+            raise AssertionError('Baseline vector numerical code contains optional host opcodes')
+        if cpu_info['detected_target'] != 'x86_64-baseline':
+            for index in (0, 14, 28):
+                probe = compile_batch(cli, directory, [{'operations': [oracle['functions'][index]]}], 1000 + index,
+                    block=True, cpu_target='native', target_id=cpu_info['detected_target'], guest_base=BASE + index * 8)
+                if probe['compiler'] != compiler or probe['native'] != batches[index]['native']:
+                    raise AssertionError('Checked vector numerical recipe differs from baseline')
+                checked.append({'function': index, 'target_cpu': cpu_info['detected_target'],
+                                'native_sha256': digest(probe['native']), 'baseline_bytes_identical': True})
+        raw = bounded_cases(batches)
+        raw['limits'] = 'QEMU original captures all GPR/SP/V/NZCV/FPCR/FPSR before transport clobbers. Reserved GuestState bytes are metadata canaries. Raw helper exits verify unchanged state and exact instruction PC; actual Rust runtime separately completes helpers. Requested controls remain unchanged; QEMU trap-enable RAZ/WI is excluded from successful native equality.'
+        runtime = vector_numerical_runtime_cohort(cli, directory, oracle, compiler)
+    if (digest(cli.read_bytes()) != cli_hash or digest(Path(__file__).read_bytes()) != harness_hash
+            or any(digest((ROOT / name).read_bytes()) != value for name, value in shared_hashes.items())):
+        raise AssertionError('Vector executable, harness or shared source changed during verification')
+    report = {'kind': 'simd_vector_numerical_arm_vs_native_x86', 'passed': True, 'abi': BLOCK_ABI,
+        'state_comparisons': runtime['complete_state_comparisons'],
+        'runtime_complete_state_comparisons': runtime['complete_state_comparisons'],
+        'runtime_typed_unsupported_state_checks': runtime['typed_unsupported_state_checks'],
+        'runtime_budget_resume_checks': runtime['budget_helper_resume_checks'],
+        'runtime_disk_cache_checks': runtime['disk_cache_checks'],
+        'runtime_memory_cache_loop_checks': runtime['memory_cache_loop_checks'],
+        'runtime_control_status_chain_checks': runtime['control_status_chain_checks'],
+        'raw_native_state_and_exit_comparisons': raw['raw_native_state_and_exit_comparisons'],
+        'raw_original_complete_state_comparisons': raw['raw_inline_complete_state_comparisons'],
+        'raw_inline_complete_state_comparisons': raw['raw_inline_complete_state_comparisons'],
+        'raw_helper_unchanged_state_comparisons': raw['raw_helper_unchanged_state_comparisons'],
+        'raw_unsupported_unchanged_state_comparisons': raw['raw_unsupported_unchanged_state_comparisons'],
+        'original_full_frame_captures': len(oracle['records']),
+        'native_mxcsr_preservation_comparisons': raw['caller_mxcsr_preservation_comparisons'],
+        'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
+        'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
+        'original_oracle_receipt_sha256': oracle['receipt_sha256'], 'original_producer': oracle['producer'],
+        'control_readbacks': oracle['control_readbacks'], 'input_derivation': oracle['input_derivation'],
+        'raw_native': raw, 'rust_runtime': runtime, 'native_artifacts': artifacts,
+        'checked_host_emission_identity': checked, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
+        'verification_wall_seconds': time.monotonic() - started,
+        'limits': 'Enabled nonstreaming AdvSIMD H/S/D binary arithmetic only. Full-frame unchanged original instruction captures receive direct equality credit only under actual compatible controls. No numerical trap delivery, disabled-feature, Apple hardware, complete application, OS or performance claim.'}
+    write_evidence(ROOT / '.stela/simd-vector_numerical-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
 def fp_register_runtime_cases(oracle):
     controls = (0, 1 << 22, 2 << 22, 3 << 22, NUMERICAL_NEP)
     helper_labels = {'fadd': 'one_opposite_one', 'fsub': 'one_one',
@@ -3393,9 +3834,11 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
+    parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
+                        help='Pinned full-frame original vector numerical receipt')
     arguments = parser.parse_args()
     if not arguments.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
@@ -3405,6 +3848,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == VECTOR_NUMERICAL_FOCUS:
+        run_vector_numerical_cohort(cli, arguments.vector_oracle)
         return
     if arguments.focus:
         run_register_cohort(cli, arguments.focus)

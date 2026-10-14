@@ -14,6 +14,81 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_vector_numerical_encodings_cover_arrangements_aliases_and_v31(self):
+        functions = suite.vector_numerical_functions()
+        words = [operation['word'] for operation in functions]
+        decoded = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(struct.pack('<140I', *words), 0))
+        self.assertEqual(len(set(words)), 140)
+        self.assertEqual(len(decoded), 140)
+        for operation, instruction in zip(functions, decoded):
+            self.assertEqual(instruction.mnemonic, operation['name'])
+            arrangement = str(operation['bytes'] // operation['lane']) + {2: 'h', 4: 's', 8: 'd'}[operation['lane']]
+            self.assertEqual(instruction.op_str, ', '.join(f'v{operation[role]}.{arrangement}' for role in ('d', 'n', 'm')))
+        self.assertEqual({(op['lane'], op['bytes']) for op in functions}, set(suite.VECTOR_NUMERICAL_SHAPES))
+        for arguments in (('fmax', 4, 16, 0, 1, 2), ('fadd', 8, 8, 0, 1, 2),
+                          ('fadd', 4, 16, -1, 1, 2), ('fadd', 2, 8, 0, 1, 32)):
+            with self.assertRaises(ValueError):
+                suite.vector_numerical_operation(*arguments)
+
+    def test_vector_numerical_inputs_poison_inactive_lanes_without_changing_active_pairs(self):
+        for lane, width in suite.VECTOR_NUMERICAL_SHAPES:
+            operation = suite.vector_numerical_operation('fdiv', lane, width, 0, 1, 2)
+            pairs = [(element + 1, element + 17) for element in range(width // lane)]
+            state = suite.vector_numerical_state(operation, 7, pairs, suite.NUMERICAL_NEP, True)
+            bits, mask = lane * 8, (1 << (lane * 8)) - 1
+            for register, side in ((1, 0), (2, 1)):
+                value = state.v[register][0] | state.v[register][1] << 64
+                self.assertEqual([(value >> (element * bits)) & mask for element in range(width // lane)],
+                                 [pair[side] for pair in pairs])
+                if width == 8:
+                    self.assertNotEqual(state.v[register][1], 0)
+            self.assertEqual((state.fpcr, state.fpsr, state.reserved),
+                             (suite.NUMERICAL_NEP, suite.FP_REGISTER_MASKS['fpsr'], suite.VECTOR_NUMERICAL_CANARY))
+            with self.assertRaises(ValueError):
+                suite.vector_numerical_state(operation, 7, pairs[:-1])
+
+    def test_vector_original_frame_imports_every_architectural_field_keeps_metadata_canary(self):
+        initial = State()
+        initial.reserved = suite.VECTOR_NUMERICAL_CANARY
+        initial.x[:] = [99] * 31
+        snapshot = bytearray(suite.FP_REGISTER_RECORD_BYTES)
+        registers = [0x1000000000000000 + register for register in range(31)]
+        vectors = [0x8000000000000000 + limb for limb in range(64)]
+        struct.pack_into('<31Q', snapshot, 0, *registers)
+        struct.pack_into('<4Q', snapshot, suite.VECTOR_NUMERICAL_STATUS_OFFSET,
+                         0x48010100, 0xa0000005, suite.NUMERICAL_NEP, 0x08000012)
+        struct.pack_into('<64Q', snapshot, suite.VECTOR_NUMERICAL_VECTORS_OFFSET, *vectors)
+        observed = suite.vector_numerical_original_state(initial, snapshot)
+        self.assertEqual(list(observed.x), registers)
+        self.assertEqual((observed.sp, observed.nzcv, observed.fpcr, observed.fpsr),
+                         (0x48010100, 0xa0000000, suite.NUMERICAL_NEP, 0x08000012))
+        self.assertEqual([limb for vector in observed.v for limb in vector], vectors)
+        self.assertEqual(observed.reserved, initial.reserved)
+        for invalid in (snapshot[:-1], snapshot + bytes(1)):
+            with self.assertRaises(AssertionError):
+                suite.vector_numerical_original_state(initial, invalid)
+
+    def test_vector_runtime_selection_keeps_both_widths_semantic_lanes_aliases_and_traps(self):
+        records = []
+        for function, operation in enumerate(suite.vector_numerical_functions()):
+            for control, label, unsupported in ((0, 'directed_pack_0', False),
+                    (suite.NUMERICAL_NEP, 'alias_pattern_0', False),
+                    (suite.NUMERICAL_AH, 'active_snan_left_0', False),
+                    (suite.NUMERICAL_TRAP_ENABLE_MASK, 'trap_enable_readback_only', True)):
+                initial = State()
+                initial.fpcr, initial.fpsr = control, 0
+                records.append({'function': function, 'operation': operation, 'case': len(records),
+                                'initial': bytes(initial), 'label': label, 'unsupported': unsupported})
+        selected = suite.vector_numerical_runtime_cases(records)
+        self.assertEqual(len(selected), 200)
+        aliases = [record for record in selected if State.from_buffer_copy(record['initial']).fpcr == suite.NUMERICAL_NEP]
+        self.assertEqual({record['function'] for record in aliases}, set(range(140)))
+        semantic = [record for record in selected if record['label'] == 'active_snan_left_0']
+        self.assertEqual(len(semantic), 20)
+        self.assertEqual({(record['operation']['lane'], record['operation']['bytes']) for record in semantic},
+                         set(suite.VECTOR_NUMERICAL_SHAPES))
+        self.assertEqual(sum(record['unsupported'] for record in selected), 20)
+
     def test_fp_register_encodings_cover_exactly_all_four_operands_and_all_rt(self):
         functions = suite.fp_register_functions()
         words = [function['operations'][0]['word'] for function in functions]

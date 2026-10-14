@@ -82,12 +82,12 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v4",
+  "registry_version": "apple-silicon-block-forms-v5",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
     "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
-    "description": "Reviewed ordinary control flow and scalar numerical FP under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind returns in RAX/RDX. The nonwrapping, non-streaming profile enables FP/FP16/AFP, disables GCS, uses unguarded executable pages and private direct RAM. Numerical S/D common paths execute inline with preserved caller MXCSR; H and exceptional values complete through an immutable-source-validated kind-9 interior boundary. Any numerical exception enable declines before effects. SVC/BRK partially support a precise typed kind-5 boundary retaining kind, imm16 and preferred exception return PC; architectural exception entry is pending.",
+    "description": "Reviewed ordinary control flow and scalar and vector numerical FP under explicit native block exits and serialized runtime dispatch. GuestState* arrives in RDI; the two-u64 BlockExit next_pc/kind returns in RAX/RDX. The nonwrapping, non-streaming profile enables FP/FP16/AFP, disables GCS, uses unguarded executable pages and private direct RAM. Numerical S/D common paths execute inline with preserved caller MXCSR; vectors evaluate only active lanes, clear the upper half for 64-bit shapes and aggregate sticky status transactionally. H and exceptional values complete through an immutable-source-validated kind-9 interior boundary. Any numerical exception enable declines before effects. SVC/BRK partially support a precise typed kind-5 boundary retaining kind, imm16 and preferred exception return PC; architectural exception entry is pending.",
     "outside_scope": [
       "PAC and tagged/authenticated pointers",
       "GCS, guarded-page BTI checks and PSTATE.BTYPE",
@@ -156,6 +156,39 @@
         "raw_native.raw_helper_unchanged_state_comparisons": 31383,
         "raw_native.raw_unsupported_unchanged_state_comparisons": 84,
         "raw_native.unicorn_original_complete_state_comparisons": 14556
+      }
+    },
+    "vector_numerical_fp": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-vector_numerical-differential-report.json",
+      "kind": "simd_vector_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "original_full_frame_captures": 21220,
+        "raw_native_state_and_exit_comparisons": 21220,
+        "raw_original_complete_state_comparisons": 3373,
+        "raw_helper_unchanged_state_comparisons": 17707,
+        "raw_unsupported_unchanged_state_comparisons": 140
       }
     }
   },
@@ -1533,6 +1566,482 @@
       ],
       "review": "Reviewed ordinary transfer decoding and native BlockExit emission against the linked original-A64/native/Rust-dispatch suite. Smoke binds the first-terminator prefix and ABI; it does not execute the block.",
       "scope": "Ordinary control transfer returns the next guest PC and exit kind to serialized dispatch, with X30=PC+4 for calls and original-target capture for BLR X30. Conditional transfers preserve guest NZCV. Guest address arithmetic must not wrap. GCS is disabled and executable pages are unguarded; no PAC, PSTATE.BTYPE or exception delivery is claimed."
+    },
+    {
+      "id": "FADD_asimdsame_only",
+      "mnemonic": "FADD",
+      "category": "fp_simd",
+      "source_file": "fadd_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0e20d400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fadd_advsimd.xml",
+      "source_sha256": "58bedcd74dc33b88590658c458068589ce9232b1b2e5391ab44ea4e04fd58e30",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADD",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22d420",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e22d421",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e62d422",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FADD_asimdsamefp16_only",
+      "mnemonic": "FADD",
+      "category": "fp_simd",
+      "source_file": "fadd_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e401400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fadd_advsimd.xml",
+      "source_sha256": "58bedcd74dc33b88590658c458068589ce9232b1b2e5391ab44ea4e04fd58e30",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FADD",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e421420",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4e421421",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FDIV_asimdsame_only",
+      "mnemonic": "FDIV",
+      "category": "fp_simd",
+      "source_file": "fdiv_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2e20fc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdiv_advsimd.xml",
+      "source_sha256": "4356e45d3d0767fc25682422cbf05501ff24c65baeef9af85c0fc20b7925ee78",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FDIV",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22fc20",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e22fc21",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e62fc22",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FDIV_asimdsamefp16_only",
+      "mnemonic": "FDIV",
+      "category": "fp_simd",
+      "source_file": "fdiv_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e403c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdiv_advsimd.xml",
+      "source_sha256": "4356e45d3d0767fc25682422cbf05501ff24c65baeef9af85c0fc20b7925ee78",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FDIV",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e423c20",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x6e423c21",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FMUL_asimdsame_only",
+      "mnemonic": "FMUL",
+      "category": "fp_simd",
+      "source_file": "fmul_advsimd_vec.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2e20dc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_vec.xml",
+      "source_sha256": "4592801a26f7020f58474b8ddb47d0bcda1362b0418f2856e39c0cee75424d55",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22dc20",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e22dc21",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e62dc22",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FMUL_asimdsamefp16_only",
+      "mnemonic": "FMUL",
+      "category": "fp_simd",
+      "source_file": "fmul_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e401c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmul_advsimd_vec.xml",
+      "source_sha256": "4592801a26f7020f58474b8ddb47d0bcda1362b0418f2856e39c0cee75424d55",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMUL",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e421c20",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x6e421c21",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FSUB_asimdsame_only",
+      "mnemonic": "FSUB",
+      "category": "fp_simd",
+      "source_file": "fsub_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0ea0d400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD",
+          "name": "v8Ap0"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fsub_advsimd.xml",
+      "source_sha256": "f5fe4a2db5643b2745dd6727bac98090ed5687d6af4de7fd695ba45154785279",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FSUB",
+        "advsimd-datatype": "simd-single-and-double",
+        "datatype": "single-and-double",
+        "reguse-datatype": "3reg-same-single-and-double"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ea2d420",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea2d421",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ee2d422",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
+    },
+    {
+      "id": "FSUB_asimdsamefp16_only",
+      "mnemonic": "FSUB",
+      "category": "fp_simd",
+      "source_file": "fsub_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ec01400",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FP16",
+          "name": "v8Ap0 && v8Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fsub_advsimd.xml",
+      "source_sha256": "f5fe4a2db5643b2745dd6727bac98090ed5687d6af4de7fd695ba45154785279",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FSUB",
+        "advsimd-datatype": "simd-half",
+        "datatype": "half",
+        "reguse-datatype": "3reg-same-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ec21420",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x4ec21421",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ],
+      "status": "implemented",
+      "evidence_groups": [
+        "vector_numerical_fp"
+      ],
+      "review": "Exact June canonical forms, all 20 arrangements and reserved 1D encodings are reviewed. Actual vector originals supply full-frame QEMU captures; raw completed native paths receive direct-original equality credit, while unchanged helper exits and actual Rust helper completion are checked separately. Emitted binaries, caller MXCSR and runtime control/status, cache and budget resumes are retained in the consolidated numerical evidence.",
+      "scope": "Enabled FP/FP16/AFP, AArch64, non-streaming vector binary arithmetic: 4H/8H, 2S/4S and 2D, every V-register role and source/destination alias. Evaluate active lanes only; 64-bit vector writes clear the upper half regardless of NEP. Reuse shared Arm lane NaN/flushing/rounding/tininess semantics, aggregate sticky FPSR transactionally and preserve other CPU/RAM state. Normal S/D paths execute inline; H and exceptional values use the immutable-source-validated shared integer-core boundary. Any numerical exception enable declines before destination/status effects. No numerical trap delivery, disabled-FP access, streaming SME, numerical leaf ABI or complete application execution is claimed."
     }
   ]
 }
