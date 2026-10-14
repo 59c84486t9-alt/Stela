@@ -937,6 +937,14 @@ class DeclaredScalableProgressTests(unittest.TestCase):
                 progress.validate_scalable_profile({**profile, 'decoder_mattrs': attrs})
 
 class LLVMDisassemblyGuards(unittest.TestCase):
+    def test_llvm_hyphenated_feature_segments_are_explicit_and_unambiguous(self):
+        for feature in ('+sme-i16i64', '+sme-f64f64', '-sme-i16i64'):
+            with self.subTest(feature=feature):
+                self.assertIsNotNone(disassembly.FEATURE_NAME.fullmatch(feature))
+        for feature in ('+sme--i16i64', '+sme-', '+sme_i16i64', '+sme2,+all', ' +sme2', '+sme2 '):
+            with self.subTest(feature=feature):
+                self.assertIsNone(disassembly.FEATURE_NAME.fullmatch(feature))
+
     def fact(self):
         catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
         return progress.a64_checklist.validate(catalog)['sdot_z32_zzz_']

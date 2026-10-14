@@ -23,7 +23,7 @@ ELF_HEADER_BYTES = 64
 ELF_SECTION_HEADER = struct.Struct('<IIQQQQIIQQ')
 DECODED_LINE = re.compile(r'^\s*([0-9a-f]+):\s+([0-9a-f]{8})\s+([a-z][a-z0-9_.]*)(?:\s+(.*?))?\s*$', re.IGNORECASE)
 INSTRUCTION_LINE = re.compile(r'^\s*[0-9a-f]+:\s', re.IGNORECASE)
-FEATURE_NAME = re.compile(r'^[+-][a-z][a-z0-9]*$')
+FEATURE_NAME = re.compile(r'^[+-][a-z][a-z0-9]*(?:-[a-z0-9]+)*$')
 
 
 @dataclass(frozen=True)
