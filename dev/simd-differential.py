@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 from contextlib import ExitStack
 import ctypes
+from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
@@ -251,7 +252,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx', 'fmlal', 'fmlal2', 'fmlsl', 'fmlsl2'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx', 'fmlal', 'fmlal2', 'fmlsl', 'fmlsl2', 'bfcvt', 'bfcvtn', 'bfcvtn2', 'bfdot', 'bfmlalb', 'bfmlalt', 'bfmmla'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -2718,6 +2719,9 @@ def execute_numerical_batches(batches, oracle=None):
             examples.setdefault(shape, record)
             initial = State.from_buffer_copy(record['initial'])
             if not record['unsupported'] and not record.get('control_policy_success') and initial.fpcr & 7 == 0:
+                if not FULL_FRAME_NUMERICAL_COHORTS.get(batches[0].get('cohort'), {}).get('supplementary_original_available', True):
+                    counts['unicorn_unavailable'] += 1
+                    continue
                 initialize_arm(machine, initial)
                 machine.emu_start(BASE + record['function'] * 8, STOP, count=3)
                 original = capture_arm(machine, initial)
@@ -2756,6 +2760,7 @@ def execute_numerical_batches(batches, oracle=None):
             'raw_helper_unchanged_state_comparisons': counts['helper'],
             'raw_unsupported_unchanged_state_comparisons': counts['unsupported'],
             'unicorn_original_complete_state_comparisons': counts['unicorn_complete_state'],
+            'unicorn_original_unavailable_cases': counts['unicorn_unavailable'],
             'unicorn_exact_control_divergences': counts['unicorn_exact_control_divergences'],
             'unicorn_exact_divergence_examples': unicorn_divergences,
             'caller_mxcsr_preservation_comparisons': counts['mxcsr_checks'],
@@ -3078,7 +3083,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/floating/bfloat16.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -3396,7 +3401,10 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
         # the actual RET. The original subject instruction left every GPR intact.
         profile_expected = family['profile_expectation'](operation, initial, original, receipt) if family.get('profile_expectation') else None
         enabled = bool(initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK)
-        policy_success = enabled and bool(family.get('accepts_enabled_control') and family['accepts_enabled_control'](operation, initial))
+        enabled_success = enabled and bool(family.get('accepts_enabled_control') and family['accepts_enabled_control'](operation, initial))
+        policy_success = enabled_success
+        if (not enabled or enabled_success) and family.get('original_control_policy'):
+            policy_success |= bool(family['original_control_policy'](operation, initial, receipt))
         return_register = operation.get('return_register', 30)
         initial.x[return_register] = original.x[return_register] = STOP
         primary_expected = bytes(original)
@@ -3414,7 +3422,7 @@ def load_full_frame_numerical_oracle(path, expected_functions, expected_cases, f
             'primary_expected': primary_expected, 'profile_expected': bytes(profile_expected) if profile_expected is not None else None,
             'equality_basis': basis, 'control_policy_success': policy_success,
             'operation': operation, 'case': index, 'label': case['label'], 'producer': 'vector_el0' if focus == VECTOR_NUMERICAL_FOCUS else focus + '_el0',
-            'unsupported': enabled and not policy_success})
+            'unsupported': enabled and not enabled_success})
     return {'records': records, 'functions': expected_functions, 'receipt_sha256': receipt_hash,
             'pointer_sha256': pointer_hash,
             'producer': receipt, 'control_readbacks': [{'requested': requested, 'actual': actual, 'cases': count}
@@ -5842,7 +5850,620 @@ def load_widening_oracle(path=WIDENING_NUMERICAL_ORACLE):
     return load_full_frame_numerical_oracle(path, widening_functions(), WIDENING_NUMERICAL_CASES, WIDENING_NUMERICAL_FOCUS)
 
 
+BFLOAT16_NUMERICAL_FOCUS = 'bfloat16_numerical'
+BFLOAT16_NUMERICAL_ORACLE = ROOT / '.stela/research/bfloat16-numerical/harness/oracle/receipt.json'
+BFLOAT16_NUMERICAL_CASES = 21002
+BFLOAT16_BITS = 16
+BFLOAT16_FRACTION_BITS = 7
+BFLOAT16_EXPONENT_MASK = 255
+BFLOAT16_SIGN = 1 << 15
+BFLOAT16_QUIET = 1 << 6
+BFLOAT16_INFINITY = 255 << BFLOAT16_FRACTION_BITS
+BFLOAT16_ONE = 127 << BFLOAT16_FRACTION_BITS
+BFLOAT16_EBF = 1 << 13
+BFLOAT16_SCALAR_CONVERT = 0x1e634000
+BFLOAT16_NARROW_CONVERT = 0x0ea16800
+BFLOAT16_DOT_VECTOR = 0x2e40fc00
+BFLOAT16_DOT_INDEXED = 0x0f40f000
+BFLOAT16_MLA_VECTOR = 0x2ec0fc00
+BFLOAT16_MLA_INDEXED = 0x0fc0f000
+BFLOAT16_MATRIX = 0x6e40ec00
+BFLOAT16_RANDOM_SEED = 0x42464c4f41543136
+BFLOAT16_CONTROLS = (*WIDENING_CONTROLS, NUMERICAL_AH | NUMERICAL_DN | NUMERICAL_FZ)
+
+
+def bfloat16_operation(kind, width, d=0, n=1, m=None, index=None, upper=False, parity=0):
+    if any(not 0 <= register < 32 for register in (d, n)) or m is not None and not 0 <= m < 32:
+        raise ValueError('Invalid BF16 register')
+    if kind == 'conversion':
+        if width not in (2, 8, 16) or m is not None or index is not None or parity or upper != (width == 16):
+            raise ValueError('Invalid BF16 conversion shape')
+        scalar = width == 2
+        word = BFLOAT16_SCALAR_CONVERT if scalar else BFLOAT16_NARROW_CONVERT | int(upper) << 30
+        name = 'bfcvt' if scalar else 'bfcvtn2' if upper else 'bfcvtn'
+        canonical = 'BFCVT_BS_floatdp1' if scalar else 'BFCVTN_asimdmisc_4S'
+    elif kind == 'dot':
+        if width not in (8, 16) or m is None or upper or parity or index is not None and not 0 <= index < 4:
+            raise ValueError('Invalid BF16 dot shape')
+        scalar, name = False, 'bfdot'
+        word = (BFLOAT16_DOT_VECTOR if index is None else BFLOAT16_DOT_INDEXED) | int(width == 16) << 30
+        if index is not None:
+            word |= (index & 1) << 21 | (index >> 1) << 11
+        canonical = 'BFDOT_asimdsame2_D' if index is None else 'BFDOT_asimdelem_E'
+    elif kind == 'multiply':
+        if width != 16 or m is None or upper or parity not in (0, 1) or index is not None and (m >= 16 or not 0 <= index < 8):
+            raise ValueError('Invalid BF16 multiply-add shape')
+        scalar, name = False, 'bfmlalt' if parity else 'bfmlalb'
+        word = (BFLOAT16_MLA_VECTOR if index is None else BFLOAT16_MLA_INDEXED) | parity << 30
+        if index is not None:
+            word |= ((index >> 2) & 1) << 11 | ((index >> 1) & 1) << 21 | (index & 1) << 20
+        canonical = 'BFMLAL_asimdsame2_F_' if index is None else 'BFMLAL_asimdelem_F'
+    elif kind == 'matrix':
+        if width != 16 or m is None or upper or parity or index is not None:
+            raise ValueError('Invalid BF16 matrix shape')
+        scalar, name, word, canonical = False, 'bfmmla', BFLOAT16_MATRIX, 'BFMMLA_asimdsame2_E'
+    else:
+        raise ValueError('Unknown BF16 family')
+    result_count = 1 if scalar else 4 if kind == 'conversion' else width // 4
+    operation = {'kind': kind, 'name': name, 'lane': 2 if kind == 'conversion' else 4,
+        'source_lane': 4 if kind == 'conversion' else 2, 'bytes': width, 'scalar': scalar,
+        'd': d, 'n': n, 'm': m, 'index': index, 'upper': upper, 'parity': parity,
+        'word': word | n << 5 | d | (0 if m is None else m << 16), 'canonical_id': canonical,
+        'source_lane_count': result_count if kind == 'conversion' else result_count * 2 if kind == 'dot' else 8 if kind == 'matrix' else 4,
+        'result_lane_count': result_count, 'output_kind': 'vector',
+        'input_kind': 'single' if kind == 'conversion' else 'indexed' if index is not None else 'register',
+        'merge': 'old_destination_if_nep' if scalar else 'preserve_low64' if upper else 'none', 'cohort_family': 'bfloat16'}
+    if kind != 'conversion':
+        operation['a'] = d
+    return operation
+
+
+def bfloat16_functions():
+    functions = [bfloat16_operation('conversion', width, d, n, upper=width == 16)
+        for width in (2, 8, 16) for d, n in NUMERICAL_UNARY_ROLES]
+    for width in (8, 16):
+        for index in (None, *range(4)):
+            functions.extend(bfloat16_operation('dot', width, d, n, m, index)
+                for d, n, m in FUSED_ACCUMULATE_ROLES)
+    for parity in (0, 1):
+        for index in (None, *range(8)):
+            roles = FUSED_ACCUMULATE_ROLES if index is None else WIDENING_INDEXED_ROLES
+            functions.extend(bfloat16_operation('multiply', 16, d, n, m, index, parity=parity)
+                for d, n, m in roles)
+    functions.extend(bfloat16_operation('matrix', 16, d, n, m) for d, n, m in FUSED_ACCUMULATE_ROLES)
+    if len(functions) != len({op['word'] for op in functions}):
+        raise AssertionError('BF16 subject words must be unique')
+    return functions
+
+
+def bfloat16_values():
+    one, infinity = BFLOAT16_ONE, BFLOAT16_INFINITY
+    return {'zero_positive': 0, 'zero_negative': BFLOAT16_SIGN, 'one_positive': one,
+        'one_negative': one | BFLOAT16_SIGN, 'two_positive': one + (1 << BFLOAT16_FRACTION_BITS),
+        'half_positive': one - (1 << BFLOAT16_FRACTION_BITS), 'minsubnormal_positive': 1,
+        'minsubnormal_negative': 1 | BFLOAT16_SIGN, 'maxsubnormal_positive': (1 << BFLOAT16_FRACTION_BITS) - 1,
+        'minnormal_positive': 1 << BFLOAT16_FRACTION_BITS, 'maxfinite_positive': infinity - 1,
+        'infinity_positive': infinity, 'infinity_negative': infinity | BFLOAT16_SIGN,
+        'qnan_positive': infinity | BFLOAT16_QUIET | 3, 'qnan_negative': infinity | BFLOAT16_QUIET | BFLOAT16_SIGN | 5,
+        'snan_positive': infinity | 1, 'snan_negative': infinity | BFLOAT16_SIGN | 7}
+
+
+def bfloat16_conversion_values():
+    values = list(numerical_unary_values(4))
+    for top in (0, 1, 0x007f, 0x0080, 0x3f80, 0x3f81, 0x7f7f):
+        for low in (0, 0x7fff, 0x8000, 0x8001, 0xffff):
+            for sign in (0, 1 << 31):
+                values.append((f'bf_round_{top}_{low}_{bool(sign)}', top << 16 | low | sign))
+    return values
+
+
+def bfloat16_triples():
+    b, s = bfloat16_values(), dict(numerical_unary_values(4))
+    one, small = b['one_positive'], (127 - 12) << BFLOAT16_FRACTION_BITS
+    triples = [('one_one_one', s['one_positive'], one, one),
+        ('cancel_negative', s['one_negative'], one, one), ('cancel_positive', s['one_positive'], one | BFLOAT16_SIGN, one),
+        ('single_round_residual', s['one_negative'], one + 1, one - 2),
+        ('tie_even', s['one_positive'], small, small), ('tie_odd', s['one_positive'] + 1, small, small),
+        ('tie_above', s['one_positive'], small + 1, small), ('tie_below', s['one_positive'], small - 1, small),
+        ('maximum_product', 0, b['maxfinite_positive'], b['maxfinite_positive']),
+        ('overflow_cancel', s['maxfinite_positive'], b['maxfinite_positive'] | BFLOAT16_SIGN, b['two_positive']),
+        ('tiny_product', 0, b['minnormal_positive'], b['minnormal_positive']),
+        ('subnormal_product', 0, b['minsubnormal_positive'], b['one_positive']),
+        ('single_subnormal', s['minsubnormal_positive'], 0, one),
+        ('negative_single_subnormal', s['minsubnormal_negative'], 0, one),
+        ('single_denormal_nan', s['minsubnormal_positive'], b['qnan_negative'], one),
+        ('single_denormal_invalid', s['minsubnormal_positive'], b['infinity_positive'], 0),
+        ('qnan_invalid_product', s['qnan_negative'], b['infinity_positive'], 0),
+        ('half_denormal_nan', s['qnan_negative'], b['minsubnormal_positive'], one),
+        ('opposed_infinity', s['infinity_negative'], b['infinity_positive'], one),
+        ('same_infinity', s['infinity_positive'], b['infinity_positive'], one)]
+    for addend in ('positive', 'negative'):
+        for left in ('positive', 'negative'):
+            triples.append((f'zero_{addend}_{left}', s['zero_' + addend], b['zero_' + left], one))
+    for label in ('minsubnormal_positive', 'minsubnormal_negative', 'maxsubnormal_positive', 'minnormal_positive',
+                  'infinity_positive', 'infinity_negative', 'qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+        triples.extend((('left_' + label, s['one_positive'], b[label], one), ('right_' + label, s['one_positive'], one, b[label])))
+    for label in ('qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+        triples.append(('addend_' + label, s[label], one, one))
+    return triples
+
+
+def bfloat16_state(op, case, addends, left=None, right=None, control=0, sticky=0):
+    if op['kind'] == 'conversion':
+        count = op['source_lane_count']
+        if len(addends) != count:
+            raise ValueError('Incorrect BF16 conversion source count')
+        initial = vector_numerical_state(dict(op, lane=4, bytes=count * 4, m=op['n']), case, [(value, value) for value in addends], control)
+        initial.fpsr = sticky
+        return initial
+    count = op['result_lane_count']
+    left_count = op['source_lane_count']
+    right_count = (2 if op['kind'] == 'dot' else 1) if op['index'] is not None else left_count
+    if (len(addends) != count or left is None or len(left) != left_count or right is None or len(right) != right_count
+            or any(not 0 <= value < 1 << 32 for value in addends)
+            or any(not 0 <= value < 1 << 16 for value in (*left, *right))):
+        raise ValueError('Incorrect BF16 arithmetic source layouts')
+    seed = [(addends[position], left[position], right[position % len(right)]) for position in range(count)]
+    initial = fused_numerical_state(dict(op, index=None), case, seed, control)
+    initial.fpsr = sticky
+    def store(register, lane, positions, values):
+        bits = lane * 8
+        poison = BFLOAT16_INFINITY | 1 if lane == 2 else dict(numerical_unary_values(4))['snan_positive']
+        packed = sum(poison << (position * bits) for position in range(16 // lane))
+        for position, value in zip(positions, values):
+            mask = ((1 << bits) - 1) << (position * bits)
+            packed = packed & ~mask | value << (position * bits)
+        initial.v[register][:] = [packed & MASK, packed >> 64]
+    store(op['d'], 4, range(count), addends)
+    positions = [2 * position + op['parity'] for position in range(4)] if op['kind'] == 'multiply' else range(left_count)
+    store(op['n'], 2, positions, left)
+    if op['index'] is not None:
+        positions = range(2 * op['index'], 2 * op['index'] + 2) if op['kind'] == 'dot' else [op['index']]
+    store(op['m'], 2, positions, right)
+    return initial
+
+
+def bfloat16_shape(op):
+    return op['kind'], op['name'], op['bytes'], op['index'] is not None
+
+
+def bfloat16_accepts_enabled_control(op, initial):
+    return op['kind'] in ('dot', 'matrix') or bool(initial.fpcr & NUMERICAL_AH)
+
+
+def bfloat16_control_policy(op, initial, producer):
+    return bool(initial.fpcr & BFLOAT16_EBF) and op['kind'] in ('conversion', 'multiply')
+
+
+def validate_bfloat16_original_effects(initial, original, op):
+    if op['kind'] == 'conversion':
+        if op['scalar']:
+            merged = struct.pack('<2Q', *initial.v[op['d']]) if initial.fpcr & NUMERICAL_NEP else bytes(16)
+            if struct.pack('<2Q', *original.v[op['d']])[2:] != merged[2:]:
+                raise AssertionError('BF16 scalar old-Vd merge changed')
+        elif op['upper'] and original.v[op['d']][0] != initial.v[op['d']][0]:
+            raise AssertionError('BF16 narrowing upper lost old low64')
+    if bfloat16_accepts_enabled_control(op, initial) and original.fpsr != initial.fpsr:
+        raise AssertionError('BF16 suppressed-status operation generated flags')
+
+
+BFLOAT16_WITNESS_BF16_FRACTION_BITS = 7
+BFLOAT16_WITNESS_SINGLE_FRACTION_BITS = 23
+BFLOAT16_WITNESS_EXPONENT_BITS = 8
+BFLOAT16_WITNESS_EXPONENT_MASK = (1 << BFLOAT16_WITNESS_EXPONENT_BITS) - 1
+BFLOAT16_WITNESS_EXPONENT_BIAS = (1 << (BFLOAT16_WITNESS_EXPONENT_BITS - 1)) - 1
+BFLOAT16_WITNESS_MINIMUM_NORMAL_EXPONENT = 1 - BFLOAT16_WITNESS_EXPONENT_BIAS
+BFLOAT16_WITNESS_MAXIMUM_NORMAL_EXPONENT = BFLOAT16_WITNESS_EXPONENT_BIAS
+BFLOAT16_WITNESS_SINGLE_SIGN = 1 << (BFLOAT16_WITNESS_SINGLE_FRACTION_BITS + BFLOAT16_WITNESS_EXPONENT_BITS)
+BFLOAT16_WITNESS_SINGLE_FRACTION_MASK = (1 << BFLOAT16_WITNESS_SINGLE_FRACTION_BITS) - 1
+BFLOAT16_WITNESS_SINGLE_HIDDEN_BIT = 1 << BFLOAT16_WITNESS_SINGLE_FRACTION_BITS
+BFLOAT16_WITNESS_FPCR_AH = 1 << 1
+BFLOAT16_WITNESS_FPCR_ROUNDING_SHIFT = 22
+BFLOAT16_WITNESS_FPCR_ROUNDING_MASK = 3
+BFLOAT16_WITNESS_ROUND_NEAREST_EVEN = 0
+BFLOAT16_WITNESS_ROUND_POSITIVE = 1
+BFLOAT16_WITNESS_ROUND_NEGATIVE = 2
+BFLOAT16_WITNESS_ROUND_ZERO = 3
+BFLOAT16_WITNESS_ROUND_ODD = 4
+
+
+class Bfloat16ModelDomainError(ValueError):
+    """The requested observation is outside the explicitly reviewed witness domain."""
+
+
+@dataclass(frozen=True)
+class Bfloat16Dyadic:
+    significand: int
+    exponent: int
+    negative_zero: bool = False
+
+    @property
+    def negative(self) -> bool:
+        return self.significand < 0 or self.significand == 0 and self.negative_zero
+
+
+def _bfloat16_witness_decode(bits: int, fraction_bits: int) -> Bfloat16Dyadic:
+    width = 1 + BFLOAT16_WITNESS_EXPONENT_BITS + fraction_bits
+    if not isinstance(bits, int) or not 0 <= bits < 1 << width:
+        raise Bfloat16ModelDomainError(f'Invalid {width}-bit input')
+    sign = bool(bits >> (width - 1))
+    exponent = (bits >> fraction_bits) & BFLOAT16_WITNESS_EXPONENT_MASK
+    fraction = bits & ((1 << fraction_bits) - 1)
+    if exponent == BFLOAT16_WITNESS_EXPONENT_MASK:
+        raise Bfloat16ModelDomainError('NaN/infinity inputs are outside finite witnesses')
+    if exponent == 0:
+        if fraction:
+            raise Bfloat16ModelDomainError('Input subnormals are outside finite normal witnesses')
+        return Bfloat16Dyadic(0, 0, sign)
+    magnitude = (1 << fraction_bits) | fraction
+    return Bfloat16Dyadic(-magnitude if sign else magnitude,
+                  exponent - BFLOAT16_WITNESS_EXPONENT_BIAS - fraction_bits)
+
+
+def _bfloat16_witness_product(left: Bfloat16Dyadic, right: Bfloat16Dyadic) -> Bfloat16Dyadic:
+    value = left.significand * right.significand
+    return Bfloat16Dyadic(value, left.exponent + right.exponent,
+                  value == 0 and left.negative != right.negative)
+
+
+def _bfloat16_witness_sum(left: Bfloat16Dyadic, right: Bfloat16Dyadic, mode: int) -> Bfloat16Dyadic:
+    base = min(left.exponent, right.exponent)
+    value = ((left.significand << (left.exponent - base))
+             + (right.significand << (right.exponent - base)))
+    if value:
+        return Bfloat16Dyadic(value, base)
+    if left.significand == right.significand == 0 and left.negative == right.negative:
+        negative = left.negative
+    else:
+        negative = mode == BFLOAT16_WITNESS_ROUND_NEGATIVE
+    return Bfloat16Dyadic(0, base, negative)
+
+
+def _bfloat16_witness_round_single(value: Bfloat16Dyadic, mode: int) -> int:
+    if mode not in (BFLOAT16_WITNESS_ROUND_NEAREST_EVEN, BFLOAT16_WITNESS_ROUND_POSITIVE, BFLOAT16_WITNESS_ROUND_NEGATIVE, BFLOAT16_WITNESS_ROUND_ZERO, BFLOAT16_WITNESS_ROUND_ODD):
+        raise Bfloat16ModelDomainError('Unknown witness rounding mode')
+    sign = BFLOAT16_WITNESS_SINGLE_SIGN if value.negative else 0
+    magnitude = abs(value.significand)
+    if not magnitude:
+        return sign
+    leading = magnitude.bit_length() - 1
+    exponent = leading + value.exponent
+    if exponent < BFLOAT16_WITNESS_MINIMUM_NORMAL_EXPONENT:
+        if mode == BFLOAT16_WITNESS_ROUND_ODD:
+            return sign  # Classic BFRound flushes before any retained-bit jam.
+        raise Bfloat16ModelDomainError('Extended tiny/subnormal stage is outside witnesses')
+    if exponent > BFLOAT16_WITNESS_MAXIMUM_NORMAL_EXPONENT:
+        raise Bfloat16ModelDomainError('Overflow stage is outside finite witnesses')
+    shift = leading - BFLOAT16_WITNESS_SINGLE_FRACTION_BITS
+    if shift <= 0:
+        mantissa = magnitude << -shift
+    else:
+        divisor = 1 << shift
+        mantissa, remainder = divmod(magnitude, divisor)
+        if mode == BFLOAT16_WITNESS_ROUND_ODD:
+            mantissa |= bool(remainder)
+        elif mode == BFLOAT16_WITNESS_ROUND_NEAREST_EVEN:
+            mantissa += (remainder * 2 > divisor
+                         or remainder * 2 == divisor and mantissa & 1)
+        elif mode == BFLOAT16_WITNESS_ROUND_POSITIVE:
+            mantissa += bool(remainder) and not value.negative
+        elif mode == BFLOAT16_WITNESS_ROUND_NEGATIVE:
+            mantissa += bool(remainder) and value.negative
+        # Toward-zero leaves the truncated magnitude untouched.
+    if mantissa >= BFLOAT16_WITNESS_SINGLE_HIDDEN_BIT << 1:
+        mantissa >>= 1
+        exponent += 1
+    if exponent > BFLOAT16_WITNESS_MAXIMUM_NORMAL_EXPONENT:
+        raise Bfloat16ModelDomainError('Rounded overflow is outside finite witnesses')
+    return (sign | ((exponent + BFLOAT16_WITNESS_EXPONENT_BIAS) << BFLOAT16_WITNESS_SINGLE_FRACTION_BITS)
+            | (mantissa & BFLOAT16_WITNESS_SINGLE_FRACTION_MASK))
+
+
+def _bfloat16_witness_inputs(fpcr: int, addend: int, left: tuple[int, int], right: tuple[int, int]):
+    if not isinstance(fpcr, int) or not 0 <= fpcr < 1 << 32:
+        raise Bfloat16ModelDomainError('Invalid FPCR witness input')
+    if len(left) != 2 or len(right) != 2:
+        raise Bfloat16ModelDomainError('A dot witness needs exactly two products')
+    return (_bfloat16_witness_decode(addend, BFLOAT16_WITNESS_SINGLE_FRACTION_BITS),
+            tuple(_bfloat16_witness_decode(bits, BFLOAT16_WITNESS_BF16_FRACTION_BITS) for bits in left),
+            tuple(_bfloat16_witness_decode(bits, BFLOAT16_WITNESS_BF16_FRACTION_BITS) for bits in right))
+
+
+def bfloat16_standard_dot(fpcr: int, addend: int,
+                          left: tuple[int, int], right: tuple[int, int]) -> int:
+    """Classic BFMulH twice, odd pair addition, then odd accumulator addition.
+
+    FPCR is validated but intentionally has no numeric effect in this domain.
+    In particular raw EBF bit 13 cannot select another algorithm in this API.
+    """
+    accumulator, lhs, rhs = _bfloat16_witness_inputs(fpcr, addend, left, right)
+    products = tuple(_bfloat16_witness_decode(_bfloat16_witness_round_single(_bfloat16_witness_product(lhs[i], rhs[i]), BFLOAT16_WITNESS_ROUND_ODD),
+                             BFLOAT16_WITNESS_SINGLE_FRACTION_BITS) for i in range(2))
+    pair = _bfloat16_witness_decode(_bfloat16_witness_round_single(_bfloat16_witness_sum(*products, BFLOAT16_WITNESS_ROUND_ODD), BFLOAT16_WITNESS_ROUND_ODD),
+                   BFLOAT16_WITNESS_SINGLE_FRACTION_BITS)
+    return _bfloat16_witness_round_single(_bfloat16_witness_sum(accumulator, pair, BFLOAT16_WITNESS_ROUND_ODD), BFLOAT16_WITNESS_ROUND_ODD)
+
+
+def bfloat16_enhanced_dot(fpcr: int, addend: int,
+                          left: tuple[int, int], right: tuple[int, int]) -> int:
+    """Genuine FPDot fused pair, then separate FPAdd, for finite witnesses.
+
+    This is an independent enhanced-policy model, never a Stela support claim.
+    Forced DN and AH/FIZ/FZ effects on exceptional/tiny inputs are outside this
+    API's domain and cause refusal rather than a successful substitute result.
+    """
+    accumulator, lhs, rhs = _bfloat16_witness_inputs(fpcr, addend, left, right)
+    mode = (fpcr >> BFLOAT16_WITNESS_FPCR_ROUNDING_SHIFT) & BFLOAT16_WITNESS_FPCR_ROUNDING_MASK
+    exact_products = tuple(_bfloat16_witness_product(lhs[i], rhs[i]) for i in range(2))
+    pair = _bfloat16_witness_decode(_bfloat16_witness_round_single(_bfloat16_witness_sum(*exact_products, mode), mode),
+                   BFLOAT16_WITNESS_SINGLE_FRACTION_BITS)
+    return _bfloat16_witness_round_single(_bfloat16_witness_sum(accumulator, pair, mode), mode)
+
+
+
+def bfloat16_dot_profile_state(op, initial, enhanced):
+    """Closed finite witnesses for the explicitly absent EBF16 profile."""
+    if op['kind'] not in ('dot', 'matrix'):
+        raise ValueError('Only BF16 dot/matrix have an EBF profile split')
+    left = struct.unpack('<8H', struct.pack('<2Q', *initial.v[op['n']]))
+    right = struct.unpack('<8H', struct.pack('<2Q', *initial.v[op['m']]))
+    addends = struct.unpack('<4I', struct.pack('<2Q', *initial.v[op['d']]))
+    dot = bfloat16_enhanced_dot if enhanced else bfloat16_standard_dot
+    values = []
+    for position in range(op['result_lane_count']):
+        value = addends[position]
+        if op['kind'] == 'dot':
+            source = 2 * position
+            selected = source if op['index'] is None else 2 * op['index']
+            value = dot(initial.fpcr, value, left[source:source + 2], right[selected:selected + 2])
+        else:
+            row, column = divmod(position, 2)
+            for stage in range(2):
+                lhs, rhs = 4 * row + 2 * stage, 4 * column + 2 * stage
+                value = dot(initial.fpcr, value, left[lhs:lhs + 2], right[rhs:rhs + 2])
+        values.append(value)
+    expected = State.from_buffer_copy(initial)
+    packed = struct.pack('<4I', *(values + [0] * (4 - len(values))))
+    expected.v[op['d']][:] = struct.unpack('<2Q', packed)
+    return expected
+
+
+def bfloat16_profile_expectation(op, initial, original, producer):
+    if op['kind'] not in ('dot', 'matrix') or not initial.fpcr & BFLOAT16_EBF:
+        return None
+    if producer.get('cpu_registers', {}).get('ID_AA64ISAR1_EL1') != '0x111211110211502':
+        raise AssertionError('BF16 enhanced oracle must match calibrated original CPU')
+    enhanced = bfloat16_dot_profile_state(op, initial, True)
+    enhanced.fpcr = original.fpcr
+    if bytes(enhanced) != bytes(original):
+        raise AssertionError('Raw EBF1 original does not match independent enhanced witness')
+    return bfloat16_dot_profile_state(op, initial, False)
+
+
+def bfloat16_corpus():
+    functions, records, primary = bfloat16_functions(), [], set()
+    rng = random.Random(BFLOAT16_RANDOM_SEED)
+    b, s = bfloat16_values(), dict(numerical_unary_values(4))
+    triples = bfloat16_triples()
+    catalog = {label: (addend, left, right) for label, addend, left, right in triples}
+    def append(function, label, addends, left=None, right=None, control=0, sticky=0):
+        initial = bfloat16_state(functions[function], len(records), addends, left, right, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    def repeated(function, label, triple, control=0, sticky=0):
+        op = functions[function]
+        addend, left, right = triple
+        right_count = (2 if op['kind'] == 'dot' else 1) if op['index'] is not None else op['source_lane_count']
+        append(function, label, [addend] * op['result_lane_count'], [left] * op['source_lane_count'], [right] * right_count, control, sticky)
+    for function, op in enumerate(functions):
+        shape, count = bfloat16_shape(op), op['result_lane_count']
+        first = shape not in primary
+        if first:
+            primary.add(shape)
+            if op['kind'] == 'conversion':
+                for ah in (0, NUMERICAL_AH):
+                    for mode in range(4):
+                        for label, value in bfloat16_conversion_values():
+                            append(function, 'value_' + label, [value] * count, control=ah | mode << NUMERICAL_ROUND_SHIFT)
+                for control in BFLOAT16_CONTROLS:
+                    for label in ('one_positive', 'minsubnormal_positive', 'minsubnormal_negative', 'maxsubnormal_positive',
+                                  'minnormal_positive', 'maxfinite_positive', 'qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+                        append(function, 'control_' + label, [s[label]] * count, control=control)
+                for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+                    for ah in (0, NUMERICAL_AH):
+                        append(function, 'sticky_inexact', [s['one_positive'] + 1] * count, control=ah, sticky=sticky)
+                for mode in range(4):
+                    for iteration in range(16):
+                        append(function, f'bounded_random_{iteration}', [rng.getrandbits(32) for _ in range(count)], control=mode << NUMERICAL_ROUND_SHIFT)
+                append(function, 'helper_quiet_nan', [s['qnan_positive']] * count)
+            else:
+                for ah in (0, NUMERICAL_AH):
+                    for mode in range(4):
+                        for label, addend, left, right in triples:
+                            repeated(function, 'directed_' + label, (addend, left, right), ah | mode << NUMERICAL_ROUND_SHIFT)
+                if op['kind'] in ('dot', 'matrix'):
+                    for ah in (0, NUMERICAL_AH):
+                        for mode in range(4):
+                            control = ah | mode << NUMERICAL_ROUND_SHIFT
+                            cancelled = 0xc0000000 if op['kind'] == 'dot' else 0xc0800000
+                            repeated(function, 'exact_cancel', (cancelled, BFLOAT16_ONE, BFLOAT16_ONE), control)
+                            left = [BFLOAT16_ONE, (127 - 12) << BFLOAT16_FRACTION_BITS] * (op['source_lane_count'] // 2)
+                            right = [BFLOAT16_ONE, (127 - 13) << BFLOAT16_FRACTION_BITS]
+                            append(function, 'fixed_odd_residual', [s['one_negative']] * count, left,
+                                right if op['index'] is not None else right * (op['source_lane_count'] // 2), control)
+                if op['kind'] == 'matrix':
+                    for ah in (0, NUMERICAL_AH):
+                        for mode in range(4):
+                            left = [BFLOAT16_ONE | BFLOAT16_SIGN, 0, (127 - 12) << BFLOAT16_FRACTION_BITS, 0] * 2
+                            right = [BFLOAT16_ONE, 0, (127 - 13) << BFLOAT16_FRACTION_BITS, 0] * 2
+                            append(function, 'matrix_stage_order', [s['one_positive']] * 4, left, right, ah | mode << NUMERICAL_ROUND_SHIFT)
+                for control in BFLOAT16_CONTROLS:
+                    for label in ('tie_odd', 'single_subnormal', 'negative_single_subnormal', 'single_denormal_nan',
+                                  'single_denormal_invalid', 'qnan_invalid_product', 'left_minsubnormal_positive',
+                                  'right_minsubnormal_negative', 'left_snan_positive', 'right_snan_negative',
+                                  'addend_qnan_positive', 'addend_snan_negative'):
+                        repeated(function, 'control_' + label, catalog[label], control)
+                if op['kind'] == 'multiply':
+                    for variant in range(2):
+                        choices = ([s['one_positive'], s['qnan_positive'] + variant * 3, s['snan_negative'] + variant * 7],
+                            [b['one_positive'], b['qnan_negative'] + variant * 3, b['snan_positive'] + variant * 5],
+                            [b['one_positive'], b['qnan_positive'] + variant * 7, b['snan_negative'] + variant * 3])
+                        for a, addend in enumerate(choices[0]):
+                            for n, left in enumerate(choices[1]):
+                                for m, right in enumerate(choices[2]):
+                                    if a or n or m:
+                                        for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+                                            repeated(function, f'nan_matrix_{variant}_{a}_{n}_{m}', (addend, left, right), control)
+                elif op['kind'] == 'dot':
+                    a_values = [s['one_positive'], s['qnan_negative'], s['snan_positive']]
+                    bf_values = [b['one_positive'], b['qnan_positive'], b['snan_negative']]
+                    for a, addend in enumerate(a_values):
+                        for code in range(81):
+                            indices = [(code // (3 ** position)) % 3 for position in range(4)]
+                            if not a and not any(indices):
+                                continue
+                            left, right = [bf_values[index] for index in indices[:2]], [bf_values[index] for index in indices[2:]]
+                            for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+                                append(function, f'dot_nan_{a}_{code}', [addend] * count, left * count,
+                                    right if op['index'] is not None else right * count, control)
+                else:
+                    for bank, positions in (('addend', 4), ('left', 8), ('right', 8)):
+                        for position in range(positions):
+                            for label in ('qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+                                for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+                                    addends, left, right = [s['one_positive']] * 4, [b['one_positive']] * 8, [b['one_positive']] * 8
+                                    {'addend': addends, 'left': left, 'right': right}[bank][position] = s[label] if bank == 'addend' else b[label]
+                                    append(function, f'matrix_nan_{bank}_{position}_{label}', addends, left, right, control)
+                    for n in range(8):
+                        for m in range(8):
+                            for ah in (0, NUMERICAL_AH):
+                                for mode in range(4):
+                                    left, right = [0] * 8, [0] * 8
+                                    left[n], right[m] = b['one_positive'], b['one_positive']
+                                    append(function, f'matrix_basis_{n}_{m}', [0] * 4, left, right, ah | mode << NUMERICAL_ROUND_SHIFT)
+                for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+                    for ah in (0, NUMERICAL_AH):
+                        for label in ('one_one_one', 'tie_odd', 'left_snan_positive', 'single_subnormal'):
+                            repeated(function, 'sticky_' + label, catalog[label], ah, sticky)
+                for control in (0, NUMERICAL_AH, NUMERICAL_FIZ, NUMERICAL_FZ):
+                    for label in ('tie_odd', 'left_snan_positive', 'single_subnormal', 'left_minsubnormal_positive'):
+                        for position in range(count):
+                            addends = [s['one_positive']] * count
+                            left = [b['one_positive']] * op['source_lane_count']
+                            right_count = (2 if op['kind'] == 'dot' else 1) if op['index'] is not None else op['source_lane_count']
+                            right = [b['one_positive']] * right_count
+                            addends[position] = catalog[label][0]
+                            left[min(position, len(left) - 1)] = catalog[label][1]
+                            append(function, f'mixed_{label}_{position}', addends, left, right, control)
+                for mode in range(4):
+                    for iteration in range(8):
+                        right_count = (2 if op['kind'] == 'dot' else 1) if op['index'] is not None else op['source_lane_count']
+                        append(function, f'bounded_random_{iteration}', [rng.getrandbits(32) for _ in range(count)],
+                            [rng.getrandbits(16) for _ in range(op['source_lane_count'])], [rng.getrandbits(16) for _ in range(right_count)], mode << NUMERICAL_ROUND_SHIFT)
+                repeated(function, 'helper_quiet_nan', (0x7fc00000, b['one_positive'], b['one_positive']))
+            for ah in (0, NUMERICAL_AH):
+                for enables in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                    if op['kind'] == 'conversion':
+                        append(function, 'retained_enable', [s['snan_negative']] * count, control=ah | enables)
+                    else:
+                        repeated(function, 'retained_enable', catalog['left_snan_positive'], ah | enables)
+        base_roles = (op['d'], op['n']) == (0, 1) if op['kind'] == 'conversion' else (op['d'], op['n'], op['m']) == (0, 1, 2)
+        for mode in range(4):
+            if op['kind'] == 'conversion':
+                append(function, 'layout_witness', [conversion_exact_positive_bits(4, position + 1, 0) for position in range(count)], control=mode << NUMERICAL_ROUND_SHIFT)
+            else:
+                right_count = (2 if op['kind'] == 'dot' else 1) if op['index'] is not None else op['source_lane_count']
+                append(function, 'layout_witness', [conversion_exact_positive_bits(4, position + 1, 0) for position in range(count)],
+                    [BFLOAT16_ONE + position for position in range(op['source_lane_count'])], [BFLOAT16_ONE + position + 9 for position in range(right_count)], mode << NUMERICAL_ROUND_SHIFT)
+        if not base_roles:
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP, NUMERICAL_FZ):
+                if op['kind'] == 'conversion':
+                    for label in ('one_positive', 'qnan_negative', 'snan_positive', 'minsubnormal_positive'):
+                        append(function, 'alias_' + label, [s[label]] * count, control=control)
+                else:
+                    for label in ('one_one_one', 'cancel_negative', 'left_snan_positive', 'single_subnormal'):
+                        repeated(function, 'alias_' + label, catalog[label], control)
+        if op['index'] not in (None, 0):
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP):
+                for label in ('one_one_one', 'cancel_negative', 'left_snan_positive', 'single_subnormal'):
+                    repeated(function, 'indexed_' + label, catalog[label], control)
+        if base_roles:
+            for ah in (0, NUMERICAL_AH):
+                for mode in range(4):
+                    control = BFLOAT16_EBF | ah | mode << NUMERICAL_ROUND_SHIFT
+                    if op['kind'] == 'conversion':
+                        append(function, 'raw_ebf_import', [s['one_positive'] + 1] * count, control=control)
+                    elif op['kind'] == 'multiply':
+                        repeated(function, 'raw_ebf_import', catalog['single_round_residual'], control)
+                    else:
+                        addends = [s['one_negative']] * count
+                        left = [BFLOAT16_ONE, (127 - 12) << BFLOAT16_FRACTION_BITS] * (op['source_lane_count'] // 2)
+                        right = [BFLOAT16_ONE, (127 - 13) << BFLOAT16_FRACTION_BITS]
+                        append(function, 'raw_ebf_import', addends, left, right if op['index'] is not None else right * (op['source_lane_count'] // 2), control)
+    return functions, records
+
+
+def bfloat16_runtime_cases(records):
+    selected = {}
+    important_controls = BFLOAT16_CONTROLS
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        shape, control = bfloat16_shape(op), initial.fpcr
+        base = (op['d'], op['n']) == (0, 1) if op['kind'] == 'conversion' else (op['d'], op['n'], op['m']) == (0, 1, 2)
+        if control & NUMERICAL_TRAP_ENABLE_MASK:
+            enables = control & NUMERICAL_TRAP_ENABLE_MASK
+            selected.setdefault(('enable', op['canonical_id'] if enables == NUMERICAL_TRAP_ENABLE_MASK else op['kind'], enables, bool(control & NUMERICAL_AH)), record)
+        elif label == 'layout_witness' and control == 0 and base:
+            selected.setdefault(('layout', shape, op['index']), record)
+        elif label == 'value_bf_round_16256_32768_False':
+            selected.setdefault(('conversion_round', shape, control), record)
+        elif label in ('exact_cancel', 'fixed_odd_residual', 'matrix_stage_order', 'directed_cancel_negative'):
+            selected.setdefault(('stage', op['kind'], op['name'], label, control), record)
+        elif label == 'raw_ebf_import' and control in (BFLOAT16_EBF, BFLOAT16_EBF | NUMERICAL_AH):
+            selected.setdefault(('raw_ebf', shape, control), record)
+        elif label == ('control_minsubnormal_positive' if op['kind'] == 'conversion' else 'control_single_denormal_nan') and control in important_controls:
+            selected.setdefault(('control', op['kind'], control), record)
+        elif label in ('value_snan_negative', 'directed_left_snan_positive') and control in (0, NUMERICAL_AH):
+            selected.setdefault(('snan', op['kind'], control), record)
+        elif label.startswith('alias_') and control == NUMERICAL_NEP:
+            selected.setdefault(('alias', op['kind'], op['d'], op['n'], op['m']), record)
+        elif label.startswith('sticky_') and control == 0:
+            selected.setdefault(('sticky', op['kind'], op['name']), record)
+        elif label in ('matrix_basis_0_0', 'matrix_basis_2_2', 'matrix_basis_4_4', 'matrix_basis_6_6', 'matrix_basis_0_1') and control == 0:
+            selected.setdefault(('basis', label), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def bfloat16_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (record['label'] != 'helper_quiet_nan' or initial.fpcr or initial.fpsr
+                or case_ids is not None and record['case'] not in case_ids):
+            continue
+        selected.setdefault(bfloat16_shape(op), record)
+    return list(selected.values())
+
+
+def prepare_bfloat16_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *bfloat16_corpus(), BFLOAT16_NUMERICAL_FOCUS)
+
+
+def load_bfloat16_oracle(path=BFLOAT16_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, bfloat16_functions(), BFLOAT16_NUMERICAL_CASES, BFLOAT16_NUMERICAL_FOCUS)
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
+    BFLOAT16_NUMERICAL_FOCUS: {'loader': load_bfloat16_oracle, 'runtime_cases': bfloat16_runtime_cases,
+        'supplementary_original_available': False,
+        'supplementary_original_evidence': {'path': '.stela/evidence/unicorn-review/838e4d9f084c88f790eacdb952da88255b1d389e3c10e1c91afe381f9f8723b3.json',
+            'sha256': '838e4d9f084c88f790eacdb952da88255b1d389e3c10e1c91afe381f9f8723b3'},
+        'helpers': bfloat16_helpers, 'forms': 7, 'actual_helpers': True, 'status_merge_source': 'd',
+        'original_effects': validate_bfloat16_original_effects, 'accepts_enabled_control': bfloat16_accepts_enabled_control,
+        'original_control_policy': bfloat16_control_policy, 'profile_expectation': bfloat16_profile_expectation,
+        'native_fma_operations': {'bfmlalb': 'vfmadd', 'bfmlalt': 'vfmadd'}, 'native_fma_optional': True,
+        'limits': 'Enabled nonstreaming BF16 conversion/dot/MLA/matrix with EBF16 explicitly absent. Every raw EBF1 dot/matrix case, including coincident results, uses a separately counted closed integer standard-profile model after validating the unchanged enhanced original. Raw EBF1 conversion/MLA and accepted retained enables use separate requested-control policy comparisons. AH0 conversion/MLA enables precisely refuse. Raw originals remain immutable. Supplementary Unicorn cannot execute BF16, including joined helper/status sequences; strict runtime/cache comparisons retain the primary single-instruction expectations. All otherwise eligible states are separately counted unavailable with zero equality credit and a retained inventory. No enabled trap delivery, EBF16-enabled guest profile, Apple hardware, process/OS or performance claim.'},
     WIDENING_NUMERICAL_FOCUS: {'loader': load_widening_oracle, 'runtime_cases': widening_runtime_cases,
         'helpers': widening_helpers, 'forms': 8, 'actual_helpers': True, 'status_merge_source': 'd',
         'native_fma_operations': {'fmlal': 'vfmadd', 'fmlal2': 'vfmadd', 'fmlsl': 'vfnmadd', 'fmlsl2': 'vfnmadd'},
@@ -5951,6 +6572,9 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
         counts['typed_unsupported_state_checks' if reason == 'floating_point_unsupported' else 'complete_state_comparisons'] += 1
 
     def check_original(code, initial, expected):
+        if not family.get('supplementary_original_available', True):
+            counts['original_joined_unavailable_cases'] += 1
+            return
         original.mem_write(BASE, code)
         original.ctl_remove_cache(BASE, BASE + len(code))
         initialize_arm(original, initial)
@@ -6071,6 +6695,7 @@ def full_frame_numerical_runtime_cohort(cli, directory, oracle, compiler,
     transcript_name = f'{focus}-{target_id}' if fused or modern else focus
     for name in ('budget_helper_resume_checks', 'disk_cache_checks', 'memory_cache_loop_checks', 'control_status_chain_checks', 'control_policy_success_checks', 'profile_model_success_checks'):
         counts.setdefault(name, 0)
+    counts.setdefault('original_joined_unavailable_cases', 0)
     snapshot = write_evidence(ROOT / f'.stela/simd-{transcript_name}-runtime-records.json', transcripts)
     return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
             'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())}}
@@ -6085,7 +6710,7 @@ def run_conversion_numerical_cohort(cli, oracle_path):
 
 
 def numerical_fma_expectation(operation, target_id, operations):
-    if not operations or 'fma' not in target_id.split('+')[1:] or operation['lane'] == 2:
+    if not operations or operation['name'] not in operations or 'fma' not in target_id.split('+')[1:] or operation['lane'] == 2:
         return {}
     suffix = ('s' if operation['scalar'] else 'p') + ('s' if operation['lane'] == 4 else 'd')
     return {operations[operation['name']] + '132' + suffix: 1}
@@ -6100,11 +6725,14 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     fused = focus == FUSED_NUMERICAL_FOCUS
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
     oracle = family['loader'](oracle_path)
+    supplementary = family.get('supplementary_original_evidence')
+    if supplementary:
+        numerical_json(ROOT / supplementary['path'], supplementary['sha256'])
     started = time.monotonic()
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/floating/bfloat16.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -6180,6 +6808,10 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
         'profiles': profiles, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
         'verification_wall_seconds': time.monotonic() - started,
         'limits': family['limits']}
+    if supplementary:
+        report['supplementary_original_evidence'] = supplementary
+        report['unicorn_original_unavailable_cases'] = sums('raw_native', 'unicorn_original_unavailable_cases')
+        report['runtime_joined_original_unavailable_cases'] = sums('rust_runtime', 'original_joined_unavailable_cases')
     if family.get('accepts_enabled_control'):
         report['runtime_control_policy_success_checks'] = sums('rust_runtime', 'control_policy_success_checks')
         report['raw_inline_control_policy_comparisons'] = sums('raw_native', 'raw_inline_control_policy_comparisons')
@@ -6195,7 +6827,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/floating/bfloat16.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -6416,7 +7048,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/floating/bfloat16.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -6540,7 +7172,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS, BFLOAT16_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -6555,6 +7187,7 @@ def main():
                         help='Pinned full-frame original integral rounding receipt')
     parser.add_argument('--sqrt-oracle', type=Path, default=SQRT_NUMERICAL_ORACLE,
                         help='Pinned full-frame original square-root receipt')
+    parser.add_argument('--bfloat16-oracle', type=Path, default=BFLOAT16_NUMERICAL_ORACLE)
     parser.add_argument('--widening-oracle', type=Path, default=WIDENING_NUMERICAL_ORACLE)
     parser.add_argument('--binary-remaining-oracle', type=Path, default=BINARY_REMAINING_ORACLE)
     parser.add_argument('--estimate-oracle', type=Path, default=ESTIMATE_NUMERICAL_ORACLE)
@@ -6568,6 +7201,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == BFLOAT16_NUMERICAL_FOCUS:
+        run_full_frame_numerical_cohort(cli, arguments.bfloat16_oracle, arguments.focus)
         return
     if arguments.focus == WIDENING_NUMERICAL_FOCUS:
         run_full_frame_numerical_cohort(cli, arguments.widening_oracle, arguments.focus)

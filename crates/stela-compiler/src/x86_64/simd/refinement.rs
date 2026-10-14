@@ -2,17 +2,17 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
-    RESULT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact, emit_fma,
-    emit_opcode_to, environment, environment_round, exponent_range, prepare_vector_input_range,
-    prepare_vector_result_range, read_numerical_vector, reject_other_status, reject_product_status,
-    resolve, restore_environment, restore_environment_with_product, save_product_status,
-    test_control, vector_exponent_range,
+    RESULT_MINIMUM_EXPONENT, VZEROUPPER, branch, clear_scalar, commit_ah0_inexact, emit_fma,
+    emit_opcode_to, environment_alternative_nearest, exponent_range, guard_ah0_exceptions,
+    prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
+    reject_other_status, reject_product_status, resolve, restore_environment,
+    restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
 use super::{Host, commit, half, packed};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format},
+        floating::{FPCR_AH, FPCR_NEP, Format},
         simd::{
             arithmetic::Shape,
             refinement::{Kind, Operand},
@@ -77,27 +77,6 @@ fn jump(code: &mut Vec<u8>) -> usize {
     let patch = code.len();
     code.extend(0i32.to_le_bytes());
     patch
-}
-
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
-    test_control(code, FPCR_AH);
-    let suppressed = branch(code, Condition::NotZero);
-    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
-    helper.push(branch(code, Condition::NotZero));
-    let enabled = code.len();
-    resolve(code, suppressed, enabled);
-}
-
-fn effective_environment(code: &mut Vec<u8>) {
-    test_control(code, FPCR_AH);
-    let nearest = branch(code, Condition::NotZero);
-    environment(code);
-    let done = jump(code);
-    let nearest_start = code.len();
-    resolve(code, nearest, nearest_start);
-    environment_round(code, Rounding::NearestEven);
-    let end = code.len();
-    resolve(code, done, end);
 }
 
 fn constant(code: &mut Vec<u8>, format: Format, kind: Kind, destination: u8) {
@@ -166,14 +145,6 @@ fn prehalve(code: &mut Vec<u8>, operand: &Operand) {
     if operand.shape == Shape::Vector64 {
         packed(code, Host::MoveQword, LEFT, LEFT);
     }
-}
-
-fn commit_host_status(code: &mut Vec<u8>) {
-    test_control(code, FPCR_AH);
-    let suppressed = branch(code, Condition::NotZero);
-    commit_inexact(code);
-    let end = code.len();
-    resolve(code, suppressed, end);
 }
 
 /// The first pair's target PE must not contaminate the second pair's exact
@@ -253,7 +224,7 @@ fn widened_product(code: &mut Vec<u8>, shape: Shape) {
 fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: usize) {
     packed(code, Host::MoveAligned, LEFT, SAVED_SINGLE_LEFT);
     constant(code, Format::Double, operand.kind, CONSTANT);
-    effective_environment(code);
+    environment_alternative_nearest(code);
     match operand.shape {
         Shape::Scalar => {
             code.extend(CVTSS2SD_XMM0_XMM0);
@@ -285,7 +256,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
         code.extend(VZEROUPPER);
     }
     let mut helper = Vec::new();
-    exception_guard(code, &mut helper);
+    guard_ah0_exceptions(code, &mut helper);
     read_numerical_vector(code, operand.shape, operand.left, LEFT);
     read_numerical_vector(code, operand.shape, operand.right, RIGHT);
     let merge = if operand.shape == Shape::Scalar
@@ -303,7 +274,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
         prehalve(code, operand);
     }
     constant(code, operand.format, operand.kind, CONSTANT);
-    effective_environment(code);
+    environment_alternative_nearest(code);
     let mut widen_product = None;
     let result = if native_fma {
         emit_fma(
@@ -362,7 +333,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
         resolve(code, patch, helper_start);
     }
     resolve(code, success, success_start);
-    commit_host_status(code);
+    commit_ah0_inexact(code);
     if operand.shape == Shape::Scalar {
         if merge != result {
             code.extend([
@@ -393,7 +364,7 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
 fn emit_half(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
-    exception_guard(code, &mut helper);
+    guard_ah0_exceptions(code, &mut helper);
     read_numerical_vector(code, operand.shape, operand.left, LEFT);
     read_numerical_vector(code, operand.shape, operand.right, RIGHT);
     if operand.shape == Shape::Scalar {

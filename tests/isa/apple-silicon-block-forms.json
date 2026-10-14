@@ -52,6 +52,8 @@
     "crates/stela-compiler/src/aarch64/floating/sqrt.rs",
     "crates/stela-compiler/src/aarch64/floating/fused.rs",
     "crates/stela-compiler/src/aarch64/floating/widening.rs",
+    "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+    "crates/stela-compiler/src/aarch64/floating/bfloat16/dot.rs",
     "crates/stela-compiler/src/aarch64/floating/precision.rs",
     "crates/stela-compiler/src/aarch64/floating/refinement.rs",
     "crates/stela-compiler/src/aarch64/floating/integer.rs",
@@ -91,12 +93,18 @@
     "crates/stela-compiler/src/x86_64/simd/sqrt.rs",
     "crates/stela-compiler/src/aarch64/simd/fused.rs",
     "crates/stela-compiler/src/aarch64/simd/widening.rs",
+    "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
     "crates/stela-compiler/src/aarch64/simd/conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/fused.rs",
     "crates/stela-compiler/src/x86_64/simd/widening.rs",
+    "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+    "crates/stela-compiler/src/x86_64/simd/bfloat16/conversion.rs",
+    "crates/stela-compiler/src/x86_64/simd/bfloat16/multiply.rs",
+    "crates/stela-compiler/src/x86_64/simd/bfloat16/dot.rs",
     "crates/stela-compiler/src/x86_64/simd/precision.rs",
     "crates/stela-compiler/src/x86_64/simd/integer_conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+    "crates/stela-compiler/src/x86_64/simd/numerical/quantization.rs",
     "crates/stela-compiler/src/x86_64/isa.rs",
     "crates/stela-compiler/src/aarch64/simd/rearrange.rs",
     "crates/stela-compiler/src/x86_64/simd/rearrange.rs",
@@ -115,7 +123,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v13",
+  "registry_version": "apple-silicon-block-forms-v14",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -649,6 +657,66 @@
         "native_mxcsr_preservation_comparisons": 768
       },
       "review": "Both target profiles retain 21,256 raw observations each: 6,733 direct original inline equalities, 14,355 unchanged helper exits and 168 precise refusals. Each profile completes 284 Rust state comparisons and 28 typed refusals. This family has zero requested-control policy or profile-model success classes; all retained enables refuse, including AH=1. Final mapping proof binds 3,968 eight-target family artifacts, 32 measured native references and 288 selected block/suffix matches. Prior preservation retains 10,855 directly checked unique compiled tuples covering 10,995 references; the selected closure permits only the new FHM emitter and separately reviewed Python fixture changes, with zero additional old compiles. Original full frames, unchanged native boundaries and successful runtime completion remain distinct."
+    },
+    "bfloat16_numerical": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-bfloat16_numerical-differential-report.json",
+      "kind": "simd_bfloat16_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/floating/comparison.rs",
+        "crates/stela-runtime/src/floating/minmax.rs",
+        "crates/stela-runtime/src/floating/rounding.rs",
+        "crates/stela-runtime/src/floating/sqrt.rs",
+        "crates/stela-runtime/src/floating/estimate.rs",
+        "crates/stela-runtime/src/floating/refinement.rs",
+        "crates/stela-runtime/src/floating/arithmetic.rs",
+        "crates/stela-runtime/src/floating/widening.rs",
+        "crates/stela-runtime/src/floating/bfloat16.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_control_policy_success_checks",
+        "runtime_profile_model_success_checks",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 7,
+        "original_full_frame_captures": 21002,
+        "raw_native_state_and_exit_comparisons": 42004,
+        "raw_original_complete_state_comparisons": 9182,
+        "raw_inline_complete_state_comparisons": 9694,
+        "raw_inline_control_policy_comparisons": 336,
+        "raw_inline_profile_model_comparisons": 176,
+        "raw_helper_unchanged_state_comparisons": 32212,
+        "raw_unsupported_unchanged_state_comparisons": 98,
+        "runtime_complete_state_comparisons": 742,
+        "runtime_control_policy_success_checks": 120,
+        "runtime_profile_model_success_checks": 20,
+        "runtime_typed_unsupported_state_checks": 32,
+        "runtime_budget_resume_checks": 24,
+        "runtime_disk_cache_checks": 24,
+        "runtime_memory_cache_loop_checks": 24,
+        "runtime_control_status_chain_checks": 48,
+        "native_mxcsr_preservation_comparisons": 672,
+        "unicorn_original_unavailable_cases": 20464,
+        "runtime_joined_original_unavailable_cases": 48
+      },
+      "review": "The two profiles retain 42,004 raw observations: 9,182 direct original inline equalities, 336 requested-control policy comparisons, 176 standard-profile model comparisons, 32,212 unchanged helper exits and 98 precise refusals. Runtime completes 742 full states, including 120 policy and 20 model successes, with 32 precise refusals. EBF16 is absent; every raw EBF1 dot/matrix observation, including coincident results, remains in the standard-profile model class, while raw EBF1 conversion/MLA and accepted retained enables use the policy class. Supplementary Unicorn cannot execute BF16: 20,464 single cases and 48 joined sequences remain explicitly unavailable with zero equality credit. Current emitted artifacts, feature checks and selected recipe bridges retain separate original, runtime and historical proof identities."
     }
   },
   "forms": [
@@ -31065,6 +31133,801 @@
       ],
       "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
       "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFCVTN_asimdmisc_4S",
+      "mnemonic": "BFCVTN",
+      "category": "fp_simd",
+      "source_file": "bfcvtn_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x0ea16800",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfcvtn_advsimd.xml",
+      "source_sha256": "c7f58ac53dcf9af6b70f912172d8712b8f3b492081ca101fc77546f1e54a34c3",
+      "docvars": {
+        "advsimd-datatype": "simd-single-and-bf16",
+        "advsimd-type": "simd",
+        "datatype": "single-and-bf16",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFCVTN"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x0ea16820",
+          "expected_mnemonics": [
+            "bfcvtn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ea16bff",
+          "expected_mnemonics": [
+            "bfcvtn"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea16820",
+          "expected_mnemonics": [
+            "bfcvtn2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea16bff",
+          "expected_mnemonics": [
+            "bfcvtn2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/conversion.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical/quantization.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "Single-to-BF16 conversion classifies original Single NaNs, quiets/truncates payload and rounds once to seven stored fraction bits under the exact source-denormal and target-tininess rules. Scalar NEP merges original Vd above bit15; narrow lower clears high64 and narrow upper preserves original low64. AH=0 uses checked controls and precisely refuses retained numerical enables. AH=1 forces FIZ/FZ and RNE, retains AH NaN/default/flush semantics and commits zero fresh exceptions. Integer rounding/packing requires no host FP environment. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFCVT_BS_floatdp1",
+      "mnemonic": "BFCVT",
+      "category": "fp_simd",
+      "source_file": "bfcvt_float.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x1e634000",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfcvt_float.xml",
+      "source_sha256": "64ae8c1ab55f4aed999e441e9cddc7d0553665e77d19d6a631e1a4c295a8ba11",
+      "docvars": {
+        "convert-type": "single-to-bf16",
+        "instr-class": "float",
+        "isa": "A64",
+        "mnemonic": "BFCVT"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x1e634020",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x1e6343ff",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/conversion.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical/quantization.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "Single-to-BF16 conversion classifies original Single NaNs, quiets/truncates payload and rounds once to seven stored fraction bits under the exact source-denormal and target-tininess rules. Scalar NEP merges original Vd above bit15; narrow lower clears high64 and narrow upper preserves original low64. AH=0 uses checked controls and precisely refuses retained numerical enables. AH=1 forces FIZ/FZ and RNE, retains AH NaN/default/flush semantics and commits zero fresh exceptions. Integer rounding/packing requires no host FP environment. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFDOT_asimdelem_E",
+      "mnemonic": "BFDOT",
+      "category": "fp_simd",
+      "source_file": "bfdot_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f40f000",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfdot_advsimd_elt.xml",
+      "source_sha256": "1c52760133d71e415def1eaa3196e4bbd7561f44caa0c7dc76b5fdb52c046001",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFDOT"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x0f42f020",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f5ff3ff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f62f020",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f7ff3ff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f42f820",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f5ffbff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f62f820",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f7ffbff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f42f020",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f5ff3ff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f62f020",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f7ff3ff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f42f820",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f5ffbff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f62f820",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f7ffbff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "BF16 dot stages always suppress fresh flags/traps, treat every NaN as quiet and flush every exponent-zero input/result. AH affects default-NaN sign only. Two BFMulH products, their pair addition and accumulator addition each use the fixed standard-profile round-to-odd rules; overflow is signed infinity and exact cancellation is +0. Q0 writes two Singles and clears high64; Q1 writes four Singles. Indexed Vm0..31 reads one pair0..3 from the full original Vm128 even for Q0. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFDOT_asimdsame2_D",
+      "mnemonic": "BFDOT",
+      "category": "fp_simd",
+      "source_file": "bfdot_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e40fc00",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfdot_advsimd_vec.xml",
+      "source_sha256": "86b90ab9ba5eeef15857e328a71d7125607817ad77e2a75bef91fed221e649e8",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFDOT"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x2e42fc20",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e5fffff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e42fc20",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fffff",
+          "expected_mnemonics": [
+            "bfdot"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "BF16 dot stages always suppress fresh flags/traps, treat every NaN as quiet and flush every exponent-zero input/result. AH affects default-NaN sign only. Two BFMulH products, their pair addition and accumulator addition each use the fixed standard-profile round-to-odd rules; overflow is signed infinity and exact cancellation is +0. Q0 writes two Singles and clears high64; Q1 writes four Singles. Indexed Vm0..31 reads one pair0..3 from the full original Vm128 even for Q0. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFMLAL_asimdelem_F",
+      "mnemonic": "BFMLAL",
+      "category": "fp_simd",
+      "source_file": "bfmlal_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0fc0f000",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfmlal_advsimd_elt.xml",
+      "source_sha256": "c06a8f0872a741825f1a52e81b301d96fe152911cf8bcbcb3c3614e898674d0e",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "datatype": "half",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFMLAL",
+        "reguse-datatype": "2reg-element-half"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x0fc2f020",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fcff3ff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fd2f020",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fdff3ff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fe2f020",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0feff3ff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ff2f020",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ffff3ff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fc2f820",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fcffbff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fd2f820",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fdffbff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fe2f820",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0feffbff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ff2f820",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ffffbff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fc2f020",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fcff3ff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fd2f020",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdff3ff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fe2f020",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4feff3ff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ff2f020",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ffff3ff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fc2f820",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fcffbff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fd2f820",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fdffbff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fe2f820",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4feffbff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ff2f820",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ffffbff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/multiply.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "Four Single accumulators add exact widened BF16 products with one final Single rounding. BFMLALB/T selects even/odd original BF16 lanes independently for every destination lane; indexed Vm0..15 selects any H0..7. AH=0 uses checked controls and precisely refuses retained numerical enables. AH=1 forces FIZ/FZ and RNE, retains AH NaN/default/flush semantics and commits zero fresh exceptions. Existing Single fused semantics own NaN priority and fused rounding. Baseline stages a Single product and requires an exact nonexceptional intermediate before the final addition; independently checked FMA performs the fused operation directly. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFMLAL_asimdsame2_F_",
+      "mnemonic": "BFMLAL",
+      "category": "fp_simd",
+      "source_file": "bfmlal_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ec0fc00",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfmlal_advsimd_vec.xml",
+      "source_sha256": "fb501cdd587717b328636ecd409d194c2bc250e4ab520aeb7809f767fd360e3f",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFMLAL"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x2ec2fc20",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2edfffff",
+          "expected_mnemonics": [
+            "bfmlalb"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ec2fc20",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6edfffff",
+          "expected_mnemonics": [
+            "bfmlalt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/multiply.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "Four Single accumulators add exact widened BF16 products with one final Single rounding. BFMLALB/T selects even/odd original BF16 lanes independently for every destination lane; indexed Vm0..15 selects any H0..7. AH=0 uses checked controls and precisely refuses retained numerical enables. AH=1 forces FIZ/FZ and RNE, retains AH NaN/default/flush semantics and commits zero fresh exceptions. Existing Single fused semantics own NaN priority and fused rounding. Baseline stages a Single product and requires an exact nonexceptional intermediate before the final addition; independently checked FMA performs the fused operation directly. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
+      "status": "implemented"
+    },
+    {
+      "id": "BFMMLA_asimdsame2_E",
+      "mnemonic": "BFMMLA",
+      "category": "fp_simd",
+      "source_file": "bfmmla_advsimd.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x6e40ec00",
+      "features": [
+        {
+          "feature": "FEAT_BF16",
+          "name": "v8Ap6"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfmmla_advsimd.xml",
+      "source_sha256": "4c167119ed97045059ff202c9c6d2b2a41e3c6d3a4a81236b138c35447b13ae5",
+      "docvars": {
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "BFMMLA"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "smoke_samples": [
+        {
+          "word": "0x6e42ec20",
+          "expected_mnemonics": [
+            "bfmmla"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e5fefff",
+          "expected_mnemonics": [
+            "bfmmla"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/simd/bfloat16/dot.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "bfloat16_numerical"
+      ],
+      "scope": "BF16 dot stages always suppress fresh flags/traps, treat every NaN as quiet and flush every exponent-zero input/result. AH affects default-NaN sign only. Two BFMulH products, their pair addition and accumulator addition each use the fixed standard-profile round-to-odd rules; overflow is signed infinity and exact cancellation is +0. Matrix output2*i+j accumulates k=0 then1 using original left lanes4*i+2*k/+1 and right lanes4*j+2*k/+1, retaining the first accumulated Single between stages. All four outputs commit together; FPSR remains unchanged. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established.",
+      "review": "Exact June canonical fields, allocated pair/lane/parity controls and standard BF16 semantics are reviewed. Current full-state original/native and Rust completion bind direct, policy/model, helper and precise-refusal categories separately. Final selected emission and source/byte bridges retain the original/core proof, measured recipes and historical artifact identities without relabeling them current.",
       "status": "implemented"
     }
   ]

@@ -3,6 +3,7 @@
 //! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
 use super::{AddressMode, Register, register};
 pub mod arithmetic;
+pub mod bfloat16;
 pub mod comparison;
 pub mod conversion;
 pub mod estimate;

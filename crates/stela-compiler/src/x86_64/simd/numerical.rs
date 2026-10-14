@@ -7,7 +7,7 @@ use crate::{
 };
 
 const MXCSR_EXCEPTION_MASKS: u32 = 0x3f << 7;
-const MXCSR_INEXACT: u32 = 1 << 5;
+pub(super) const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_POSITIVE_ROUNDING: u32 = 1 << 14;
 const MXCSR_NEGATIVE_ROUNDING: u32 = 1 << 13;
@@ -61,14 +61,17 @@ const MOVD_EAX_XMM1: &[u8] = &[0x66, 0x0f, 0x7e, 0xc8];
 const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
 const MOVQ_RAX_XMM1: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc8];
 pub(super) const MOVQ_XMM0_XMM0: &[u8] = &[0xf3, 0x0f, 0x7e, 0xc0];
-const SUB_RSP_16: &[u8] = &[0x48, 0x83, 0xec, 16];
-const ADD_RSP_16: &[u8] = &[0x48, 0x83, 0xc4, 16];
+pub(super) const ENVIRONMENT_STACK_BYTES: u8 = 16;
+const MXCSR_CONTROL_OFFSET: u8 = 4;
+const MXCSR_STATUS_OFFSET: u8 = 8;
+const SUB_RSP_ENVIRONMENT: &[u8] = &[0x48, 0x83, 0xec, ENVIRONMENT_STACK_BYTES];
+const ADD_RSP_ENVIRONMENT: &[u8] = &[0x48, 0x83, 0xc4, ENVIRONMENT_STACK_BYTES];
 const STMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x1c, 0x24];
-const MOV_CONTROL_EAX: &[u8] = &[0x89, 0x44, 0x24, 4];
-const LDMXCSR_CONTROL: &[u8] = &[0x0f, 0xae, 0x54, 0x24, 4];
-const STMXCSR_STATUS: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, 8];
+const MOV_CONTROL_EAX: &[u8] = &[0x89, 0x44, 0x24, MXCSR_CONTROL_OFFSET];
+const LDMXCSR_CONTROL: &[u8] = &[0x0f, 0xae, 0x54, 0x24, MXCSR_CONTROL_OFFSET];
+const STMXCSR_STATUS: &[u8] = &[0x0f, 0xae, 0x5c, 0x24, MXCSR_STATUS_OFFSET];
 const LDMXCSR_SAVED: &[u8] = &[0x0f, 0xae, 0x14, 0x24];
-const MOV_ECX_STATUS: &[u8] = &[0x8b, 0x4c, 0x24, 8];
+const MOV_ECX_STATUS: &[u8] = &[0x8b, 0x4c, 0x24, MXCSR_STATUS_OFFSET];
 const MOV_EAX_IMM32: u8 = 0xb8;
 
 const FMA_VEX3: u8 = 0xc4;
@@ -110,6 +113,12 @@ pub(super) enum Rounding {
     Negative,
     Zero,
 }
+
+mod quantization;
+
+pub(super) use quantization::{
+    IntegerRoundingRegister, broadcast_integer_rounding, integer_rounding_policy,
+};
 
 /// Checked FMA132 with the shared numerical allocation: XMM0 is the product
 /// destination, XMM1 the multiplier and XMM6 the addend. All are caller-volatile.
@@ -157,6 +166,45 @@ pub(super) fn resolve(code: &mut [u8], patch: usize, target: usize) {
     let distance = i32::try_from(target - next).expect("bounded numerical branch");
     code[patch..patch + size_of::<i32>()].copy_from_slice(&distance.to_le_bytes());
 }
+/// Refuse retained numerical enables unless AH suppresses exceptions.
+pub(super) fn guard_ah0_exceptions(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+    use crate::aarch64::floating::{FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK};
+    test_control(code, FPCR_AH);
+    let suppressed = branch(code, Condition::NotZero);
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+    helper.push(branch(code, Condition::NotZero));
+    let enabled = code.len();
+    resolve(code, suppressed, enabled);
+}
+
+/// Select guest RC for AH0 and mandatory nearest-even for AH1.
+/// Inputs are already normal, so the forced AH1 flush controls are immaterial.
+pub(super) fn environment_alternative_nearest(code: &mut Vec<u8>) {
+    use crate::aarch64::floating::FPCR_AH;
+    test_control(code, FPCR_AH);
+    let nearest = branch(code, Condition::NotZero);
+    environment(code);
+    const JMP_REL32: u8 = 0xe9;
+    code.push(JMP_REL32);
+    let done = code.len();
+    code.extend(0i32.to_le_bytes());
+    let nearest_start = code.len();
+    resolve(code, nearest, nearest_start);
+    environment_round(code, Rounding::NearestEven);
+    let end = code.len();
+    resolve(code, done, end);
+}
+
+/// Commit accepted host precision status only when AH permits fresh status.
+pub(super) fn commit_ah0_inexact(code: &mut Vec<u8>) {
+    use crate::aarch64::floating::FPCR_AH;
+    test_control(code, FPCR_AH);
+    let suppressed = branch(code, Condition::NotZero);
+    commit_inexact(code);
+    let end = code.len();
+    resolve(code, suppressed, end);
+}
+
 pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMM32);
     code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
@@ -231,7 +279,7 @@ pub(super) fn environment(code: &mut Vec<u8>) {
 /// Save the complete caller environment and install masked, nonflushing SSE
 /// control. Conversion instructions may select rounding independently of FPCR.
 pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
-    code.extend(SUB_RSP_16);
+    code.extend(SUB_RSP_ENVIRONMENT);
     code.extend(STMXCSR_SAVED);
     if matches!(rounding, Rounding::Fpcr) {
         code.extend(MOV_ECX_STATE);
@@ -267,7 +315,18 @@ pub(super) fn restore_environment(code: &mut Vec<u8>) {
     code.extend(STMXCSR_STATUS);
     code.extend(LDMXCSR_SAVED);
     code.extend(MOV_ECX_STATUS);
-    code.extend(ADD_RSP_16);
+    code.extend(ADD_RSP_ENVIRONMENT);
+}
+
+/// Observe a real arithmetic stage without leaving the private environment.
+pub(super) fn capture_environment_status(code: &mut Vec<u8>) {
+    code.extend(STMXCSR_STATUS);
+    code.extend(MOV_ECX_STATUS);
+}
+
+/// Discard private scratch-operation status before the next arithmetic stage.
+pub(super) fn clear_environment_status(code: &mut Vec<u8>) {
+    code.extend(LDMXCSR_CONTROL);
 }
 
 /// Accumulate status and leave ECX holding only fresh guest IXC (zero or INEXACT).
@@ -570,7 +629,7 @@ pub(super) fn restore_environment_with_product(code: &mut Vec<u8>) {
     code.extend(LDMXCSR_SAVED);
     code.extend(MOV_EAX_PRODUCT);
     code.extend(MOV_ECX_STATUS);
-    code.extend(ADD_RSP_16);
+    code.extend(ADD_RSP_ENVIRONMENT);
 }
 pub(super) fn reject_product_status(code: &mut Vec<u8>) -> usize {
     const TEST_AL_STATUS: &[u8] = &[0xa8, 0x3f];

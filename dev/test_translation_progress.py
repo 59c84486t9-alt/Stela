@@ -409,7 +409,7 @@ class BlockProgressTests(unittest.TestCase):
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
         self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 585)
         self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 20)
-        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 424)
+        self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 431)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
         self.assertEqual(len(set(leaf) & set(block)), 9)
         report = {'summary': progress.summarize(leaf), 'measured_at_utc': '2026-10-12T00:00:00Z',
@@ -421,7 +421,7 @@ class BlockProgressTests(unittest.TestCase):
                                     'comparison_field': 'trap_state_exit_comparisons'}}}}
         text = progress.markdown(report)
         self.assertIn('| Leaf-profile instruction forms implemented | 585 |', text)
-        self.assertIn('| Block-profile instruction forms implemented | 424 |', text)
+        self.assertIn('| Block-profile instruction forms implemented | 431 |', text)
         self.assertIn('| Native block state/exit comparisons | 28,704 |', text)
         self.assertIn('| Block-profile forms partially implemented | 2 |', text)
         self.assertIn('| Native synchronous-trap boundary comparisons | 320 |', text)

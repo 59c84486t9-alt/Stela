@@ -16,6 +16,143 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_bfloat16_inventory_covers_all_shapes_indices_and_alias_roles(self):
+        functions = suite.bfloat16_functions()
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (202, 202))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 7)
+        self.assertEqual(len({suite.bfloat16_shape(op) for op in functions}), 12)
+        self.assertEqual(len({(suite.bfloat16_shape(op), op['index']) for op in functions}), 32)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+            self.assertEqual([instruction.mnemonic for instruction in decoded], [op['name']])
+            if op['kind'] == 'multiply' and op['index'] is not None:
+                self.assertLess(op['m'], 16)
+            if op['kind'] == 'conversion':
+                self.assertNotIn('a', op)
+            else:
+                self.assertEqual(op['a'], op['d'])
+        for args, options in ((('dot', 8), {}), (('conversion', 16), {}),
+                (('multiply', 16), {'m':16, 'index':7}), (('matrix', 8), {'m':2})):
+            with self.assertRaises(ValueError):
+                suite.bfloat16_operation(*args, **options)
+
+    def test_bfloat16_mnemonics_reach_mocked_compiler_for_every_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(suite.subprocess, 'check_output', side_effect=RuntimeError('reached mocked compiler')) as compile_call:
+                for index, op in enumerate(suite.bfloat16_functions()):
+                    with self.assertRaisesRegex(RuntimeError, 'reached mocked compiler'):
+                        suite.compile_batch(Path('mock-stela'), Path(temporary), [{'operations': [op]}], index, block=True)
+                self.assertEqual(compile_call.call_count, 202)
+
+    def test_bfloat16_unavailable_supplementary_oracle_has_no_equality_credit(self):
+        initial = State()
+        initial.x[30] = suite.STOP
+        op = suite.bfloat16_operation('dot', 8, m=2)
+        record = {'function': 0, 'operation': op, 'initial': bytes(initial), 'expected': bytes(initial),
+            'unsupported': False, 'case': 0, 'producer': 'unit_supplementary_unavailable'}
+        batch = {'source': struct.pack('<II', op['word'], suite.RET), 'native': b'',
+            'cohort': suite.BFLOAT16_NUMERICAL_FOCUS}
+        def wrapper(state, address, mxcsr, exit_pointer):
+            observed = ctypes.cast(exit_pointer, ctypes.POINTER(suite.NumericalNativeExit)).contents
+            observed.kind, observed.next_pc = suite.NUMERICAL_RETURN_EXIT, suite.STOP
+            observed.mxcsr_before = observed.mxcsr_after = mxcsr
+        machine = Mock()
+        with patch.object(suite, 'executable', side_effect=lambda _: nullcontext(0)), \
+                patch.object(suite.ctypes, 'CFUNCTYPE', return_value=lambda _: wrapper), \
+                patch.object(suite, 'Uc', return_value=machine):
+            counts = suite.execute_numerical_batches([batch], {'records': [record]})
+        machine.emu_start.assert_not_called()
+        self.assertEqual(counts['unicorn_original_unavailable_cases'], 1)
+        self.assertEqual(counts['unicorn_original_complete_state_comparisons'], 0)
+        self.assertEqual(counts['raw_inline_original_complete_state_comparisons'], 1)
+        self.assertEqual(counts['caller_mxcsr_preservation_comparisons'], 16)
+
+    def test_bfloat16_staging_selects_full_vm_and_interleaved_parity(self):
+        op = suite.bfloat16_operation('multiply', 16, m=2, index=7, parity=1)
+        initial = suite.bfloat16_state(op, 0, [1, 2, 3, 4], [5, 6, 7, 8], [9])
+        left = struct.unpack('<8H', struct.pack('<2Q', *initial.v[1]))
+        right = struct.unpack('<8H', struct.pack('<2Q', *initial.v[2]))
+        self.assertEqual(left[1::2], (5, 6, 7, 8))
+        self.assertEqual(right[7], 9)
+        self.assertTrue(all(value == suite.BFLOAT16_INFINITY | 1 for value in left[::2]))
+        self.assertEqual(struct.unpack('<4I', struct.pack('<2Q', *initial.v[0])), (1, 2, 3, 4))
+        op = suite.bfloat16_operation('dot', 8, m=31, index=3)
+        initial = suite.bfloat16_state(op, 1, [1, 2], [3, 4, 5, 6], [7, 8])
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *initial.v[31]))[6:], (7, 8))
+
+    def test_bfloat16_closed_integer_models_cover_rounding_and_domain_refusal(self):
+        left, right = (0x3f80, 0x3980), (0x3f80, 0x3900)
+        for ah in (0, suite.NUMERICAL_AH):
+            for mode in range(4):
+                control = ah | mode << suite.NUMERICAL_ROUND_SHIFT | suite.BFLOAT16_EBF
+                standard = suite.bfloat16_standard_dot(control, 0xbf800000, left, right)
+                self.assertEqual(standard, 0x34000000)
+                self.assertEqual(suite.bfloat16_standard_dot(control, standard, left, right), 0x3f800002)
+                enhanced = suite.bfloat16_enhanced_dot(control, 0xbf800000, left, right)
+                self.assertEqual(enhanced, 0x34000000 if mode == 1 else 0x80000000 if mode == 2 else 0)
+                self.assertEqual(suite.bfloat16_enhanced_dot(control, enhanced, left, right), 0x3f800002 if mode == 1 else 0x3f800000)
+        for model, addend, lhs in ((suite.bfloat16_standard_dot, 0x7fc00000, left),
+                (suite.bfloat16_enhanced_dot, 0, (1, 0x3f80))):
+            with self.assertRaises(suite.Bfloat16ModelDomainError):
+                model(0, addend, lhs, right)
+
+    def test_bfloat16_profile_validates_unmodified_enhanced_original(self):
+        producer = {'cpu_registers': {'ID_AA64ISAR1_EL1': '0x111211110211502'}}
+        for kind in ('dot', 'matrix'):
+            op = suite.bfloat16_operation(kind, 16, m=2)
+            initial = suite.bfloat16_state(op, 0, [0xbf800000] * 4, [0x3f80, 0x3980] * 4, [0x3f80, 0x3900] * 4, suite.BFLOAT16_EBF)
+            original = suite.bfloat16_dot_profile_state(op, initial, True)
+            expected = suite.bfloat16_profile_expectation(op, initial, original, producer)
+            self.assertEqual(expected.v[0][0] & 0xffffffff, 0x34000000 if kind == 'dot' else 0x3f800002)
+            self.assertEqual(expected.fpcr, suite.BFLOAT16_EBF)
+            original.v[1][0] ^= 1
+            with self.assertRaises(AssertionError):
+                suite.bfloat16_profile_expectation(op, initial, original, producer)
+
+    def test_bfloat16_enable_acceptance_and_reserved_policy_are_separate(self):
+        for kind, width in (('conversion', 2), ('dot', 8), ('multiply', 16), ('matrix', 16)):
+            op = suite.bfloat16_operation(kind, width, m=None if kind == 'conversion' else 2)
+            for ah in (0, suite.NUMERICAL_AH):
+                initial = State()
+                initial.fpcr = suite.BFLOAT16_EBF | suite.NUMERICAL_TRAP_ENABLE_MASK | ah
+                self.assertEqual(suite.bfloat16_accepts_enabled_control(op, initial), kind in ('dot', 'matrix') or bool(ah))
+                self.assertEqual(suite.bfloat16_control_policy(op, initial, {}), kind in ('conversion', 'multiply'))
+        family = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.BFLOAT16_NUMERICAL_FOCUS]
+        self.assertFalse(family['supplementary_original_available'])
+        self.assertEqual(family['supplementary_original_evidence']['sha256'], '838e4d9f084c88f790eacdb952da88255b1d389e3c10e1c91afe381f9f8723b3')
+        for op in suite.bfloat16_functions():
+            expected = {'vfmadd132ps': 1} if op['kind'] == 'multiply' else {}
+            self.assertEqual(suite.numerical_fma_expectation(op, 'x86_64-baseline+fma', family['native_fma_operations']), expected)
+            self.assertTrue(suite.numerical_fma_accounting_matches(op, 'x86_64-baseline+f16c', {}, family))
+            self.assertFalse(suite.numerical_fma_accounting_matches(op, 'x86_64-baseline+f16c', {'vfmadd132ps': 1}, family))
+
+    def test_bfloat16_corpus_is_bounded_and_helpers_have_distinct_fixed_sources(self):
+        functions, cases = suite.bfloat16_corpus()
+        self.assertEqual(len(cases), 21002)
+        self.assertEqual({record['function'] for record in cases}, set(range(202)))
+        imported = [dict(record, operation=functions[record['function']]) for record in cases]
+        helpers = suite.bfloat16_helpers(imported)
+        self.assertEqual((len(suite.bfloat16_runtime_cases(imported)), len(helpers)), (315, 12))
+        self.assertEqual(suite.bfloat16_helpers(imported, set()), [])
+        self.assertLessEqual(315 + 6 * len(helpers), 425)
+        self.assertEqual(sum(record['label'] == 'exact_cancel' for record in cases), 40)
+        self.assertEqual(sum(record['label'] == 'matrix_stage_order' for record in cases), 8)
+        for record in helpers:
+            op = record['operation']
+            initial = State.from_buffer_copy(record['initial'])
+            self.assertEqual(record['label'], 'helper_quiet_nan')
+            self.assertEqual((op['d'], op['n']), (0, 1))
+            if op['kind'] == 'conversion':
+                self.assertEqual(initial.v[1][0] & 0xffffffff, 0x7fc00003)
+            else:
+                self.assertEqual(op['m'], 2)
+                self.assertEqual(initial.v[0][0] & 0xffffffff, 0x7fc00000)
+            self.assertEqual((initial.fpcr, initial.fpsr), (0, 0))
+
     def test_widening_encodings_cover_every_form_width_layout_and_alias(self):
         facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
         functions = suite.widening_functions()
