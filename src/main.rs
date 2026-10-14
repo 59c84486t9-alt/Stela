@@ -170,6 +170,9 @@ enum Command {
         /// Complete the declared unavailable Darwin cross-architecture service.
         #[arg(long)]
         crossarch_services: bool,
+        /// Supply host kernel entropy through bounded owned-memory copyout.
+        #[arg(long)]
+        entropy_services: bool,
         /// Service ordinary Mach VM protection using owned current-task data pages.
         #[arg(long, requires = "memory")]
         mach_vm_services: bool,
@@ -1326,6 +1329,7 @@ fn run() -> Result<()> {
             memory: memory_path,
             data_vm_services,
             crossarch_services,
+            entropy_services,
             mach_vm_services,
             csr_active_configuration,
             mach_port_services,
@@ -1448,6 +1452,7 @@ fn run() -> Result<()> {
                     || crossarch_services
                     || csr_policy.is_some()
                     || mach_vm_services
+                    || entropy_services
                 {
                     stela_runtime::darwin::run_services(
                         &mut runtime,
@@ -1462,6 +1467,7 @@ fn run() -> Result<()> {
                             crossarch: crossarch_services,
                             mach_vm: mach_vm_services,
                             csr: csr_policy.as_ref(),
+                            entropy: entropy_services,
                             mach_ports: mach_ports.as_mut(),
                             thread: thread_context.as_mut(),
                         },
@@ -1515,6 +1521,8 @@ fn run() -> Result<()> {
                 "csr_service_profile":csr_policy.as_ref().map(|_| stela_runtime::darwin::csr::PROFILE_ID),
                 "csr_active_configuration":csr_policy.as_ref().map(|policy| policy.active_configuration()),
                 "csr_service_events":service_run.csr_services,
+                "entropy_service_profile":entropy_services.then_some(stela_runtime::darwin::entropy::PROFILE_ID),
+                "entropy_service_events":service_run.entropy_services,
                 "mach_vm_service_profile":mach_vm_services.then_some(stela_runtime::darwin::mach_vm::PROFILE_ID),
                 "mach_vm_service_events":service_run.mach_vm_services,
                 "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({

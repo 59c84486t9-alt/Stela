@@ -12,8 +12,10 @@ use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
 use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
+mod copyout;
 pub mod crossarch;
 pub mod csr;
+pub mod entropy;
 pub mod mach_vm;
 pub mod platform;
 pub mod shared_region;
@@ -294,6 +296,7 @@ pub struct ServiceRunOutcome {
     pub thread_services: Vec<crate::thread::Event>,
     pub crossarch_services: Vec<BsdServiceEvent>,
     pub csr_services: Vec<BsdServiceEvent>,
+    pub entropy_services: Vec<BsdServiceEvent>,
     pub mach_vm_services: Vec<crate::mach::Event>,
 }
 impl ServiceRunOutcome {
@@ -306,6 +309,7 @@ impl ServiceRunOutcome {
             thread_services: Vec::new(),
             crossarch_services: Vec::new(),
             csr_services: Vec::new(),
+            entropy_services: Vec::new(),
             mach_vm_services: Vec::new(),
         }
     }
@@ -318,6 +322,7 @@ pub struct ExecutionServices<'a> {
     pub mach_vm: bool,
     pub crossarch: bool,
     pub csr: Option<&'a csr::ArmSecurityPolicy>,
+    pub entropy: bool,
     pub pauth: Option<&'a crate::pauth::Context>,
     pub clock: Option<&'a mut crate::clock::Context>,
 }
@@ -450,6 +455,7 @@ pub unsafe fn run_services(
     let mut thread_events = Vec::new();
     let mut crossarch_events = Vec::new();
     let mut csr_events = Vec::new();
+    let mut entropy_events = Vec::new();
     let mut mach_vm_events = Vec::new();
     anyhow::ensure!(
         services.mach_ports.is_none() || services.thread.is_none(),
@@ -572,6 +578,11 @@ pub unsafe fn run_services(
             let serviced = event.completion.is_some();
             csr_events.push(event);
             serviced
+        } else if services.entropy && entropy::handles(state, &trap) {
+            let event = entropy::service(state, &trap, memory);
+            let serviced = event.completion.is_some();
+            entropy_events.push(event);
+            serviced
         } else if services.data_vm {
             let event = service_data_mprotect(state, &trap, memory, runtime);
             let serviced = event.completion.is_some();
@@ -600,6 +611,7 @@ pub unsafe fn run_services(
         thread_services: thread_events,
         crossarch_services: crossarch_events,
         csr_services: csr_events,
+        entropy_services: entropy_events,
         mach_vm_services: mach_vm_events,
     })
 }
