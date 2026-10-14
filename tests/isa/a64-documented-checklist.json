@@ -2138,15 +2138,15 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 1489,
+    "implemented": 1490,
     "partial": 19,
-    "unsupported": 2824,
+    "unsupported": 2823,
     "total": 4332,
-    "implementation_percentage": 34.37211449676823,
+    "implementation_percentage": 34.395198522622344,
     "categories": {
       "base_integer_system": {
-        "implemented": 524,
-        "unsupported": 423,
+        "implemented": 525,
+        "unsupported": 422,
         "partial": 7
       },
       "fp_simd": {
@@ -2162,7 +2162,7 @@
       }
     }
   },
-  "compiler_source_sha256": "ce34d0c18781eea0021f8362e311995b876961999ad5265dc1f440d299d8f0dc",
+  "compiler_source_sha256": "e9b658167bc971ef14aa6ea93dd0f01bbf20520925290939090ca7f078ad22ab",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -2240,7 +2240,7 @@
     {"id":"AUTIZB_64Z_dp_1src","instruction_id":"AUTIB","mnemonic":"AUTIZB","category":"base_integer_system","source_file":"autib.xml","encoding_mask":"0xffffffe0","encoding_value":"0xdac137e0","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"AXFLAG_M_pstate","instruction_id":"AXFLAG","mnemonic":"AXFLAG","category":"base_integer_system","source_file":"axflag.xml","encoding_mask":"0xfffff0ff","encoding_value":"0xd500405f","features":[{"feature":"FEAT_FlagM2","name":"v8Ap5"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled FlagM/FlagM2 register-only profile with architectural NZCV. CFINV toggles C; RMIF selectively copies rotated Xn bits; SETF8/16 sets NZV from Wn and preserves C; AXFLAG/XAFLAG perform declared Boolean transforms. Register31 is ZR; ignored CRm bits follow pinned decode. All unrelated state and ordinary guest RAM are preserved. No complete PSTATE/DIT, disabled-feature guest exception delivery, application or OS compatibility claim."}]},
     {"id":"BCAX_VVV16_crypto4","instruction_id":"BCAX_advsimd","mnemonic":"BCAX","category":"fp_simd","source_file":"bcax_advsimd.xml","encoding_mask":"0xffe08000","encoding_value":"0xce200000","features":[{"feature":"FEAT_SHA3","name":"v8Ap2"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled nonstreaming FP/AdvSIMD and SHA3. EOR3/BCAX three-source logic, qword RAX1 and every XAR immediate 0..63; all register roles and aliases. Full 128-bit destination, NZCV/FPCR/FPSR and guest RAM preserved. Disabled access, streaming/SVE spellings and Apple hardware remain outside scope."}]},
-    {"id":"BC_only_condbranch","instruction_id":"BC_cond","mnemonic":"BC","category":"base_integer_system","source_file":"bc_cond.xml","encoding_mask":"0xff000010","encoding_value":"0x54000010","features":[{"feature":"FEAT_HBC","name":"v8Ap8"}],"status":"unsupported","profiles":[]},
+    {"id":"BC_only_condbranch","instruction_id":"BC_cond","mnemonic":"BC","category":"base_integer_system","source_file":"bc_cond.xml","encoding_mask":"0xff000010","encoding_value":"0x54000010","features":[{"feature":"FEAT_HBC","name":"v8Ap8"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-block-v1","status":"implemented","scope":"FEAT_HBC enabled. All16 conditions and signed imm19 times4 targets under the existing nonwrapping guest-address profile. Conditional transfer preserves all GPR/SP/NZCV/FP/SIMD state and returns actual next guest PC/exit kind to serialized dispatch. Bit4 supplies a consistent-direction prediction hint with no additional architectural state effect. GCS is disabled and executable pages are unguarded; no PSTATE.BTYPE, exception delivery, hardware predictor identity or application execution claim."}]},
     {"id":"BF1CVTL_asimdmisc_V","instruction_id":"BF12CVTL_advsimd","mnemonic":"BF1CVTL","category":"fp_simd","source_file":"bf12cvtl_advsimd.xml","encoding_mask":"0xbffffc00","encoding_value":"0x2ea17800","features":[{"feature":"FEAT_FP8","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"BF2CVTL_asimdmisc_V","instruction_id":"BF12CVTL_advsimd","mnemonic":"BF2CVTL","category":"fp_simd","source_file":"bf12cvtl_advsimd.xml","encoding_mask":"0xbffffc00","encoding_value":"0x2ee17800","features":[{"feature":"FEAT_FP8","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"BFCVTN_asimdmisc_4S","instruction_id":"BFCVTN_advsimd","mnemonic":"BFCVTN","category":"fp_simd","source_file":"bfcvtn_advsimd.xml","encoding_mask":"0xbffffc00","encoding_value":"0x0ea16800","features":[{"feature":"FEAT_BF16","name":"v8Ap6"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-block-v1","status":"implemented","scope":"Single-to-BF16 conversion classifies original Single NaNs, quiets/truncates payload and rounds once to seven stored fraction bits under the exact source-denormal and target-tininess rules. Scalar NEP merges original Vd above bit15; narrow lower clears high64 and narrow upper preserves original low64. AH=0 uses checked controls and precisely refuses retained numerical enables. AH=1 forces FIZ/FZ and RNE, retains AH NaN/default/flush semantics and commits zero fresh exceptions. Integer rounding/packing requires no host FP environment. Enabled AArch64 non-streaming FP/AdvSIMD/AFP/BF16 profile with FEAT_EBF16 absent. Raw FPCR bit13 cannot select extended arithmetic; AHP/FZ16 do not convert BF16 into IEEE Half. V registers are ordinary data, all legal aliases use original snapshots, and vector operations ignore scalar NEP. Results and any fresh sticky FPSR stage before one transactional commit. FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. All forms retain an interior numerical helper and consume the instruction plus RET. Retained enables may succeed only under the family control policy; architectural enabled trap delivery remains outside scope. No SVE/SME, EBF16-enabled profile, numerical leaf ABI, disabled-feature checks, Apple hardware, application or OS execution is established."}]},

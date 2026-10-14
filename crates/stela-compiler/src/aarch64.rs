@@ -20,6 +20,9 @@ pub mod simd;
 pub mod tag_arithmetic;
 pub mod unprivileged;
 
+const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;
+const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
     W32,
@@ -528,7 +531,9 @@ impl Lifter for Decoder {
             Operation::Branch {
                 target: target(word & 0x03ffffff, 26)?,
             }
-        } else if word & 0xff000010 == 0x54000000 {
+        } else if word & CONDITIONAL_BRANCH_MASK == CONDITIONAL_BRANCH_CLASS {
+            // B.cond and enabled FEAT_HBC BC.cond have identical architectural
+            // effects. Bit 4 is only the consistent-direction prediction hint.
             Operation::BranchCondition {
                 target: target((word >> 5) & 0x7ffff, 19)?,
                 condition: (word & 15) as u8,
@@ -675,6 +680,30 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn consistent_branches_preserve_conditional_branch_operand_semantics() {
+        const CONSISTENT_BRANCH_HINT: u32 = 1 << 4;
+        const BRANCH_IMMEDIATE_MASK: u32 = (1 << 19) - 1;
+        const BRANCH_IMMEDIATE_SHIFT: u32 = 5;
+        const INSTRUCTION_BYTES: i32 = 4;
+        let pc = GuestAddress(0x20_0000);
+        for offset in [-(1 << 18), -3, -1, 0, 1, 3, (1 << 18) - 1] {
+            let immediate = ((offset as u32) & BRANCH_IMMEDIATE_MASK) << BRANCH_IMMEDIATE_SHIFT;
+            for condition in 0..16 {
+                let word = CONDITIONAL_BRANCH_CLASS | immediate | condition;
+                let expected = Operation::BranchCondition {
+                    target: GuestAddress(
+                        pc.0.checked_add_signed(i64::from(offset * INSTRUCTION_BYTES))
+                            .unwrap(),
+                    ),
+                    condition: condition as u8,
+                };
+                for hint in [0, CONSISTENT_BRANCH_HINT] {
+                    assert_eq!(Decoder.lift(pc, word | hint).unwrap().operation, expected);
+                }
+            }
+        }
+    }
     #[test]
     fn extended_arithmetic_validates_options_shifts_and_sp_zero_roles() {
         let extensions = [
@@ -950,7 +979,6 @@ mod tests {
         assert!(Decoder.lift(GuestAddress(0), 0x0b008000).is_err()); // W32 shift 32
         assert!(Decoder.lift(GuestAddress(0), 0x0bc00000).is_err()); // reserved arithmetic ROR
         assert!(Decoder.lift(GuestAddress(0), 0x0a008000).is_err()); // W32 logical shift 32
-        assert!(Decoder.lift(GuestAddress(0), 0x54000010).is_err()); // BC.cond is a different instruction
         assert!(Decoder.lift(GuestAddress(0), 0x94000000).is_err()); // BL requires call semantics
         assert!(Decoder.lift(GuestAddress(0), 0x17ffffff).is_err()); // PC-relative underflow
     }

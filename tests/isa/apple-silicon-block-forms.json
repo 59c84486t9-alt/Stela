@@ -167,7 +167,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v15",
+  "registry_version": "apple-silicon-block-forms-v16",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -818,6 +818,24 @@
         "runtime_joined_original_unavailable_cases": 52
       },
       "review": "Primary 14,919 full captures separate 14,737 direct-compatible original successes from 182 precise retained-enable refusals. Current native direct inline equality, unchanged helpers and refusals remain distinct from actual Rust completion. No policy/model successes apply. Supplementary Unicorn has extra-IOC defects in Q0 indexed Half: 5,941 matching observations and 418 differences are retained with zero supplementary raw/joined equality credit. Strict runtime/cache checks use primary single-instruction expectations. Final raw checks separate 4,379 direct original inline equalities, 25,095 unchanged helper exits and 364 precise refusals; Rust completes 726 full states with 84 typed refusals and 960 caller-MXCSR checks. Baseline S/D uses packed SSE2 Add and an exact-product-guarded MLA. Independently checked FMA serves S/D MLA, including negative FMA for 180 degrees; Double pair swaps retain PSHUFD. Half uses the compact Double loop with one architectural Half rounding, checked F16C widening and direct indexed-pair broadcast; Half FMA remains excluded. Exceptional or inexact intermediate cases retain the precise core boundary. Selected single-instruction bytes, measured recipe bodies and cached blocks/suffixes require separate final bridges; timings remain bound to their original measured compiler/placement."
+    },
+    "bc_cond_control_flow": {
+      "harness": "dev/block-differential.py",
+      "report": ".stela/bc-cond-differential-report.json",
+      "kind": "arm64_bc_cond_original_native_differential",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "state_exit_comparisons",
+      "required_shared_sources": [
+        "dev/differential.py"
+      ],
+      "required_positive_counts": [
+        "actual_b_cond_byte_bridges"
+      ],
+      "required_measurements": {
+        "state_exit_comparisons": 256,
+        "actual_b_cond_byte_bridges": 16
+      },
+      "require_current_executable": true
     }
   },
   "forms": [
@@ -33047,6 +33065,57 @@
       "scope": "Indexed H4/H8/S4 supports rotations 0/90/180/270 and all Vm registers V0\u2013V31, including Half. Vm selects a complete pair: Q0 Half index 0..1, Q1 Half index 0..3; Single requires Q1/L=0 with index H0..1. Each component computes fused Add(original Vd, selected N component, rotated M pair); rotations 0/180 select N real and 90/270 select N imaginary. The pinned indexed missing-FP16 predicate tests size 10 despite Half width size 01; this enabled-FP16 profile bounds that source discrepancy without correcting it. Enabled nonstreaming FP/AdvSIMD/FP16/AFP/FCMA profile. H is IEEE Half and AHP is ignored; all retained numerical enables refuse under AH=0/1. Architectural FPNeg rotates original M before arithmetic unpacking, retaining AH-sensitive NaN signs and specified argument priority. Original sources are snapshotted; unselected components/pairs and inactive lanes have no effects. Q0 clears high64 and vector NEP is ignored. Destination and fresh sticky FPSR commit once after complete success, preserving FPCR, NZCV, GPR/SP, unrelated vectors, RAM and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET. Disabled-feature/access behavior, enabled trap delivery, streaming SME, Apple-hardware conformance, applications and OS execution remain outside scope.",
       "review": "Exact June canonical fields and allocated width/rotation/pair-index layouts are reviewed. Current primary original, full-state native and Rust completion evidence preserve operand/NaN roles, transactional status and precise retained-enable refusals. Emitted family artifacts and selected source bridges retain separately identified original/core, supplementary-defect and historical mapping evidence.",
       "status": "implemented"
+    },
+    {
+      "id": "BC_only_condbranch",
+      "category": "base_integer_system",
+      "encoding_mask": "0xff000010",
+      "encoding_value": "0x54000010",
+      "source_file": "bc_cond.xml",
+      "mnemonic": "BC",
+      "features": [
+        {
+          "feature": "FEAT_HBC",
+          "name": "v8Ap8"
+        }
+      ],
+      "alias": false,
+      "docvars": {
+        "branch-offset": "br19",
+        "compare-with": "cmp-cond",
+        "instr-class": "general",
+        "isa": "A64",
+        "mnemonic": "BC"
+      },
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bc_cond.xml",
+      "source_sha256": "9e186f6369e50f448b29795791d6df0a2e797a0c71d24054dc29aab5c7e080f6",
+      "status": "implemented",
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "bc_cond_control_flow"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x54000070",
+          "expected_mnemonics": [
+            "bc.eq"
+          ]
+        },
+        {
+          "word": "0x5400007f",
+          "expected_mnemonics": [
+            "bc.nv"
+          ]
+        }
+      ],
+      "review": "Exact June FEAT_HBC branch semantics reuse existing ordinary conditional lowering. Genuine HBC-enabled original QEMU frames and emitted native BlockExit compare all16conditions and16NZCV values; all16 actual B.cond/BC bodies and source maps are byte-identical. Signed-offset composition is covered by decoder tests and existing ordinary branch lowering. No predictor-speed claim.",
+      "scope": "FEAT_HBC enabled. All16 conditions and signed imm19 times4 targets under the existing nonwrapping guest-address profile. Conditional transfer preserves all GPR/SP/NZCV/FP/SIMD state and returns actual next guest PC/exit kind to serialized dispatch. Bit4 supplies a consistent-direction prediction hint with no additional architectural state effect. GCS is disabled and executable pages are unguarded; no PSTATE.BTYPE, exception delivery, hardware predictor identity or application execution claim."
     }
   ]
 }

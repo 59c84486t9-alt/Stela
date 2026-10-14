@@ -555,13 +555,138 @@ def bounded_cases(compiled, multi, compiled_traps):
         receive.close()
 
 
+CONDITIONAL_BRANCH_CLASS = 0x54000000
+CONSISTENT_HINT_BIT = 1 << 4
+CONDITION_MASK = 15
+WORD_BYTES = 4
+NZCV_SHIFT = 28
+BRANCH_TAKEN = KINDS['direct']
+BRANCH_FALLTHROUGH = KINDS['fallthrough']
+BC_ENCODING_MASK = 0xff000010
+BRANCH_IMMEDIATE_BITS = 19
+BRANCH_IMMEDIATE_SHIFT = 5
+BRANCH_IMMEDIATE_MASK = (1 << BRANCH_IMMEDIATE_BITS) - 1
+
+
+def bc_sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def compile_bc_body(cli, directory, pc, word, label):
+    source = struct.pack('<I', word)
+    path = directory / (label + '.arm64')
+    path.write_bytes(source)
+    output = directory / label
+    manifest = json.loads(subprocess.check_output([
+        str(cli), 'compile-block', str(path), '--guest-base', hex(pc),
+        '--cpu-target', 'baseline', '--output-dir', str(output)], timeout=30))
+    native = (output / 'native.bin').read_bytes()
+    assert manifest['abi'] == ABI
+    assert manifest['source_bytes'] == WORD_BYTES
+    assert manifest['source_sha256'] == hashlib.sha256(source).hexdigest()
+    assert manifest['native_sha256'] == hashlib.sha256(native).hexdigest()
+    assert manifest['source_map'] == [[pc, 0]]
+    decoded = list(Cs(CS_ARCH_X86, CS_MODE_64).disasm(native, 0))
+    assert sum(ins.size for ins in decoded) == len(native)
+    return native, manifest, [{'mnemonic': ins.mnemonic, 'operands': ins.op_str,
+                                'size': ins.size} for ins in decoded]
+
+def bc_original_native(cli, case_index_path, output_dir):
+    cli = Path(cli).resolve()
+    output_dir = Path(output_dir)
+    case_index_path = Path(case_index_path)
+    output_dir.mkdir(parents=True, exist_ok=False)
+    cli_hash = bc_sha(cli)
+    harness_hash = bc_sha(__file__)
+    shared_hash = bc_sha(ROOT / 'dev/differential.py')
+    oracle_hash = bc_sha(case_index_path)
+    cases = json.loads(case_index_path.read_text())
+    if isinstance(cases, dict):
+        cases = cases['cases']
+    assert {(row['condition'], row['nzcv']) for row in cases} == {
+        (condition, flags) for condition in range(16) for flags in range(16)}
+    assert len(cases) == 256
+    artifacts, rows = {}, []
+    compiler = None
+    for index, case in enumerate(cases):
+        word, pc = case['word'], case['source_pc']
+        condition = case['condition']
+        assert word & CONDITION_MASK == condition
+        assert word & BC_ENCODING_MASK == CONDITIONAL_BRANCH_CLASS | CONSISTENT_HINT_BIT
+        assert struct.unpack_from('<I', bytes.fromhex(case['source_hex']))[0] == word
+        displacement = (word >> BRANCH_IMMEDIATE_SHIFT) & BRANCH_IMMEDIATE_MASK
+        if displacement & (1 << (BRANCH_IMMEDIATE_BITS - 1)):
+            displacement -= 1 << BRANCH_IMMEDIATE_BITS
+        nzcv = case['nzcv'] << NZCV_SHIFT
+        taken = holds(condition, nzcv)
+        expected_pc = pc + (displacement * WORD_BYTES if taken else WORD_BYTES)
+        assert case['observed_next_pc'] == expected_pc
+        assert case['observed_elr'] == expected_pc + WORD_BYTES
+        assert case['translation_terminator']['original_pc'] == expected_pc
+        initial = bytes.fromhex(case['initial_state_hex'])
+        original = bytes.fromhex(case['state_hex'])
+        assert len(initial) == len(original) == ctypes.sizeof(State)
+        assert State.from_buffer_copy(initial).nzcv == nzcv
+        assert original == initial, 'BC has no architectural register effects'
+        key = (pc, word)
+        if key not in artifacts:
+            label = 'case-' + str(len(artifacts))
+            native, manifest, decoded = compile_bc_body(cli, output_dir, pc, word, label)
+            ordinary, ordinary_manifest, _ = compile_bc_body(
+                cli, output_dir, pc, word & ~CONSISTENT_HINT_BIT, label + '-ordinary')
+            assert ordinary == native, 'B.cond/BC actual emitted bodies differ'
+            if compiler is None:
+                compiler = manifest['compiler_source_sha256']
+            assert manifest['compiler_source_sha256'] == ordinary_manifest['compiler_source_sha256'] == compiler
+            artifacts[key] = (native, manifest, decoded)
+        native, manifest, decoded = artifacts[key]
+        state = State.from_buffer_copy(initial)
+        with executable(native) as address:
+            function = ctypes.CFUNCTYPE(BlockExit, ctypes.POINTER(State))(address)
+            returned = function(ctypes.byref(state))
+        expected_kind = BRANCH_TAKEN if taken else BRANCH_FALLTHROUGH
+        assert bytes(state) == original
+        assert (returned.next_pc, returned.kind) == (expected_pc, expected_kind)
+        rows.append({'case_index': index, 'condition': condition, 'nzcv': nzcv,
+                     'original_next_pc': case['observed_next_pc'], 'native_next_pc': returned.next_pc,
+                     'native_exit_kind': returned.kind, 'state_sha256': hashlib.sha256(bytes(state)).hexdigest(),
+                     'native_sha256': manifest['native_sha256']})
+    assert bc_sha(cli) == cli_hash
+    assert bc_sha(__file__) == harness_hash
+    assert bc_sha(ROOT / 'dev/differential.py') == shared_hash
+    assert bc_sha(case_index_path) == oracle_hash
+    report = {'kind': 'arm64_bc_cond_original_native_differential', 'passed': True,
+              'compiler_executable_sha256': cli_hash, 'compiler_source_sha256': compiler,
+              'abi': ABI, 'harness_source_sha256': harness_hash,
+              'shared_sources_sha256': {'dev/differential.py': shared_hash},
+              'original_case_index_sha256': oracle_hash,
+              'target': 'baseline', 'comparisons': len(rows), 'state_exit_comparisons': len(rows),
+              'actual_b_cond_byte_bridges': len(artifacts), 'state_bytes': ctypes.sizeof(State),
+              'cases': rows,
+              'artifacts': [{'pc': pc, 'word': word, 'manifest': manifest,
+                             'native_bytes': len(native), 'instructions_including_exit_returns': len(decoded),
+                             'decoded': decoded} for (pc, word), (native, manifest, decoded) in artifacts.items()],
+              'limits': 'Bounded genuine QEMU original path and full-State comparison. No Apple hardware, host branch-prediction timing, application or OS boot claim.'}
+    (output_dir / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--cli', type=Path, help='Use an explicitly frozen compiler executable')
+    parser.add_argument('--bc-oracle', type=Path, help='Run only focused BC originals from this observations index')
+    parser.add_argument('--output-dir', type=Path, help='Fresh artifact directory required with --bc-oracle')
     args = parser.parse_args()
     if not args.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
-    cli = ROOT / 'target/debug/stela'
+    cli = (args.cli or ROOT / 'target/debug/stela').resolve()
+    if args.bc_oracle is not None:
+        if args.output_dir is None:
+            parser.error('--bc-oracle requires a fresh --output-dir')
+        report = bc_original_native(cli, args.bc_oracle, args.output_dir)
+        write_evidence(ROOT / '.stela/bc-cond-differential-report.json', report)
+        print(json.dumps({key: report[key] for key in ('passed', 'comparisons', 'actual_b_cond_byte_bridges')}))
+        return
     executable_hash = hashlib.sha256(cli.read_bytes()).hexdigest()
     harness_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     shared_paths = [ROOT / 'dev/differential.py', ROOT / 'crates/stela-runtime/src/blocks.rs',
