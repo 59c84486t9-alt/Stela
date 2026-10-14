@@ -9,6 +9,7 @@ pub mod precision;
 pub mod refinement;
 pub mod rounding;
 pub mod sqrt;
+pub mod widening;
 
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,

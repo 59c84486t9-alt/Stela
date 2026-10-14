@@ -16,6 +16,122 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_widening_encodings_cover_every_form_width_layout_and_alias(self):
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        functions = suite.widening_functions()
+        self.assertEqual((len(functions), len({op['word'] for op in functions})), (496, 496))
+        self.assertEqual(len({op['canonical_id'] for op in functions}), 8)
+        self.assertEqual(len({suite.widening_shape(op) for op in functions}), 16)
+        self.assertEqual(len({(suite.widening_shape(op), op['index']) for op in functions}), 72)
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        for op in functions:
+            fact = facts[op['canonical_id']]
+            self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))
+            decoded = list(decoder.disasm(struct.pack('<I', op['word']), 0))
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(decoded[0].mnemonic, op['name'])
+            self.assertEqual((op['lane'], op['source_lane'], op['a']), (4, 2, op['d']))
+            self.assertEqual(op['source_lane_offset'], op['bytes'] // 4 if op['upper'] else 0)
+            if op['index'] is not None:
+                self.assertLess(op['m'], 16)
+        for args, options in ((('fmla', 8), {}), (('fmlal', 4), {}),
+                (('fmlal', 8), {'m': 16, 'index': 0}), (('fmlsl2', 16), {'index': 8})):
+            with self.assertRaises(ValueError):
+                suite.widening_operation(*args, **options)
+
+    def test_widening_source_parts_indices_and_accumulator_snapshot_are_distinct(self):
+        triples = [(0x3f800000, 0x4000, 0x3800), (0x40000000, 0x4200, 0x3800)]
+        op = suite.widening_operation('fmlal2', 8)
+        initial = suite.widening_state(op, 0, triples, suite.NUMERICAL_NEP)
+        left = struct.unpack('<8H', struct.pack('<2Q', *initial.v[1]))
+        right = struct.unpack('<8H', struct.pack('<2Q', *initial.v[2]))
+        self.assertEqual(left[2:4], (0x4000, 0x4200))
+        self.assertEqual(right[2:4], (0x3800, 0x3800))
+        self.assertEqual(left[:2], (0x7c05, 0x7c05))
+        self.assertEqual(initial.v[0][0], 0x400000003f800000)
+        indexed = suite.widening_operation('fmlal2', 8, index=7)
+        initial = suite.widening_state(indexed, 1, triples)
+        right = struct.unpack('<8H', struct.pack('<2Q', *initial.v[2]))
+        self.assertEqual(right[7], 0x3800)
+        self.assertEqual(right[:7], (0x7c05,) * 7)
+        alias = suite.widening_operation('fmlal2', 8, d=1, n=1)
+        initial = suite.widening_state(alias, 2, triples)
+        self.assertEqual(struct.unpack('<8H', struct.pack('<2Q', *initial.v[1]))[2:4], (0x4000, 0x4200))
+        self.assertNotEqual(initial.v[1][0], 0x400000003f800000)
+        with self.assertRaises(ValueError):
+            suite.widening_state(op, 0, [(0x3f800000, 0x10000, 0x3c00)] * 2)
+
+    def test_widening_original_nan_classes_are_not_prequieted_or_prenegated(self):
+        triples = {label: (addend, left, right) for label, addend, left, right in suite.widening_triples()}
+        self.assertEqual(triples['left_snan_positive'][1], 0x7c05)
+        self.assertEqual(triples['right_snan_negative'][2], 0xfc05)
+        self.assertEqual(triples['addend_snan_negative'][0], 0xff800005)
+        op = suite.widening_operation('fmlsl2', 8)
+        initial = suite.widening_state(op, 0, [triples['left_snan_positive']] * 2, suite.NUMERICAL_AH)
+        self.assertEqual((initial.v[1][0] >> 32) & 0xffff, 0x7c05)
+        self.assertEqual(triples['cancel_negative'], (0xbf800000, 0x3c01, 0x3bfe))
+
+    def test_widening_mnemonics_reach_mocked_compiler_for_every_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(suite.subprocess, 'check_output', side_effect=RuntimeError('reached mocked compiler')) as compile_call:
+                for index, op in enumerate(suite.widening_functions()):
+                    with self.assertRaisesRegex(RuntimeError, 'reached mocked compiler'):
+                        suite.compile_batch(Path('mock-stela'), Path(temporary), [{'operations': [op]}], index, block=True)
+                self.assertEqual(compile_call.call_count, 496)
+
+    def test_widening_optional_fma_still_requires_exact_opcode_and_capability(self):
+        family = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.WIDENING_NUMERICAL_FOCUS]
+        for name, mnemonic in (('fmlal', 'vfmadd132ps'), ('fmlsl2', 'vfnmadd132ps')):
+            op = suite.widening_operation(name, 16)
+            for target in ('x86_64-baseline', 'x86_64-baseline+f16c'):
+                self.assertTrue(suite.numerical_fma_accounting_matches(op, target, {}, family))
+                self.assertFalse(suite.numerical_fma_accounting_matches(op, target, {mnemonic: 1}, family))
+            for target in ('x86_64-baseline+fma', 'x86_64-baseline+f16c+fma'):
+                self.assertTrue(suite.numerical_fma_accounting_matches(op, target, {}, family))
+                self.assertTrue(suite.numerical_fma_accounting_matches(op, target, {mnemonic: 1}, family))
+                self.assertFalse(suite.numerical_fma_accounting_matches(op, target, {mnemonic: 2}, family))
+                self.assertFalse(suite.numerical_fma_accounting_matches(op, target, {'vfmadd213ps': 1}, family))
+        old = suite.FULL_FRAME_NUMERICAL_COHORTS[suite.FUSED_NUMERICAL_FOCUS]
+        op = suite.fused_numerical_operation('fmadd', 4, 4, True, 0, 1, 2, 3)
+        self.assertFalse(suite.numerical_fma_accounting_matches(op, 'x86_64-baseline+fma', {}, old))
+        self.assertNotIn('accepts_enabled_control', family)
+        self.assertNotIn('profile_expectation', family)
+
+    def test_widening_cache_helper_is_a_quiet_nan_fixed_point(self):
+        functions, cases = suite.widening_corpus()
+        records = [dict(case, operation=functions[case['function']]) for case in cases]
+        helpers = suite.widening_helpers(records)
+        self.assertEqual(len(helpers), 16)
+        for record in helpers:
+            op = record['operation']
+            initial = State.from_buffer_copy(record['initial'])
+            self.assertEqual(record['label'], 'directed_addend_qnan_positive')
+            self.assertEqual((op['d'], op['n'], op['m']), (0, 1, 2))
+            self.assertEqual((initial.fpcr, initial.fpsr), (0, 0))
+            accumulator = struct.unpack('<4I', struct.pack('<2Q', *initial.v[op['d']]))
+            self.assertEqual(accumulator[:op['source_lane_count']], (0x7fc00003,) * op['source_lane_count'])
+            for register in (op['n'], op['m']):
+                source = struct.unpack('<8H', struct.pack('<2Q', *initial.v[register]))
+                positions = [op['index']] if register == op['m'] and op['index'] is not None else range(op['source_lane_offset'], op['source_lane_offset'] + op['source_lane_count'])
+                self.assertTrue(all(source[position] == 0x3c00 for position in positions))
+            # A sole quiet Single NaN plus normal Half multiplicands preserves
+            # its original payload/status forever. The first Q0 commit clears
+            # upper64, and every following commit leaves the full state fixed.
+            self.assertEqual(op['merge'], 'none')
+            if op['bytes'] == 8:
+                self.assertNotEqual(initial.v[op['d']][1], 0)
+
+    def test_widening_corpus_and_runtime_are_bounded_and_all_enables_refuse(self):
+        functions, cases = suite.widening_corpus()
+        self.assertEqual(len(cases), 21256)
+        self.assertEqual({case['function'] for case in cases}, set(range(496)))
+        imported = [dict(case, operation=functions[case['function']]) for case in cases]
+        self.assertEqual(sum(bool(State.from_buffer_copy(case['initial']).fpcr & suite.NUMERICAL_TRAP_ENABLE_MASK) for case in cases), 168)
+        self.assertEqual(len(suite.widening_runtime_cases(imported)), 216)
+        self.assertEqual(len(suite.widening_helpers(imported)), 16)
+        self.assertEqual(suite.widening_helpers(imported, set()), [])
+        self.assertLessEqual(len(suite.widening_runtime_cases(imported)) + 6 * len(suite.widening_helpers(imported)), 425)
+
     def test_remaining_binary_forms_reach_compiler_after_independent_decode(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

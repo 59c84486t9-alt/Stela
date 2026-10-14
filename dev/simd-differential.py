@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(numerical_return_word(function['operations'][0]) if len(function['operations']) == 1 else RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr', 'fmadd', 'fmsub', 'fnmadd', 'fnmsub', 'fmla', 'fmls', 'fcvt', 'fcvtl', 'fcvtl2', 'fcvtn', 'fcvtn2', 'fcvtxn', 'fcvtxn2', 'fcvtns', 'fcvtnu', 'fcvtps', 'fcvtpu', 'fcvtms', 'fcvtmu', 'fcvtzs', 'fcvtzu', 'fcvtas', 'fcvtau', 'scvtf', 'ucvtf', 'fjcvtzs', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'facge', 'facgt', 'fcmeq', 'fcmge', 'fcmgt', 'fcmle', 'fcmlt', 'fmax', 'fmin', 'fmaxnm', 'fminnm', 'fmaxp', 'fminp', 'fmaxnmp', 'fminnmp', 'fmaxv', 'fminv', 'fmaxnmv', 'fminnmv', 'frintn', 'frintp', 'frintm', 'frintz', 'frinta', 'frintx', 'frinti', 'frint32z', 'frint32x', 'frint64z', 'frint64x', 'fsqrt', 'frecpe', 'frsqrte', 'frecpx', 'urecpe', 'ursqrte', 'frecps', 'frsqrts', 'fnmul', 'fabd', 'faddp', 'fmulx', 'fmlal', 'fmlal2', 'fmlsl', 'fmlsl2'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -3078,7 +3078,7 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/memory-faults.py', 'dev/native-memory-faults.c',
                     'dev/test_simd_differential.py', 'crates/stela-runtime/src/floating.rs',
-                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs',
+                    'crates/stela-runtime/src/floating/comparison.rs', 'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs',
                     'crates/stela-runtime/src/blocks.rs', 'crates/stela-runtime/src/lib.rs',
                     'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
@@ -5600,7 +5600,254 @@ def load_binary_remaining_oracle(path=BINARY_REMAINING_ORACLE):
     return load_full_frame_numerical_oracle(path, binary_remaining_functions(), BINARY_REMAINING_CASES, BINARY_REMAINING_FOCUS)
 
 
+WIDENING_NUMERICAL_FOCUS = 'widening_numerical'
+WIDENING_NUMERICAL_ORACLE = ROOT / '.stela/research/fhm-numerical/harness/oracle/receipt.json'
+WIDENING_REGISTER_BASES = {'fmlal': 0x0e20ec00, 'fmlal2': 0x2e20cc00,
+    'fmlsl': 0x0ea0ec00, 'fmlsl2': 0x2ea0cc00}
+WIDENING_INDEXED_BASES = {'fmlal': 0x0f800000, 'fmlal2': 0x2f808000,
+    'fmlsl': 0x0f804000, 'fmlsl2': 0x2f80c000}
+WIDENING_INDEXED_ROLES = ((0, 1, 2), (1, 1, 2), (2, 1, 2), (0, 1, 1),
+    (15, 15, 15), (31, 31, 15), (31, 30, 14))
+WIDENING_CONTROLS = (*BINARY_REMAINING_CONTROLS, NUMERICAL_FIZ | NUMERICAL_FZ,
+    NUMERICAL_AH | NUMERICAL_FIZ | NUMERICAL_FZ)
+WIDENING_NUMERICAL_CASES = 21256
+WIDENING_RANDOM_SEED = 0x574944454e494e47
+
+
+def widening_operation(name, width, d=0, n=1, m=2, index=None):
+    if (name not in WIDENING_REGISTER_BASES or width not in (8, 16)
+            or any(not 0 <= register < 32 for register in (d, n, m))
+            or index is not None and (m >= 16 or not 0 <= index < 8)):
+        raise ValueError('Unallocated widening FP16 operand')
+    word = (WIDENING_REGISTER_BASES if index is None else WIDENING_INDEXED_BASES)[name]
+    if index is not None:
+        word |= ((index >> 2) & 1) << 11 | ((index >> 1) & 1) << 21 | (index & 1) << 20
+    upper = name.endswith('2')
+    return {'name': name, 'lane': 4, 'source_lane': 2, 'bytes': width, 'scalar': False,
+        'd': d, 'a': d, 'n': n, 'm': m, 'index': index, 'upper': upper,
+        'source_lane_offset': width // 4 if upper else 0, 'source_lane_count': width // 4,
+        'word': word | int(width == 16) << 30 | m << 16 | n << 5 | d,
+        'canonical_id': name.upper() + ('_asimdsame_F' if index is None else '_asimdelem_LH'),
+        'output_kind': 'vector', 'input_kind': 'register' if index is None else 'indexed',
+        'merge': 'none', 'cohort_family': 'widening'}
+
+
+def widening_functions():
+    functions = []
+    for name in WIDENING_REGISTER_BASES:
+        for width in (8, 16):
+            for index in (None, *range(8)):
+                roles = FUSED_ACCUMULATE_ROLES if index is None else WIDENING_INDEXED_ROLES
+                functions.extend(widening_operation(name, width, d, n, m, index) for d, n, m in roles)
+    if len(functions) != len({op['word'] for op in functions}):
+        raise AssertionError('Widening subject words must be unique')
+    return functions
+
+
+def widening_triples():
+    h, s = dict(numerical_unary_values(2)), dict(numerical_unary_values(4))
+    one, half = h['one_positive'], h['half_positive']
+    small = conversion_exact_positive_bits(2, 1, -12)
+    triples = [('one_one_one', s['one_positive'], one, one),
+        ('two_two_one', s['two_positive'], h['two_positive'], one),
+        ('cancel_negative', s['one_negative'], one + 1, one - 2),
+        ('cancel_positive', s['one_positive'], one + 1, one - 2),
+        ('tie_even', s['one_positive'], small, small),
+        ('tie_odd', s['one_positive'] + 1, small, small),
+        ('tie_above', s['one_positive'], small + 1, small),
+        ('tie_below', s['one_positive'], small - 1, small),
+        ('negative_tie', s['one_negative'], small | h['zero_negative'], small),
+        ('max_half_product', 0, h['maxfinite_positive'], h['maxfinite_positive']),
+        ('max_single_add', s['maxfinite_positive'], one, one),
+        ('min_half_product', 0, h['minsubnormal_positive'], h['minsubnormal_positive']),
+        ('min_half_cancel', conversion_exact_positive_bits(4, 1, -48) | s['zero_negative'], 1, 1),
+        ('single_subnormal', s['minsubnormal_positive'], 0, one),
+        ('negative_single_subnormal', s['minsubnormal_negative'], 0, one),
+        ('max_single_subnormal', s['maxsubnormal_positive'], 0, one)]
+    for addend in ('positive', 'negative'):
+        for left in ('positive', 'negative'):
+            triples.append((f'zero_{addend}_{left}', s['zero_' + addend], h['zero_' + left], one))
+    for left, right in (('infinity_positive', 'zero_positive'), ('zero_negative', 'infinity_positive'),
+                        ('infinity_negative', 'one_positive'), ('one_positive', 'infinity_negative')):
+        triples.append(('special_' + left + '_' + right, s['one_positive'], h[left], h[right]))
+    for label in ('qnan_positive', 'qnan_negative', 'snan_positive', 'snan_negative'):
+        triples.extend((('addend_' + label, s[label], one, one),
+            ('left_' + label, s['one_positive'], h[label], one),
+            ('right_' + label, s['one_positive'], one, h[label])))
+    triples.extend((('qnan_invalid_product', s['qnan_negative'], h['infinity_positive'], 0),
+        ('opposed_infinity', s['infinity_negative'], h['infinity_positive'], one),
+        ('same_infinity', s['infinity_positive'], h['infinity_positive'], one),
+        ('half_denormal', s['one_positive'], h['minsubnormal_positive'], one),
+        ('half_denormal_negative', s['one_positive'], h['minsubnormal_negative'], one),
+        ('half_denormal_nan', s['qnan_negative'], h['minsubnormal_positive'], one),
+        ('single_denormal_nan', s['minsubnormal_positive'], h['qnan_negative'], one),
+        ('single_denormal_invalid', s['minsubnormal_positive'], h['infinity_positive'], 0),
+        ('single_denormal_infinity', s['minsubnormal_positive'], h['infinity_positive'], one),
+        ('half_denormal_infinity', 0, h['minsubnormal_positive'], h['infinity_positive']),
+        ('both_denormals', s['minsubnormal_positive'], h['minsubnormal_positive'], one),
+        ('exact_half_subnormal', 0, h['minsubnormal_positive'], one)))
+    return triples
+
+
+def widening_state(op, case, triples, control=0, sticky=0):
+    if (len(triples) != op['source_lane_count'] or any(not 0 <= addend < 1 << 32
+            or not 0 <= left < 1 << 16 or not 0 <= right < 1 << 16 for addend, left, right in triples)):
+        raise ValueError('Invalid widening mixed-width input')
+    initial = fused_numerical_state(dict(op, index=None), case, triples, control)
+    initial.fpsr = sticky
+    def store(register, lane, values):
+        bits = lane * 8
+        poison = dict(numerical_unary_values(lane))['snan_positive']
+        packed = sum(poison << (position * bits) for position in range(16 // lane))
+        for position, value in values:
+            mask = ((1 << bits) - 1) << (position * bits)
+            packed = packed & ~mask | value << (position * bits)
+        initial.v[register][:] = [packed & MASK, packed >> 64]
+    # Aliases resolve through complete source writes; the retained frame owns
+    # the actual accumulator/multiplicands, rather than the requested triples.
+    store(op['d'], 4, enumerate(addend for addend, _, _ in triples))
+    store(op['n'], 2, enumerate((left for _, left, _ in triples), op['source_lane_offset']))
+    right = [(op['index'], triples[0][2])] if op['index'] is not None else enumerate((right for _, _, right in triples), op['source_lane_offset'])
+    store(op['m'], 2, right)
+    return initial
+
+
+def widening_shape(op):
+    return op['name'], op['bytes'], op['index'] is not None
+
+
+def widening_corpus():
+    functions, records, primary, enabled = widening_functions(), [], set(), set()
+    triples = widening_triples()
+    catalog = {label: (addend, left, right) for label, addend, left, right in triples}
+    h, s = dict(numerical_unary_values(2)), dict(numerical_unary_values(4))
+    rng = random.Random(WIDENING_RANDOM_SEED)
+    def append(function, label, active, control=0, sticky=0):
+        initial = widening_state(functions[function], len(records), active, control, sticky)
+        records.append({'function': function, 'function_index': function, 'case': len(records), 'label': label,
+            'initial_state_sha256': digest(bytes(initial)), 'initial': bytes(initial)})
+    for function, op in enumerate(functions):
+        shape, count = widening_shape(op), op['source_lane_count']
+        if shape not in primary:
+            primary.add(shape)
+            for mode in range(4):
+                for label, addend, left, right in triples:
+                    append(function, 'directed_' + label, [(addend, left, right)] * count, mode << NUMERICAL_ROUND_SHIFT)
+            for mode in range(4):
+                for label in ('cancel_negative', 'cancel_positive', 'tie_even', 'tie_odd', 'tie_above', 'negative_tie',
+                              'max_single_add', 'single_subnormal', 'negative_single_subnormal', 'half_denormal',
+                              'single_denormal_nan', 'qnan_invalid_product'):
+                    append(function, 'ah_round_' + label, [catalog[label]] * count, NUMERICAL_AH | mode << NUMERICAL_ROUND_SHIFT)
+            for variant in range(2):
+                addends = [s['one_positive'], s['qnan_positive'] + variant * 7, s['snan_negative'] + variant * 11]
+                lefts = [h['one_positive'], h['qnan_negative'] + variant * 3, h['snan_positive'] + variant * 5]
+                rights = [h['two_positive'], h['qnan_positive'] + variant * 9, h['snan_negative'] + variant * 13]
+                for a, addend in enumerate(addends):
+                    for n, left in enumerate(lefts):
+                        for m, right in enumerate(rights):
+                            if not (a or n or m):
+                                continue
+                            for control in (0, NUMERICAL_AH, NUMERICAL_DN, NUMERICAL_AH | NUMERICAL_DN):
+                                append(function, f'nan_matrix_{variant}_{a}_{n}_{m}', [(addend, left, right)] * count, control)
+            for control in WIDENING_CONTROLS:
+                for label in ('tie_odd', 'max_single_add', 'single_subnormal', 'negative_single_subnormal',
+                              'half_denormal', 'half_denormal_negative', 'half_denormal_nan', 'single_denormal_nan',
+                              'single_denormal_invalid', 'single_denormal_infinity', 'half_denormal_infinity', 'both_denormals',
+                              'left_snan_positive', 'right_snan_negative'):
+                    append(function, 'control_' + label, [catalog[label]] * count, control)
+            for sticky in (1, 1 << 4, 1 << 27, FP_REGISTER_MASKS['fpsr']):
+                for control in (0, NUMERICAL_AH):
+                    for label in ('one_one_one', 'tie_odd', 'left_snan_positive', 'single_subnormal'):
+                        append(function, 'sticky_' + label, [catalog[label]] * count, control, sticky)
+            for control in (0, NUMERICAL_AH, NUMERICAL_FZ16, NUMERICAL_AH | NUMERICAL_FZ):
+                for label in ('tie_odd', 'left_snan_positive', 'single_subnormal', 'half_denormal', 'max_single_add', 'qnan_invalid_product'):
+                    for position in range(count):
+                        active = [catalog['one_one_one']] * count
+                        active[position] = catalog[label]
+                        append(function, f'mixed_{label}_{position}', active, control)
+            for mode in range(4):
+                for iteration in range(16):
+                    active = [(rng.getrandbits(32), rng.getrandbits(16), rng.getrandbits(16)) for _ in range(count)]
+                    append(function, f'bounded_random_{iteration}', active, mode << NUMERICAL_ROUND_SHIFT)
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_enable_readback_only', [catalog['one_one_one']] * count, control)
+        if op['canonical_id'] not in enabled:
+            enabled.add(op['canonical_id'])
+            for control in (*(1 << bit for bit in (8, 9, 10, 11, 12, 15)), NUMERICAL_TRAP_ENABLE_MASK):
+                append(function, 'trap_ah_enable_readback_only', [catalog['left_snan_positive']] * count, control | NUMERICAL_AH)
+        witness = [(conversion_exact_positive_bits(4, position + 1, 0), conversion_exact_positive_bits(2, position + 2, 0), h['half_positive']) for position in range(count)]
+        for mode in range(4):
+            append(function, 'layout_witness', witness, mode << NUMERICAL_ROUND_SHIFT)
+        if op['index'] not in (None, 0):
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP):
+                for label in ('one_one_one', 'cancel_negative', 'left_snan_positive', 'single_denormal_nan'):
+                    append(function, 'indexed_' + label, [catalog[label]] * count, control)
+        elif (op['d'], op['n'], op['m']) != (0, 1, 2):
+            for control in (0, NUMERICAL_AH, NUMERICAL_NEP, NUMERICAL_FZ16):
+                for label in ('one_one_one', 'cancel_negative', 'left_snan_positive', 'single_subnormal'):
+                    append(function, 'alias_' + label, [catalog[label]] * count, control)
+    if len(records) != WIDENING_NUMERICAL_CASES:
+        raise AssertionError("Widening corpus exceeded approved bounded scope")
+    return functions, records
+
+
+def widening_runtime_cases(records):
+    selected = {}
+    for record in records:
+        op, label = record['operation'], record['label']
+        initial = State.from_buffer_copy(record['initial'])
+        shape = widening_shape(op)
+        if initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK:
+            enables = initial.fpcr & NUMERICAL_TRAP_ENABLE_MASK
+            selected.setdefault(('enable', op['canonical_id'] if enables == NUMERICAL_TRAP_ENABLE_MASK else enables, bool(initial.fpcr & NUMERICAL_AH)), record)
+        elif label == 'directed_one_one_one' and initial.fpcr == 0:
+            selected.setdefault(('shape', shape), record)
+        elif label == 'layout_witness' and initial.fpcr == 0 and (op['d'], op['n'], op['m']) == (0, 1, 2):
+            selected.setdefault(('layout', shape, op['index']), record)
+        elif label == 'directed_tie_odd':
+            selected.setdefault(('round', op['name'], initial.fpcr), record)
+        elif label in ('directed_cancel_negative', 'directed_max_single_add', 'directed_single_subnormal',
+                       'directed_left_snan_positive', 'directed_qnan_invalid_product') and initial.fpcr == 0:
+            selected.setdefault(('semantic', op['name'], label), record)
+        elif label in ('control_single_subnormal', 'control_single_denormal_nan'):
+            selected.setdefault(('control', initial.fpcr, label), record)
+        elif label == 'alias_one_one_one' and initial.fpcr == NUMERICAL_NEP:
+            selected.setdefault(('alias', op['d'], op['n'], op['m']), record)
+        elif label == 'sticky_tie_odd' and initial.fpcr == 0:
+            selected.setdefault(('sticky', op['name']), record)
+        elif label == 'mixed_left_snan_positive_0' and initial.fpcr == NUMERICAL_AH:
+            selected.setdefault(('mixed_status', shape), record)
+        elif label == 'nan_matrix_0_2_1_0' and initial.fpcr in (0, NUMERICAL_AH):
+            selected.setdefault(('mixed_nan_priority', op['name'], initial.fpcr), record)
+    return list({record['case']: record for record in selected.values()}.values())
+
+
+def widening_helpers(records, case_ids=None):
+    selected = {}
+    for record in records:
+        op, initial = record['operation'], State.from_buffer_copy(record['initial'])
+        if (record['label'] != 'directed_addend_qnan_positive'
+                or case_ids is not None and record['case'] not in case_ids or initial.fpcr or initial.fpsr
+                or (op['d'], op['n'], op['m']) != (0, 1, 2) or op['index'] not in (None, 0)):
+            continue
+        selected.setdefault(widening_shape(op), record)
+    return list(selected.values())
+
+
+def prepare_widening_oracle(directory):
+    return prepare_full_frame_numerical_oracle(directory, *widening_corpus(), WIDENING_NUMERICAL_FOCUS)
+
+
+def load_widening_oracle(path=WIDENING_NUMERICAL_ORACLE):
+    return load_full_frame_numerical_oracle(path, widening_functions(), WIDENING_NUMERICAL_CASES, WIDENING_NUMERICAL_FOCUS)
+
+
 FULL_FRAME_NUMERICAL_COHORTS = {
+    WIDENING_NUMERICAL_FOCUS: {'loader': load_widening_oracle, 'runtime_cases': widening_runtime_cases,
+        'helpers': widening_helpers, 'forms': 8, 'actual_helpers': True, 'status_merge_source': 'd',
+        'native_fma_operations': {'fmlal': 'vfmadd', 'fmlal2': 'vfmadd', 'fmlsl': 'vfnmadd', 'fmlsl2': 'vfnmadd'},
+        'native_fma_optional': True,
+        'limits': 'Enabled nonstreaming FHM Half multiplicands and Single accumulator/results only. All retained enables precisely refuse, including AH1. QEMU RAZ/WI observations receive no successful equality credit. Full original states and supplementary oracle limitations remain explicit. No trap delivery, disabled-feature, Apple hardware, application, OS or performance claim.'},
     BINARY_REMAINING_FOCUS: {'loader': load_binary_remaining_oracle, 'runtime_cases': binary_remaining_runtime_cases,
         'helpers': binary_remaining_helpers, 'forms': 23, 'actual_helpers': True,
         'original_effects': validate_binary_remaining_original_effects, 'status_merge_source': 'n',
@@ -5844,6 +6091,11 @@ def numerical_fma_expectation(operation, target_id, operations):
     return {operations[operation['name']] + '132' + suffix: 1}
 
 
+def numerical_fma_accounting_matches(operation, target_id, mnemonics, family):
+    expected = numerical_fma_expectation(operation, target_id, family.get('native_fma_operations'))
+    return mnemonics == expected or bool(family.get('native_fma_optional') and not mnemonics)
+
+
 def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     fused = focus == FUSED_NUMERICAL_FOCUS
     family = FULL_FRAME_NUMERICAL_COHORTS[focus]
@@ -5852,7 +6104,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     cpu_info = json.loads(subprocess.check_output([str(cli), 'cpu-info']))
@@ -5889,8 +6141,7 @@ def run_full_frame_numerical_cohort(cli, oracle_path, focus):
                 histogram = artifact['accounting']['static_opcode_histogram']
                 fused_mnemonics = {mnemonic: count for mnemonic, count in histogram.items()
                                    if mnemonic.startswith(FUSED_NATIVE_PREFIXES)}
-                expected = numerical_fma_expectation(operation, target_id, family.get('native_fma_operations'))
-                if fused_mnemonics != expected:
+                if not numerical_fma_accounting_matches(operation, target_id, fused_mnemonics, family):
                     raise AssertionError(f'FMA3 opcode/feature guard failed: {target_id} {operation} {fused_mnemonics}')
             raw = bounded_cases(batches)
             raw['limits'] = 'Original QEMU captures every architectural register before transport clobbers. Raw helper exits verify exact PC and unchanged full state; actual Rust runtime completion is separate. Requested enables remain intact in native inputs. QEMU RAZ/WI observations receive no direct-original equality credit; accepted control-policy and standard-profile model successes are counted separately.'
@@ -5944,7 +6195,7 @@ def run_vector_numerical_cohort(cli, oracle_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     batches, artifacts, checked, compiler = [], [], [], None
@@ -6165,7 +6416,7 @@ def run_fp_register_cohort(cli, numerical_path):
     cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
     shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
                     'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/floating/comparison.rs',
-                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/floating/minmax.rs', 'crates/stela-runtime/src/floating/rounding.rs', 'crates/stela-runtime/src/floating/sqrt.rs', 'crates/stela-runtime/src/floating/estimate.rs', 'crates/stela-runtime/src/floating/refinement.rs', 'crates/stela-runtime/src/floating/arithmetic.rs', 'crates/stela-runtime/src/floating/widening.rs', 'crates/stela-runtime/src/blocks.rs',
                     'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
     shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
     with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
@@ -6289,7 +6540,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS, VECTOR_NUMERICAL_FOCUS, FUSED_NUMERICAL_FOCUS, CONVERSION_NUMERICAL_FOCUS, COMPARISON_MINMAX_FOCUS, ROUND_INTEGRAL_FOCUS, SQRT_NUMERICAL_FOCUS, ESTIMATE_NUMERICAL_FOCUS, REFINEMENT_NUMERICAL_FOCUS, BINARY_REMAINING_FOCUS, WIDENING_NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     parser.add_argument('--vector-oracle', type=Path, default=VECTOR_NUMERICAL_ORACLE,
@@ -6304,6 +6555,7 @@ def main():
                         help='Pinned full-frame original integral rounding receipt')
     parser.add_argument('--sqrt-oracle', type=Path, default=SQRT_NUMERICAL_ORACLE,
                         help='Pinned full-frame original square-root receipt')
+    parser.add_argument('--widening-oracle', type=Path, default=WIDENING_NUMERICAL_ORACLE)
     parser.add_argument('--binary-remaining-oracle', type=Path, default=BINARY_REMAINING_ORACLE)
     parser.add_argument('--estimate-oracle', type=Path, default=ESTIMATE_NUMERICAL_ORACLE)
     parser.add_argument('--refinement-oracle', type=Path, default=REFINEMENT_NUMERICAL_ORACLE)
@@ -6316,6 +6568,9 @@ def main():
         return
     if arguments.focus == FP_REGISTER_FOCUS:
         run_fp_register_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == WIDENING_NUMERICAL_FOCUS:
+        run_full_frame_numerical_cohort(cli, arguments.widening_oracle, arguments.focus)
         return
     if arguments.focus == BINARY_REMAINING_FOCUS:
         run_full_frame_numerical_cohort(cli, arguments.binary_remaining_oracle, arguments.focus)

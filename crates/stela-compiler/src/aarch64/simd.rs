@@ -20,6 +20,7 @@ pub mod rounding;
 pub mod saturating;
 pub mod shifts;
 pub mod sqrt;
+pub mod widening;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerOperation {

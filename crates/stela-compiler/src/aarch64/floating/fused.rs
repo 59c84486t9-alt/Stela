@@ -96,7 +96,7 @@ fn tiny<F: Float>(addend: F, left: F, right: F, result: StatusAnd<F>, control: C
         < double(minimum)
 }
 
-fn finite<F: Float + FloatConvert<Quad>>(
+pub(super) fn finite<F: Float + FloatConvert<Quad>>(
     format: Format,
     addend: u64,
     left: u64,

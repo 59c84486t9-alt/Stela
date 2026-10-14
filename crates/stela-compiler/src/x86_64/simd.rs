@@ -25,6 +25,7 @@ mod rounding;
 mod saturating;
 mod shifts;
 mod sqrt;
+mod widening;
 
 fn vector_offset(vector: u8) -> u32 {
     (std::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
@@ -159,6 +160,7 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
     match operation {
         FloatingPointOperation::Binary(operand) => arithmetic::always_exits(operand),
         FloatingPointOperation::Fused(operand) => operand.format == Format::Half,
+        FloatingPointOperation::Widening(_) => false,
         FloatingPointOperation::Conversion(operand) => match operand {
             Operand::Precision(operand) => operand.mode.destination_format() == Format::Half,
             Operand::FromInteger(operand) => operand.format == Format::Half,
@@ -194,6 +196,9 @@ pub(super) fn emit_numerical(
         }
         crate::aarch64::FloatingPointOperation::Fused(operand) => {
             fused::emit(code, operand, pc, target)
+        }
+        crate::aarch64::FloatingPointOperation::Widening(operand) => {
+            widening::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::Comparison(operand) => {
             comparison::emit(code, operand, pc)

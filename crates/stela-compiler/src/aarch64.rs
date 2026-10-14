@@ -78,6 +78,7 @@ pub enum AddressMode {
 pub enum FloatingPointOperation {
     Binary(simd::arithmetic::Operand),
     Fused(simd::fused::Operand),
+    Widening(simd::widening::Operand),
     Conversion(simd::conversion::Operand),
     Comparison(simd::comparison::Operand),
     MinMax(simd::minmax::Operand),
@@ -94,6 +95,8 @@ impl FloatingPointOperation {
             Some(result.map(Self::Binary))
         } else if let Some(result) = simd::fused::decode(word) {
             Some(result.map(Self::Fused))
+        } else if let Some(result) = simd::widening::decode(word) {
+            Some(result.map(Self::Widening))
         } else if let Some(result) = simd::conversion::decode(word) {
             Some(result.map(Self::Conversion))
         } else if let Some(result) = simd::comparison::decode(word) {
@@ -120,6 +123,11 @@ impl From<simd::arithmetic::Operand> for FloatingPointOperation {
 impl From<simd::fused::Operand> for FloatingPointOperation {
     fn from(operand: simd::fused::Operand) -> Self {
         Self::Fused(operand)
+    }
+}
+impl From<simd::widening::Operand> for FloatingPointOperation {
+    fn from(operand: simd::widening::Operand) -> Self {
+        Self::Widening(operand)
     }
 }
 impl From<simd::conversion::Operand> for FloatingPointOperation {

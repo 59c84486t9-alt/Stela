@@ -297,13 +297,7 @@ pub(super) fn vector_positive_exponent_range(
     vector_exponent_range_impl(code, format, shape, source, true);
 }
 
-fn vector_exponent_range_impl(
-    code: &mut Vec<u8>,
-    format: Format,
-    shape: Shape,
-    source: u8,
-    positive_only: bool,
-) {
+fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
     packed(code, Host::MoveAligned, EXPONENT_VECTOR, source);
     let (left, right) = match format {
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
@@ -334,17 +328,37 @@ fn vector_exponent_range_impl(
     packed(code, compare, VALIDITY_VECTOR, EXPONENT_VECTOR);
     packed(code, compare, EXPONENT_VECTOR, MINIMUM_EXPONENT_VECTOR);
     packed(code, Host::And, EXPONENT_VECTOR, VALIDITY_VECTOR);
+}
+
+fn half_validity_mask(code: &mut Vec<u8>, byte_mask: u32) {
+    Host::ByteSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
+    code.push(AND_EAX_IMM32);
+    code.extend(byte_mask.to_le_bytes());
+    code.push(CMP_EAX_IMM32);
+    code.extend(byte_mask.to_le_bytes());
+}
+
+/// Classify a caller-selected low Half lane span without inventing a vector shape.
+pub(super) fn vector_half_exponent_range(code: &mut Vec<u8>, source: u8, byte_mask: u32) {
+    vector_exponent_validity(code, Format::Half, source, false);
+    half_validity_mask(code, byte_mask);
+}
+
+fn vector_exponent_range_impl(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    positive_only: bool,
+) {
+    vector_exponent_validity(code, format, source, positive_only);
     if format == Format::Half {
-        Host::ByteSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
         let mask = match shape {
             Shape::Scalar => HALF_SCALAR_BYTE_MASK,
             Shape::Vector64 => HALF_LOW_BYTE_MASK,
             Shape::Vector128 => HALF_VECTOR_BYTE_MASK,
         };
-        code.push(AND_EAX_IMM32);
-        code.extend(mask.to_le_bytes());
-        code.push(CMP_EAX_IMM32);
-        code.extend(mask.to_le_bytes());
+        half_validity_mask(code, mask);
         return;
     }
     Host::DwordSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
@@ -365,6 +379,39 @@ fn vector_exponent_range_impl(
     };
     code.extend(CMP_EAX_IMM8);
     code.push(mask);
+}
+
+/// Widen four staged Half fields with integer operations. Callers guard active
+/// inputs and supply zero and the broadcast Single-minus-Half exponent bias.
+/// Inactive raw fields also become finite normal Single values without status.
+pub(super) fn widen_half_to_single(
+    code: &mut Vec<u8>,
+    destination: u8,
+    source: u8,
+    sign: u8,
+    zero: u8,
+    bias: u8,
+) {
+    const WIDTH_DIFFERENCE: u8 = (Format::Single.bits() - Format::Half.bits()) as u8;
+    const SINGLE_SIGN_POSITION: u8 = (Format::Single.bits() - 1) as u8;
+    const FRACTION_DIFFERENCE: u8 =
+        (Format::Single.fraction_bits() - Format::Half.fraction_bits()) as u8;
+    if destination != source {
+        packed(code, Host::MoveAligned, destination, source);
+    }
+    packed(code, Host::UnpackLowWord, destination, zero);
+    packed(code, Host::MoveAligned, sign, destination);
+    ShiftOpcode::LeftDword.emit(code, sign, WIDTH_DIFFERENCE);
+    ShiftOpcode::RightDword.emit(code, sign, SINGLE_SIGN_POSITION);
+    ShiftOpcode::LeftDword.emit(code, sign, SINGLE_SIGN_POSITION);
+    ShiftOpcode::LeftDword.emit(code, destination, WIDTH_DIFFERENCE + SIGN_BITS);
+    ShiftOpcode::RightDword.emit(
+        code,
+        destination,
+        WIDTH_DIFFERENCE + SIGN_BITS - FRACTION_DIFFERENCE,
+    );
+    packed(code, Host::AddDword, destination, bias);
+    packed(code, Host::Or, destination, sign);
 }
 
 pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8, xmm: u8) {

@@ -51,6 +51,7 @@
     "crates/stela-compiler/src/aarch64/floating/rounding.rs",
     "crates/stela-compiler/src/aarch64/floating/sqrt.rs",
     "crates/stela-compiler/src/aarch64/floating/fused.rs",
+    "crates/stela-compiler/src/aarch64/floating/widening.rs",
     "crates/stela-compiler/src/aarch64/floating/precision.rs",
     "crates/stela-compiler/src/aarch64/floating/refinement.rs",
     "crates/stela-compiler/src/aarch64/floating/integer.rs",
@@ -89,8 +90,10 @@
     "crates/stela-compiler/src/x86_64/simd/refinement.rs",
     "crates/stela-compiler/src/x86_64/simd/sqrt.rs",
     "crates/stela-compiler/src/aarch64/simd/fused.rs",
+    "crates/stela-compiler/src/aarch64/simd/widening.rs",
     "crates/stela-compiler/src/aarch64/simd/conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/fused.rs",
+    "crates/stela-compiler/src/x86_64/simd/widening.rs",
     "crates/stela-compiler/src/x86_64/simd/precision.rs",
     "crates/stela-compiler/src/x86_64/simd/integer_conversion.rs",
     "crates/stela-compiler/src/x86_64/simd/numerical.rs",
@@ -112,7 +115,7 @@
     "crates/stela-compiler/Cargo.toml",
     "Cargo.lock"
   ],
-  "registry_version": "apple-silicon-block-forms-v12",
+  "registry_version": "apple-silicon-block-forms-v13",
   "profile": {
     "id": "direct-private-ram-block-v1",
     "compiler_command": "compile-block",
@@ -595,6 +598,57 @@
         "native_mxcsr_preservation_comparisons": 3360
       },
       "review": "Both target profiles retain 33,518 raw observations each: 9,096 direct original inline equalities, 23,960 unchanged helper exits and 462 precise refusals. Each profile completes 563 Rust state comparisons and 58 typed refusals. This family has zero requested-control policy or profile-model success classes; all retained enables refuse, including AH=1. Final mapping proof binds 1,272 family artifacts, 9,717 prior-byte/map/extent comparisons and 288 measured block/suffix references. Original full frames, unchanged native boundaries and successful runtime completion remain distinct."
+    },
+    "widening_numerical": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-widening_numerical-differential-report.json",
+      "kind": "simd_widening_numerical_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "comparison_field": "raw_original_complete_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/floating/comparison.rs",
+        "crates/stela-runtime/src/floating/minmax.rs",
+        "crates/stela-runtime/src/floating/rounding.rs",
+        "crates/stela-runtime/src/floating/sqrt.rs",
+        "crates/stela-runtime/src/floating/estimate.rs",
+        "crates/stela-runtime/src/floating/refinement.rs",
+        "crates/stela-runtime/src/floating/arithmetic.rs",
+        "crates/stela-runtime/src/floating/widening.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "runtime_complete_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "runtime_control_status_chain_checks",
+        "native_mxcsr_preservation_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 8,
+        "original_full_frame_captures": 21256,
+        "raw_native_state_and_exit_comparisons": 42512,
+        "raw_original_complete_state_comparisons": 13466,
+        "raw_inline_complete_state_comparisons": 13466,
+        "raw_helper_unchanged_state_comparisons": 28710,
+        "raw_unsupported_unchanged_state_comparisons": 336,
+        "runtime_complete_state_comparisons": 568,
+        "runtime_typed_unsupported_state_checks": 56,
+        "runtime_budget_resume_checks": 32,
+        "runtime_disk_cache_checks": 32,
+        "runtime_memory_cache_loop_checks": 32,
+        "runtime_control_status_chain_checks": 64,
+        "native_mxcsr_preservation_comparisons": 768
+      },
+      "review": "Both target profiles retain 21,256 raw observations each: 6,733 direct original inline equalities, 14,355 unchanged helper exits and 168 precise refusals. Each profile completes 284 Rust state comparisons and 28 typed refusals. This family has zero requested-control policy or profile-model success classes; all retained enables refuse, including AH=1. Final mapping proof binds 3,968 eight-target family artifacts, 32 measured native references and 288 selected block/suffix matches. Prior preservation retains 10,855 directly checked unique compiled tuples covering 10,995 references; the selected closure permits only the new FHM emitter and separately reviewed Python fixture changes, with zero additional old compiles. Original full frames, unchanged native boundaries and successful runtime completion remain distinct."
     }
   },
   "forms": [
@@ -29615,6 +29669,1402 @@
       ],
       "review": "Exact June canonical fields, allocated indices and ordered arithmetic/result transforms are reviewed. Current full-state original/native and actual Rust completion verify destination/status and precise refusals; final S/D and Half mapping joins retain emitted artifacts, source extents/maps, prior-byte preservation and measured-recipe bridges.",
       "scope": "Multiply is rounded under guest controls before the AH-sensitive result FPNeg, including every selected/defaulted NaN result. AH=0 toggles the result NaN sign and AH=1 preserves it; directed rounding is not emulated by negating an input. Scalar NEP merges original Vn; vectors ignore scalar NEP, evaluate active lanes only and clear Q=0 upper 64 bits. V0\u2013V31 are ordinary data where allocated and legal aliases preserve all original sources. Enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP profile; H is IEEE half and AHP is ignored. All retained numerical exception enables refuse before effects, including AH=1. Destination and fresh sticky FPSR commit transactionally, preserving FPCR, NZCV, unrelated registers, RAM and caller MXCSR. Normal S/D uses staged scalar/packed SSE2 arithmetic with input/result/status guards and no implicit optional-extension requirement. New H and S/D forms retain conditional interior helper exits and consume the instruction plus RET; existing elementwise H Add/Subtract/Multiply/Divide keep their terminal boundary. No numerical leaf ABI, enabled trap delivery, disabled-FP access, streaming SME, application or OS execution is established.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLAL2_asimdelem_LH",
+      "mnemonic": "FMLAL2",
+      "category": "fp_simd",
+      "source_file": "fmlal_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x2f808000",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlal_advsimd_elt.xml",
+      "source_sha256": "69389b70a10ca29496916678e00221f8d18b33f370db46b00bc592636fe2043a",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLAL2"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f828020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f8f83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f928020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9f83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa28020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2faf83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fb28020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbf83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f828820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f8f8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f928820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9f8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa28820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2faf8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fb28820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbf8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f828020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f8f83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f928020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa28020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6faf83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fb28020",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbf83ff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f828820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f8f8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f928820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9f8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa28820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6faf8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fb28820",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbf8bff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLAL2_asimdsame_F",
+      "mnemonic": "FMLAL2",
+      "category": "fp_simd",
+      "source_file": "fmlal_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2e20cc00",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlal_advsimd_vec.xml",
+      "source_sha256": "e8ce8bd2b48d03bf1afe682a986233e788de9b356c543a7c84907b8281ef00a9",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLAL2"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e22cc20",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2e3fcfff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e22cc20",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6e3fcfff",
+          "expected_mnemonics": [
+            "fmlal2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLAL_asimdelem_LH",
+      "mnemonic": "FMLAL",
+      "category": "fp_simd",
+      "source_file": "fmlal_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f800000",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlal_advsimd_elt.xml",
+      "source_sha256": "69389b70a10ca29496916678e00221f8d18b33f370db46b00bc592636fe2043a",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLAL"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f820020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f8f03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f920020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa20020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0faf03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fb20020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f820820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f8f0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f920820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa20820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0faf0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fb20820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f820020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8f03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f920020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa20020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4faf03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fb20020",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf03ff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f820820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8f0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f920820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa20820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4faf0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fb20820",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf0bff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLAL_asimdsame_F",
+      "mnemonic": "FMLAL",
+      "category": "fp_simd",
+      "source_file": "fmlal_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e20ec00",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlal_advsimd_vec.xml",
+      "source_sha256": "e8ce8bd2b48d03bf1afe682a986233e788de9b356c543a7c84907b8281ef00a9",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLAL"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0e22ec20",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0e3fefff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e22ec20",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4e3fefff",
+          "expected_mnemonics": [
+            "fmlal"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLSL2_asimdelem_LH",
+      "mnemonic": "FMLSL2",
+      "category": "fp_simd",
+      "source_file": "fmlsl_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x2f80c000",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlsl_advsimd_elt.xml",
+      "source_sha256": "8792b2000f9717ca5e8193c54f1b02874cb70e1d3d1180a1b8f19d608a53e89a",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLSL2"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2f82c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f8fc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f92c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9fc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa2c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fafc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fb2c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbfc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f82c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f8fcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f92c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2f9fcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fa2c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fafcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fb2c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2fbfcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f82c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f8fc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f92c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9fc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa2c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fafc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fb2c020",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbfc3ff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f82c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f8fcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f92c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6f9fcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fa2c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fafcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fb2c820",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6fbfcbff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLSL2_asimdsame_F",
+      "mnemonic": "FMLSL2",
+      "category": "fp_simd",
+      "source_file": "fmlsl_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ea0cc00",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlsl_advsimd_vec.xml",
+      "source_sha256": "6159e6ace125c3da6f340eb33f20d7a651cbcc911b717671ab5b8e51fc13a85a",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLSL2"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ea2cc20",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x2ebfcfff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ea2cc20",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x6ebfcfff",
+          "expected_mnemonics": [
+            "fmlsl2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLSL_asimdelem_LH",
+      "mnemonic": "FMLSL",
+      "category": "fp_simd",
+      "source_file": "fmlsl_advsimd_elt.xml",
+      "encoding_mask": "0xbfc0f400",
+      "encoding_value": "0x0f804000",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlsl_advsimd_elt.xml",
+      "source_sha256": "8792b2000f9717ca5e8193c54f1b02874cb70e1d3d1180a1b8f19d608a53e89a",
+      "docvars": {
+        "advsimd-reguse": "2reg-element",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLSL"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0f824020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f8f43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f924020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa24020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0faf43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fb24020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f824820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f8f4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f924820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0f9f4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fa24820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0faf4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fb24820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0fbf4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f824020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8f43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f924020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa24020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4faf43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fb24020",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf43ff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f824820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f8f4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f924820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4f9f4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fa24820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4faf4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fb24820",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4fbf4bff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
+      "status": "implemented"
+    },
+    {
+      "id": "FMLSL_asimdsame_F",
+      "mnemonic": "FMLSL",
+      "category": "fp_simd",
+      "source_file": "fmlsl_advsimd_vec.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ea0ec00",
+      "features": [
+        {
+          "feature": "FEAT_FHM",
+          "name": "v8Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fmlsl_advsimd_vec.xml",
+      "source_sha256": "6159e6ace125c3da6f340eb33f20d7a651cbcc911b717671ab5b8e51fc13a85a",
+      "docvars": {
+        "advsimd-reguse": "3reg-same",
+        "advsimd-type": "simd",
+        "instr-class": "advsimd",
+        "isa": "A64",
+        "mnemonic": "FMLSL"
+      },
+      "profile": "direct-private-ram-block-v1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/floating/fused.rs",
+        "crates/stela-compiler/src/aarch64/floating/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/simd/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/widening.rs",
+        "crates/stela-compiler/src/x86_64/simd/numerical.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0ea2ec20",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x0ebfefff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ea2ec20",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0x4ebfefff",
+          "expected_mnemonics": [
+            "fmlsl"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ],
+      "evidence_groups": [
+        "widening_numerical"
+      ],
+      "review": "Exact June canonical allocation, source part/index routing and mixed-width semantics are reviewed. Current full-state original/native and Rust completion verify destination/status and precise refusals. Final eight-target mapping and measured-recipe bridges bind the selected emitted artifacts; historical original/core proof and prior emitted-byte preservation retain explicit source-closure bridges.",
+      "scope": "Vector-only Half multiplicands and a Single accumulator use one final Single rounding. Lower/upper source parts are relative to Q: upper Q0 selects H2/H3 and upper Q1 H4\u2013H7; register Vm uses the same part, while indexed Vm0\u2013V15 selects any H0\u2013H7 independently. All admitted V registers and destination/source aliases are ordinary data. Original Vd supplies the Single addend; every source is snapshotted before transactional destination/sticky-FPSR commit. Q0 writes 2S and clears upper64; Q1 writes 4S, and NEP is ignored. Subtract negates the original Half left operand before mixed-width NaN processing. Original Single/Half NaN classes retain architectural priority, signaling status and payload resizing; AH=0 quiet-NaN addend with zero-times-infinity uses default NaN plus IOC. AH changes NaN/sign/flush/late-Single-IDC behavior but never suppresses fresh exceptions or forces rounding. AHP is ignored, Half FZ16 remains independent, Single FIZ/FZ and all four rounding modes apply, and only the Single addend participates in late IDC after non-NaN/non-invalid completion. All retained numerical enables precisely refuse before effects in the enabled AArch64 non-streaming FP/AdvSIMD/FP16/AFP/FHM profile. NZCV, FPCR, GPR/SP, unrelated vectors, RAM and caller MXCSR are preserved. Scalar, sz=1, BF16, FP8 and SME mnemonic-sharing encodings remain outside this family. No enabled trap delivery, numerical leaf ABI, hardware conformance, application or OS execution is established. Normal finite paths use independently checked F16C widening when available, otherwise integer SSE2 widening. FMA is independently checked for Add and Vector64 Subtract; Vector128 Subtract uses an exact packed Single product followed by the sole rounding Add. Baseline requires SSE2 only; optional recipes preserve original indexed staging and caller MXCSR. Every form retains an interior helper and consumes the instruction plus RET.",
       "status": "implemented"
     }
   ]

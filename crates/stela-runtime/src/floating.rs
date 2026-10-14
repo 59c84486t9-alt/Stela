@@ -6,6 +6,7 @@ mod minmax;
 mod refinement;
 mod rounding;
 mod sqrt;
+mod widening;
 
 use stela_compiler::{
     GuestState,
@@ -50,6 +51,7 @@ pub(crate) fn complete(
     let (destination, merge_register, left_register, right_register, right_lane, format, shape) =
         match operation {
             FloatingPointOperation::Binary(operand) => return arithmetic::complete(state, operand),
+            FloatingPointOperation::Widening(operand) => return widening::complete(state, operand),
             FloatingPointOperation::Fused(operand) => (
                 operand.destination,
                 operand.addend,
@@ -97,6 +99,7 @@ pub(crate) fn complete(
                 right,
             )?,
             FloatingPointOperation::Binary(_)
+            | FloatingPointOperation::Widening(_)
             | FloatingPointOperation::Conversion(_)
             | FloatingPointOperation::Comparison(_)
             | FloatingPointOperation::MinMax(_)

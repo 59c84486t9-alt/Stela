@@ -3,6 +3,7 @@
 use super::super::super::super::isa::ShiftOpcode;
 use super::super::super::numerical::{
     ArithmeticOpcode, Condition, RESULT_MINIMUM_EXPONENT, branch, emit_opcode_to, resolve,
+    widen_half_to_single,
 };
 use super::super::super::{Host, packed, shuffle};
 use crate::{
@@ -148,31 +149,12 @@ fn rounding_policy(code: &mut Vec<u8>) {
     code.extend(XOR_R10D_R10D);
 }
 
-/// Even inactive raw Half fields become finite normal Single values. Thus this
-/// exact 11-bit widening and the following 22-bit product cannot raise status.
-fn widen(code: &mut Vec<u8>, destination: u8, source: u8) {
-    packed(code, Host::MoveAligned, destination, source);
-    packed(code, Host::UnpackLowWord, destination, ZERO);
-    packed(code, Host::MoveAligned, SIGN, destination);
-    ShiftOpcode::LeftDword.emit(code, SIGN, SINGLE_BITS - HALF_BITS);
-    ShiftOpcode::RightDword.emit(code, SIGN, SIGN_POSITION);
-    ShiftOpcode::LeftDword.emit(code, SIGN, SIGN_POSITION);
-    ShiftOpcode::LeftDword.emit(code, destination, SINGLE_BITS - HALF_BITS + SIGN_BITS);
-    ShiftOpcode::RightDword.emit(
-        code,
-        destination,
-        SINGLE_BITS - HALF_BITS + SIGN_BITS - DISCARDED_BITS,
-    );
-    packed(code, Host::AddDword, destination, CONSTANT);
-    packed(code, Host::Or, destination, SIGN);
-}
-
 /// One four-lane group, with fresh IXC accumulating only in private R10D.
 fn group(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     packed(code, Host::Xor, ZERO, ZERO);
     constant(code, CONSTANT, SINGLE_HALF_BIAS);
-    widen(code, RESULT, LEFT);
-    widen(code, TEMPORARY, RIGHT);
+    widen_half_to_single(code, RESULT, LEFT, SIGN, ZERO, CONSTANT);
+    widen_half_to_single(code, TEMPORARY, RIGHT, SIGN, ZERO, CONSTANT);
     emit_opcode_to(
         code,
         Format::Single,
