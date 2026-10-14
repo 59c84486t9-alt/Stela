@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+rustc_apfloat.workspace = true

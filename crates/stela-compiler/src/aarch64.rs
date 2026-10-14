@@ -4,6 +4,7 @@ pub mod bitfield;
 pub mod conditional_select;
 pub mod crc;
 pub mod flags;
+pub mod floating;
 pub mod integer_math;
 pub mod literal;
 pub mod pc_relative;
