@@ -447,6 +447,10 @@ mod tests {
         let _clock_guard = TEST_CONTEXT_LOCK.lock().unwrap();
         let configuration = legacy::Configuration {
             kdebug: Some(legacy::KdebugState::Disabled),
+            dyld_flags: Some(legacy::DyldFlags {
+                value: 0xfedcba9876543210,
+                thread_protection: legacy::ThreadProtection::Disabled,
+            }),
         };
         let mut context = Context::new_with_commpage(
             93,

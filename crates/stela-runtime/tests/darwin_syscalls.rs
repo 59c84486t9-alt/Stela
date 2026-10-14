@@ -1653,3 +1653,6 @@ mod native_thread_services {
         Ok(())
     }
 }
+
+#[path = "darwin/mach_vm.rs"]
+mod native_mach_vm;

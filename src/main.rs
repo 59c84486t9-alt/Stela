@@ -170,6 +170,9 @@ enum Command {
         /// Complete the declared unavailable Darwin cross-architecture service.
         #[arg(long)]
         crossarch_services: bool,
+        /// Service ordinary Mach VM protection using owned current-task data pages.
+        #[arg(long, requires = "memory")]
+        mach_vm_services: bool,
         /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
         #[arg(long)]
         csr_active_configuration: Option<u32>,
@@ -197,6 +200,9 @@ enum Command {
         /// Explicitly declare legacy commpage kernel tracing disabled.
         #[arg(long, requires = "clock_snapshot")]
         disabled_kdebug: bool,
+        /// Explicit opaque legacy DYLD_FLAGS for a process with hardware TPRO disabled.
+        #[arg(long, requires = "clock_snapshot", value_parser = parse_address)]
+        opaque_dyld_flags: Option<u64>,
     },
     /// Probe trusted executable entry code; dyld/process setup remains unresolved.
     ProbeImageEntry {
@@ -1320,6 +1326,7 @@ fn run() -> Result<()> {
             memory: memory_path,
             data_vm_services,
             crossarch_services,
+            mach_vm_services,
             csr_active_configuration,
             mach_port_services,
             thread_services,
@@ -1328,6 +1335,7 @@ fn run() -> Result<()> {
             read_memory,
             clock_snapshot: clock_snapshot_path,
             disabled_kdebug,
+            opaque_dyld_flags,
         } => {
             use stela_runtime::blocks::{BlockRuntime, ThreadState};
             const ADDRESS_SPACE_ID: u64 = 1;
@@ -1366,6 +1374,10 @@ fn run() -> Result<()> {
                     .map(|path| pauth_context(path, ADDRESS_SPACE_ID))
                     .transpose()?
             };
+            ensure!(
+                !mach_vm_services || mach_port_services || thread_services,
+                "Mach VM services require an owned Mach port or thread context"
+            );
             let mut memory = raw_memory(memory_path.as_deref())?;
             let memory_before = memory_hashes(&memory)?;
             let commpage = arm_commpage_kernel_page_shift
@@ -1392,6 +1404,13 @@ fn run() -> Result<()> {
                         stela_runtime::commpage::legacy::Configuration {
                             kdebug: disabled_kdebug
                                 .then_some(stela_runtime::commpage::legacy::KdebugState::Disabled),
+                            dyld_flags: opaque_dyld_flags.map(|value| {
+                                stela_runtime::commpage::legacy::DyldFlags {
+                                    value,
+                                    thread_protection:
+                                        stela_runtime::commpage::legacy::ThreadProtection::Disabled,
+                                }
+                            }),
                         },
                     )
                 })
@@ -1428,6 +1447,7 @@ fn run() -> Result<()> {
                     || thread_services
                     || crossarch_services
                     || csr_policy.is_some()
+                    || mach_vm_services
                 {
                     stela_runtime::darwin::run_services(
                         &mut runtime,
@@ -1440,6 +1460,7 @@ fn run() -> Result<()> {
                             clock: clock.as_mut(),
                             data_vm: data_vm_services,
                             crossarch: crossarch_services,
+                            mach_vm: mach_vm_services,
                             csr: csr_policy.as_ref(),
                             mach_ports: mach_ports.as_mut(),
                             thread: thread_context.as_mut(),
@@ -1494,6 +1515,8 @@ fn run() -> Result<()> {
                 "csr_service_profile":csr_policy.as_ref().map(|_| stela_runtime::darwin::csr::PROFILE_ID),
                 "csr_active_configuration":csr_policy.as_ref().map(|policy| policy.active_configuration()),
                 "csr_service_events":service_run.csr_services,
+                "mach_vm_service_profile":mach_vm_services.then_some(stela_runtime::darwin::mach_vm::PROFILE_ID),
+                "mach_vm_service_events":service_run.mach_vm_services,
                 "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
                     "profile_id":page.profile_id(),"address_space":page.address_space(),
                     "region":page.region(),"supported_fields":page.supported_fields(),

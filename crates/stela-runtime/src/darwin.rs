@@ -14,6 +14,7 @@ use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
 pub mod crossarch;
 pub mod csr;
+pub mod mach_vm;
 pub mod platform;
 pub mod shared_region;
 
@@ -293,6 +294,7 @@ pub struct ServiceRunOutcome {
     pub thread_services: Vec<crate::thread::Event>,
     pub crossarch_services: Vec<BsdServiceEvent>,
     pub csr_services: Vec<BsdServiceEvent>,
+    pub mach_vm_services: Vec<crate::mach::Event>,
 }
 impl ServiceRunOutcome {
     /// Preserve the common report shape when no OS service backend is selected.
@@ -304,6 +306,7 @@ impl ServiceRunOutcome {
             thread_services: Vec::new(),
             crossarch_services: Vec::new(),
             csr_services: Vec::new(),
+            mach_vm_services: Vec::new(),
         }
     }
 }
@@ -312,6 +315,7 @@ pub struct ExecutionServices<'a> {
     pub mach_ports: Option<&'a mut crate::mach::HostPorts>,
     pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
+    pub mach_vm: bool,
     pub crossarch: bool,
     pub csr: Option<&'a csr::ArmSecurityPolicy>,
     pub pauth: Option<&'a crate::pauth::Context>,
@@ -446,6 +450,7 @@ pub unsafe fn run_services(
     let mut thread_events = Vec::new();
     let mut crossarch_events = Vec::new();
     let mut csr_events = Vec::new();
+    let mut mach_vm_events = Vec::new();
     anyhow::ensure!(
         services.mach_ports.is_none() || services.thread.is_none(),
         "thread services and independent Mach ports cannot have different owners"
@@ -529,6 +534,20 @@ pub unsafe fn run_services(
             let serviced = event.completed();
             thread_events.push(event);
             serviced
+        } else if services.mach_vm && mach_vm::handles(state, &trap) {
+            let ports = services
+                .thread
+                .as_deref()
+                .map(|thread| thread.ports())
+                .or(services.mach_ports.as_deref());
+            if let Some(ports) = ports {
+                let event = mach_vm::service(state, &trap, ports, memory, runtime);
+                let serviced = event.result.is_some();
+                mach_vm_events.push(event);
+                serviced
+            } else {
+                false
+            }
         } else if (state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32) < 0 {
             let ports = if let Some(thread) = services.thread.as_deref_mut() {
                 Some(thread.ports_mut())
@@ -581,6 +600,7 @@ pub unsafe fn run_services(
         thread_services: thread_events,
         crossarch_services: crossarch_events,
         csr_services: csr_events,
+        mach_vm_services: mach_vm_events,
     })
 }
 
