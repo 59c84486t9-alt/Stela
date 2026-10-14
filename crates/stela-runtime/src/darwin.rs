@@ -14,6 +14,7 @@ use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
 pub mod crossarch;
 pub mod platform;
+pub mod shared_region;
 
 pub const MAX_BSD_ARGUMENTS: usize = 8;
 pub(crate) const SYSCALL_SELECTOR_REGISTER: usize = 16;
