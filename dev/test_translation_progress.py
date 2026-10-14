@@ -717,6 +717,225 @@ class ScalableProgressTests(unittest.TestCase):
             progress.smoke_decoding(decoder, int(scalable['encoding_value'], 16), scalable['id'], facts)
 
 
+
+class DeclaredScalableProgressTests(unittest.TestCase):
+    def profile(self):
+        return {'id': 'sme-streaming-v2', 'compiler_command': 'compile-leaf',
+                'abi': progress.CONTEXT_LEAF_ABI, 'svl_bytes': 16, 'svcr': 3,
+                'features': ['FEAT_SME_I16I64', 'FEAT_SME2', 'FEAT_SME'],
+                'max_svl_bytes': 256, 'zt0_enabled': False, 'dit': False,
+                'outside_scope': ['block/cache and architectural DIT enforcement']}
+
+    def declaration(self, profile=None):
+        return progress.scalable_declaration(profile or self.profile())
+
+    def manifest(self):
+        # Exact field names/types and canonical feature order of the reviewed
+        # generic V2 CLI schema; guest features remain separate from host CPU.
+        return {'schema_version': 2, 'kind': 'raw_arm64_leaf_aot',
+                'abi': 'x86_64-sysv-guest-state-v1-context-direct-ram',
+                'target_cpu': 'x86_64-baseline', 'guest_base': 268435456,
+                'guest_instructions': 2, 'native_bytes': 15, 'entry_prefix_bytes': 13,
+                'execution_profile': {'id': 'sme-streaming-v2', 'svl_bytes': 16, 'svcr': 3,
+                    'features': ['FEAT_SME', 'FEAT_SME2', 'FEAT_SME_I16I64'],
+                    'max_svl_bytes': 256, 'zt0_enabled': False, 'dit': False},
+                'source_map': [[268435456, 13], [268435460, 14]]}
+
+    def validate_manifest(self, manifest):
+        progress.validate_context_manifest(manifest, bytes.fromhex('c0035fd6c0035fd6'), 15, 16, 3,
+            guest_profile='sme-streaming-v2', **self.declaration())
+
+    def registry(self):
+        registry = fixtures()
+        registry['profile'] = ScalableProgressTests().profile()
+        registry['execution_profiles'] = {'sme-i16i64-v2': self.profile()}
+        for row in registry['forms']:
+            row['profile'] = progress.SCALABLE_PROFILE
+            for sample in row['smoke_samples'] + row.get('rejected_samples', []):
+                sample.update(svl_bytes=16, svcr=3)
+        registry['forms'][1]['profile'] = 'sme-i16i64-v2'
+        return registry
+
+    def test_explicit_features_are_canonicalized_without_implication(self):
+        result = progress.validate_scalable_profile(self.profile())
+        self.assertEqual(result, self.manifest()['execution_profile'])
+        profile = self.profile()
+        profile.update(features=['FEAT_SME'], max_svl_bytes=16)
+        self.assertEqual(progress.validate_scalable_profile(profile)['features'], ['FEAT_SME'])
+        profile.update(features=list(reversed(progress.SCALABLE_FEATURES)), zt0_enabled=True)
+        self.assertEqual(progress.validate_scalable_profile(profile)['features'], sorted(progress.SCALABLE_FEATURES))
+
+    def test_v2_missing_invalid_and_contradictory_declarations_decline(self):
+        changes = [{'features': value} for value in (None, [], ['SME'], ['FEAT_future'],
+            ['FEAT_SME2'], ['FEAT_SME', 'FEAT_SME'], ['FEAT_SME', 'FEAT_SME2p1'])]
+        changes += [{'max_svl_bytes': value} for value in (None, False, 0, 48, '256')]
+        changes += [{'zt0_enabled': value} for value in (None, 0, 'false')]
+        changes += [{'dit': value} for value in (None, 0, True, 'false')]
+        changes += [{'features': ['FEAT_SME'], 'zt0_enabled': True},
+                    {'svl_bytes': 256, 'max_svl_bytes': 128}, {'undeclared_control': False}]
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                progress.validate_scalable_profile({**self.profile(), **change})
+        for key in progress.SCALABLE_DECLARATION_FIELDS:
+            profile = self.profile()
+            profile.pop(key)
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                progress.validate_scalable_profile(profile)
+
+    def test_v1_shape_rejects_every_v2_declaration(self):
+        profile = ScalableProgressTests().profile()
+        before = copy.deepcopy(profile)
+        self.assertEqual(progress.validate_scalable_profile(profile), {
+            'id': 'apple-sme2-streaming-v1', 'svl_bytes': 16, 'svcr': 3})
+        self.assertEqual(profile, before)
+        for key, value in self.declaration().items():
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                progress.validate_scalable_profile({**profile, key: value})
+
+    def test_full_v2_manifest_contract_is_required(self):
+        self.validate_manifest(self.manifest())
+        for key in ('features', 'max_svl_bytes', 'zt0_enabled', 'dit'):
+            changed = self.manifest()
+            changed['execution_profile'].pop(key)
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                self.validate_manifest(changed)
+        changes = [{'id': progress.SCALABLE_PROFILE}, {'features': ['FEAT_SME', 'FEAT_SME2']},
+                   {'features': ['FEAT_SME_I16I64', 'FEAT_SME2', 'FEAT_SME']},
+                   {'features': ['FEAT_SME', 'FEAT_SME2', 'FEAT_SME_I16I64', 'FEAT_SME_FA64']},
+                   {'max_svl_bytes': 128}, {'max_svl_bytes': '256'},
+                   {'zt0_enabled': True}, {'zt0_enabled': 0}, {'dit': True}, {'dit': 0},
+                   {'undeclared_control': False}]
+        for change in changes:
+            changed = self.manifest()
+            changed['execution_profile'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.validate_manifest(changed)
+
+    def test_explicit_host_target_is_checked_independently_of_guest_contract(self):
+        manifest = self.manifest()
+        manifest['target_cpu'] = 'x86_64-baseline+ssse3+sse4.1'
+        with self.assertRaisesRegex(ValueError, 'source/native metadata mismatch'):
+            self.validate_manifest(manifest)
+        progress.validate_context_manifest(manifest, bytes.fromhex('c0035fd6c0035fd6'), 15, 16, 3,
+            guest_profile='sme-streaming-v2', expected_target_cpu='x86_64-baseline+ssse3+sse4.1',
+            **self.declaration())
+        for target in (None, '', True, 'x86_64-baseline+ssse3'):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                progress.validate_context_manifest(manifest, bytes.fromhex('c0035fd6c0035fd6'), 15, 16, 3,
+                    guest_profile='sme-streaming-v2', expected_target_cpu=target, **self.declaration())
+
+    def test_compile_probe_emits_only_explicit_v2_cli_contract(self):
+        commands = []
+        def fake(command, **kwargs):
+            commands.append(command)
+            source = Path(command[2])
+            output = Path(command[command.index('--output-dir') + 1])
+            output.mkdir()
+            (output / 'native.bin').write_bytes(bytes(13) + b'\xc3\xc3')
+            manifest = self.manifest()
+            manifest.update(source_sha256=progress.sha256(source),
+                native_sha256=progress.sha256(output / 'native.bin'), compiler_source_sha256=COMPILER)
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        with tempfile.TemporaryDirectory() as directory:
+            result = progress.compile_probe('cli', progress.RET, Path(directory), mode='scalable',
+                guest_profile='sme-streaming-v2', svl_bytes=16, svcr=3, run=fake, **self.declaration())
+        command = commands[0]
+        self.assertEqual(command[1], 'compile-leaf')
+        self.assertEqual(command[command.index('--guest-profile') + 1], 'sme-streaming-v2')
+        self.assertEqual([command[index+1] for index, value in enumerate(command)
+                          if value == '--guest-feature'], ['FEAT_SME', 'FEAT_SME2', 'FEAT_SME_I16I64'])
+        self.assertEqual(command[command.index('--max-svl-bytes') + 1], '256')
+        self.assertEqual(command[command.index('--zt0-enabled') + 1], 'false')
+        self.assertNotIn('--dit', command)
+        self.assertEqual(result['execution_profile'], self.manifest()['execution_profile'])
+
+    def test_bad_declaration_never_invokes_compiler_or_writes_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            location = Path(directory)
+            with patch.object(progress.subprocess, 'run') as run, self.assertRaises(ValueError):
+                progress.compile_probe('cli', progress.RET, location, mode='scalable',
+                    guest_profile='sme-streaming-v2', svl_bytes=16, svcr=3, run=run,
+                    features=['FEAT_SME2'], max_svl_bytes=256, zt0_enabled=False, dit=False)
+            run.assert_not_called()
+            self.assertEqual(list(location.iterdir()), [])
+
+    def test_specialization_keys_resolve_full_contract_without_replacing_v1(self):
+        registry = self.registry()
+        original = copy.deepcopy(registry)
+        rows = progress.validate_registry(registry)
+        self.assertEqual(rows['ADC_32_addsub_carry']['profile'], progress.SCALABLE_PROFILE)
+        self.assertEqual(rows['RET_64R_branch_reg']['profile'], 'sme-i16i64-v2')
+        self.assertEqual(registry, original)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(progress, 'compile_probe', return_value={
+                    'compiler_source_sha256': COMPILER}) as probe:
+                progress.smoke_forms('cli', rows, rows, Path(directory), mode='scalable',
+                    profile=registry['profile'], execution_profiles=registry['execution_profiles'])
+        self.assertEqual(probe.call_args_list[0].kwargs, {'mode': 'scalable',
+            'guest_profile': 'apple-sme2-streaming-v1', 'svl_bytes': 16, 'svcr': 3})
+        self.assertEqual(probe.call_args_list[-1].kwargs, {'mode': 'scalable',
+            'guest_profile': 'sme-streaming-v2', 'svl_bytes': 16, 'svcr': 3, **self.declaration()})
+
+    def test_ambiguous_duplicate_unknown_and_undeclared_profiles_fail(self):
+        for value in ([], {}, {'alias': self.profile(), 'same': {**self.profile(), 'svl_bytes': 32}},
+                      {'': self.profile()}, {progress.SCALABLE_PROFILE: self.profile()},
+                      {'bad': {**self.profile(), 'id': 'future-v3'}},
+                      {'bad': {**self.profile(), 'ezt0': True}}):
+            registry = self.registry()
+            registry['execution_profiles'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                progress.validate_registry(registry)
+        for key in ('sme-streaming-v2', 'undeclared', None, []):
+            registry = self.registry()
+            registry['forms'][1]['profile'] = key
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                progress.validate_registry(registry)
+        registry = self.registry()
+        for field in ('zt0_enabled', 'unknown_control'):
+            registry = self.registry()
+            registry['forms'][1]['smoke_samples'][0][field] = True
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                progress.validate_registry(registry)
+
+    def test_independent_decoding_batches_each_explicit_decoder_contract(self):
+        registry = self.registry()
+        registry['execution_profiles']['sme-i16i64-v2']['decoder_mattrs'] = ['+sme2p1']
+        rows = progress.validate_registry(registry)
+        facts = {identity: {**row, 'features': [], 'mnemonic': 'ADC' if identity.startswith('ADC') else 'RET'}
+                 for identity, row in rows.items()}
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        def decode(words, directory, *, mattrs):
+            decoded = []
+            for index, word in enumerate(words):
+                mnemonic = 'adc' if word == 0x1a000000 else 'ret'
+                decoded.append({'word': word, 'offset': index * 4, 'mnemonic': mnemonic,
+                                'operands': '', 'assembly': mnemonic})
+            return {'rows': decoded, 'mattrs': list(mattrs)}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(progress, 'Cs', return_value=decoder), \
+                 patch.object(disassembly, 'decode_words', side_effect=decode) as decode_call, \
+                 patch.object(progress, 'compile_probe', return_value={'compiler_source_sha256': COMPILER}):
+                _compiler, results = progress.smoke_forms('cli', rows, rows, Path(directory),
+                    mode='scalable', profile=registry['profile'], canonical_facts=facts,
+                    execution_profiles=registry['execution_profiles'])
+        self.assertEqual(decode_call.call_count, 2)
+        self.assertEqual({call.kwargs['mattrs'] for call in decode_call.call_args_list},
+                         {disassembly.DEFAULT_MATTRS, ('+sme2p1',)})
+        supported = [result for result in results if 'sample' in result]
+        self.assertEqual([result['independent_decode_basis'] for result in supported],
+                         ['apple_llvm21_objdump', 'apple_llvm21_objdump'])
+        self.assertEqual(supported[1]['independent_decode_receipt']['mattrs'], ['+sme2p1'])
+
+    def test_decoder_attributes_are_explicit_and_separate_from_guest_features(self):
+        profile = self.profile()
+        profile['decoder_mattrs'] = ['+sme2', '+sve2p1']
+        execution = progress.validate_scalable_profile(profile)
+        self.assertNotIn('decoder_mattrs', execution)
+        self.assertNotIn('FEAT_SME2p1', execution['features'])
+        for attrs in ([], ['+sme2', '+sme2'], ['+all,+sme2'], ['unknown'], [None], [{}]):
+            with self.subTest(attrs=attrs), self.assertRaises(ValueError):
+                progress.validate_scalable_profile({**profile, 'decoder_mattrs': attrs})
+
 class LLVMDisassemblyGuards(unittest.TestCase):
     def fact(self):
         catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())

@@ -22,6 +22,15 @@ RET = 0xd65f03c0
 BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
 SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
+DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'
+SCALABLE_PROFILE_IDS = (SCALABLE_PROFILE, DECLARED_SCALABLE_PROFILE)
+# Architectural names accepted by scalable/features.rs; no feature implication.
+SCALABLE_FEATURES = (
+    'FEAT_BF16', 'FEAT_FAMINMAX', 'FEAT_I8MM', 'FEAT_SME', 'FEAT_SME2',
+    'FEAT_SME2p1', 'FEAT_SME_B16B16', 'FEAT_SME_F16F16', 'FEAT_SME_F64F64',
+    'FEAT_SME_F8F16', 'FEAT_SME_FA64', 'FEAT_SME_I16I64', 'FEAT_SVE_B16B16',
+)
+SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
 CONTEXT_ENTRY_PREFIX_BYTES = 13
 SCALABLE_VECTOR_BYTES = (16, 32, 64, 128, 256)
@@ -61,8 +70,9 @@ def validate_registry(registry):
     profile = registry.get('profile', {}).get('id')
     if not profile or not registry.get('profile', {}).get('outside_scope'):
         raise ValueError('Support needs an explicit bounded execution profile')
-    if profile == SCALABLE_PROFILE:
-        validate_scalable_profile(registry['profile'])
+    scalable_profiles = None
+    if profile in SCALABLE_PROFILE_IDS or 'execution_profiles' in registry:
+        scalable_profiles = validate_scalable_profiles(registry['profile'], registry.get('execution_profiles'))
     evidence = registry.get('evidence_groups', {})
     rows = {}
     for row in registry.get('forms', []):
@@ -79,8 +89,11 @@ def validate_registry(registry):
             raise ValueError('Invalid reviewed encoding mask/value')
         if row.get('status') not in STATUSES:
             raise ValueError('Unknown support status')
-        if row.get('profile') != profile or not row.get('scope'):
+        if (not row.get('scope') or not isinstance(row.get('profile'), str)
+                or (row.get('profile') not in scalable_profiles
+                if scalable_profiles is not None else row.get('profile') != profile)):
             raise ValueError('Form support scope/profile missing')
+        row_contract = scalable_profiles[row['profile']] if scalable_profiles is not None else None
         if row['status'] != 'unsupported':
             if not row.get('review') or not row.get('compiler_sources') or not row.get('smoke_samples'):
                 raise ValueError('Support requires reviewed implementation and smoke samples')
@@ -90,13 +103,13 @@ def validate_registry(registry):
                 repository_path(source)
             for sample in row['smoke_samples']:
                 validate_sample(row, sample)
-                if profile == SCALABLE_PROFILE:
-                    validate_scalable_configuration(sample.get('svl_bytes'), sample.get('svcr'))
+                if row_contract is not None:
+                    validate_scalable_sample(sample, row_contract)
             if row['status'] == 'partial' and not row.get('rejected_samples'):
                 raise ValueError('Partial forms need a rejected scope-boundary sample')
-            if profile == SCALABLE_PROFILE:
+            if row_contract is not None:
                 for sample in row.get('rejected_samples', []):
-                    validate_scalable_configuration(sample.get('svl_bytes'), sample.get('svcr'))
+                    validate_scalable_sample(sample, row_contract)
         rows[identity] = row
     return rows
 
@@ -145,24 +158,104 @@ def validate_scalable_configuration(svl_bytes, svcr):
         raise ValueError('Scalable probe requires an explicit supported SVCR')
 
 
+def scalable_execution_profile(guest_profile, svl_bytes, svcr, *, features=None,
+                               max_svl_bytes=None, zt0_enabled=None, dit=None):
+    validate_scalable_configuration(svl_bytes, svcr)
+    execution = {'id': guest_profile, 'svl_bytes': svl_bytes, 'svcr': svcr}
+    declaration = (features, max_svl_bytes, zt0_enabled, dit)
+    if guest_profile == SCALABLE_PROFILE:
+        if any(value is not None for value in declaration):
+            raise ValueError('V1 scalable profile does not accept V2 declarations')
+        return execution
+    if guest_profile != DECLARED_SCALABLE_PROFILE:
+        raise ValueError('Unknown scalable guest profile')
+    if (not isinstance(features, list) or not features
+            or any(not isinstance(feature, str) or feature not in SCALABLE_FEATURES for feature in features)
+            or len(set(features)) != len(features)):
+        raise ValueError('V2 scalable profile requires explicit unique known architectural features')
+    if 'FEAT_SME' not in features:
+        raise ValueError('V2 scalable profile requires FEAT_SME')
+    if 'FEAT_SME2p1' in features and 'FEAT_SME2' not in features:
+        raise ValueError('FEAT_SME2p1 requires explicit FEAT_SME2')
+    if type(max_svl_bytes) is not int or max_svl_bytes not in SCALABLE_VECTOR_BYTES or svl_bytes > max_svl_bytes:
+        raise ValueError('V2 scalable profile requires a supported maximum SVL covering the current SVL')
+    if type(zt0_enabled) is not bool or type(dit) is not bool or dit is not False:
+        raise ValueError('V2 scalable profile requires explicit ZT0 permission and DIT=false')
+    if zt0_enabled and 'FEAT_SME2' not in features:
+        raise ValueError('ZT0 permission requires explicit FEAT_SME2')
+    execution.update(features=sorted(features), max_svl_bytes=max_svl_bytes,
+                     zt0_enabled=zt0_enabled, dit=dit)
+    return execution
+
+
+def scalable_declaration(profile):
+    return {key: profile[key] for key in SCALABLE_DECLARATION_FIELDS if key in profile}
+
+
 def validate_scalable_profile(profile):
-    if (profile.get('id') != SCALABLE_PROFILE or profile.get('compiler_command') != 'compile-leaf'
-            or profile.get('abi') != CONTEXT_LEAF_ABI):
-        raise ValueError('Scalable registry must declare the context-leaf compiler profile and ABI')
-    validate_scalable_configuration(profile.get('svl_bytes'), profile.get('svcr'))
+    common = {'id', 'compiler_command', 'abi', 'svl_bytes', 'svcr', 'description', 'outside_scope',
+              'decoder_mattrs'}
+    if (not isinstance(profile, dict) or set(profile) - common - set(SCALABLE_DECLARATION_FIELDS)
+            or profile.get('compiler_command') != 'compile-leaf' or profile.get('abi') != CONTEXT_LEAF_ABI):
+        raise ValueError('Scalable registry must declare only supported context-leaf profile fields')
+    execution = scalable_execution_profile(profile.get('id'), profile.get('svl_bytes'), profile.get('svcr'),
+                                            **scalable_declaration(profile))
+    if 'decoder_mattrs' in profile:
+        attrs = profile['decoder_mattrs']
+        if (not isinstance(attrs, list) or not attrs
+                or any(not isinstance(attr, str) for attr in attrs) or len(set(attrs)) != len(attrs)):
+            raise ValueError('Independent decoder attributes must be an explicit unique list')
+        import a64_disassembly
+        if any(not a64_disassembly.FEATURE_NAME.fullmatch(attr) for attr in attrs):
+            raise ValueError('Unsupported independent decoder attribute syntax')
+    return execution
 
 
-def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, svcr):
+def validate_scalable_profiles(default_profile, execution_profiles=None):
+    default = validate_scalable_profile(default_profile)
+    profiles = {default_profile['id']: default_profile}
+    identities = {json.dumps({key: value for key, value in default.items() if key not in ('svl_bytes', 'svcr')},
+                             sort_keys=True)}
+    if execution_profiles is not None:
+        if not isinstance(execution_profiles, dict) or not execution_profiles:
+            raise ValueError('Execution profiles must be a nonempty specialization-key mapping')
+        for key, contract in execution_profiles.items():
+            if not isinstance(key, str) or not key or key in profiles:
+                raise ValueError('Execution profile keys must be unique and distinct from the default profile')
+            execution = validate_scalable_profile(contract)
+            if not contract.get('outside_scope'):
+                raise ValueError('Execution profile specialization needs explicit scope limits')
+            identity = json.dumps({name: value for name, value in execution.items()
+                                   if name not in ('svl_bytes', 'svcr')}, sort_keys=True)
+            if identity in identities:
+                raise ValueError('Duplicate semantic execution-profile contract')
+            identities.add(identity)
+            profiles[key] = contract
+    return profiles
+
+
+def validate_scalable_sample(sample, contract):
+    allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason'}
+    if set(sample) - allowed:
+        raise ValueError('Samples must use declared fields and select guest features/controls through the row profile')
+    return scalable_execution_profile(contract['id'], sample.get('svl_bytes'), sample.get('svcr'),
+                                       **scalable_declaration(contract))
+
+
+def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, svcr,
+                              guest_profile=SCALABLE_PROFILE,
+                              expected_target_cpu='x86_64-baseline', **declaration):
     if (type(manifest.get('schema_version')) is not int or manifest['schema_version'] != 2 or manifest.get('kind') != 'raw_arm64_leaf_aot'
             or manifest.get('abi') != CONTEXT_LEAF_ABI):
         raise ValueError('Compiler scalable probe schema/ABI mismatch')
-    profile = manifest.get('execution_profile', {})
-    if (not isinstance(profile, dict) or profile.get('id') != SCALABLE_PROFILE
-            or type(profile.get('svl_bytes')) is not int or profile['svl_bytes'] != svl_bytes
-            or type(profile.get('svcr')) is not int or profile['svcr'] != svcr):
+    expected = scalable_execution_profile(guest_profile, svl_bytes, svcr, **declaration)
+    profile = manifest.get('execution_profile')
+    if (not isinstance(profile, dict) or profile != expected
+            or any(type(profile.get(key)) is not type(value) for key, value in expected.items())):
         raise ValueError('Compiler scalable probe execution profile mismatch')
     instructions = len(source_data) // 4
-    if (manifest.get('target_cpu') != 'x86_64-baseline' or type(manifest.get('guest_base')) is not int or manifest['guest_base'] != SCALABLE_GUEST_BASE
+    if (not isinstance(expected_target_cpu, str) or not expected_target_cpu
+            or manifest.get('target_cpu') != expected_target_cpu or type(manifest.get('guest_base')) is not int or manifest['guest_base'] != SCALABLE_GUEST_BASE
             or type(manifest.get('guest_instructions')) is not int
             or manifest['guest_instructions'] != instructions
             or type(manifest.get('native_bytes')) is not int or manifest['native_bytes'] != native_bytes):
@@ -183,16 +276,17 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
-                  expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None):
+                  expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
+                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
         raise ValueError('Invalid declared compiler probe boundary')
     if mode == 'scalable':
-        if guest_profile != SCALABLE_PROFILE:
-            raise ValueError('Unknown scalable guest profile')
-        validate_scalable_configuration(svl_bytes, svcr)
-    elif any(value is not None for value in (guest_profile, svl_bytes, svcr)):
+        execution = scalable_execution_profile(guest_profile, svl_bytes, svcr, features=features,
+            max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit)
+    elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
+                                            max_svl_bytes, zt0_enabled, dit)):
         raise ValueError('Scalable configuration requires the context compiler lane')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
@@ -204,6 +298,11 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     if mode == 'scalable':
         command.extend(['--guest-profile', guest_profile, '--svl-bytes', str(svl_bytes),
                         '--svcr', str(svcr), '--cpu-target', 'baseline'])
+        if guest_profile == DECLARED_SCALABLE_PROFILE:
+            for feature in execution['features']:
+                command.extend(['--guest-feature', feature])
+            command.extend(['--max-svl-bytes', str(max_svl_bytes),
+                            '--zt0-enabled', str(zt0_enabled).lower()])
     if mode == 'service':
         command.extend(['--software-pauth', '--software-clock'])
     process = run(command,
@@ -229,7 +328,9 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
         raise ValueError('Compiler probe native output identity mismatch')
     if mode == 'scalable':
-        validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr)
+        validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,
+            guest_profile, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
+                             if guest_profile == DECLARED_SCALABLE_PROFILE else {}))
     fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
         raise ValueError('Compiler probe fingerprint missing')
@@ -264,41 +365,55 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_ro
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
 
 
-def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None):
-    if mode == 'scalable':
-        validate_scalable_profile(profile or {})
-    def options(sample=None):
+def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None,
+                execution_profiles=None):
+    profiles = validate_scalable_profiles(profile or {}, execution_profiles) if mode == 'scalable' else {}
+    def contract(row=None):
+        return profiles[profile['id'] if row is None else row['profile']]
+    def options(sample=None, row=None):
         result = {'mode': mode} if mode != 'leaf' else {}
         if mode == 'scalable':
-            configuration = profile if sample is None else sample
-            result.update(guest_profile=profile['id'], svl_bytes=configuration['svl_bytes'],
-                          svcr=configuration['svcr'])
+            declaration = contract(row)
+            configuration = declaration if sample is None else sample
+            result.update(guest_profile=declaration['id'], svl_bytes=configuration['svl_bytes'],
+                          svcr=configuration['svcr'], **scalable_declaration(declaration))
         return result
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
     results = []
-    independent_receipt = None
-    independent_rows = {}
+    independent_receipts = {}
     if mode == 'scalable':
-        declined = sorted({validate_sample(forms[identity], sample)
-                          for identity, row in overrides.items() if row['status'] != 'unsupported'
-                          for sample in row['smoke_samples']
-                          if next(decoder.disasm(struct.pack('<I', int(sample['word'], 16)), 0), None) is None})
-        if declined:
-            import a64_disassembly
-            independent_receipt = a64_disassembly.decode_words(declined, directory / 'llvm-decoding')
-            independent_rows = {row['word']: row for row in independent_receipt['rows']}
+        import a64_disassembly
+        declined = {}
+        for identity, row in overrides.items():
+            if row['status'] == 'unsupported':
+                continue
+            attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
+            for sample in row['smoke_samples']:
+                word = validate_sample(forms[identity], sample)
+                if next(decoder.disasm(struct.pack('<I', word), 0), None) is None:
+                    declined.setdefault(attrs, set()).add(word)
+        for index, (attrs, words) in enumerate(sorted(declined.items())):
+            independent_receipts[attrs] = a64_disassembly.decode_words(
+                sorted(words), directory / f'llvm-decoding-{index}', mattrs=attrs)
     for identity, row in overrides.items():
         if row['status'] == 'unsupported':
             continue
         for index, sample in enumerate(row['smoke_samples']):
             word = validate_sample(forms[identity], sample)
+            independent_receipt = None
+            independent_rows = {}
+            if mode == 'scalable':
+                attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
+                independent_receipt = independent_receipts.get(attrs)
+                if independent_receipt is not None:
+                    independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
             mnemonic, assembly, basis = smoke_decoding(decoder, word, identity, canonical_facts, independent_rows)
             if mnemonic not in sample['expected_mnemonics']:
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
             location.mkdir()
-            probe_options = options(sample)
+            probe_options = options(sample, row)
             if 'consumed_source_bytes' in sample:
                 probe_options['expected_source_bytes'] = sample['consumed_source_bytes']
             probe = compile_probe(cli, word, location, **probe_options)
@@ -313,7 +428,7 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             location = directory / f'{len(results)}-rejected'
             location.mkdir()
             probe = compile_probe(cli, int(sample['word'], 16), location, sample['reason'],
-                                  **options(sample))
+                                  **options(sample, row))
             results.append({'id': identity, 'scope_boundary_sample': index, **probe})
     if fingerprint is None:
         location = directory / 'compiler-identity'
@@ -600,7 +715,9 @@ def main():
         scalable_directory.mkdir()
         scalable_compiler, scalable_probes = smoke_forms(
             args.cli, scalable_rows, scalable_rows, scalable_directory, mode='scalable',
-            canonical_facts=canonical_facts, profile=scalable_registry['profile'])
+            canonical_facts=canonical_facts, profile=scalable_registry['profile'],
+            **({'execution_profiles': scalable_registry['execution_profiles']}
+               if 'execution_profiles' in scalable_registry else {}))
         if any(identity != compiler for identity in (block_compiler, service_compiler, scalable_compiler)):
             raise ValueError('Execution-profile compiler identities differ')
     if args.implementation_only:
@@ -663,9 +780,12 @@ def main():
                   'registry_version': scalable_registry['registry_version'],
                   'registry_sha256': hashlib.sha256(scalable_data).hexdigest(),
                   'profile': scalable_registry['profile'], 'summary': summarize(scalable_rows),
+                  **({'execution_profiles': scalable_registry['execution_profiles']}
+                     if 'execution_profiles' in scalable_registry else {}),
                   'counts_are_not_additive': True, 'compiler_sources_sha256': scalable_sources,
                   'native_differential_evidence': scalable_evidence, 'compiler_smoke_probes': scalable_probes,
-                  'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
+                  'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope'],
+                                      **({'profile': row['profile']} if 'execution_profiles' in scalable_registry else {})}
                                      for identity, row in scalable_rows.items()]},
               'block_profile_evidence': {
                   'registry_version': block_registry['registry_version'],
