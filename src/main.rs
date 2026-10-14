@@ -170,6 +170,9 @@ enum Command {
         /// Complete the declared unavailable Darwin cross-architecture service.
         #[arg(long)]
         crossarch_services: bool,
+        /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
+        #[arg(long)]
+        csr_active_configuration: Option<u32>,
         /// Own host Mach bootstrap rights behind guest port names (macOS only).
         #[arg(long)]
         mach_port_services: bool,
@@ -1317,6 +1320,7 @@ fn run() -> Result<()> {
             memory: memory_path,
             data_vm_services,
             crossarch_services,
+            csr_active_configuration,
             mach_port_services,
             thread_services,
             guest_vm_max_address,
@@ -1415,15 +1419,17 @@ fn run() -> Result<()> {
             } else {
                 None
             };
-            let (
-                outcome,
-                data_vm_events,
-                mach_port_events,
-                thread_service_events,
-                crossarch_service_events,
-            ) = unsafe {
-                if data_vm_services || mach_port_services || thread_services || crossarch_services {
-                    let result = stela_runtime::darwin::run_services(
+            let csr_policy = csr_active_configuration
+                .map(stela_runtime::darwin::csr::ArmSecurityPolicy::new)
+                .transpose()?;
+            let service_run = unsafe {
+                if data_vm_services
+                    || mach_port_services
+                    || thread_services
+                    || crossarch_services
+                    || csr_policy.is_some()
+                {
+                    stela_runtime::darwin::run_services(
                         &mut runtime,
                         &mut thread,
                         stop_pc.map(stela_compiler::GuestAddress),
@@ -1434,17 +1440,11 @@ fn run() -> Result<()> {
                             clock: clock.as_mut(),
                             data_vm: data_vm_services,
                             crossarch: crossarch_services,
+                            csr: csr_policy.as_ref(),
                             mach_ports: mach_ports.as_mut(),
                             thread: thread_context.as_mut(),
                         },
-                    )?;
-                    (
-                        result.execution,
-                        result.services,
-                        result.mach_services,
-                        result.thread_services,
-                        result.crossarch_services,
-                    )
+                    )?
                 } else {
                     let outcome = if let Some(clock) = &mut clock {
                         runtime.run_with_clock(
@@ -1470,7 +1470,7 @@ fn run() -> Result<()> {
                             block_budget,
                         )?
                     };
-                    (outcome, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                    stela_runtime::darwin::ServiceRunOutcome::unserviced(outcome)
                 }
             };
             let memory_after = memory_hashes(&memory)?;
@@ -1483,20 +1483,23 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
                 "source_sha256":source_hash,"guest_base":guest_base,"pc":thread.pc.0,"state":register_json(&thread.registers),
-                "outcome":outcome,"abi":runtime.profile().abi(),"target_cpu":runtime.target_cpu().id(),"memory":memory_report,
+                "outcome":service_run.execution,"abi":runtime.profile().abi(),"target_cpu":runtime.target_cpu().id(),"memory":memory_report,
                 "mach_port_profile":(mach_port_services || thread_services).then_some(stela_runtime::mach::HOST_PORT_PROFILE),
-                "mach_port_events":mach_port_events,"mach_port_rights":mach_ports.as_ref()
+                "mach_port_events":service_run.mach_services,"mach_port_rights":mach_ports.as_ref()
                     .or_else(|| thread_context.as_ref().map(|thread| thread.ports())).map(|ports| ports.rights()),
                 "thread_context":thread_context.as_ref().map(|context| context.snapshot()),
-                "thread_service_events":thread_service_events,
+                "thread_service_events":service_run.thread_services,
                 "crossarch_service_profile":crossarch_services.then_some(stela_runtime::darwin::crossarch::PROFILE_ID),
-                "crossarch_service_events":crossarch_service_events,
+                "crossarch_service_events":service_run.crossarch_services,
+                "csr_service_profile":csr_policy.as_ref().map(|_| stela_runtime::darwin::csr::PROFILE_ID),
+                "csr_active_configuration":csr_policy.as_ref().map(|policy| policy.active_configuration()),
+                "csr_service_events":service_run.csr_services,
                 "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
                     "profile_id":page.profile_id(),"address_space":page.address_space(),
                     "region":page.region(),"supported_fields":page.supported_fields(),
                     "page_sha256":stela_core::sha256(&page.snapshot_bytes()?)
                 })) }).transpose()?,
-                "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":data_vm_events,
+                "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":service_run.services,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock.as_ref().map(|clock| -> Result<_> { Ok(serde_json::json!({
                     "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),

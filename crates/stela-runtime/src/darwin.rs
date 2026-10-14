@@ -13,6 +13,7 @@ use serde::{Serialize, ser::SerializeStruct};
 use std::{error::Error, fmt};
 use stela_compiler::block::{SynchronousTrap, TrapKind};
 pub mod crossarch;
+pub mod csr;
 pub mod platform;
 pub mod shared_region;
 
@@ -291,6 +292,20 @@ pub struct ServiceRunOutcome {
     pub mach_services: Vec<crate::mach::Event>,
     pub thread_services: Vec<crate::thread::Event>,
     pub crossarch_services: Vec<BsdServiceEvent>,
+    pub csr_services: Vec<BsdServiceEvent>,
+}
+impl ServiceRunOutcome {
+    /// Preserve the common report shape when no OS service backend is selected.
+    pub fn unserviced(execution: crate::blocks::RunOutcome) -> Self {
+        Self {
+            execution,
+            services: Vec::new(),
+            mach_services: Vec::new(),
+            thread_services: Vec::new(),
+            crossarch_services: Vec::new(),
+            csr_services: Vec::new(),
+        }
+    }
 }
 #[derive(Default)]
 pub struct ExecutionServices<'a> {
@@ -298,6 +313,7 @@ pub struct ExecutionServices<'a> {
     pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
     pub crossarch: bool,
+    pub csr: Option<&'a csr::ArmSecurityPolicy>,
     pub pauth: Option<&'a crate::pauth::Context>,
     pub clock: Option<&'a mut crate::clock::Context>,
 }
@@ -429,6 +445,7 @@ pub unsafe fn run_services(
     let mut mach_events = Vec::new();
     let mut thread_events = Vec::new();
     let mut crossarch_events = Vec::new();
+    let mut csr_events = Vec::new();
     anyhow::ensure!(
         services.mach_ports.is_none() || services.thread.is_none(),
         "thread services and independent Mach ports cannot have different owners"
@@ -531,6 +548,11 @@ pub unsafe fn run_services(
             let serviced = event.completion.is_some();
             crossarch_events.push(event);
             serviced
+        } else if let Some(policy) = services.csr.filter(|_| csr::handles(state, &trap)) {
+            let event = csr::service(state, &trap, memory, policy);
+            let serviced = event.completion.is_some();
+            csr_events.push(event);
+            serviced
         } else if services.data_vm {
             let event = service_data_mprotect(state, &trap, memory, runtime);
             let serviced = event.completion.is_some();
@@ -558,6 +580,7 @@ pub unsafe fn run_services(
         mach_services: mach_events,
         thread_services: thread_events,
         crossarch_services: crossarch_events,
+        csr_services: csr_events,
     })
 }
 
