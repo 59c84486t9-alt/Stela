@@ -3,14 +3,12 @@ use super::{commit, read_vector};
 use crate::{
     GuestAddress, GuestState,
     aarch64::{
-        floating::{BinaryOperation, EXCEPTIONS, Format},
+        floating::{BinaryOperation, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format},
         simd::arithmetic::Operand,
     },
     block::ExitKind,
 };
 
-const FPCR_NEP: u32 = 1 << 2;
-const EXCEPTION_ENABLE_SHIFT: u32 = 8;
 const MXCSR_EXCEPTION_MASKS: u32 = 0x3f << 7;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
@@ -138,7 +136,7 @@ pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAd
         return;
     }
     let mut helper = Vec::new();
-    test_control(code, EXCEPTIONS << EXCEPTION_ENABLE_SHIFT);
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     read_vector(code, operand.left, 0);
     read_vector(code, operand.right, 1);

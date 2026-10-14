@@ -45,6 +45,8 @@
     "crates/stela-compiler/src/aarch64/flags.rs",
     "crates/stela-compiler/src/x86_64/flags.rs",
     "crates/stela-compiler/src/aarch64/floating.rs",
+    "crates/stela-compiler/src/aarch64/fp_register.rs",
+    "crates/stela-compiler/src/x86_64/fp_register.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
     "crates/stela-compiler/src/x86_64/integer_math.rs",
     "crates/stela-compiler/src/aarch64/literal.rs",
@@ -829,7 +831,7 @@
       "evidence_groups": [
         "software_services"
       ],
-      "scope": "MRS CNTVCT_EL0 only, every Rt including XZR; finite replay/native clock context. Other system registers declined.",
+      "scope": "This assessment covers MRS CNTVCT_EL0, every Rt including XZR, with a finite replay/native clock context. Common FPCR/FPSR accesses have a separate reviewed leaf assessment. Other registers require separate support and evidence.",
       "rejected_samples": [
         {
           "word": "0xd53bd060",

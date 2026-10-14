@@ -2,12 +2,11 @@
 use stela_compiler::{
     GuestState,
     aarch64::{
-        floating::{UnsupportedControl, evaluate},
+        floating::{FPCR_NEP, UnsupportedControl, evaluate},
         simd::arithmetic::Operand,
     },
 };
 
-const FPCR_NEP: u32 = 1 << 2;
 const LOW_LIMB: usize = 0;
 const VECTOR_LIMBS: usize = 2;
 

@@ -14,6 +14,70 @@ suite = importlib.import_module('simd-differential')
 
 
 class SimdDifferentialTests(unittest.TestCase):
+    def test_fp_register_encodings_cover_exactly_all_four_operands_and_all_rt(self):
+        functions = suite.fp_register_functions()
+        words = [function['operations'][0]['word'] for function in functions]
+        self.assertEqual(len(set(words)), 128)
+        decoded = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(struct.pack('<128I', *words), 0))
+        self.assertEqual(len(decoded), 128)
+        self.assertEqual([instruction.mnemonic for instruction in decoded], ['mrs'] * 32 + ['msr'] * 32 + ['mrs'] * 32 + ['msr'] * 32)
+        self.assertEqual([instruction.op_str for instruction in decoded if 'xzr' in instruction.op_str],
+                         ['xzr, fpcr', 'fpcr, xzr', 'xzr, fpsr', 'fpsr, xzr'])
+        for name in suite.FP_REGISTER_WORDS:
+            for rt in (-1, 32):
+                with self.assertRaises(ValueError):
+                    suite.fp_register_operation(name, rt)
+
+    def test_fp_register_reads_zero_extend_without_normalizing_imported_storage(self):
+        initial = State.from_buffer_copy(suite.states()[0])
+        initial.fpcr, initial.fpsr, initial.nzcv = 0xffffffff, 0xffffffff, 0xf0000000
+        for register, mask in suite.FP_REGISTER_MASKS.items():
+            for rt in (0, 30, 31):
+                actual = suite.fp_register_expected(suite.fp_register_operation('mrs_' + register, rt), initial)
+                expected = State.from_buffer_copy(initial)
+                if rt != 31:
+                    expected.x[rt] = mask
+                self.assertEqual(bytes(actual), bytes(expected))
+                self.assertEqual(getattr(actual, register), 0xffffffff)
+
+    def test_fp_register_writes_replace_all_storage_keep_enables_and_separate_status(self):
+        initial = State.from_buffer_copy(suite.states()[0])
+        initial.fpcr, initial.fpsr, initial.nzcv = 0xffffffff, 0xffffffff, 0x90000000
+        for register, mask in suite.FP_REGISTER_MASKS.items():
+            for rt in (0, 30, 31):
+                for value in (0, (1 << 64) - 1, 0xfeedface00009f00, 1 << 27):
+                    initial.x[0 if rt == 31 else rt] = value
+                    actual = suite.fp_register_expected(suite.fp_register_operation('msr_' + register, rt), initial)
+                    expected = State.from_buffer_copy(initial)
+                    setattr(expected, register, 0 if rt == 31 else value & mask)
+                    self.assertEqual(bytes(actual), bytes(expected))
+        self.assertEqual(suite.FP_REGISTER_MASKS['fpcr'] & suite.NUMERICAL_TRAP_ENABLE_MASK,
+                         suite.NUMERICAL_TRAP_ENABLE_MASK)
+
+    def test_fp_register_policy_cases_cover_raw_imports_every_bit_and_128_roles(self):
+        records = suite.fp_register_policy_cases()
+        self.assertEqual(len(records), 640)
+        self.assertEqual({record['function'] for record in records}, set(range(128)))
+        for index in (32, 96):
+            self.assertEqual({record['bit'] for record in records if record['function'] == index and 'bit' in record}, set(range(64)))
+        self.assertTrue(any(State.from_buffer_copy(record['initial']).fpcr & ~suite.FP_REGISTER_MASKS['fpcr'] for record in records))
+        self.assertTrue(any(State.from_buffer_copy(record['initial']).fpsr & ~suite.FP_REGISTER_MASKS['fpsr'] for record in records))
+
+    def test_fp_register_runtime_chain_exposes_status_then_clears_before_repeat_and_ret(self):
+        initial = State.from_buffer_copy(suite.states()[0])
+        initial.fpcr, initial.fpsr, initial.x[30] = suite.NUMERICAL_NEP, 0, suite.STOP
+        expected = State.from_buffer_copy(initial)
+        expected.fpsr = 0x12
+        record = {'initial': bytes(initial), 'expected': bytes(expected), 'operation': {'word': 0x1e221820}}
+        code, entered, intermediate, final = suite.fp_register_chain(record)
+        decoded = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(code, 0))
+        self.assertEqual([instruction.mnemonic for instruction in decoded],
+                         ['msr', 'msr', 'fdiv', 'mrs', 'msr', 'mrs', 'fdiv', 'mrs', 'msr', 'mrs', 'ret'])
+        self.assertEqual(entered.fpsr, suite.FP_REGISTER_MASKS['fpsr'])
+        self.assertNotEqual(entered.fpcr, intermediate.fpcr)
+        self.assertEqual((intermediate.fpcr, intermediate.fpsr), (suite.NUMERICAL_NEP, 0x12))
+        self.assertEqual((final.x[3], final.x[4], final.x[5], final.x[6], final.fpsr), (0x12, 0, 0x12, 0, 0))
+
     def test_block_manifest_binds_only_its_consumed_prefix_without_losing_original_input(self):
         source = struct.pack('<II', 0x1ee22820, suite.RET)
         native = bytes.fromhex('48b80010000000000000ba09000000c3')

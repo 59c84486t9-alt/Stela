@@ -408,7 +408,7 @@ class BlockProgressTests(unittest.TestCase):
         leaf = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text()))
         block = progress.validate_registry(json.loads((root / 'tests/isa/apple-silicon-block-forms.json').read_text()))
         self.assertEqual(progress.summarize(leaf)['reviewed']['implemented'], 585)
-        self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 18)
+        self.assertEqual(progress.summarize(leaf)['reviewed']['partial'], 20)
         self.assertEqual(progress.summarize(block)['reviewed']['implemented'], 24)
         self.assertEqual(progress.summarize(block)['reviewed']['partial'], 2)
         self.assertEqual(len(set(leaf) & set(block)), 9)

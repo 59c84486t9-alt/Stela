@@ -1,4 +1,4 @@
-//! Arm binary arithmetic outcomes, independent of native execution and state.
+//! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
 //! FP/FP16/AFP enabled, non-streaming; enabled numerical traps are explicit errors.
 use rustc_apfloat::{
     Float, FloatConvert, Round, Status, StatusAnd,
@@ -13,18 +13,22 @@ pub const INEXACT: u32 = 1 << 4;
 pub const INPUT_DENORMAL: u32 = 1 << 7;
 pub const EXCEPTIONS: u32 =
     INVALID | DIVIDE_BY_ZERO | OVERFLOW | UNDERFLOW | INEXACT | INPUT_DENORMAL;
-const EXCEPTION_ENABLE_SHIFT: u32 = 8;
-const FIZ: u32 = 1 << 0;
-const AH: u32 = 1 << 1;
-const FZ16: u32 = 1 << 19;
-const ROUNDING_SHIFT: u32 = 22;
-const ROUNDING_MASK: u32 = 3;
+pub const FPCR_EXCEPTION_ENABLE_SHIFT: u32 = 8;
+pub const FPCR_FIZ: u32 = 1 << 0;
+pub const FPCR_AH: u32 = 1 << 1;
+pub const FPCR_NEP: u32 = 1 << 2;
+pub const FPCR_FZ16: u32 = 1 << 19;
+pub const FPCR_ROUNDING_SHIFT: u32 = 22;
+pub const FPCR_ROUNDING_MASK: u32 = 3;
 const ROUND_NEAREST_EVEN: u32 = 0;
 const ROUND_POSITIVE: u32 = 1;
 const ROUND_NEGATIVE: u32 = 2;
 const ROUND_ZERO: u32 = 3;
-const FZ: u32 = 1 << 24;
-const DN: u32 = 1 << 25;
+pub const FPCR_FZ: u32 = 1 << 24;
+pub const FPCR_DN: u32 = 1 << 25;
+pub const FPCR_AHP: u32 = 1 << 26;
+pub const FPCR_EXCEPTION_ENABLE_MASK: u32 = EXCEPTIONS << FPCR_EXCEPTION_ENABLE_SHIFT;
+pub const FPSR_QC: u32 = 1 << 27;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -89,10 +93,10 @@ pub struct UnsupportedControl {
 struct Control(u32);
 impl Control {
     fn alternative(self) -> bool {
-        self.0 & AH != 0
+        self.0 & FPCR_AH != 0
     }
     fn round(self) -> Round {
-        match (self.0 >> ROUNDING_SHIFT) & ROUNDING_MASK {
+        match (self.0 >> FPCR_ROUNDING_SHIFT) & FPCR_ROUNDING_MASK {
             ROUND_NEAREST_EVEN => Round::NearestTiesToEven,
             ROUND_POSITIVE => Round::TowardPositive,
             ROUND_NEGATIVE => Round::TowardNegative,
@@ -101,7 +105,13 @@ impl Control {
         }
     }
     fn flush_output(self, format: Format) -> bool {
-        self.0 & if format == Format::Half { FZ16 } else { FZ } != 0
+        self.0
+            & if format == Format::Half {
+                FPCR_FZ16
+            } else {
+                FPCR_FZ
+            }
+            != 0
     }
     fn default_nan(self, format: Format) -> u64 {
         format.infinity(self.alternative()) | format.quiet_bit()
@@ -150,12 +160,12 @@ fn unpack(format: Format, bits: u64, control: Control, exceptions: &mut u32) -> 
         Class::Zero
     } else {
         let flush = if format == Format::Half {
-            control.0 & FZ16 != 0
+            control.0 & FPCR_FZ16 != 0
         } else {
-            control.0 & FIZ != 0 || control.0 & FZ != 0 && !control.alternative()
+            control.0 & FPCR_FIZ != 0 || control.0 & FPCR_FZ != 0 && !control.alternative()
         };
         if flush {
-            if format != Format::Half && control.0 & FZ != 0 && !control.alternative() {
+            if format != Format::Half && control.0 & FPCR_FZ != 0 && !control.alternative() {
                 *exceptions |= INPUT_DENORMAL;
             }
             bits &= format.sign_mask();
@@ -195,7 +205,7 @@ fn nan(
     if signaling {
         *exceptions |= INVALID;
     }
-    Some(if control.0 & DN != 0 {
+    Some(if control.0 & FPCR_DN != 0 {
         control.default_nan(format)
     } else {
         selected.bits | format.quiet_bit()
@@ -324,7 +334,7 @@ pub fn evaluate(
     left: u64,
     right: u64,
 ) -> Result<Outcome, UnsupportedControl> {
-    let enabled_exceptions = (fpcr >> EXCEPTION_ENABLE_SHIFT) & EXCEPTIONS;
+    let enabled_exceptions = (fpcr >> FPCR_EXCEPTION_ENABLE_SHIFT) & EXCEPTIONS;
     if enabled_exceptions != 0 {
         return Err(UnsupportedControl { enabled_exceptions });
     }
@@ -404,8 +414,8 @@ pub fn evaluate(
             Format::Double => finite::<Double>(format, operation, left.bits, right.bits, control),
         }
     };
-    // AH input-denormal processing follows arithmetic/NaNs, and FDIV omits it
-    // for a zero denominator. Earlier AH=0 input-flush IDC remains accumulated.
+    // FPCR_AH input-denormal processing follows arithmetic/NaNs, and FDIV omits it
+    // for a zero denominator. Earlier FPCR_AH=0 input-flush IDC remains accumulated.
     if control.alternative()
         && format != Format::Half
         && (operation != BinaryOperation::Divide || right.class != Class::Zero)
@@ -448,7 +458,7 @@ mod tests {
                 evaluate(
                     Format::Double,
                     BinaryOperation::Divide,
-                    exception << EXCEPTION_ENABLE_SHIFT,
+                    exception << FPCR_EXCEPTION_ENABLE_SHIFT,
                     0,
                     0
                 ),
@@ -477,14 +487,20 @@ mod tests {
                 }
             );
             assert_eq!(
-                result(Format::Single, operation, AH, quiet, signaling),
+                result(Format::Single, operation, FPCR_AH, quiet, signaling),
                 Outcome {
                     bits: quiet,
                     exceptions: INVALID
                 }
             );
             assert_eq!(
-                result(Format::Single, operation, AH | DN, quiet, signaling),
+                result(
+                    Format::Single,
+                    operation,
+                    FPCR_AH | FPCR_DN,
+                    quiet,
+                    signaling
+                ),
                 Outcome {
                     bits: 0xffc00000,
                     exceptions: INVALID
@@ -496,42 +512,60 @@ mod tests {
     #[test]
     fn input_denormal_order_is_distinct_from_host_denormal_status() {
         assert_eq!(
-            result(Format::Single, BinaryOperation::Add, FZ, 1, 0x7fc00123),
+            result(Format::Single, BinaryOperation::Add, FPCR_FZ, 1, 0x7fc00123),
             Outcome {
                 bits: 0x7fc00123,
                 exceptions: INPUT_DENORMAL
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Add, AH | FZ, 1, 0x7fc00123),
+            result(
+                Format::Single,
+                BinaryOperation::Add,
+                FPCR_AH | FPCR_FZ,
+                1,
+                0x7fc00123
+            ),
             Outcome {
                 bits: 0x7fc00123,
                 exceptions: 0
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Divide, AH, 1, 0),
+            result(Format::Single, BinaryOperation::Divide, FPCR_AH, 1, 0),
             Outcome {
                 bits: 0x7f800000,
                 exceptions: DIVIDE_BY_ZERO
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Multiply, AH, 1, 0x3f800000),
+            result(
+                Format::Single,
+                BinaryOperation::Multiply,
+                FPCR_AH,
+                1,
+                0x3f800000
+            ),
             Outcome {
                 bits: 1,
                 exceptions: INPUT_DENORMAL
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Divide, FIZ, 1, 0),
+            result(Format::Single, BinaryOperation::Divide, FPCR_FIZ, 1, 0),
             Outcome {
                 bits: 0x7fc00000,
                 exceptions: INVALID
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Divide, FIZ | FZ, 1, 0),
+            result(
+                Format::Single,
+                BinaryOperation::Divide,
+                FPCR_FIZ | FPCR_FZ,
+                1,
+                0
+            ),
             Outcome {
                 bits: 0x7fc00000,
                 exceptions: INVALID | INPUT_DENORMAL
@@ -546,7 +580,11 @@ mod tests {
             (Format::Single, 0x00800000, 0x3f000000),
             (Format::Double, 0x0010000000000000, 0x3fe0000000000000),
         ] {
-            let flush = if format == Format::Half { FZ16 } else { FZ };
+            let flush = if format == Format::Half {
+                FPCR_FZ16
+            } else {
+                FPCR_FZ
+            };
             assert_eq!(
                 result(format, BinaryOperation::Multiply, 0, minimum, half),
                 Outcome {
@@ -562,7 +600,13 @@ mod tests {
                 }
             );
             assert_eq!(
-                result(format, BinaryOperation::Multiply, flush | AH, minimum, half),
+                result(
+                    format,
+                    BinaryOperation::Multiply,
+                    flush | FPCR_AH,
+                    minimum,
+                    half
+                ),
                 Outcome {
                     bits: 0,
                     exceptions: UNDERFLOW | INEXACT
@@ -586,14 +630,26 @@ mod tests {
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Multiply, AH, left, right),
+            result(
+                Format::Single,
+                BinaryOperation::Multiply,
+                FPCR_AH,
+                left,
+                right
+            ),
             Outcome {
                 bits: 0x00800000,
                 exceptions: INEXACT
             }
         );
         assert_eq!(
-            result(Format::Single, BinaryOperation::Multiply, FZ, left, right),
+            result(
+                Format::Single,
+                BinaryOperation::Multiply,
+                FPCR_FZ,
+                left,
+                right
+            ),
             Outcome {
                 bits: 0,
                 exceptions: UNDERFLOW
@@ -603,7 +659,7 @@ mod tests {
             result(
                 Format::Single,
                 BinaryOperation::Multiply,
-                FZ | AH,
+                FPCR_FZ | FPCR_AH,
                 left,
                 right
             ),
@@ -618,7 +674,7 @@ mod tests {
     fn exact_cancellation_skips_scaling_and_obeys_zero_sign() {
         let maximum = 0x7fefffffffffffff;
         for rounding in 0..4 {
-            let fpcr = AH | (rounding << ROUNDING_SHIFT);
+            let fpcr = FPCR_AH | (rounding << FPCR_ROUNDING_SHIFT);
             let expected = Outcome {
                 bits: if rounding == ROUND_NEGATIVE {
                     1 << 63
@@ -652,7 +708,7 @@ mod tests {
                     ROUND_NEGATIVE,
                     ROUND_ZERO,
                 ] {
-                    let fpcr = rounding << ROUNDING_SHIFT;
+                    let fpcr = rounding << FPCR_ROUNDING_SHIFT;
                     let infinite = rounding == ROUND_NEAREST_EVEN
                         || rounding == ROUND_POSITIVE && !negative
                         || rounding == ROUND_NEGATIVE && negative;

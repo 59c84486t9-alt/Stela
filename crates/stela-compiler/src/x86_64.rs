@@ -13,6 +13,7 @@ pub(crate) mod block;
 mod conditional_select;
 mod crc;
 mod flags;
+mod fp_register;
 mod integer_math;
 pub mod isa;
 mod literal;
@@ -282,6 +283,7 @@ fn emit_instruction(
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
         }
+        Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),

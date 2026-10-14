@@ -5,6 +5,7 @@ pub mod conditional_select;
 pub mod crc;
 pub mod flags;
 pub mod floating;
+pub mod fp_register;
 pub mod integer_math;
 pub mod literal;
 pub mod pc_relative;
@@ -74,6 +75,7 @@ pub enum AddressMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     FloatingPoint(simd::arithmetic::Operand),
+    FloatingPointRegister(fp_register::Operand),
     Simd(simd::Operand),
     Bitfield(bitfield::Operand),
     PcRelative(pc_relative::Operand),
@@ -280,6 +282,8 @@ impl Lifter for Decoder {
             Operation::Crc(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = flags::decode(word) {
             Operation::Flags(decoded)
+        } else if let Some(decoded) = fp_register::decode(word) {
+            Operation::FloatingPointRegister(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = simd::arithmetic::decode(word) {

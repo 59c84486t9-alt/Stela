@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "reviewed_apple_silicon_instruction_forms",
-  "registry_version": "apple-silicon-reviewed-forms-v26",
+  "registry_version": "apple-silicon-reviewed-forms-v27",
   "target_profile": {
     "vendor": "Apple",
     "guest_architectures": [
@@ -479,6 +479,40 @@
         "native_block_exit_checks"
       ],
       "require_current_executable": true
+    },
+    "fp_registers": {
+      "harness": "dev/simd-differential.py",
+      "report": ".stela/simd-fp_registers-differential-report.json",
+      "kind": "simd_fp_registers_arm_vs_native_x86",
+      "abi": "x86_64-sysv-guest-state-v3-direct-ram",
+      "comparison_field": "compatible_original_native_full_state_comparisons",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/test_simd_differential.py",
+        "crates/stela-runtime/src/floating.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/execution.rs"
+      ],
+      "required_positive_counts": [
+        "native_policy_state_comparisons",
+        "policy_difference_classifications",
+        "runtime_state_comparisons",
+        "runtime_typed_unsupported_state_checks",
+        "runtime_budget_resume_checks",
+        "runtime_disk_cache_checks",
+        "runtime_memory_cache_loop_checks",
+        "native_caller_mxcsr_checks"
+      ],
+      "required_measurements": {
+        "operand_combinations": 128,
+        "state_comparisons": 914,
+        "compatible_original_native_full_state_comparisons": 191,
+        "policy_difference_classifications": 83,
+        "rust_runtime.status_clear_repeat_checks": 120
+      }
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -25809,6 +25843,118 @@
       "profile": "direct-private-ram-leaf-v2",
       "review": "Pinned June 2026 canonical decode and shift/round/saturate facts reviewed. Original ARM, independent arbitrary-precision lane math and baseline/detected native x86 compare complete 784-byte state across all legal shifts, saturation/rounding boundaries, incoming QC, inactive poison, aliases and chains. Actual emitted binaries and source maps are inspected; baseline packed recipes and checked PACKUSDW/PCMPGTQ alternatives retain explicit feature requirements. Compile-time full-width nonround bounds omit QC work only where saturation is impossible.",
       "scope": "Enabled FP/AdvSIMD, ordinary non-streaming execution. All allocated scalar B/H/S and vector lower/upper-half SQSHRN/SQRSHRN/UQSHRN/UQRSHRN/SQSHRUN/SQRSHRUN forms, source lanes twice destination width and every legal immediate. Shift and optional rounding precede signed/unsigned saturation; only active-lane saturation sets sticky FPSR.QC. Scalar/lower-half writes clear upper bits; upper-half writes preserve the original low half. V31 and all aliases are ordinary data. NZCV, FPCR, unrelated FPSR bits and RAM are preserved. Disabled-feature traps, architectural exception delivery, SVE/SME and complete process behavior are outside profile."
+    },
+    {
+      "id": "MRS_RS_systemmove",
+      "category": "base_integer_system",
+      "source_file": "mrs.xml",
+      "encoding_mask": "0xfff00000",
+      "encoding_value": "0xd5300000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "d0dc95a34dbfd4dde54de527b0dd4679a8327c3911bcae736b4088d776d481f6",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "fp_registers"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/fp_register.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/fp_register.rs"
+      ],
+      "review": "Reviewed exact Arm DDI0601 June 2026 revision 1 register fields/access and original EL0 execution. Compatible raw original/native states remain distinct from explicit QEMU policy divergences. Actual baseline integer bodies, complete saved state, MXCSR, eager status/control chains and helper/cache resumption are evidenced.",
+      "scope": "FPCR/FPSR operands only, every Xt/Xn including XZR, under enabled non-streaming AArch64-only FP/FP16/AFP policy. FPCR mask 0x07c89f07 retains numerical exception enables; FPSR mask 0x0800009f replaces QC/cumulative fields independently of PSTATE NZCV. Reads mask raw storage and zero-extend without normalizing it; writes replace masked low 32-bit storage. Len/Stride RAZ/WI, EBF16/FPMR absent and other RES0 hardwired zero. Disabled FP/higher-level access checks, enabled numerical exception delivery and broader system-register space remain unsupported. This is no Apple hardware conformance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd53b4400",
+          "expected_mnemonics": [
+            "mrs"
+          ]
+        },
+        {
+          "word": "0xd53b441f",
+          "expected_mnemonics": [
+            "mrs"
+          ]
+        },
+        {
+          "word": "0xd53b4420",
+          "expected_mnemonics": [
+            "mrs"
+          ]
+        },
+        {
+          "word": "0xd53b443f",
+          "expected_mnemonics": [
+            "mrs"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xd53b4440",
+          "reason": "Instruction"
+        }
+      ]
+    },
+    {
+      "id": "MSR_SR_systemmove",
+      "category": "base_integer_system",
+      "source_file": "msr_reg.xml",
+      "encoding_mask": "0xfff00000",
+      "encoding_value": "0xd5100000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "7453b210e1b2fe6e548a3071fc342bffb101d20492b659dd779809c0419f7189",
+      "profile": "direct-private-ram-leaf-v2",
+      "status": "partial",
+      "evidence_groups": [
+        "fp_registers"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/floating.rs",
+        "crates/stela-compiler/src/aarch64/fp_register.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/fp_register.rs"
+      ],
+      "review": "Reviewed exact Arm DDI0601 June 2026 revision 1 register fields/access and original EL0 execution. Compatible raw original/native states remain distinct from explicit QEMU policy divergences. Actual baseline integer bodies, complete saved state, MXCSR, eager status/control chains and helper/cache resumption are evidenced.",
+      "scope": "FPCR/FPSR operands only, every Xt/Xn including XZR, under enabled non-streaming AArch64-only FP/FP16/AFP policy. FPCR mask 0x07c89f07 retains numerical exception enables; FPSR mask 0x0800009f replaces QC/cumulative fields independently of PSTATE NZCV. Reads mask raw storage and zero-extend without normalizing it; writes replace masked low 32-bit storage. Len/Stride RAZ/WI, EBF16/FPMR absent and other RES0 hardwired zero. Disabled FP/higher-level access checks, enabled numerical exception delivery and broader system-register space remain unsupported. This is no Apple hardware conformance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd51b4400",
+          "expected_mnemonics": [
+            "msr"
+          ]
+        },
+        {
+          "word": "0xd51b441f",
+          "expected_mnemonics": [
+            "msr"
+          ]
+        },
+        {
+          "word": "0xd51b4420",
+          "expected_mnemonics": [
+            "msr"
+          ]
+        },
+        {
+          "word": "0xd51b443f",
+          "expected_mnemonics": [
+            "msr"
+          ]
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0xd51b4440",
+          "reason": "Instruction"
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -25827,6 +25973,8 @@
     "crates/stela-compiler/src/aarch64/flags.rs",
     "crates/stela-compiler/src/x86_64/flags.rs",
     "crates/stela-compiler/src/aarch64/floating.rs",
+    "crates/stela-compiler/src/aarch64/fp_register.rs",
+    "crates/stela-compiler/src/x86_64/fp_register.rs",
     "crates/stela-compiler/src/aarch64/integer_math.rs",
     "crates/stela-compiler/src/x86_64/integer_math.rs",
     "crates/stela-compiler/src/aarch64/literal.rs",

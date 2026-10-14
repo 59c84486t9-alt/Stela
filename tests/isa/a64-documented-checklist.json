@@ -2139,15 +2139,15 @@
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
     "implemented": 650,
-    "partial": 13,
-    "unsupported": 3669,
+    "partial": 14,
+    "unsupported": 3668,
     "total": 4332,
     "implementation_percentage": 15.004616805170821,
     "categories": {
       "base_integer_system": {
-        "unsupported": 674,
+        "unsupported": 673,
         "implemented": 276,
-        "partial": 4
+        "partial": 5
       },
       "fp_simd": {
         "implemented": 374,
@@ -2162,7 +2162,7 @@
       }
     }
   },
-  "compiler_source_sha256": "9400a7680f9c18dd1c1177ab40914f9492c424b6008bb755ece578ea780048ce",
+  "compiler_source_sha256": "f29faff804aa5035dd384ac6626c9ce345c04ee5b28661381a1ef66b76187437",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -3553,10 +3553,10 @@
     {"id":"MOVZ_32_movewide","instruction_id":"MOVZ","mnemonic":"MOVZ","category":"base_integer_system","source_file":"movz.xml","encoding_mask":"0xffc00000","encoding_value":"0x52800000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"MOVZ_64_movewide","instruction_id":"MOVZ","mnemonic":"MOVZ","category":"base_integer_system","source_file":"movz.xml","encoding_mask":"0xff800000","encoding_value":"0xd2800000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined operands and width for this canonical encoding form in the declared leaf profile; full PSTATE/system integration outside profile."}]},
     {"id":"MRRS_RS_systemmovepr","instruction_id":"MRRS","mnemonic":"MRRS","category":"base_integer_system","source_file":"mrrs.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5700000","features":[{"feature":"FEAT_SYSREG128","name":"v9Ap4"}],"status":"unsupported","profiles":[]},
-    {"id":"MRS_RS_systemmove","instruction_id":"MRS","mnemonic":"MRS","category":"base_integer_system","source_file":"mrs.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5300000","features":[],"status":"partial","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"partial","scope":"MRS CNTVCT_EL0 only, every Rt including XZR; finite replay/native clock context. Other system registers declined."}]},
+    {"id":"MRS_RS_systemmove","instruction_id":"MRS","mnemonic":"MRS","category":"base_integer_system","source_file":"mrs.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5300000","features":[],"status":"partial","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"partial","scope":"FPCR/FPSR operands only, every Xt/Xn including XZR, under enabled non-streaming AArch64-only FP/FP16/AFP policy. FPCR mask 0x07c89f07 retains numerical exception enables; FPSR mask 0x0800009f replaces QC/cumulative fields independently of PSTATE NZCV. Reads mask raw storage and zero-extend without normalizing it; writes replace masked low 32-bit storage. Len/Stride RAZ/WI, EBF16/FPMR absent and other RES0 hardwired zero. Disabled FP/higher-level access checks, enabled numerical exception delivery and broader system-register space remain unsupported. This is no Apple hardware conformance claim."},{"profile":"apple-arm64e-software-pauth-clock-v1","status":"partial","scope":"This assessment covers MRS CNTVCT_EL0, every Rt including XZR, with a finite replay/native clock context. Common FPCR/FPSR accesses have a separate reviewed leaf assessment. Other registers require separate support and evidence."}]},
     {"id":"MSRR_SR_systemmovepr","instruction_id":"MSRR","mnemonic":"MSRR","category":"base_integer_system","source_file":"msrr.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5500000","features":[{"feature":"FEAT_SYSREG128","name":"v9Ap4"}],"status":"unsupported","profiles":[]},
     {"id":"MSR_SI_pstate","instruction_id":"MSR_imm","mnemonic":"MSR","category":"base_integer_system","source_file":"msr_imm.xml","encoding_mask":"0xfff8f01f","encoding_value":"0xd500401f","features":[],"status":"unsupported","profiles":[]},
-    {"id":"MSR_SR_systemmove","instruction_id":"MSR_reg","mnemonic":"MSR","category":"base_integer_system","source_file":"msr_reg.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5100000","features":[],"status":"unsupported","profiles":[]},
+    {"id":"MSR_SR_systemmove","instruction_id":"MSR_reg","mnemonic":"MSR","category":"base_integer_system","source_file":"msr_reg.xml","encoding_mask":"0xfff00000","encoding_value":"0xd5100000","features":[],"status":"partial","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"partial","scope":"FPCR/FPSR operands only, every Xt/Xn including XZR, under enabled non-streaming AArch64-only FP/FP16/AFP policy. FPCR mask 0x07c89f07 retains numerical exception enables; FPSR mask 0x0800009f replaces QC/cumulative fields independently of PSTATE NZCV. Reads mask raw storage and zero-extend without normalizing it; writes replace masked low 32-bit storage. Len/Stride RAZ/WI, EBF16/FPMR absent and other RES0 hardwired zero. Disabled FP/higher-level access checks, enabled numerical exception delivery and broader system-register space remain unsupported. This is no Apple hardware conformance claim."}]},
     {"id":"MSUBPT_64A_dp_3src","instruction_id":"MSUBPT","mnemonic":"MSUBPT","category":"base_integer_system","source_file":"msubpt.xml","encoding_mask":"0xffe08000","encoding_value":"0x9b608000","features":[{"feature":"FEAT_CPA","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"MSUB_32A_dp_3src","instruction_id":"MSUB","mnemonic":"MSUB","category":"base_integer_system","source_file":"msub.xml","encoding_mask":"0xffe08000","encoding_value":"0x1b008000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."}]},
     {"id":"MSUB_64A_dp_3src","instruction_id":"MSUB","mnemonic":"MSUB","category":"base_integer_system","source_file":"msub.xml","encoding_mask":"0xffe08000","encoding_value":"0x9b008000","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"All defined W32/X64 operands and overlaps, modular low-width multiply-add/subtract result, W32 zero extension, ZR operands and guest NZCV preservation in the declared leaf profile; complete PSTATE/DIT and platform integration remain outside profile."}]},

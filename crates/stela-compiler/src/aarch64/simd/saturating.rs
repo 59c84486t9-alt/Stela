@@ -1,6 +1,6 @@
 //! Arm A64 2026-06 saturating integer facts, including sticky FPSR.QC.
 /// Architectural cumulative saturation bit; unrelated FPSR bits stay unchanged.
-pub const FPSR_QC: u32 = 1 << 27;
+pub use crate::aarch64::floating::FPSR_QC;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Add {

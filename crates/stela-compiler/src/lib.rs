@@ -24,6 +24,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/flags.rs"),
     include_str!("x86_64/flags.rs"),
     include_str!("aarch64/floating.rs"),
+    include_str!("aarch64/fp_register.rs"),
+    include_str!("x86_64/fp_register.rs"),
     include_str!("aarch64/integer_math.rs"),
     include_str!("x86_64/integer_math.rs"),
     include_str!("aarch64/literal.rs"),
@@ -298,9 +300,10 @@ pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v3-direct-ram";
 /// Native ABI v3: System V x86-64 `void function(GuestState *state)`.
 /// Registers are initially memory-backed; register allocation is future work.
 /// Only NZCV bits 31:28 are modeled, not the complete PSTATE register.
-/// V registers are little-endian low/high 64-bit limbs. FPCR and unimplemented FPSR bits
-/// are preserved state. Saturating integer SIMD updates FPSR.QC; storage alone
-/// does not implement floating-point arithmetic.
+/// V registers are little-endian low/high 64-bit limbs. Arithmetic preserves
+/// unrelated FPCR/FPSR bits; architectural register accesses apply the declared
+/// field masks. Saturating integer SIMD updates QC and numerical FP accumulates
+/// exception status. The state layout itself grants no instruction support.
 #[repr(C)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestState {

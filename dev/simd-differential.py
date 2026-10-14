@@ -251,7 +251,7 @@ def compile_batch(cli, directory, functions, index, block=False, cpu_target="bas
         words.append(RET)
     source = struct.pack('<' + 'I' * len(words), *words)
     disassembly = list(Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(source, BASE))
-    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv'} for i in disassembly):
+    if len(disassembly) != len(words) or any(i.mnemonic not in {'ldr', 'str', 'ldur', 'stur', 'ldp', 'stp', 'movi', 'ret', 'and', 'bic', 'orr', 'orn', 'eor', 'bsl', 'bit', 'bif', 'add', 'sub', 'abs', 'neg', 'mov', 'cmeq', 'cmgt', 'cmge', 'cmhi', 'cmhs', 'cmlt', 'cmle', 'cmtst', 'dup', 'ins', 'smov', 'umov', 'ext', 'rev16', 'rev32', 'rev64', 'zip1', 'zip2', 'uzp1', 'uzp2', 'trn1', 'trn2', 'tbl', 'tbx', 'shl', 'sshr', 'ushr', 'srshr', 'urshr', 'ssra', 'usra', 'srsra', 'ursra', 'sli', 'sri', 'shrn', 'shrn2', 'rshrn', 'rshrn2', 'sshll', 'sshll2', 'ushll', 'ushll2', 'sxtl', 'sxtl2', 'uxtl', 'uxtl2', 'smin', 'smax', 'umin', 'umax', 'sminp', 'smaxp', 'uminp', 'umaxp', 'sminv', 'smaxv', 'uminv', 'umaxv', 'addv', 'addp', 'saddlv', 'uaddlv', 'cnt', 'clz', 'cls', 'rbit', 'mvn', 'not', 'sqadd', 'uqadd', 'sqsub', 'uqsub', 'sqabs', 'sqneg', 'suqadd', 'usqadd', 'sqxtn', 'sqxtn2', 'uqxtn', 'uqxtn2', 'sqxtun', 'sqxtun2', 'mul', 'mla', 'mls', 'smull', 'smull2', 'umull', 'umull2', 'smlal', 'smlal2', 'umlal', 'umlal2', 'smlsl', 'smlsl2', 'umlsl', 'umlsl2', 'saddl', 'saddl2', 'uaddl', 'uaddl2', 'ssubl', 'ssubl2', 'usubl', 'usubl2', 'saddw', 'saddw2', 'uaddw', 'uaddw2', 'ssubw', 'ssubw2', 'usubw', 'usubw2', 'sabd', 'uabd', 'saba', 'uaba', 'sabdl', 'sabdl2', 'uabdl', 'uabdl2', 'sabal', 'sabal2', 'uabal', 'uabal2', 'shadd', 'uhadd', 'srhadd', 'urhadd', 'shsub', 'uhsub', 'addhn', 'addhn2', 'raddhn', 'raddhn2', 'subhn', 'subhn2', 'rsubhn', 'rsubhn2', 'saddlp', 'uaddlp', 'sadalp', 'uadalp', 'xtn', 'xtn2', 'shll', 'shll2', 'mvni', 'fmov', 'pmul', 'pmull', 'pmull2', 'sqdmulh', 'sqrdmulh', 'sqdmull', 'sqdmull2', 'sqdmlal', 'sqdmlal2', 'sqdmlsl', 'sqdmlsl2', 'sshl', 'ushl', 'srshl', 'urshl', 'sqshl', 'uqshl', 'sqrshl', 'uqrshl', 'sqshlu', 'fcsel', 'fabs', 'fneg', 'sqshrn', 'sqshrn2', 'sqrshrn', 'sqrshrn2', 'uqshrn', 'uqshrn2', 'uqrshrn', 'uqrshrn2', 'sqshrun', 'sqshrun2', 'sqrshrun', 'sqrshrun2', 'sdot', 'udot', 'sqrdmlah', 'sqrdmlsh', 'fadd', 'fsub', 'fmul', 'fdiv', 'mrs', 'msr'} for i in disassembly):
         raise AssertionError('Independent decoder declined SIMD fixture')
     path = directory / f'program-{index}.arm64'
     path.write_bytes(source)
@@ -407,6 +407,8 @@ def worker(pipe, batches):
     try:
         if batches[0].get('cohort') == 'scalar_numerical':
             result = execute_scalar_numerical_batches(batches)
+        elif batches[0].get('cohort') == 'fp_registers':
+            result = execute_fp_register_batches(batches)
         else:
             result = execute_register_batches(batches) if batches[0].get('cohort') in REGISTER_COHORTS else execute_batches(batches, pipe)
         pipe.send({'result': result})
@@ -2272,6 +2274,233 @@ def retain_native_binary_evidence(batch,accounting,dynamic):
 
 
 
+FP_REGISTER_FOCUS = 'fp_registers'
+FP_REGISTER_REVIEW = ROOT / '.stela/research/fp-registers/review.json'
+FP_REGISTER_MASKS = {'fpcr': 0x07c89f07, 'fpsr': 0x0800009f}
+FP_REGISTER_WORDS = {'mrs_fpcr': 0xd53b4400, 'msr_fpcr': 0xd51b4400,
+                     'mrs_fpsr': 0xd53b4420, 'msr_fpsr': 0xd51b4420}
+FP_REGISTER_WORD_MASK = 0xffffffe0
+FP_REGISTER_QEMU_MASKS = {'fpcr': 0x07ff2007, 'fpsr': 0xf800009f}
+FP_REGISTER_SEED = {'fpcr': 0x07c80007, 'fpsr': 0x0800009f}
+FP_REGISTER_ORIGINAL_FLAGS = 0xa0000000
+FP_REGISTER_ORIGINAL_SP = 0x48010000
+FP_REGISTER_RECORD_BYTES = 1024
+FP_REGISTER_SVC = 0xd4002461
+FP_REGISTER_EC_SVC = 0x15
+FP_REGISTER_EC_ACCESS = 7
+FP_REGISTER_POLICY_FIELDS = {'trap_enables': ('fpcr', 0x9f00),
+                             'ebf': ('fpcr', 1 << 13),
+                             'len_stride': ('fpcr', 0x00370000),
+                             'aarch32_nzcv': ('fpsr', 0xf0000000)}
+
+
+def fp_register_operation(name, rt):
+    if name not in FP_REGISTER_WORDS or not 0 <= rt < 32:
+        raise ValueError('Invalid FP register operand')
+    return {'kind': FP_REGISTER_FOCUS, 'name': name, 'rt': rt,
+            'word': FP_REGISTER_WORDS[name] | rt}
+
+
+def fp_register_functions():
+    return [{'operations': [fp_register_operation(name, rt)]}
+            for name in FP_REGISTER_WORDS for rt in range(32)]
+
+
+def fp_register_expected(operation, initial, masks=FP_REGISTER_MASKS):
+    result = State.from_buffer_copy(initial)
+    name, rt = operation['name'], operation['rt']
+    register = name.split('_')[1]
+    if name.startswith('mrs'):
+        if rt != 31:
+            result.x[rt] = getattr(result, register) & masks[register]
+    else:
+        setattr(result, register, (0 if rt == 31 else result.x[rt]) & masks[register])
+    return result
+
+
+def fp_register_original_state(case, record=None):
+    state = State()
+    state.x[:] = case['initial_x']
+    state.sp, state.nzcv = FP_REGISTER_ORIGINAL_SP, FP_REGISTER_ORIGINAL_FLAGS
+    state.fpcr, state.fpsr = FP_REGISTER_SEED['fpcr'], FP_REGISTER_SEED['fpsr']
+    for register in range(32):
+        state.v[register][:] = [int.from_bytes(bytes([register + 1]) * 8, 'little')] * 2
+    if record is not None:
+        if len(record) != FP_REGISTER_RECORD_BYTES:
+            raise AssertionError('Truncated original FP register snapshot')
+        state.x[:] = struct.unpack_from('<31Q', record)
+        sp, spsr, fpcr, fpsr = struct.unpack_from('<4Q', record, 248)
+        state.sp, state.nzcv, state.fpcr, state.fpsr = sp, spsr & 0xf0000000, fpcr, fpsr
+        vectors = struct.unpack_from('<64Q', record, 320)
+        for register in range(32):
+            state.v[register][:] = vectors[register * 2:register * 2 + 2]
+    return state
+
+
+def fp_register_elf_word(elf, address):
+    if elf[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', elf, 18)[0] != 183:
+        raise AssertionError('FP register original is not ELF64 little-endian AArch64')
+    offset = struct.unpack_from('<Q', elf, 32)[0]
+    size, count = struct.unpack_from('<HH', elf, 54)
+    for index in range(count):
+        segment = struct.unpack_from('<IIQQQQQQ', elf, offset + index * size)
+        if segment[0] == 1 and segment[3] <= address <= segment[3] + segment[5] - 4:
+            return struct.unpack_from('<I', elf, segment[2] + address - segment[3])[0]
+    raise AssertionError('Original FP register subject PC is outside ELF file bytes')
+
+
+def load_fp_register_oracle(path=FP_REGISTER_REVIEW):
+    review, review_hash = numerical_json(path)
+    selected = review['selected_software_profile']
+    if any(int(selected[f'{name}_mask'], 16) != mask for name, mask in FP_REGISTER_MASKS.items()):
+        raise AssertionError('FP register policy differs from declared independent masks')
+    reference = review['original_el0_oracle']['receipt']
+    receipt_path = ROOT / reference['path']
+    receipt, receipt_hash = numerical_json(receipt_path, reference['sha256'])
+    if receipt.get('passed') is not True or receipt['cases'] != 314:
+        raise AssertionError('Passing complete original FP register capture required')
+    for name, identity in receipt['files'].items():
+        if Path(name).name != name:
+            raise AssertionError('Original FP register file is not one path component')
+        data = (receipt_path.parent / name).read_bytes()
+        if digest(data) != identity['sha256'] or len(data) != identity['bytes']:
+            raise AssertionError(f'Original FP register file changed: {name}')
+    validation_ref = review['original_el0_oracle']['byte_and_exception_pc_validation']
+    validation, validation_hash = numerical_json(ROOT / validation_ref['path'], validation_ref['sha256'])
+    if validation.get('passed') is not True or validation['oracle_receipt']['sha256'] != receipt_hash:
+        raise AssertionError('Original FP register byte/exception validation is unbound')
+    directory = receipt_path.parent
+    cases = json.loads((directory / 'cases.json').read_bytes())
+    results, elf = (directory / 'results.bin').read_bytes(), (directory / 'guest.elf').read_bytes()
+    if len(cases) != 314 or len(results) != (len(cases) + 1) * FP_REGISTER_RECORD_BYTES or len(validation['proofs']) != len(cases):
+        raise AssertionError('Original FP register case/snapshot/proof counts differ')
+    records, classifications, access_traps, undefined = [], [], [], []
+    functions = {(function['operations'][0]['name'], function['operations'][0]['rt']): index
+                 for index, function in enumerate(fp_register_functions())}
+    for index, (case, proof, observation) in enumerate(zip(cases, validation['proofs'], receipt['observations'])):
+        record = results[(index + 1) * FP_REGISTER_RECORD_BYTES:(index + 2) * FP_REGISTER_RECORD_BYTES]
+        initial, original = fp_register_original_state(case), fp_register_original_state(case, record)
+        esr, elr, current_el, cpacr, marker = struct.unpack_from('<5Q', record, 280)
+        pc = int(proof['subject_pc'], 16)
+        expected_ec = 0 if case['name'].endswith('fpmr') else FP_REGISTER_EC_ACCESS if case['fpen'] != 3 else FP_REGISTER_EC_SVC
+        if (proof['case'] != index or observation['case'] != index or esr >> 26 != expected_ec
+                or proof['exception_class'] != expected_ec or int(proof['verified_elr'], 16) != elr
+                or elr != pc + (8 if expected_ec == FP_REGISTER_EC_SVC else 0)
+                or fp_register_elf_word(elf, pc) != case['word']
+                or fp_register_elf_word(elf, pc + 4) != FP_REGISTER_SVC
+                or current_el != 4 or cpacr != case['fpen'] << 20 or marker != 0x1234):
+            raise AssertionError(f'Original FP register instruction/exception evidence changed: {index}')
+        if expected_ec != FP_REGISTER_EC_SVC:
+            if bytes(original) != bytes(initial):
+                raise AssertionError('Original disabled/undefined FP access changed state')
+            (undefined if expected_ec == 0 else access_traps).append({'case': index, 'word': case['word'],
+                'fpen': case['fpen'], 'subject_pc': pc, 'exception_pc': elr, 'esr': esr})
+            continue
+        operation = fp_register_operation(case['name'], case['rt'])
+        if operation['word'] != case['word'] or bytes(original) != bytes(fp_register_expected(operation, initial, FP_REGISTER_QEMU_MASKS)):
+            raise AssertionError(f'Original FP register full state disagrees with its declared observed policy: {index}')
+        expected = fp_register_expected(operation, initial)
+        fields = []
+        if bytes(expected) != bytes(original):
+            if (list(expected.x) != list(original.x)
+                    or (expected.fpcr ^ original.fpcr) & ~(FP_REGISTER_MASKS['fpcr'] ^ FP_REGISTER_QEMU_MASKS['fpcr'])
+                    or (expected.fpsr ^ original.fpsr) & ~(FP_REGISTER_MASKS['fpsr'] ^ FP_REGISTER_QEMU_MASKS['fpsr'])):
+                raise AssertionError('Original FP register differs outside declared policy fields')
+            for field, (register, mask) in FP_REGISTER_POLICY_FIELDS.items():
+                if (getattr(expected, register) ^ getattr(original, register)) & mask:
+                    fields.append(field)
+            if not fields:
+                raise AssertionError('Unclassified original FP register policy mismatch')
+            classifications.append({'case': index, 'fields': fields, 'requested': case['value'],
+                'original_fpcr': original.fpcr, 'native_policy_fpcr': expected.fpcr,
+                'original_fpsr': original.fpsr, 'native_policy_fpsr': expected.fpsr})
+        records.append({'function': functions[(case['name'], case['rt'])], 'initial': bytes(initial),
+            'expected': bytes(expected), 'original': bytes(original), 'case': index, 'fields': fields})
+    if len(records) != 274 or len(access_traps) != 36 or len(undefined) != 4:
+        raise AssertionError('Original FP register success/trap classification changed')
+    return {'records': records, 'classifications': classifications, 'disabled_fp_access_traps': access_traps,
+            'undefined_fpmr_traps': undefined, 'review_sha256': review_hash,
+            'receipt': {'path': str(receipt_path.relative_to(ROOT)), 'sha256': receipt_hash,
+                        'files': receipt['files'], 'historical_harness_sha256': receipt['harness_sha256'],
+                        'cpu': receipt['cpu'], 'qemu_version': receipt['qemu_version']},
+            'validation_sha256': validation_hash}
+
+
+def fp_register_policy_cases():
+    records = []
+    variants = ((0, 0, 0), (MASK, 0xffffffff, 0xffffffff),
+                (0xfedcba9800000000, ~FP_REGISTER_MASKS['fpcr'] & 0xffffffff,
+                 ~FP_REGISTER_MASKS['fpsr'] & 0xffffffff),
+                (0x1234567807c89f07, 0x9f00, 0x0800009f))
+    for index, function in enumerate(fp_register_functions()):
+        operation = function['operations'][0]
+        for variant, (value, fpcr, fpsr) in enumerate(variants):
+            initial = State.from_buffer_copy(states()[0])
+            seed_extended_state(initial, index * len(variants) + variant)
+            initial.fpcr, initial.fpsr, initial.nzcv = fpcr, fpsr, ((index + variant) % 16) << 28
+            if operation['rt'] != 31:
+                initial.x[operation['rt']] = value
+            records.append({'function': index, 'initial': bytes(initial),
+                'expected': bytes(fp_register_expected(operation, initial)), 'variant': variant})
+    for register in ('fpcr', 'fpsr'):
+        operation = fp_register_operation('msr_' + register, 0)
+        index = list(FP_REGISTER_WORDS).index(operation['name']) * 32
+        for bit in range(64):
+            initial = State.from_buffer_copy(states()[0])
+            seed_extended_state(initial, bit)
+            initial.fpcr, initial.fpsr, initial.x[0] = 0xffffffff, 0xffffffff, 1 << bit
+            records.append({'function': index, 'initial': bytes(initial),
+                'expected': bytes(fp_register_expected(operation, initial)), 'bit': bit})
+    return records
+
+
+def execute_fp_register_batches(batches):
+    batch = batches[0]
+    oracle = load_fp_register_oracle()
+    records = oracle['records'] + fp_register_policy_cases()
+    counts, corpus = Counter(), hashlib.sha256()
+    with executable(batch['native']) as address, executable(NUMERICAL_MXCSR_WRAPPER) as wrapper_address:
+        wrapper = ctypes.CFUNCTYPE(None, ctypes.POINTER(State), ctypes.c_void_p, ctypes.c_uint32,
+                                 ctypes.POINTER(NumericalNativeExit))(wrapper_address)
+        guard = ctypes.create_string_buffer(NUMERICAL_GUARD_BYTES * 2 + ctypes.sizeof(State))
+        state_address = ctypes.addressof(guard) + NUMERICAL_GUARD_BYTES
+        native_state = ctypes.cast(state_address, ctypes.POINTER(State))
+
+        def invoke(record, mxcsr):
+            ctypes.memmove(guard, NUMERICAL_GUARD + record['initial'] + NUMERICAL_GUARD, len(guard))
+            observed = NumericalNativeExit()
+            wrapper(native_state, address + batch['offsets'][record['function']], mxcsr, ctypes.byref(observed))
+            actual = ctypes.string_at(state_address, ctypes.sizeof(State))
+            if (actual != record['expected'] or observed.mxcsr_before != mxcsr or observed.mxcsr_after != mxcsr
+                    or guard.raw[:NUMERICAL_GUARD_BYTES] != NUMERICAL_GUARD
+                    or guard.raw[-NUMERICAL_GUARD_BYTES:] != NUMERICAL_GUARD):
+                failure = {'kind': 'fp_register_native_failure', 'record': {key: value.hex() if isinstance(value, bytes) else value
+                    for key, value in record.items()}, 'actual': actual.hex(), 'requested_mxcsr': mxcsr,
+                    'observed_mxcsr': [observed.mxcsr_before, observed.mxcsr_after]}
+                write_evidence(ROOT / '.stela/simd-fp_registers-failure.json', failure)
+                raise AssertionError('FP register native state/MXCSR/canary mismatch; immutable failure retained')
+
+        for record in records:
+            invoke(record, NUMERICAL_MXCSR_ALL_MASKS)
+            corpus.update(record['initial']); corpus.update(struct.pack('<I', record['function']))
+            counts['complete_state'] += 1
+            if 'original' in record:
+                counts['classified_policy' if record['fields'] else 'direct_original'] += 1
+        examples = {record['function']: record for record in records}
+        for record in examples.values():
+            for masks in (0, NUMERICAL_MXCSR_ALL_MASKS):
+                for status in (0, NUMERICAL_MXCSR_ALL_STATUS):
+                    for rounding in range(4):
+                        invoke(record, masks | status | (rounding << NUMERICAL_MXCSR_ROUND_SHIFT))
+                        counts['mxcsr_checks'] += 1
+    return {'complete_state_comparisons': counts['complete_state'],
+            'direct_original_complete_state_comparisons': counts['direct_original'],
+            'classified_original_policy_comparisons': counts['classified_policy'],
+            'caller_mxcsr_preservation_comparisons': counts['mxcsr_checks'],
+            'state_corpus_sha256': corpus.hexdigest(), 'state_bytes': ctypes.sizeof(State),
+            'ram_canary_bytes_per_case': NUMERICAL_GUARD_BYTES * 2}
+
+
 NUMERICAL_FOCUS = 'scalar_numerical'
 NUMERICAL_FOUNDATION = ROOT / '.stela/research/numerical-fp/receipt.json'
 NUMERICAL_RETURN_EXIT = 4
@@ -2883,6 +3112,205 @@ def run_scalar_numerical_cohort(cli, oracle_path):
     print(json.dumps(report, indent=2))
 
 
+def fp_register_runtime_cases(oracle):
+    controls = (0, 1 << 22, 2 << 22, 3 << 22, NUMERICAL_NEP)
+    helper_labels = {'fadd': 'one_opposite_one', 'fsub': 'one_one',
+                     'fmul': 'minimum_normal_half', 'fdiv': 'denormal_zero_divisor'}
+    selected = {}
+    for record in oracle['records']:
+        operation = record['operation']
+        initial = State.from_buffer_copy(record['initial'])
+        if ((operation['d'], operation['n'], operation['m']) != (0, 1, 2)
+                or initial.fpcr not in controls or initial.fpsr != 0
+                or record['label'] not in (helper_labels[operation['name']], 'one_positive_halfulp')):
+            continue
+        key = (operation['name'], operation['lane'], initial.fpcr, record['label'])
+        selected.setdefault(key, record)
+    if len(selected) != 4 * 3 * len(controls) * 2:
+        raise AssertionError('FP register runtime selection omits a format, control or arithmetic boundary')
+    return list(selected.values()), helper_labels
+
+
+def fp_register_chain(record):
+    words = [fp_register_operation('msr_fpcr', 0)['word'], fp_register_operation('msr_fpsr', 31)['word'],
+             record['operation']['word'], fp_register_operation('mrs_fpsr', 3)['word'],
+             fp_register_operation('msr_fpsr', 31)['word'], fp_register_operation('mrs_fpsr', 4)['word'],
+             record['operation']['word'], fp_register_operation('mrs_fpsr', 5)['word'],
+             fp_register_operation('msr_fpsr', 31)['word'], fp_register_operation('mrs_fpsr', 6)['word'], RET]
+    initial = State.from_buffer_copy(record['initial'])
+    control = initial.fpcr
+    initial.x[0] = 0xfeedface00000000 | control
+    initial.fpcr = control ^ (3 << 22)
+    initial.fpsr = FP_REGISTER_MASKS['fpsr']
+    intermediate = State.from_buffer_copy(record['expected'])
+    intermediate.x[:] = initial.x
+    intermediate.fpcr = control
+    expected = State.from_buffer_copy(intermediate)
+    expected.x[3] = expected.x[5] = expected.fpsr & FP_REGISTER_MASKS['fpsr']
+    expected.x[4] = expected.x[6] = expected.fpsr = 0
+    return struct.pack('<' + 'I' * len(words), *words), initial, intermediate, expected
+
+
+def fp_register_runtime_cohort(cli, directory, numerical, compiler):
+    records, helper_labels = fp_register_runtime_cases(numerical)
+    counts, transcripts = Counter(), []
+    cache = directory / 'fp-register-runtime-cache'
+    source_path, state_path = directory / 'fp-register-chain.arm64', directory / 'fp-register-state.json'
+    ram_address, ram = 0x240000000000, NUMERICAL_GUARD * 16
+    memory_path = directory / 'fp-register-memory.json'
+    memory_path.write_text(json.dumps({'regions': [{'guest_address': ram_address, 'virtual_bytes': len(ram),
+        'initial_bytes': list(ram), 'readable': True, 'writable': True}]}))
+    original = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    original.ctl_set_cpu_model(arm.UC_CPU_ARM64_MAX)
+    base = BASE + 0x4000
+    original.mem_map(base, 4096)
+    original.mem_map(STOP, 4096)
+
+    def invoke(code, initial, entry=base, budget=16, cache_dir=cache):
+        source_path.write_bytes(code)
+        state_path.write_text(json.dumps(state_dict(initial)))
+        report = json.loads(subprocess.check_output([str(cli), 'run-blocks', str(source_path),
+            '--guest-base', hex(base), '--entry', hex(entry), '--stop-pc', hex(STOP),
+            '--cpu-target', 'baseline', '--state', str(state_path), '--block-budget', str(budget),
+            '--cache-dir', str(cache_dir), '--memory', str(memory_path),
+            '--read-memory', f'{hex(ram_address)}:{len(ram)}'], timeout=30))
+        if (report['kind'] != 'native_block_run' or report['source_sha256'] != digest(code)
+                or report['compiler_source_sha256'] != compiler or report['target_cpu'] != 'x86_64-baseline'):
+            raise AssertionError('FP register runtime report source/compiler/target differs')
+        memory = report['memory']
+        if memory['memory_before'] != memory['memory_after'] or memory['memory_reads'][0]['hex'] != ram.hex():
+            raise AssertionError('FP register runtime changed owned guest RAM')
+        for name in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits', 'floating_point_helpers'):
+            value = report['outcome'][name]
+            if not isinstance(value, int) or value < 0:
+                raise AssertionError(f'FP register runtime omitted {name}')
+            counts[name] += value
+        transcripts.append({'source_hex': code.hex(), 'initial_state_hex': bytes(initial).hex(),
+                            'entry': entry, 'budget': budget, 'report': report})
+        counts['invocations'] += 1
+        return report, numerical_report_state(report['state'])
+
+    def require(report, actual, expected, pc=STOP, reason='stop_address'):
+        if report['pc'] != pc or report['outcome']['reason']['kind'] != reason or bytes(actual) != bytes(expected):
+            write_evidence(ROOT / '.stela/simd-fp_registers-runtime-failure.json',
+                {'kind': 'fp_register_runtime_failure', 'transcripts': transcripts,
+                 'expected_state_hex': bytes(expected).hex(), 'expected_pc': pc, 'expected_reason': reason})
+            raise AssertionError('FP register runtime complete-state mismatch; immutable failure retained')
+        if reason == 'stop_address' and report['outcome']['last_exit'] != [STOP, NUMERICAL_RETURN_EXIT]:
+            raise AssertionError('FP register runtime did not execute actual guest RET')
+        counts['complete_state_comparisons'] += 1
+
+    def check_original(code, initial, expected):
+        original.mem_write(base, code)
+        original.ctl_remove_cache(base, base + len(code))
+        initialize_arm(original, initial)
+        original.emu_start(base, STOP, count=128)
+        if original.reg_read(arm.UC_ARM64_REG_PC) != STOP or bytes(capture_arm(original, initial)) != bytes(expected):
+            raise AssertionError('FP register joined original complete state differs')
+        counts['original_joined_complete_state_comparisons'] += 1
+
+    for record in records:
+        code, initial, intermediate, expected = fp_register_chain(record)
+        report, actual = invoke(code, initial)
+        require(report, actual, expected)
+        counts['status_clear_repeat_checks'] += 1
+        if State.from_buffer_copy(record['initial']).fpcr & 7 == 0:
+            check_original(code, initial, expected)
+        if record['label'] != helper_labels[record['operation']['name']]:
+            continue
+        if State.from_buffer_copy(record['initial']).fpcr != 0:
+            continue
+        first, actual = invoke(code, initial, budget=1, cache_dir=directory / f"fp-resume-{record['function']}")
+        require(first, actual, intermediate, base + 12, 'budget_exhausted')
+        if first['outcome']['floating_point_helpers'] != 1:
+            raise AssertionError('FP register budget fixture did not cross the actual arithmetic helper')
+        final, actual = invoke(code, intermediate, entry=base + 12)
+        require(final, actual, expected)
+        counts['budget_helper_resume_checks'] += 1
+        warm, actual = invoke(code, initial)
+        require(warm, actual, expected)
+        if warm['outcome']['compiled_blocks'] != 0 or warm['outcome']['disk_cache_hits'] < 2:
+            raise AssertionError('FP register joined chain did not reuse its persistent cache')
+        counts['disk_cache_checks'] += 1
+        loop_words = list(struct.unpack('<' + 'I' * (len(code) // 4), code))[:-1]
+        loop_words += [NUMERICAL_SUBS_X10_ONE,
+                       0xb5000000 | ((-(len(loop_words) + 1) & ((1 << 19) - 1)) << 5) | 10, RET]
+        loop = struct.pack('<' + 'I' * len(loop_words), *loop_words)
+        loop_initial = State.from_buffer_copy(initial)
+        loop_initial.x[10] = NUMERICAL_CACHE_LOOP_ITERATIONS
+        loop_expected = State.from_buffer_copy(expected)
+        loop_expected.x[10], loop_expected.nzcv = 0, NUMERICAL_ZERO_CARRY_FLAGS
+        repeated, actual = invoke(loop, loop_initial, budget=32)
+        require(repeated, actual, loop_expected)
+        if repeated['outcome']['memory_cache_hits'] < NUMERICAL_CACHE_LOOP_ITERATIONS - 1:
+            raise AssertionError('FP register joined loop did not exercise live cache reuse')
+        check_original(loop, loop_initial, loop_expected)
+        counts['memory_cache_loop_checks'] += 1
+        for bit in (8, 9, 10, 11, 12, 15):
+            trap_initial = State.from_buffer_copy(initial)
+            trap_initial.x[0] |= 1 << bit
+            trap_expected = State.from_buffer_copy(trap_initial)
+            trap_expected.fpcr = trap_initial.x[0] & FP_REGISTER_MASKS['fpcr']
+            trap_expected.fpsr = 0
+            declined, actual = invoke(code, trap_initial)
+            require(declined, actual, trap_expected, base + 8, 'floating_point_unsupported')
+            if declined['outcome']['reason'] != {'kind': 'floating_point_unsupported',
+                    'instruction_pc': base + 8, 'fpcr': trap_expected.fpcr,
+                    'enabled_exceptions': 1 << (bit - NUMERICAL_EXCEPTION_ENABLE_SHIFT)}:
+                raise AssertionError('MSR FPCR lost requested enable or imprecise arithmetic refusal')
+            counts['typed_unsupported_state_checks'] += 1
+    snapshot = write_evidence(ROOT / '.stela/simd-fp_registers-runtime-records.json', transcripts)
+    return {**dict(counts), 'ram_bytes_per_invocation': len(ram),
+            'transcript': {'path': str(snapshot.relative_to(ROOT)), 'sha256': digest(snapshot.read_bytes())}}
+
+
+def run_fp_register_cohort(cli, numerical_path):
+    started = time.monotonic()
+    oracle, numerical = load_fp_register_oracle(), load_numerical_oracle(numerical_path)
+    cli_hash, harness_hash = digest(cli.read_bytes()), digest(Path(__file__).read_bytes())
+    shared_paths = ('dev/differential.py', 'dev/evidence.py', 'dev/test_simd_differential.py',
+                    'crates/stela-runtime/src/floating.rs', 'crates/stela-runtime/src/blocks.rs',
+                    'crates/stela-runtime/src/lib.rs', 'crates/stela-runtime/src/execution.rs')
+    shared_hashes = {name: digest((ROOT / name).read_bytes()) for name in shared_paths}
+    with tempfile.TemporaryDirectory(prefix='stela-fp-registers-') as temporary:
+        directory = Path(temporary)
+        batch = compile_batch(cli, directory, fp_register_functions(), 0)
+        batch['cohort'] = FP_REGISTER_FOCUS
+        compiler = batch['compiler']
+        accounting = native_binary_accounting(batch)
+        artifacts = retain_native_evidence('simd-fp_registers', batch['source'], batch['native'],
+            batch['manifest'], accounting, Path(__file__).read_bytes())
+        raw = bounded_cases([batch])
+        runtime = fp_register_runtime_cohort(cli, directory, numerical, compiler)
+    if (digest(cli.read_bytes()) != cli_hash or digest(Path(__file__).read_bytes()) != harness_hash
+            or any(digest((ROOT / name).read_bytes()) != value for name, value in shared_hashes.items())):
+        raise AssertionError('FP register executable, harness or shared source changed during verification')
+    report = {'kind': 'simd_fp_registers_arm_vs_native_x86', 'passed': True, 'abi': LEAF_ABI,
+        'state_comparisons': raw['complete_state_comparisons'],
+        'compatible_original_native_full_state_comparisons': raw['direct_original_complete_state_comparisons'],
+        'native_policy_state_comparisons': raw['complete_state_comparisons'] - raw['direct_original_complete_state_comparisons'],
+        'policy_difference_classifications': len(oracle['classifications']),
+        'runtime_state_comparisons': runtime['complete_state_comparisons'] - runtime['typed_unsupported_state_checks'],
+        'runtime_complete_state_comparisons': runtime['complete_state_comparisons'] - runtime['typed_unsupported_state_checks'],
+        'runtime_typed_unsupported_state_checks': runtime['typed_unsupported_state_checks'],
+        'runtime_budget_resume_checks': runtime['budget_helper_resume_checks'],
+        'runtime_disk_cache_checks': runtime['disk_cache_checks'],
+        'runtime_memory_cache_loop_checks': runtime['memory_cache_loop_checks'],
+        'native_mxcsr_preservation_comparisons': raw['caller_mxcsr_preservation_comparisons'],
+        'native_caller_mxcsr_checks': raw['caller_mxcsr_preservation_comparisons'],
+        'compiler_source_sha256': compiler, 'compiler_executable_sha256': cli_hash,
+        'harness_source_sha256': harness_hash, 'shared_sources_sha256': shared_hashes,
+        'original_oracle': {key: value for key, value in oracle.items() if key != 'records'},
+        'numerical_foundation_receipt_sha256': numerical['foundation_sha256'],
+        'policy_masks': FP_REGISTER_MASKS, 'operand_combinations': len(batch['functions']),
+        'raw_native': raw, 'rust_runtime': runtime, 'native_accounting': accounting,
+        'native_artifacts': artifacts, 'caller_mxcsr_wrapper_sha256': digest(NUMERICAL_MXCSR_WRAPPER),
+        'verification_wall_seconds': time.monotonic() - started,
+        'limits': 'Enabled AArch64 nonstreaming FP/FP16/AFP software policy only. Original EL0 inputs remain unchanged; exact QEMU RAZ/WI and AArch32/EBF differences receive separate policy credit. Disabled FP and absent FPMR traps are original-only evidence. Requested numerical enables precisely decline arithmetic; no exception delivery, generic MRS/MSR form completion, Apple hardware or application claim.'}
+    write_evidence(ROOT / '.stela/simd-fp_registers-differential-report.json', report)
+    print(json.dumps(report, indent=2))
+
+
 def run_register_cohort(cli, focus):
     functions=REGISTER_COHORTS[focus][0]();started=time.monotonic()
     cli_hash,harness_hash=digest(cli.read_bytes()),digest(Path(__file__).read_bytes())
@@ -2965,7 +3393,7 @@ def run_register_cohort(cli, focus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS], help='Only the focused SIMD implementation cohort')
+    parser.add_argument('--focus', choices=[*REGISTER_COHORTS, NUMERICAL_FOCUS, FP_REGISTER_FOCUS], help='Only the focused SIMD implementation cohort')
     parser.add_argument('--numerical-oracle', type=Path, default=NUMERICAL_FOUNDATION,
                         help='Pinned numerical foundation receipt for scalar_numerical')
     arguments = parser.parse_args()
@@ -2974,6 +3402,9 @@ def main():
     cli = ROOT / 'target/debug/stela'
     if arguments.focus == NUMERICAL_FOCUS:
         run_scalar_numerical_cohort(cli, arguments.numerical_oracle)
+        return
+    if arguments.focus == FP_REGISTER_FOCUS:
+        run_fp_register_cohort(cli, arguments.numerical_oracle)
         return
     if arguments.focus:
         run_register_cohort(cli, arguments.focus)

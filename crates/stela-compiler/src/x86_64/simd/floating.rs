@@ -1,13 +1,11 @@
 //! Raw FP selection/sign lowering: integer classification, no MXCSR effects.
 use super::super::isa::ShiftOpcode;
 use super::{Host, commit, packed, read_vector, vector_offset};
+use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};
 use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},
 };
-
-const FPCR_AH: u32 = 1 << 1;
-const FPCR_NEP: u32 = 1 << 2;
 
 fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend([0xf7, 0x87]); // test dword [rdi+fpcr],mask
