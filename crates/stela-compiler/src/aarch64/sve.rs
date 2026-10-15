@@ -27,6 +27,7 @@ pub mod reductions;
 pub mod shifts;
 pub mod shifts_narrow;
 pub mod sign;
+pub mod tables;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
@@ -53,12 +54,14 @@ pub enum Operand {
     Shifts(shifts::Operand),
     ShiftsNarrow(shifts_narrow::Operand),
     Sign(sign::Operand),
+    Tables(tables::Operand),
 }
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
-    address::decode(word)
-        .map(|operand| operand.map(Operand::Address))
+    tables::decode(word)
+        .map(|operand| operand.map(Operand::Tables))
+        .or_else(|| address::decode(word).map(|operand| operand.map(Operand::Address)))
         .or_else(|| dot::decode_integer(word).map(|operand| operand.map(Operand::Dot)))
         .or_else(|| integer_bits::decode(word).map(|operand| operand.map(Operand::IntegerBits)))
         .or_else(|| integer_logic::decode(word).map(|operand| operand.map(Operand::IntegerLogic)))

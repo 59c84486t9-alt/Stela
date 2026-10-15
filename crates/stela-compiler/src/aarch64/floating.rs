@@ -1,5 +1,6 @@
 //! Shared Arm FP fields and binary arithmetic outcomes, independent of native execution.
 //! FP/FP16/AFP enabled, non-streaming; numerical trap delivery remains unsupported.
+pub mod absolute_minmax;
 pub mod bfloat16;
 pub mod comparison;
 pub mod complex;

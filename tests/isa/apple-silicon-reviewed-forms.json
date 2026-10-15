@@ -48425,6 +48425,14 @@
     "crates/stela-compiler/src/x86_64/sve/memory_store.rs",
     "crates/stela-compiler/src/x86_64/sve/memory_structure.rs",
     "crates/stela-compiler/src/x86_64/sme/memory.rs",
-    "crates/stela-compiler/src/x86_64/sme/memory/za.rs"
+    "crates/stela-compiler/src/x86_64/sme/memory/za.rs",
+    "crates/stela-compiler/src/aarch64/floating/absolute_minmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/faminmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+    "crates/stela-compiler/src/x86_64/simd/absolute_selection.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/tables.rs",
+    "crates/stela-compiler/src/x86_64/sve/tables.rs",
+    "crates/stela-compiler/src/x86_64/scalable/lut.rs"
   ]
 }

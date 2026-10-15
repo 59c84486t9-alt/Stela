@@ -537,3 +537,408 @@ fn entry_and_completion_reject_current_length_mode_pc_and_header_without_mutatio
     }
     Ok(())
 }
+
+// Append to the consolidated scalable/block/numerical22_tests.rs in a private
+// gate source. These tests use its actual public PreparedScalableBlock fixture.
+struct New19Cursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> New19Cursor<'a> {
+    fn take(&mut self, bytes: usize) -> &'a [u8] {
+        let value = &self.bytes[self.offset..self.offset + bytes];
+        self.offset += bytes;
+        value
+    }
+
+    fn word(&mut self) -> u32 {
+        u32::from_le_bytes(self.take(4).try_into().unwrap())
+    }
+
+    fn quad(&mut self) -> u64 {
+        u64::from_le_bytes(self.take(8).try_into().unwrap())
+    }
+
+    fn fixture(&mut self, bytes: usize) -> Result<Fixture> {
+        let tpidr = self.quad();
+        let fpmr = self.quad();
+        let mut primary = New19Cursor {
+            bytes: self.take(784),
+            offset: 0,
+        };
+        let registers = GuestState {
+            x: std::array::from_fn(|_| primary.quad()),
+            sp: primary.quad(),
+            nzcv: primary.word(),
+            reserved: primary.word(),
+            v: std::array::from_fn(|_| [primary.quad(), primary.quad()]),
+            fpcr: primary.word(),
+            fpsr: primary.word(),
+        };
+        assert_eq!(primary.offset, 784);
+        let mut fixture = Fixture::new(bytes, false)?;
+        fixture.thread.registers = registers;
+        for register in 0..VECTOR_REGISTER_COUNT {
+            fixture
+                .scalable
+                .write_z(&mut fixture.thread.registers, register, self.take(bytes))?;
+        }
+        for register in 0..PREDICATE_REGISTER_COUNT {
+            fixture
+                .scalable
+                .write_predicate(register, self.take(bytes / 8))?;
+        }
+        fixture.scalable.write_ffr(self.take(bytes / 8))?;
+        fixture.scalable.write_za(0, self.take(bytes * bytes))?;
+        fixture
+            .scalable
+            .write_zt0(0, self.take(LOOKUP_TABLE_BYTES))?;
+        fixture.scalable.set_tpidr2_el0(tpidr);
+        fixture.scalable.set_fpmr(fpmr);
+        Ok(fixture)
+    }
+}
+
+fn new19_features() -> ScalableFeatures {
+    ScalableFeatures::of(ScalableFeature::Sme)
+        .with(ScalableFeature::Sme2)
+        .with(ScalableFeature::Fp8)
+        .with(ScalableFeature::Fpmr)
+        .with(ScalableFeature::FaMinMax)
+        .with(ScalableFeature::Lut)
+}
+
+fn new19_profile(
+    bytes: usize,
+    declared: ScalableFeatures,
+    access: bool,
+    mode: ScalableMode,
+    numerical: NumericalFeatures,
+) -> Result<ExtendedBlockProfile> {
+    Ok(ExtendedBlockProfile::new(
+        ScalableProfile::new_with_features(
+            VectorLength::from_bytes(bytes).unwrap(),
+            mode,
+            declared,
+            ScalableControls::new(VectorLength::from_bytes(256).unwrap(), false)
+                .with_fpmr_enabled(access),
+        )?,
+        BlockProfile::Ordinary,
+        numerical,
+    ))
+}
+
+fn new19_target() -> Result<TargetCpu> {
+    Ok(match std::env::var("STELA_NEW19_TARGET")?.as_str() {
+        "baseline" => TargetCpu::Baseline,
+        "ssse3" => TargetCpu::Ssse3,
+        "sse41" => TargetCpu::Sse41,
+        "sse42" => TargetCpu::Sse42,
+        _ => anyhow::bail!("unknown explicit new19 target"),
+    })
+}
+
+#[test]
+#[ignore = "requires bound original corpus, current compiler identity and explicit host tier"]
+fn new19_actual_owned_prepared_original_corpus() -> Result<()> {
+    use std::collections::hash_map::Entry;
+    let bytes = std::fs::read(std::env::var("STELA_NEW19_CASES")?)?;
+    let fingerprint = std::env::var("STELA_NEW19_COMPILER")?;
+    let family: u32 = std::env::var("STELA_NEW19_FAMILY")?.parse()?;
+    let target = new19_target()?;
+    anyhow::ensure!(
+        target.supported(),
+        "requested explicit host tier unavailable"
+    );
+    let mut input = New19Cursor {
+        bytes: &bytes,
+        offset: 0,
+    };
+    assert_eq!(input.take(8), b"ST19P1\0\0");
+    let count = input.word();
+    let mut prepared = std::collections::HashMap::new();
+    let mut observed = 0;
+    let mut numerical_exits = 0;
+    for index in 0..count {
+        let row_family = input.word();
+        let word = input.word();
+        let length = input.word() as usize;
+        let mut fixture = input.fixture(length)?;
+        let original = input.fixture(length)?;
+        if row_family != family {
+            continue;
+        }
+        let subject_source = source(word);
+        // Register-only LUT reaches the bounded source end; numerical subjects
+        // terminate before the retained unsupported suffix in the shared helper.
+        let prepared_source = if row_family == 3 {
+            &subject_source[..8]
+        } else {
+            &subject_source[..]
+        };
+        let entry = match prepared.entry((word, length)) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(PreparedScalableBlock::prepare(
+                prepared_source,
+                BASE,
+                new19_profile(
+                    length,
+                    new19_features(),
+                    true,
+                    ScalableMode::new(true, true),
+                    NumericalFeatures::default(),
+                )?,
+                target,
+            )?),
+        };
+        assert_eq!(entry.identity().compiler_source_sha256, fingerprint);
+        assert_eq!(entry.source(), &source(word)[..8]);
+        assert_eq!(entry.source_map().len(), 2);
+        let before_subject = fixture.expected_prefix(NUMERICAL_PC);
+        let expected = original.expected_prefix(NEXT_PC);
+        let mut context = context();
+        let pointers = context_pointers(&context);
+        // SAFETY: Exact declared software guest features/effective EnFPM and
+        // DIT=0 are bound to this finite source and disjoint owned fixture.
+        let exit =
+            unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
+        match ExitKind::try_from(exit.kind)
+            .map_err(|()| anyhow::anyhow!("invalid native exit kind {}", exit.kind))?
+        {
+            ExitKind::ScalableNumerical => {
+                anyhow::ensure!(
+                    row_family != 3,
+                    "LUT unexpectedly required numerical completion"
+                );
+                numerical_exits += 1;
+                assert_eq!(exit.next_pc, NUMERICAL_PC.0);
+                assert_eq!(
+                    fixture.snapshot()?,
+                    before_subject.snapshot()?,
+                    "row {index}"
+                );
+                let proof = entry.recover_numerical(exit)?;
+                assert_eq!(proof.word(), word);
+                assert_eq!(proof.instruction_pc(), NUMERICAL_PC);
+                assert!(proof.profile().controls().fpmr_enabled());
+                assert_eq!(
+                    entry.complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit)?,
+                    NEXT_PC
+                );
+                let committed = fixture.snapshot()?;
+                assert!(
+                    entry
+                        .complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit)
+                        .is_err()
+                );
+                assert_eq!(fixture.snapshot()?, committed);
+            }
+            ExitKind::Fallthrough => {
+                anyhow::ensure!(row_family != 1, "FP8 must use the exact numerical boundary");
+                assert_eq!(exit.next_pc, NEXT_PC.0);
+            }
+            other => anyhow::bail!("unexpected new19 exit {other:?}"),
+        }
+        assert_eq!(
+            fixture.snapshot()?,
+            expected.snapshot()?,
+            "row {index}, word {word:#x}"
+        );
+        assert_eq!(context_pointers(&context), pointers);
+        observed += 1;
+    }
+    assert_eq!(input.offset, bytes.len());
+    anyhow::ensure!(observed != 0, "no actual new19 cases executed");
+    println!(
+        "NEW19_ACTUAL_PREPARED family={family} target={} cases={observed} bodies={} numerical_exits={numerical_exits} compiler={fingerprint}",
+        target.id(),
+        prepared.len()
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires current new19 union compiler; explicit software profile controls"]
+fn new19_actual_admission_and_completion_rejections() -> Result<()> {
+    use stela_compiler::block::scalable::{
+        admit_scalable_numerical_instruction, decode_scalable_numerical_instruction,
+    };
+    const FP8: u32 = 0x650a_381f;
+    const ABSOLUTE: u32 = 0x658e_9fdf;
+    const LUT: u32 = 0x4520_bc20;
+    let declared = new19_features();
+    let mode = ScalableMode::new(true, true);
+    let numerical = NumericalFeatures::default();
+    // Missing EnFPM permission is refused after exact source re-decoding.
+    let denied = new19_profile(32, declared, false, mode, numerical)?;
+    assert!(
+        PreparedScalableBlock::prepare(&source(FP8), BASE, denied, TargetCpu::Baseline).is_err()
+    );
+    let instruction = decode_scalable_numerical_instruction(NUMERICAL_PC, FP8)?.unwrap();
+    assert!(
+        admit_scalable_numerical_instruction(instruction, denied.scalable(), numerical).is_err()
+    );
+    let mut forged = instruction;
+    forged.word ^= 1;
+    let allowed = new19_profile(32, declared, true, mode, numerical)?;
+    assert!(admit_scalable_numerical_instruction(forged, allowed.scalable(), numerical).is_err());
+    // An M1-like absent-SME declaration cannot manufacture a scalable profile.
+    assert!(
+        new19_profile(
+            32,
+            ScalableFeatures::empty(),
+            false,
+            ScalableMode::new(false, false),
+            numerical
+        )
+        .is_err()
+    );
+    assert!(
+        new19_profile(
+            32,
+            ScalableFeatures::of(ScalableFeature::Sme),
+            true,
+            mode,
+            numerical
+        )
+        .is_err()
+    );
+    for word in [FP8, ABSOLUTE, LUT] {
+        let only_sme = new19_profile(
+            32,
+            ScalableFeatures::of(ScalableFeature::Sme),
+            false,
+            mode,
+            numerical,
+        )?;
+        assert!(
+            PreparedScalableBlock::prepare(&source(word), BASE, only_sme, TargetCpu::Baseline)
+                .is_err()
+        );
+        let nonstreaming = new19_profile(
+            32,
+            declared,
+            true,
+            ScalableMode::new(false, false),
+            numerical,
+        )?;
+        assert!(
+            PreparedScalableBlock::prepare(&source(word), BASE, nonstreaming, TargetCpu::Baseline)
+                .is_err()
+        );
+    }
+    let short = new19_profile(16, declared, true, mode, numerical)?;
+    assert!(
+        PreparedScalableBlock::prepare(&source(LUT), BASE, short, TargetCpu::Baseline).is_err()
+    );
+    let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, allowed, TargetCpu::Baseline)?;
+    let mut fixture = Fixture::new(32, false)?;
+    fixture.scalable.set_fpmr(0);
+    let mut context = context();
+    // SAFETY: Same explicit finite software guest profile/disjoint owners as above.
+    let exit = unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
+    assert_eq!(
+        (exit.next_pc, exit.kind),
+        (NUMERICAL_PC.0, ExitKind::ScalableNumerical as u64)
+    );
+    let before = fixture.snapshot()?;
+    let wrong = BlockExit {
+        next_pc: NEXT_PC.0,
+        ..exit
+    };
+    assert!(
+        entry
+            .complete_numerical(&mut fixture.thread, &mut fixture.scalable, wrong)
+            .is_err()
+    );
+    assert_eq!(fixture.snapshot()?, before);
+    for length in [16, 32] {
+        let mut mismatch = Fixture::new(length, false)?;
+        if length == 32 {
+            mismatch.scalable.apply_mode(
+                &mut mismatch.thread.registers,
+                ScalableMode::new(false, true),
+            )?;
+        }
+        let before = mismatch.snapshot()?;
+        // SAFETY: Invoke must decline the mismatching owner before native entry.
+        assert!(
+            unsafe { entry.invoke(&mut mismatch.thread, &mut mismatch.scalable, &mut context) }
+                .is_err()
+        );
+        assert_eq!(mismatch.snapshot()?, before);
+    }
+    fixture.thread.pc = NEXT_PC;
+    let before = fixture.snapshot()?;
+    assert!(
+        entry
+            .complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit)
+            .is_err()
+    );
+    assert_eq!(fixture.snapshot()?, before);
+    let fa64 = new19_profile(
+        32,
+        declared.with(ScalableFeature::SmeFa64),
+        true,
+        mode,
+        NumericalFeatures::new(true, false, false),
+    )?;
+    for active in [false, true] {
+        let entry =
+            PreparedScalableBlock::prepare(&source(ABSOLUTE), BASE, fa64, TargetCpu::Baseline)?;
+        let mut fixture = Fixture::new(32, false)?;
+        fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
+        fixture
+            .scalable
+            .write_predicate(7, &[if active { 255 } else { 0 }; 4])?;
+        fixture.scalable.write_z(
+            &mut fixture.thread.registers,
+            31,
+            &repeated(&ONE_SINGLE.to_le_bytes(), 32),
+        )?;
+        fixture.scalable.write_z(
+            &mut fixture.thread.registers,
+            30,
+            &repeated(&TWO_SINGLE.to_le_bytes(), 32),
+        )?;
+        let expected = fixture.expected_prefix(if active { NUMERICAL_PC } else { NEXT_PC });
+        // SAFETY: Explicit software FA64/control declaration and owned finite input.
+        let exit =
+            unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
+        assert_eq!(fixture.snapshot()?, expected.snapshot()?);
+        if active {
+            assert_eq!(
+                (exit.next_pc, exit.kind),
+                (NUMERICAL_PC.0, ExitKind::ScalableNumerical as u64)
+            );
+            let before = fixture.snapshot()?;
+            assert!(matches!(
+                entry.complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit),
+                Err(CompletionError::UnsupportedControl(_))
+            ));
+            assert_eq!(fixture.snapshot()?, before);
+        } else {
+            assert_eq!(
+                (exit.next_pc, exit.kind),
+                (NEXT_PC.0, ExitKind::Fallthrough as u64)
+            );
+        }
+    }
+    // Retained enables under effective FullA64 must refuse without partial commit.
+    let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, fa64, TargetCpu::Baseline)?;
+    fixture.thread.pc = BASE;
+    fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
+    // SAFETY: The independently declared software FA64/control profile is bound.
+    let exit = unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
+    let before = fixture.snapshot()?;
+    assert!(matches!(
+        entry.complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit),
+        Err(CompletionError::UnsupportedControl(_))
+    ));
+    assert_eq!(fixture.snapshot()?, before);
+    println!(
+        "NEW19_ACTUAL_REJECTIONS source_redecode/enfpm/features/mode/length/exit/pc/retained_enables PASS"
+    );
+    Ok(())
+}

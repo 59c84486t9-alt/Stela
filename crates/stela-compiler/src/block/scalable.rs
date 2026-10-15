@@ -144,6 +144,7 @@ pub fn admit_scalable_numerical_instruction(
         instruction.operation,
         ScalableNumericalOperation::FixedFp8Conversion(_)
             | ScalableNumericalOperation::SmeFp8Conversion(_)
+            | ScalableNumericalOperation::Sve(floating::Operation::Fp8(_))
     ) && !profile.controls().fpmr_enabled()
     {
         return Err(CompileError(

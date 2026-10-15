@@ -10,6 +10,7 @@ mod comparison;
 mod complex;
 mod conversion;
 mod estimate_exponent;
+mod faminmax;
 mod floating_estimates;
 mod fused;
 mod half_dot;
@@ -45,6 +46,8 @@ pub(crate) fn emit(
         Operation::Arithmetic(operand) => {
             arithmetic_dispatch::emit(code, word, operand, length, features, pc, target)
         }
+        Operation::FaMinMax(operand) => faminmax::emit(code, operand, length, features, pc, target),
+        Operation::Fp8(_) => Ok(false),
         Operation::Rounding(operand) => rounding::emit(code, operand, length, features, pc, target),
         Operation::Dot(operand) => half_dot::emit(code, operand, length, features, pc, target),
         Operation::Bfloat16(operand) => bfloat16::emit(code, operand, length, features, pc, target),

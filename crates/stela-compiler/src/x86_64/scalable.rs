@@ -8,6 +8,7 @@
 pub(crate) use super::memory_context as memory;
 
 mod legacy;
+pub(crate) mod lut;
 pub(crate) mod numerical;
 pub(crate) mod routing;
 pub(crate) use legacy::clear_z_upper;

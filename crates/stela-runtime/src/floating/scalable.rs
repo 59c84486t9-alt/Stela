@@ -4,6 +4,8 @@ mod bfloat16;
 mod comparison;
 mod conversion;
 mod dot;
+mod faminmax;
+mod fp8;
 mod fp8_conversion_fixed;
 mod rounding;
 mod sme_fp8_conversion;
@@ -115,6 +117,8 @@ pub(crate) fn complete(
             Operation::Rounding(operand) => rounding::complete(state, scalable, operand, controls),
             Operation::Dot(operand) => dot::complete(state, scalable, operand, controls),
             Operation::Bfloat16(operand) => bfloat16::complete(state, scalable, operand, controls),
+            Operation::FaMinMax(operand) => faminmax::complete(state, scalable, operand, controls),
+            Operation::Fp8(operand) => fp8::complete(state, scalable, operand, controls),
             Operation::Comparison(operand) => {
                 comparison::complete(state, scalable, operand, controls)
             }

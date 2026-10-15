@@ -339,6 +339,14 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/sve/memory_structure.rs"),
     include_str!("x86_64/sme/memory.rs"),
     include_str!("x86_64/sme/memory/za.rs"),
+    include_str!("aarch64/floating/absolute_minmax.rs"),
+    include_str!("aarch64/sve/floating/faminmax.rs"),
+    include_str!("aarch64/sve/floating/fp8.rs"),
+    include_str!("x86_64/simd/absolute_selection.rs"),
+    include_str!("x86_64/sve/floating/faminmax.rs"),
+    include_str!("aarch64/sve/tables.rs"),
+    include_str!("x86_64/sve/tables.rs"),
+    include_str!("x86_64/scalable/lut.rs"),
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

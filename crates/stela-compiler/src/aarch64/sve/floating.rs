@@ -5,6 +5,8 @@ pub mod bfloat16;
 pub mod comparison;
 pub mod control;
 pub mod conversion;
+pub mod faminmax;
+pub mod fp8;
 pub mod rounding;
 
 use super::dot;
@@ -18,6 +20,8 @@ pub enum Operation {
     Arithmetic(arithmetic::Operand),
     Comparison(comparison::Operand),
     Conversion(conversion::Operand),
+    FaMinMax(faminmax::Operand),
+    Fp8(fp8::Operand),
     Rounding(rounding::Operand),
     Dot(dot::Operand),
     Bfloat16(bfloat16::Operand),
@@ -63,6 +67,11 @@ impl Operation {
                 ..
             }) => sme.with(Feature::Sme2),
             Self::Bfloat16(_) => sme.with(Feature::Bf16),
+            Self::FaMinMax(_) => sme.with(Feature::Sme2).with(Feature::FaMinMax),
+            Self::Fp8(_) => sme
+                .with(Feature::Sme2)
+                .with(Feature::Fp8)
+                .with(Feature::Fpmr),
             Self::Comparison(_) | Self::Conversion(_) | Self::Rounding(_) | Self::Dot(_) => sme,
         };
         FeatureRequirement::all(required)
@@ -70,6 +79,12 @@ impl Operation {
 
     #[allow(clippy::result_unit_err)]
     pub fn decode(word: u32) -> Option<Result<Self, ()>> {
+        if let Some(result) = fp8::decode(word) {
+            return Some(result.map(Self::Fp8));
+        }
+        if let Some(result) = faminmax::decode(word) {
+            return Some(result.map(Self::FaMinMax));
+        }
         // BF allocations overlap the broader ordinary floating size fields.
         if let Some(result) = bfloat16::decode(word) {
             return Some(result.map(Self::Bfloat16));

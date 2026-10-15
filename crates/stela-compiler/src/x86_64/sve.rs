@@ -26,3 +26,4 @@ pub(crate) mod reductions;
 pub(crate) mod shifts;
 pub(crate) mod shifts_narrow;
 pub(crate) mod sign;
+pub(crate) mod tables;

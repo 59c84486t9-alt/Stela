@@ -33,6 +33,7 @@ use crate::{
             integer_predicate_move, integer_products, integer_saturation, memory_load,
             memory_multi, memory_store, memory_structure, predicate_generation, predicate_logic,
             rearrange, rearrange_extract, rearrange_widen, reductions, shifts, shifts_narrow, sign,
+            tables as sve_tables,
         },
     },
     context::{ExecutionContext, ScalableStateView, memory::MemoryRequirements},
@@ -260,6 +261,7 @@ pub(crate) enum Decoded {
     MemoryStore(memory_store::Operand),
     MemoryStructure(memory_structure::Operand),
     SmeTables(tables::Operand),
+    SveTables(sve_tables::Operand),
     SmeMovement(movement::Operand),
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
@@ -308,6 +310,7 @@ impl Decoded {
             Self::PredicateLogic(_) => ScalableAccessRequirements::Unqualified,
             Self::Length(_) => ScalableAccessRequirements::Unqualified,
             Self::SmeTables(_) => ScalableAccessRequirements::Unqualified,
+            Self::SveTables(_) => ScalableAccessRequirements::Unqualified,
             Self::SmeMovement(_) => ScalableAccessRequirements::Unqualified,
             Self::SmeIntegerVector(_) => ScalableAccessRequirements::Unqualified,
             Self::SmeIntegerDots(_) => ScalableAccessRequirements::Unqualified,
@@ -352,6 +355,7 @@ impl Decoded {
             Self::PredicateLogic(_) => GuestMemoryQuantity::Unqualified,
             Self::Length(_) => GuestMemoryQuantity::Unqualified,
             Self::SmeTables(_) => GuestMemoryQuantity::Unqualified,
+            Self::SveTables(_) => GuestMemoryQuantity::None,
             Self::SmeMovement(_) => GuestMemoryQuantity::Unqualified,
             Self::SmeIntegerVector(_) => GuestMemoryQuantity::Unqualified,
             Self::SmeIntegerDots(_) => GuestMemoryQuantity::Unqualified,
@@ -392,6 +396,7 @@ impl Decoded {
             Self::PredicateLogic(_) => Default::default(),
             Self::Length(_) => Default::default(),
             Self::SmeTables(_) => Default::default(),
+            Self::SveTables(_) => Default::default(),
             Self::SmeMovement(_) => Default::default(),
             Self::SmeIntegerVector(_) => Default::default(),
             Self::SmeIntegerDots(_) => Default::default(),
@@ -434,6 +439,7 @@ impl Decoded {
             Self::PredicateLogic(_) => Ok(None),
             Self::Length(_) => Ok(None),
             Self::SmeTables(_) => Ok(None),
+            Self::SveTables(_) => Ok(None),
             Self::SmeMovement(_) => Ok(None),
             Self::SmeIntegerVector(_) => Ok(None),
             Self::SmeIntegerDots(_) => Ok(None),
@@ -474,6 +480,7 @@ impl Decoded {
             | Self::PredicateLogic(_)
             | Self::Length(_)
             | Self::SmeTables(_)
+            | Self::SveTables(_)
             | Self::SmeMovement(_)
             | Self::SmeIntegerVector(_)
             | Self::SmeIntegerDots(_)
@@ -555,6 +562,7 @@ impl Decoded {
             | Self::MemoryStructure(_)
             | Self::Address(_)
             | Self::SmeTables(_)
+            | Self::SveTables(_)
             | Self::SmeMovement(_)
             | Self::IntegerBits(_)
             | Self::IntegerPredicateMove(_)
@@ -1114,6 +1122,32 @@ fn decode_recording_features(
         }
         return Ok(Decoded::SmeIntegerDots(operand));
     }
+    if let Some(decoded) = sve_tables::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!("reserved streaming LUT encoding at {:#x}", pc.0))
+        })?;
+        profile.require_features(
+            FeatureRequirement::all(
+                ScalableFeatures::of(ScalableFeature::Sme2).with(ScalableFeature::Lut),
+            ),
+            pc,
+        )?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        if profile.length.bits() < operand.minimum_vl_bits()
+            || profile.controls().max_vector_length().bits() < operand.minimum_vl_bits()
+        {
+            return Err(CompileError(format!(
+                "LUT requires a larger current/maximum vector length at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::SveTables(operand));
+    }
     if let Some(decoded) = rearrange_extract::decode(word) {
         let operand = decoded.map_err(|()| {
             CompileError(format!(
@@ -1510,6 +1544,9 @@ fn emit_decoded(
         }
         Decoded::SmeTables(operand) => {
             x86_64::sme::tables::emit(code, &operand, profile.length, target);
+        }
+        Decoded::SveTables(operand) => {
+            x86_64::sve::tables::emit(code, &operand, profile.length, target);
         }
         Decoded::SmeIntegerMatrix(operand) => {
             x86_64::sme::integer_matrix::emit(code, &operand, profile.vector_length(), target);

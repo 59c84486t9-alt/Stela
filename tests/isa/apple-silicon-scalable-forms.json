@@ -353,7 +353,15 @@
     "crates/stela-compiler/src/x86_64/sve/memory_store.rs",
     "crates/stela-compiler/src/x86_64/sve/memory_structure.rs",
     "crates/stela-compiler/src/x86_64/sme/memory.rs",
-    "crates/stela-compiler/src/x86_64/sme/memory/za.rs"
+    "crates/stela-compiler/src/x86_64/sme/memory/za.rs",
+    "crates/stela-compiler/src/aarch64/floating/absolute_minmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/faminmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+    "crates/stela-compiler/src/x86_64/simd/absolute_selection.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
+    "crates/stela-compiler/src/aarch64/sve/tables.rs",
+    "crates/stela-compiler/src/x86_64/sve/tables.rs",
+    "crates/stela-compiler/src/x86_64/scalable/lut.rs"
   ],
   "registry_version": "apple-silicon-scalable-forms-v3",
   "profile": {
@@ -1395,6 +1403,81 @@
         "direct_original_fullstate_comparisons": 380,
         "new_original_captures": 0,
         "new_arithmetic_replays": 0
+      }
+    },
+    "streaming_new19_fp8_conversion12": {
+      "kind": "new19_retained_semantics_current_public_CLI_OwnedPrepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/passed-owned19/streaming_new19_fp8_conversion12.json",
+      "harness": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/serialize.py",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs",
+        "dev/simd_fixtures/sve_floating/fp8.py",
+        "dev/simd_fixtures/fp8.py"
+      ],
+      "comparison_field": "actual_current_owned_prepared_comparisons",
+      "required_measurements": {
+        "canonical_forms": 12,
+        "historical_native_component_comparisons": 180,
+        "actual_current_public_maps": 60,
+        "actual_current_whole_body_or_service_exit_equalities": 60,
+        "actual_current_owned_prepared_comparisons": 180,
+        "fresh_original_runs": 0
+      }
+    },
+    "streaming_new19_faminmax2": {
+      "kind": "new19_retained_semantics_current_public_CLI_OwnedPrepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/passed-owned19/streaming_new19_faminmax2.json",
+      "harness": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/serialize.py",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/aarch64/floating/absolute_minmax.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/x86_64/simd/absolute_selection.rs",
+        "crates/stela-runtime/src/floating/scalable/faminmax.rs",
+        "dev/simd_fixtures/sve_floating/faminmax.py",
+        "dev/simd_fixtures/sve_floating/control.py",
+        "dev/simd_fixtures/sve_floating/conversion.py",
+        "dev/simd_fixtures/sve_floating/ieee.py"
+      ],
+      "comparison_field": "actual_current_owned_prepared_comparisons",
+      "required_measurements": {
+        "canonical_forms": 2,
+        "historical_native_component_comparisons": 720,
+        "actual_current_public_maps": 180,
+        "actual_current_whole_body_or_service_exit_equalities": 180,
+        "actual_current_owned_prepared_comparisons": 720,
+        "fresh_original_runs": 0
+      }
+    },
+    "streaming_new19_lut5": {
+      "kind": "new19_retained_semantics_current_public_CLI_OwnedPrepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/passed-owned19/streaming_new19_lut5.json",
+      "harness": ".stela/research/crash-recovery-2026-10-15/new-sve19/serialization-payload-4/serialize.py",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+        "dev/simd_fixtures/sve_integer/tables.py"
+      ],
+      "comparison_field": "actual_current_owned_prepared_comparisons",
+      "required_measurements": {
+        "canonical_forms": 5,
+        "historical_native_component_comparisons": 3816,
+        "actual_current_public_maps": 1272,
+        "actual_current_whole_body_or_service_exit_equalities": 1272,
+        "actual_current_owned_prepared_comparisons": 3816,
+        "fresh_original_runs": 0
       }
     }
   },
@@ -80718,6 +80801,808 @@
           "consumed_source_bytes": 4
         }
       ]
+    },
+    {
+      "id": "bf1cvt_z_z8_b2bf",
+      "instruction_id": "bf1cvt_z_z8",
+      "mnemonic": "BF1CVT",
+      "category": "sve",
+      "source_file": "bf1cvt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65083800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8d4b694db6610c7039973fb5a38b7495ba6fad2757cc28022f8e54c3ea3ef1f6",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6508381f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "bf1cvt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf1cvtlt_z_z8_b2bf",
+      "instruction_id": "bf1cvtlt_z_z8",
+      "mnemonic": "BF1CVTLT",
+      "category": "sve",
+      "source_file": "bf1cvtlt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65093800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8088d8f02affdb6136f43a4c40f8827cd326733e26d6a14f0265899ed84eb3b1",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6509381f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "bf1cvtlt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf2cvt_z_z8_b2bf",
+      "instruction_id": "bf1cvt_z_z8",
+      "mnemonic": "BF2CVT",
+      "category": "sve",
+      "source_file": "bf1cvt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65083c00",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8d4b694db6610c7039973fb5a38b7495ba6fad2757cc28022f8e54c3ea3ef1f6",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x65083c1f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "bf2cvt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf2cvtlt_z_z8_b2bf",
+      "instruction_id": "bf1cvtlt_z_z8",
+      "mnemonic": "BF2CVTLT",
+      "category": "sve",
+      "source_file": "bf1cvtlt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65093c00",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8088d8f02affdb6136f43a4c40f8827cd326733e26d6a14f0265899ed84eb3b1",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x65093c1f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "bf2cvtlt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bfcvtn_z8_mz2_bf2b",
+      "instruction_id": "bfcvtn_z8_mz2",
+      "mnemonic": "BFCVTN",
+      "category": "sve",
+      "source_file": "bfcvtn_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x650a3800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "eaf8900e95a800c5f4fac7e1610b941fd09b8cb15c787682188425613124b8d6",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x650a381f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "bfcvtn"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f1cvt_z_z8_b2h",
+      "instruction_id": "f1cvt_z_z8",
+      "mnemonic": "F1CVT",
+      "category": "sve",
+      "source_file": "f1cvt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65083000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2a37b8bed329383818b6e987611a2e2bd96ad7b5debd7c9831a67fe078c1d4dd",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6508301f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "f1cvt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f1cvtlt_z_z8_b2h",
+      "instruction_id": "f1cvtlt_z_z8",
+      "mnemonic": "F1CVTLT",
+      "category": "sve",
+      "source_file": "f1cvtlt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65093000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "668dfe8f76bc339c076495e0a03ba07e94acc707e30d8aa4935c298188e76c35",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6509301f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "f1cvtlt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f2cvt_z_z8_b2h",
+      "instruction_id": "f1cvt_z_z8",
+      "mnemonic": "F2CVT",
+      "category": "sve",
+      "source_file": "f1cvt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65083400",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2a37b8bed329383818b6e987611a2e2bd96ad7b5debd7c9831a67fe078c1d4dd",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6508341f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "f2cvt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f2cvtlt_z_z8_b2h",
+      "instruction_id": "f1cvtlt_z_z8",
+      "mnemonic": "F2CVTLT",
+      "category": "sve",
+      "source_file": "f1cvtlt_z_z8.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x65093400",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "668dfe8f76bc339c076495e0a03ba07e94acc707e30d8aa4935c298188e76c35",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x6509341f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "f2cvtlt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "famax_z_p_zz_",
+      "instruction_id": "famax_z_p_zz",
+      "mnemonic": "FAMAX",
+      "category": "sve",
+      "source_file": "famax_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x650e8000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FAMINMAX",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "e101a597d37ec9727dc9d4450cd7d0ceafd177d49fac608ddd96feb503646928",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/aarch64/floating/absolute_minmax.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/x86_64/simd/absolute_selection.rs",
+        "crates/stela-runtime/src/floating/scalable/faminmax.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_faminmax2"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FAMINMAX predicated H/S/D magnitude extrema. Inactive poison is masked, active NaNs complete exactly, enabled exception controls refuse transactionally, inactive lanes preserve destination. Capability/format/SVL selection is bound to the separately frozen measured source packet; no predicate-density or register-number dispatch.",
+      "smoke_samples": [
+        {
+          "word": "0x654e9c1f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "famax"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "famin_z_p_zz_",
+      "instruction_id": "famin_z_p_zz",
+      "mnemonic": "FAMIN",
+      "category": "sve",
+      "source_file": "famin_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x650f8000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FAMINMAX",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2ae4a808d6ff0ad64a954f81614faa443b02acaa3137cf4ecc336ffe069c2f71",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/aarch64/floating/absolute_minmax.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
+        "crates/stela-compiler/src/x86_64/simd/absolute_selection.rs",
+        "crates/stela-runtime/src/floating/scalable/faminmax.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_faminmax2"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FAMINMAX predicated H/S/D magnitude extrema. Inactive poison is masked, active NaNs complete exactly, enabled exception controls refuse transactionally, inactive lanes preserve destination. Capability/format/SVL selection is bound to the separately frozen measured source packet; no predicate-density or register-number dispatch.",
+      "smoke_samples": [
+        {
+          "word": "0x654f9c1f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "famin"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvtn_z8_mz2_h2b",
+      "instruction_id": "fcvtn_z8_mz2",
+      "mnemonic": "FCVTN",
+      "category": "sve",
+      "source_file": "fcvtn_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x650a3000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "e4dc9d0c046714aa79fb6ef431b3f110d659d1b689502888634ddd79dace0627",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x650a301f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvtnb_z8_mz2_s2b",
+      "instruction_id": "fcvtnb_z8_mz2",
+      "mnemonic": "FCVTNB",
+      "category": "sve",
+      "source_file": "fcvtnb_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x650a3400",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "0aa353eb85b177082af40c4b5f520cfa15ae5cfb5d7e3c47dd02653d33c96699",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x650a341f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "fcvtnb"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvtnt_z8_mz2_s2b",
+      "instruction_id": "fcvtnt_z8_mz2",
+      "mnemonic": "FCVTNT",
+      "category": "sve",
+      "source_file": "fcvtnt_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x650a3c00",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_FP8",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "36e436d2452dde25d6b6d20257f2f73c9d03be29dfe1cf5d8ac9b4bbbd429f09",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-numerical",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-runtime/src/floating/scalable/fp8.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_fp8_conversion12"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME+SME2+FP8+FPMR streaming conversions through source-redecoded immutable EnFPM admission and owned exact-PC completion. Source pair alignment, aliases, top/bottom routing, FPMR format/scales and transactional FPSR outputs are explicit. Distinct SVE BF16 narrowing has usable originals; unadmitted SME BFCVT remains refused.",
+      "smoke_samples": [
+        {
+          "word": "0x650a3c1f",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "fcvtnt"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "luti2_z_zz_16",
+      "instruction_id": "luti2_z_zz",
+      "mnemonic": "LUTI2",
+      "category": "sve",
+      "source_file": "luti2_z_zz.xml",
+      "encoding_mask": "0xff20ec00",
+      "encoding_value": "0x4520a800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_LUT",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "94c5d814ffc3173d3bfcae2cd63ac793dcf72fc65934bb16303b39e2538f1833",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-lut",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_lut5"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME2+LUT streaming lookup with whole-VL indices, source-pair wrap and destination/index/table aliases. LUTI4 single-halfword requires current and maximum VL at least32 bytes. No memory, FP status or predicate outputs.",
+      "smoke_samples": [
+        {
+          "word": "0x4520abe0",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "luti2_z_zz_8",
+      "instruction_id": "luti2_z_zz",
+      "mnemonic": "LUTI2",
+      "category": "sve",
+      "source_file": "luti2_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4520b000",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_LUT",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "94c5d814ffc3173d3bfcae2cd63ac793dcf72fc65934bb16303b39e2538f1833",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-lut",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_lut5"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME2+LUT streaming lookup with whole-VL indices, source-pair wrap and destination/index/table aliases. LUTI4 single-halfword requires current and maximum VL at least32 bytes. No memory, FP status or predicate outputs.",
+      "smoke_samples": [
+        {
+          "word": "0x4520b3e0",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "luti4_z_zz_1x16",
+      "instruction_id": "luti4_z_zz",
+      "mnemonic": "LUTI4",
+      "category": "sve",
+      "source_file": "luti4_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4520bc00",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_LUT",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b8c250b7a0ecd3d2a3c65b2e8516f680a23bc33b6d0d0952206d5f7a9f514e0b",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-lut",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_lut5"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME2+LUT streaming lookup with whole-VL indices, source-pair wrap and destination/index/table aliases. LUTI4 single-halfword requires current and maximum VL at least32 bytes. No memory, FP status or predicate outputs.",
+      "smoke_samples": [
+        {
+          "word": "0x4520bfe0",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 32,
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "luti4_z_zz_2x16",
+      "instruction_id": "luti4_z_zz",
+      "mnemonic": "LUTI4",
+      "category": "sve",
+      "source_file": "luti4_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4520b400",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_LUT",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b8c250b7a0ecd3d2a3c65b2e8516f680a23bc33b6d0d0952206d5f7a9f514e0b",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-lut",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_lut5"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME2+LUT streaming lookup with whole-VL indices, source-pair wrap and destination/index/table aliases. LUTI4 single-halfword requires current and maximum VL at least32 bytes. No memory, FP status or predicate outputs.",
+      "smoke_samples": [
+        {
+          "word": "0x4520b7e0",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "luti4_z_zz_8",
+      "instruction_id": "luti4_z_zz",
+      "mnemonic": "LUTI4",
+      "category": "sve",
+      "source_file": "luti4_z_zz.xml",
+      "encoding_mask": "0xff60fc00",
+      "encoding_value": "0x4560a400",
+      "features": [
+        {
+          "feature": "(FEAT_SVE2 || FEAT_SME2) && FEAT_LUT",
+          "name": "(v9Ap0 || v9Ap3) && v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b8c250b7a0ecd3d2a3c65b2e8516f680a23bc33b6d0d0952206d5f7a9f514e0b",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-new19-lut",
+      "profiles": [],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "evidence_groups": [
+        "streaming_new19_lut5"
+      ],
+      "review": "Retained genuine original/model/component evidence; current physical CLI and owned completion claims require exact admission receipt.",
+      "scope": "SME2+LUT streaming lookup with whole-VL indices, source-pair wrap and destination/index/table aliases. LUTI4 single-halfword requires current and maximum VL at least32 bytes. No memory, FP status or predicate outputs.",
+      "smoke_samples": [
+        {
+          "word": "0x4560a7e0",
+          "cpu_target": "x86_64-baseline",
+          "svcr": 3,
+          "svl_bytes": 16,
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
     }
   ],
   "execution_profiles": {
@@ -81147,6 +82032,73 @@
         "Direct FPMR MRS/MSR authority, enabled numerical exception delivery, general nonstreaming SVE, application and OS execution.",
         "SME BF16 narrowing BFCVT remains unadmitted pending a usable original oracle.",
         "Grouped SME wrapper throughput is unmeasured; retained fixed Prepared performance is separate."
+      ]
+    },
+    "sme-streaming-v2-new19-numerical": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-block",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "features": [
+        "FEAT_FAMINMAX",
+        "FEAT_FP8",
+        "FEAT_FPMR",
+        "FEAT_LUT",
+        "FEAT_SME",
+        "FEAT_SME2"
+      ],
+      "svcr": 3,
+      "svl_bytes": 16,
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "fpmr_enabled": true,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme2",
+        "+sve2p1",
+        "+fp8",
+        "+faminmax",
+        "+lut"
+      ],
+      "outside_scope": [
+        "General nonstreaming SVE and implicit hardware availability.",
+        "Enabled exception delivery; software FA64 control guards are separately tested.",
+        "Apple hardware, application execution and macOS compatibility."
+      ],
+      "numerical_features": {
+        "full_a64": false,
+        "ebf16": false,
+        "rpres": false
+      }
+    },
+    "sme-streaming-v2-new19-lut": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "features": [
+        "FEAT_FAMINMAX",
+        "FEAT_FP8",
+        "FEAT_FPMR",
+        "FEAT_LUT",
+        "FEAT_SME",
+        "FEAT_SME2"
+      ],
+      "svcr": 3,
+      "svl_bytes": 16,
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "fpmr_enabled": true,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme2",
+        "+sve2p1",
+        "+fp8",
+        "+faminmax",
+        "+lut"
+      ],
+      "outside_scope": [
+        "General nonstreaming SVE and implicit hardware availability.",
+        "Enabled exception delivery; software FA64 control guards are separately tested.",
+        "Apple hardware, application execution and macOS compatibility."
       ]
     }
   }
