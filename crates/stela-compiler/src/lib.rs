@@ -307,6 +307,21 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/sve/floating/scale.rs"),
     include_str!("x86_64/sve/floating/square_root.rs"),
     include_str!("x86_64/sve/floating/unsigned_estimates.rs"),
+    include_str!("aarch64/sve/floating/rounding.rs"),
+    include_str!("x86_64/simd/numerical/bfloat16.rs"),
+    include_str!("x86_64/simd/rounding/kernel.rs"),
+    include_str!("x86_64/sve/floating/bfloat16/arithmetic.rs"),
+    include_str!("x86_64/sve/floating/bfloat16/arithmetic/binary.rs"),
+    include_str!("x86_64/sve/floating/bfloat16/arithmetic/fused.rs"),
+    include_str!("x86_64/sve/floating/bfloat16/arithmetic/selection.rs"),
+    include_str!("x86_64/sve/floating/conversion/bfloat.rs"),
+    include_str!("x86_64/sve/floating/conversion/double_narrowing.rs"),
+    include_str!("x86_64/sve/floating/conversion/half_integer.rs"),
+    include_str!("x86_64/sve/floating/conversion/half_narrowing.rs"),
+    include_str!("x86_64/sve/floating/conversion/half_widening.rs"),
+    include_str!("x86_64/sve/floating/conversion/integer.rs"),
+    include_str!("x86_64/sve/floating/conversion/unsigned64.rs"),
+    include_str!("x86_64/sve/floating/rounding.rs"),
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

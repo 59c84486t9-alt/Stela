@@ -321,7 +321,22 @@
     "crates/stela-compiler/src/x86_64/sve/floating/refinement.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/scale.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/square_root.rs",
-    "crates/stela-compiler/src/x86_64/sve/floating/unsigned_estimates.rs"
+    "crates/stela-compiler/src/x86_64/sve/floating/unsigned_estimates.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+    "crates/stela-compiler/src/x86_64/simd/numerical/bfloat16.rs",
+    "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/bfloat.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/double_narrowing.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_narrowing.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_widening.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/unsigned64.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs"
   ],
   "registry_version": "apple-silicon-scalable-forms-v3",
   "profile": {
@@ -1210,6 +1225,96 @@
         "dev/simd_fixtures/sve_floating/bfloat16.py",
         "dev/test_scalable_fixtures.py",
         ".stela/research/crash-recovery-2026-10-15/integration/future83-current1e-1/whitespace-successor-1/rebind_metadata.py"
+      ]
+    },
+    "streaming_numerical_bf_arithmetic16": {
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "comparison_field": "historical_native_state_comparisons",
+      "harness": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py",
+      "kind": "scalable_numerical_retained_semantics_current63_block_body_CALL_Prepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/reports/streaming_numerical_bf_arithmetic16.json",
+      "require_current_executable": true,
+      "required_measurements": {
+        "actual_current_cold_compile_controls": 0,
+        "actual_current_complete_CALL_equalities": 160,
+        "actual_current_complete_body_equalities": 160,
+        "actual_current_public_maps": 160,
+        "canonical_forms": 16,
+        "fresh_microbenchmarks": 0,
+        "fresh_native_arithmetic_semantic_runs": 0,
+        "fresh_original_runs": 0,
+        "historical_native_state_comparisons": 1868
+      },
+      "required_shared_sources": [
+        ".stela/research/crash-recovery-2026-10-15/next63/serialization-payload-2/build_payload.py",
+        "dev/simd_fixtures/sve_floating/conversion.py",
+        "dev/simd_fixtures/sve_floating/rounding.py",
+        "dev/simd_fixtures/sve_floating/bfloat16.py",
+        "dev/simd_fixtures/sve_floating/ieee.py",
+        "dev/simd_fixtures/sve_floating/control.py",
+        "dev/simd_fixtures/sve_floating/comparison.py",
+        "dev/test_scalable_fixtures.py",
+        ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py"
+      ]
+    },
+    "streaming_numerical_conversion40": {
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "comparison_field": "historical_native_state_comparisons",
+      "harness": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py",
+      "kind": "scalable_numerical_retained_semantics_current63_block_body_CALL_Prepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/reports/streaming_numerical_conversion40.json",
+      "require_current_executable": true,
+      "required_measurements": {
+        "actual_current_cold_compile_controls": 0,
+        "actual_current_complete_CALL_equalities": 400,
+        "actual_current_complete_body_equalities": 400,
+        "actual_current_public_maps": 400,
+        "canonical_forms": 40,
+        "fresh_microbenchmarks": 0,
+        "fresh_native_arithmetic_semantic_runs": 0,
+        "fresh_original_runs": 0,
+        "historical_native_state_comparisons": 442
+      },
+      "required_shared_sources": [
+        ".stela/research/crash-recovery-2026-10-15/next63/serialization-payload-2/build_payload.py",
+        "dev/simd_fixtures/sve_floating/conversion.py",
+        "dev/simd_fixtures/sve_floating/rounding.py",
+        "dev/simd_fixtures/sve_floating/bfloat16.py",
+        "dev/simd_fixtures/sve_floating/ieee.py",
+        "dev/simd_fixtures/sve_floating/control.py",
+        "dev/simd_fixtures/sve_floating/comparison.py",
+        "dev/test_scalable_fixtures.py",
+        ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py"
+      ]
+    },
+    "streaming_numerical_rounding7": {
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "comparison_field": "historical_native_state_comparisons",
+      "harness": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py",
+      "kind": "scalable_numerical_retained_semantics_current63_block_body_CALL_Prepared_transfer",
+      "report": ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/reports/streaming_numerical_rounding7.json",
+      "require_current_executable": true,
+      "required_measurements": {
+        "actual_current_cold_compile_controls": 7,
+        "actual_current_complete_CALL_equalities": 140,
+        "actual_current_complete_body_equalities": 140,
+        "actual_current_public_maps": 147,
+        "canonical_forms": 7,
+        "fresh_microbenchmarks": 0,
+        "fresh_native_arithmetic_semantic_runs": 0,
+        "fresh_original_runs": 0,
+        "historical_native_state_comparisons": 6362
+      },
+      "required_shared_sources": [
+        ".stela/research/crash-recovery-2026-10-15/next63/serialization-payload-2/build_payload.py",
+        "dev/simd_fixtures/sve_floating/conversion.py",
+        "dev/simd_fixtures/sve_floating/rounding.py",
+        "dev/simd_fixtures/sve_floating/bfloat16.py",
+        "dev/simd_fixtures/sve_floating/ieee.py",
+        "dev/simd_fixtures/sve_floating/control.py",
+        "dev/simd_fixtures/sve_floating/comparison.py",
+        "dev/test_scalable_fixtures.py",
+        ".stela/research/crash-recovery-2026-10-15/integration/next63-current011-1/whitespace-successor-1/rebind_metadata.py"
       ]
     }
   },
@@ -70760,6 +70865,3008 @@
       "source_file": "ursqrte_z_p_z.xml",
       "source_sha256": "9d74460b4012d2dc1e1f705a77b5b46d03328710de7411b5dc1a8429380a9087",
       "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65008000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfadd_z_p_zz_",
+      "instruction_id": "bfadd_z_p_zz",
+      "mnemonic": "BFADD",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfadd"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65008040"
+        }
+      ],
+      "source_file": "bfadd_z_p_zz.xml",
+      "source_sha256": "4630ecc0e85337077e63e0ebc96ba1f161c095882013885ac06f675984e14e7a",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x65000000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfadd_z_zz_",
+      "instruction_id": "bfadd_z_zz",
+      "mnemonic": "BFADD",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfadd"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65020020"
+        }
+      ],
+      "source_file": "bfadd_z_zz.xml",
+      "source_sha256": "74d8833796a874302ca9e6ad28a0a7edaa99f7fd67ec6a6089a61739e65ab3b8",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x64202400",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfclamp_z_zz_",
+      "instruction_id": "bfclamp_z_zz",
+      "mnemonic": "BFCLAMP",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfclamp"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x64222420"
+        }
+      ],
+      "source_file": "bfclamp_z_zz.xml",
+      "source_sha256": "faace28063e0d6ff1eb0b8f96a8cb2be9bd16e9b4f9dfa14985cfff096002aca",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x658aa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "(FEAT_SVE || FEAT_SME) && FEAT_BF16",
+          "name": "((v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)) && v8Ap6"
+        }
+      ],
+      "id": "bfcvt_z_p_z_s2bf",
+      "instruction_id": "bfcvt_z_p_z",
+      "mnemonic": "BFCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x658aa020"
+        }
+      ],
+      "source_file": "bfcvt_z_p_z.xml",
+      "source_sha256": "19717ed97b17d162ba39f127cacc8804c6fab4dfae82b55014063595e1b904cf",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x648aa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "(FEAT_SVE || FEAT_SME) && FEAT_BF16",
+          "name": "((v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)) && v8Ap6"
+        }
+      ],
+      "id": "bfcvtnt_z_p_z_s2bf",
+      "instruction_id": "bfcvtnt_z_p_z",
+      "mnemonic": "BFCVTNT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfcvtnt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x648aa020"
+        }
+      ],
+      "source_file": "bfcvtnt_z_p_z.xml",
+      "source_sha256": "5c53ed6bccbe5f6e30aa31bdabb182724feca5418e624126a714a5baff978e5e",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65068000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmax_z_p_zz_",
+      "instruction_id": "bfmax_z_p_zz",
+      "mnemonic": "BFMAX",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmax"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65068040"
+        }
+      ],
+      "source_file": "bfmax_z_p_zz.xml",
+      "source_sha256": "4c4f4dcd8ff86e3b17df1bf6685e47f04adbe8833300ad2d7b0740dc9416f08b",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65048000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmaxnm_z_p_zz_",
+      "instruction_id": "bfmaxnm_z_p_zz",
+      "mnemonic": "BFMAXNM",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmaxnm"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65048040"
+        }
+      ],
+      "source_file": "bfmaxnm_z_p_zz.xml",
+      "source_sha256": "c43a0205c7f65dcd3c84351f37c06558d53ccfa50f70c030788517eda3bb8079",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65078000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmin_z_p_zz_",
+      "instruction_id": "bfmin_z_p_zz",
+      "mnemonic": "BFMIN",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmin"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65078040"
+        }
+      ],
+      "source_file": "bfmin_z_p_zz.xml",
+      "source_sha256": "de7c605a0eb22cbe82e1bb5ae1d0c47def3103bb039708925a2ef033e9bb793b",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65058000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfminnm_z_p_zz_",
+      "instruction_id": "bfminnm_z_p_zz",
+      "mnemonic": "BFMINNM",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfminnm"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65058040"
+        }
+      ],
+      "source_file": "bfminnm_z_p_zz.xml",
+      "source_sha256": "aafa08abcdf4bc68a4f87d5d697161359dfabda4c8e4d87b4689a9a5b76e7cc4",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0x65200000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmla_z_p_zzz_",
+      "instruction_id": "bfmla_z_p_zzz",
+      "mnemonic": "BFMLA",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmla"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65220020"
+        }
+      ],
+      "source_file": "bfmla_z_p_zzz.xml",
+      "source_sha256": "f4c94e74635d19950e7fd9b253b438864c551ac0a0975256f4ef6cf068aee30c",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x64200800",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmla_z_zzzi_h",
+      "instruction_id": "bfmla_z_zzzi",
+      "mnemonic": "BFMLA",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmla"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x647a0820"
+        }
+      ],
+      "source_file": "bfmla_z_zzzi.xml",
+      "source_sha256": "e36c1d40f675f304f5710d09391d6a48ca3a6ed3b545a77ad172e0ef97ad0fb9",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0x65202000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmls_z_p_zzz_",
+      "instruction_id": "bfmls_z_p_zzz",
+      "mnemonic": "BFMLS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmls"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65222020"
+        }
+      ],
+      "source_file": "bfmls_z_p_zzz.xml",
+      "source_sha256": "8e325350b3dc7905bc5646a94c5c6c3b79aa92c99c37c77d9880d823236c44bf",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x64200c00",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmls_z_zzzi_h",
+      "instruction_id": "bfmls_z_zzzi",
+      "mnemonic": "BFMLS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmls"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x647a0c20"
+        }
+      ],
+      "source_file": "bfmls_z_zzzi.xml",
+      "source_sha256": "c427332de75fb62486f0961638ae1e76ea1738145c22e5717f5b8825c6efb47f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65028000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmul_z_p_zz_",
+      "instruction_id": "bfmul_z_p_zz",
+      "mnemonic": "BFMUL",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmul"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65028040"
+        }
+      ],
+      "source_file": "bfmul_z_p_zz.xml",
+      "source_sha256": "cfbf19c8c3fa7ac9811fe848b0aef940453bcfef65379d4170ac66fd9f33010e",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x65000800",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmul_z_zz_",
+      "instruction_id": "bfmul_z_zz",
+      "mnemonic": "BFMUL",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmul"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65020820"
+        }
+      ],
+      "source_file": "bfmul_z_zz.xml",
+      "source_sha256": "eaa8127fb5725dab7c7044887af07e31f5acaaf6bdbc49dce88ff431a39a7ae1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x64202800",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfmul_z_zzi_h",
+      "instruction_id": "bfmul_z_zzi",
+      "mnemonic": "BFMUL",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfmul"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x647a2820"
+        }
+      ],
+      "source_file": "bfmul_z_zzi.xml",
+      "source_sha256": "bb2e8e9d31ec1eeaa32f43d27a34a42a888169c558d52e83793be1fbc7e00c40",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65018000",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfsub_z_p_zz_",
+      "instruction_id": "bfsub_z_p_zz",
+      "mnemonic": "BFSUB",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfsub"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65018040"
+        }
+      ],
+      "source_file": "bfsub_z_p_zz.xml",
+      "source_sha256": "014d52e562fe039dfc22ec39dc4815feb8fe05e987328936b8d63e38e67b52d0",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+        "crates/stela-runtime/src/floating/scalable/bfloat16.rs"
+      ],
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x65000400",
+      "evidence_groups": [
+        "streaming_numerical_bf_arithmetic16"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE_B16B16",
+          "name": "v9Ap4"
+        }
+      ],
+      "id": "bfsub_z_zz_",
+      "instruction_id": "bfsub_z_zz",
+      "mnemonic": "BFSUB",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone true BF16 arithmetic through separate guarded binary/selection/fused mappings and transactional exact-PC completion. SME plus SVE_B16B16 and the declared SME2/FA64 alternative are checked separately from effective FullA64 controls. BF target rounding, BFNeg/NaN signs, lane/index routing and cumulative FPSR preserve the retained policy. Five min/max/clamp forms use checked SSE4.1 blend only at SVL16/64; fused forms retain exact product-plus-sum rather than the rejected FMA candidate.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "bfsub"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6502041f"
+        }
+      ],
+      "source_file": "bfsub_z_zz.xml",
+      "source_sha256": "824c240fcb741653a164136b513aef416a034aeec8a516102d4e156505b0fe79",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65c8a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvt_z_p_z_d2h",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65c8a020"
+        }
+      ],
+      "source_file": "fcvt_z_p_z.xml",
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65caa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvt_z_p_z_d2s",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65caa020"
+        }
+      ],
+      "source_file": "fcvt_z_p_z.xml",
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65c9a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvt_z_p_z_h2d",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65c9a020"
+        }
+      ],
+      "source_file": "fcvt_z_p_z.xml",
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6589a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvt_z_p_z_h2s",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6589a020"
+        }
+      ],
+      "source_file": "fcvt_z_p_z.xml",
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6588a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvt_z_p_z_s2h",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6588a020"
+        }
+      ],
+      "source_file": "fcvt_z_p_z.xml",
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6489a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtlt_z_p_z_h2s",
+      "instruction_id": "fcvtlt_z_p_z",
+      "mnemonic": "FCVTLT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtlt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6489a020"
+        }
+      ],
+      "source_file": "fcvtlt_z_p_z.xml",
+      "source_sha256": "dab9e68388acae490e3b67e38d6bf914ec1fdeb98813d418e4ded2350bb72aaa",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x64caa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtnt_z_p_z_d2s",
+      "instruction_id": "fcvtnt_z_p_z",
+      "mnemonic": "FCVTNT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtnt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x64caa020"
+        }
+      ],
+      "source_file": "fcvtnt_z_p_z.xml",
+      "source_sha256": "168568543d1ef32b95d063d0b852614cecbf6f5a1196cc0220a4b25e251c26bc",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6488a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtnt_z_p_z_s2h",
+      "instruction_id": "fcvtnt_z_p_z",
+      "mnemonic": "FCVTNT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtnt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6488a020"
+        }
+      ],
+      "source_file": "fcvtnt_z_p_z.xml",
+      "source_sha256": "168568543d1ef32b95d063d0b852614cecbf6f5a1196cc0220a4b25e251c26bc",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x650aa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtx_z_p_z_d2s",
+      "instruction_id": "fcvtx_z_p_z",
+      "mnemonic": "FCVTX",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtx"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x650aa020"
+        }
+      ],
+      "source_file": "fcvtx_z_p_z.xml",
+      "source_sha256": "2b5767e4faf833c61490a69128d9291a42ca4c4b1b84059ed0a6bee5b6746bf6",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x640aa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtxnt_z_p_z_d2s",
+      "instruction_id": "fcvtxnt_z_p_z",
+      "mnemonic": "FCVTXNT",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtxnt"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x640aa020"
+        }
+      ],
+      "source_file": "fcvtxnt_z_p_z.xml",
+      "source_sha256": "e8c7ba12f63dc46c22b97e1d04dc3d379a41be96dd0b93f5be2a8c0445c01bfe",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d8a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_d2w",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d8a020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65dea000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_d2x",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65dea020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655aa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_fp162h",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655aa020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655ca000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_fp162w",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655ca020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655ea000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_fp162x",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655ea020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x659ca000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_s2w",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x659ca020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65dca000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzs_z_p_z_s2x",
+      "instruction_id": "fcvtzs_z_p_z",
+      "mnemonic": "FCVTZS",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzs"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65dca020"
+        }
+      ],
+      "source_file": "fcvtzs_z_p_z.xml",
+      "source_sha256": "226e2e3dfc4611cd9fab4f98b6df429a404e197dd254c61b1b38f0ef4cf4da13",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d9a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_d2w",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d9a020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65dfa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_d2x",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65dfa020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655ba000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_fp162h",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655ba020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655da000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_fp162w",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655da020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x655fa000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_fp162x",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x655fa020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x659da000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_s2w",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x659da020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65dda000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "fcvtzu_z_p_z_s2x",
+      "instruction_id": "fcvtzu_z_p_z",
+      "mnemonic": "FCVTZU",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "fcvtzu"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65dda020"
+        }
+      ],
+      "source_file": "fcvtzu_z_p_z.xml",
+      "source_sha256": "3cba7dc47b02d8ea63e735cb006bc3f68595a23ef6f54ff48b49933c400b335f",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6504a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frinta_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTA",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frinta"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6584a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6507a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frinti_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTI",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frinti"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6587a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6502a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frintm_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTM",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frintm"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6582a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6500a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frintn_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTN",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frintn"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6580a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6501a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frintp_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTP",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frintp"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6581a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6506a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frintx_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTX",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frintx"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6586a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+        "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+        "crates/stela-runtime/src/floating/scalable/rounding.rs"
+      ],
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x6503a000",
+      "evidence_groups": [
+        "streaming_numerical_rounding7"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "frintz_z_p_z_m",
+      "instruction_id": "frinta_z_p_z",
+      "mnemonic": "FRINTZ",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming integral rounding in Half/Single/Double with exact FPCR rounding, signed-zero/NaN and sticky FPSR behavior. Guarded native Single/Double mappings or exact-PC owned Half completion preserve aliases and inactive lanes. Current-direction SSE4.1 is selected only at SVL128 for FRINTI S/D and FRINTX D; FRINTX S retains existing checked lowering. FullA64 effective enables refuse before commit; no numerical exception delivery is admitted.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "frintz"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6583a020"
+        }
+      ],
+      "source_file": "frinta_z_p_z.xml",
+      "source_sha256": "1cba0cbae213b98efe832ea2d97d1f8ec105ab070bf4b640d7c28945599cdb17",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6552a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_h2fp16",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6552a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d0a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_w2d",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d0a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6554a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_w2fp16",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6554a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6594a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_w2s",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6594a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d6a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_x2d",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d6a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6556a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_x2fp16",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6556a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d4a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "scvtf_z_p_z_x2s",
+      "instruction_id": "scvtf_z_p_z",
+      "mnemonic": "SCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "scvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d4a020"
+        }
+      ],
+      "source_file": "scvtf_z_p_z.xml",
+      "source_sha256": "5d65d2cb3463a549c22bef455134c4c28728e680022349c7e8388a1eacb5b826",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6553a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_h2fp16",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6553a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d1a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_w2d",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d1a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6555a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_w2fp16",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6555a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6595a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_w2s",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6595a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d7a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_x2d",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d7a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x6557a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_x2fp16",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x6557a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating.rs",
+        "crates/stela-runtime/src/floating/scalable.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+        "crates/stela-runtime/src/floating/scalable/conversion.rs"
+      ],
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65d5a000",
+      "evidence_groups": [
+        "streaming_numerical_conversion40"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "ucvtf_z_p_z_x2s",
+      "instruction_id": "ucvtf_z_p_z",
+      "mnemonic": "UCVTF",
+      "profile": "sme-streaming-v2-numerical63",
+      "profiles": [],
+      "review": "Retained original/model/native family evidence transferred through exact current307 public schema2 whole-body/CALL/source maps and shared owned Prepared recovery/refusal gates. Historical compiler identities and count scopes remain separate; timing observations are not arithmetic comparisons.",
+      "scope": "Standalone streaming FP precision/BF conversion and signed/unsigned integer conversion through guarded native mappings or exact-PC owned numerical completion. Explicit guest features, fixed SVL and SM=1 are required. Operand snapshots preserve aliases, destination merge/top routing and inactive lanes; raw controls and cumulative FPSR stage before commit. Applicable exception enables refuse before effects. Selected integer recipes apply only measured vector lengths and checked host capabilities; other shapes retain mature fallback.",
+      "smoke_samples": [
+        {
+          "consumed_source_bytes": 4,
+          "cpu_target": "x86_64-baseline",
+          "expected_mnemonics": [
+            "ucvtf"
+          ],
+          "svcr": 1,
+          "svl_bytes": 16,
+          "word": "0x65d5a020"
+        }
+      ],
+      "source_file": "ucvtf_z_p_z.xml",
+      "source_sha256": "ea74c8b9b6971d7311836501c7143aec51d84ba36cbb3d25b03585ee06643742",
+      "status": "implemented"
     }
   ],
   "execution_profiles": {
@@ -71090,6 +74197,39 @@
         "General nonstreaming SVE and undeclared features or numerical controls.",
         "Memory, atomics, MOVPRFX and nonordinary service prefixes; cache/image/thread ABI integration.",
         "Enabled trap delivery, original FFR/FPMR observation, DIT timing and Apple hardware/application/OS conformance."
+      ],
+      "svcr": 1,
+      "svl_bytes": 16,
+      "zt0_enabled": false
+    },
+    "sme-streaming-v2-numerical63": {
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "compiler_command": "compile-block",
+      "decoder_mattrs": [
+        "+bf16",
+        "+sme",
+        "+sme2",
+        "+sve-b16b16"
+      ],
+      "description": "Explicit SME streaming conversions, integral rounding and true BF16 arithmetic through the existing contextual block and owned numerical completion boundary.",
+      "dit": false,
+      "features": [
+        "FEAT_BF16",
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SVE_B16B16"
+      ],
+      "id": "sme-streaming-v2",
+      "max_svl_bytes": 256,
+      "numerical_features": {
+        "ebf16": true,
+        "full_a64": false,
+        "rpres": true
+      },
+      "outside_scope": [
+        "Undeclared guest features, general nonstreaming SVE, implicit FullA64 and unavailable EBF16/RPRES controls.",
+        "Memory/atomic/MOVPRFX/nonordinary service prefixes, persistent image/cache/normal thread integration and SME matrix admission.",
+        "Universal enabled numerical exception delivery, Apple hardware conformance, complete applications and macOS boot."
       ],
       "svcr": 1,
       "svl_bytes": 16,

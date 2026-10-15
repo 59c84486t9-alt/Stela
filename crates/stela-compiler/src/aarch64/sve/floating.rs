@@ -5,6 +5,7 @@ pub mod bfloat16;
 pub mod comparison;
 pub mod control;
 pub mod conversion;
+pub mod rounding;
 
 use super::dot;
 use crate::aarch64::{
@@ -17,6 +18,7 @@ pub enum Operation {
     Arithmetic(arithmetic::Operand),
     Comparison(comparison::Operand),
     Conversion(conversion::Operand),
+    Rounding(rounding::Operand),
     Dot(dot::Operand),
     Bfloat16(bfloat16::Operand),
 }
@@ -24,7 +26,7 @@ pub enum Operation {
 impl Operation {
     /// Requirements for this declared SME-derived streaming profile. Source
     /// admission remains separate from allocation and host capabilities.
-    pub fn required_streaming_features(self, _numerical: NumericalFeatures) -> FeatureRequirement {
+    pub fn required_streaming_features(self, numerical: NumericalFeatures) -> FeatureRequirement {
         use ScalableFeature as Feature;
         let sme = ScalableFeatures::of(Feature::Sme);
         let required = match self {
@@ -41,12 +43,27 @@ impl Operation {
                 kind: dot::Kind::HalfDot,
                 ..
             }) => sme.with(Feature::Sme2),
+            Self::Conversion(conversion::Operand {
+                kind: conversion::Kind::Bfloat16 { .. },
+                ..
+            }) => sme.with(Feature::Bf16),
+            Self::Bfloat16(operand) if operand.kind.is_b16b16() => {
+                let required = sme.with(Feature::SveB16B16);
+                return if numerical.full_a64() {
+                    FeatureRequirement::all_and_any(
+                        required,
+                        ScalableFeatures::of(Feature::Sme2).with(Feature::SmeFa64),
+                    )
+                } else {
+                    FeatureRequirement::all(required.with(Feature::Sme2))
+                };
+            }
             Self::Bfloat16(bfloat16::Operand {
                 kind: bfloat16::Kind::MultiplyLong { subtract: true, .. },
                 ..
             }) => sme.with(Feature::Sme2),
             Self::Bfloat16(_) => sme.with(Feature::Bf16),
-            Self::Comparison(_) | Self::Conversion(_) | Self::Dot(_) => sme,
+            Self::Comparison(_) | Self::Conversion(_) | Self::Rounding(_) | Self::Dot(_) => sme,
         };
         FeatureRequirement::all(required)
     }
@@ -54,7 +71,6 @@ impl Operation {
     #[allow(clippy::result_unit_err)]
     pub fn decode(word: u32) -> Option<Result<Self, ()>> {
         // BF allocations overlap the broader ordinary floating size fields.
-        // This endpoint admits accumulation only; true BF arithmetic is later.
         if let Some(result) = bfloat16::decode(word) {
             return Some(result.map(Self::Bfloat16));
         }
@@ -66,6 +82,9 @@ impl Operation {
         }
         if let Some(result) = conversion::decode(word) {
             return Some(result.map(Self::Conversion));
+        }
+        if let Some(result) = rounding::decode(word) {
+            return Some(result.map(Self::Rounding));
         }
         // Published integer DOT/CDOT remain owned by the generic SVE decoder.
         dot::decode(word).and_then(|result| {

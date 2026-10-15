@@ -117,9 +117,11 @@ pub(super) enum Rounding {
     Zero,
 }
 
+mod bfloat16;
+pub(in crate::x86_64) use bfloat16::{quantize_bfloat_packed, quantize_bfloat_scalar_bits};
 mod quantization;
 
-pub(super) use quantization::{
+pub(in crate::x86_64) use quantization::{
     IntegerRoundingRegister, broadcast_integer_rounding, integer_rounding_policy,
 };
 

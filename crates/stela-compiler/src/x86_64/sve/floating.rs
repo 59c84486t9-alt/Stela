@@ -18,6 +18,7 @@ mod minmax;
 mod pairwise_clamp;
 mod reduction_minmax;
 mod refinement;
+mod rounding;
 mod scale;
 mod square_root;
 mod unsigned_estimates;
@@ -44,13 +45,14 @@ pub(crate) fn emit(
         Operation::Arithmetic(operand) => {
             arithmetic_dispatch::emit(code, word, operand, length, features, pc, target)
         }
+        Operation::Rounding(operand) => rounding::emit(code, operand, length, features, pc, target),
         Operation::Dot(operand) => half_dot::emit(code, operand, length, features, pc, target),
         Operation::Bfloat16(operand) => bfloat16::emit(code, operand, length, features, pc, target),
         Operation::Comparison(operand) => {
             comparison::emit(code, operand, length, features, pc, target)
         }
         Operation::Conversion(operand) => {
-            conversion::widening::emit(code, operand, length, features, pc, target)
+            conversion::emit(code, operand, length, features, pc, target)
         }
     }
 }

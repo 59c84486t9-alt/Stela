@@ -1,4 +1,5 @@
 //! Integral rounding: compact integer baseline and checked, nontrapping ROUND.
+pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, EXPONENT_VECTOR, branch, clear_scalar, prepare_vector_input_range,

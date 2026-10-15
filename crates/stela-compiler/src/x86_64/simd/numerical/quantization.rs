@@ -28,13 +28,13 @@ const REPLICATE_FIRST_DWORD: u8 = 0;
 
 /// Low ModRM bits of the caller-volatile extended rounding registers.
 #[repr(u8)]
-pub(in crate::x86_64::simd) enum IntegerRoundingRegister {
+pub(in crate::x86_64) enum IntegerRoundingRegister {
     Bias = 0,      // R8D
     Direction = 1, // R9D
     Parity = 3,    // R11D
 }
 
-pub(in crate::x86_64::simd) fn broadcast_integer_rounding(
+pub(in crate::x86_64) fn broadcast_integer_rounding(
     code: &mut Vec<u8>,
     vector: u8,
     register: IntegerRoundingRegister,
@@ -47,7 +47,7 @@ pub(in crate::x86_64::simd) fn broadcast_integer_rounding(
 /// Prepare integer quantization bias, sign direction and retained-bit parity.
 /// R10D starts fresh exception accumulation; ordinary arithmetic keeps guest RC,
 /// while BF16 conversion selects nearest-even when alternative handling is set.
-pub(in crate::x86_64::simd) fn integer_rounding_policy(
+pub(in crate::x86_64) fn integer_rounding_policy(
     code: &mut Vec<u8>,
     discarded_bits: u8,
     alternative_nearest: bool,

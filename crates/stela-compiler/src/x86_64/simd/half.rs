@@ -91,6 +91,8 @@ const CVTSS2SD_XMM1_XMM1: &[u8] = &[0xf3, 0x0f, 0x5a, 0xc9];
 const MOVQ_RAX_XMM6: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xf0];
 const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
+const BTR_RDX_IMM8: &[u8] = &[0x48, 0x0f, 0xba, 0xf2];
+const TEST_RDX_RDX: &[u8] = &[0x48, 0x85, 0xd2];
 const BTR_RAX: &[u8] = &[0x48, 0x0f, 0xba, 0xf0];
 const BT_RAX: &[u8] = &[0x48, 0x0f, 0xba, 0xe0];
 const SUB_EDX_IMM32: &[u8] = &[0x81, 0xea];
@@ -267,6 +269,33 @@ pub(super) fn merge_scalar(code: &mut Vec<u8>) {
     packed(code, Host::MoveAligned, LEFT, ORIGINAL_LEFT);
     let merged = code.len();
     resolve(code, clearing, merged);
+}
+
+/// Round one Double in XMM6 to IEEE Half fields in EAX, or preserve signed zero.
+///
+/// The caller clears R10D once; accepted lanes OR fresh IXC into it. Nonzero
+/// inputs and rounded results retain the mature Half exponent 2..30 guards.
+/// Callers own enabled-exception policy, finite-domain proofs, staging, fallback
+/// cleanup and guest commit. No frame, host environment, store or CALL is emitted.
+/// Clobbers RAX/RCX/RDX/R9/R10 and flags; every XMM and other GPR survives.
+pub(in crate::x86_64) fn emit_normal_or_zero(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+    set_pack_bias(code);
+    code.extend(MOVQ_RAX_XMM6);
+    code.extend(MOV_RDX_RAX);
+    shift(
+        code,
+        BTR_RDX_IMM8,
+        (Format::Double.bits() - SIGN_BITS) as u8,
+    );
+    code.extend(TEST_RDX_RDX);
+    let nonzero = branch(code, Condition::NotZero);
+    shift(code, SHR_RAX, HALF_TO_DOUBLE_SIGN_SHIFT);
+    let zero_done = jump(code);
+    let normal_start = code.len();
+    resolve(code, nonzero, normal_start);
+    kernel::emit_normal(code, failures, RoundingPolicy::Fpcr, ResultSign::Preserve);
+    let end = code.len();
+    resolve(code, zero_done, end);
 }
 
 pub(in crate::x86_64) use kernel::emit_normal as pack_normal;

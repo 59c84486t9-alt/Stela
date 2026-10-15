@@ -1,9 +1,9 @@
 //! Integer-only Single-to-BF16 quantization with precise exceptional fallback.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, IntegerRoundingRegister, branch, broadcast_integer_rounding,
-    exponent_range, guard_ah0_exceptions, integer_rounding_policy, prepare_vector_input_range,
-    resolve, test_control, vector_exponent_range,
+    Condition, INPUT_MINIMUM_EXPONENT, branch, exponent_range, guard_ah0_exceptions,
+    integer_rounding_policy, prepare_vector_input_range, quantize_bfloat_packed,
+    quantize_bfloat_scalar_bits, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, packed, read_vector};
 use crate::{
@@ -21,15 +21,11 @@ use crate::{
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
 const TEMPORARY: u8 = 2;
-const SIGN: u8 = 3;
-const ZERO: u8 = 4;
 const CONSTANT: u8 = 5;
-const EAX: u8 = 0;
+const GPR_RAX: u8 = 0;
 const SINGLE_BITS: u8 = u32::BITS as u8;
 const SIGN_BITS: u8 = 1;
-const SIGN_POSITION: u8 = SINGLE_BITS - SIGN_BITS;
 const DISCARDED_BITS: u8 = BFLOAT16_TO_SINGLE_SHIFT as u8;
-const DISCARDED_MASK: u32 = (1 << DISCARDED_BITS) - 1;
 const SINGLE_EXPONENT_MASK: u32 = Format::Single.exponent_mask() as u32;
 const SINGLE_EXPONENT_BITS: u8 =
     (Format::Single.bits() - Format::Single.fraction_bits() - SIGN_BITS as u32) as u8;
@@ -37,22 +33,9 @@ const EXPONENT_TO_LOW_SHIFT: u8 = SINGLE_BITS - SINGLE_EXPONENT_BITS;
 const VECTOR_LANES: u32 = 4;
 const VECTOR_LANE_MASK: u32 = (1 << VECTOR_LANES) - 1;
 const TEST_EAX_IMM32: u8 = 0xa9;
-const NOT_EAX: &[u8] = &[0xf7, 0xd0];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const MOV_R10D_EAX: &[u8] = &[0x41, 0x89, 0xc2];
 const TEST_R10D_R10D: &[u8] = &[0x45, 0x85, 0xd2];
 const MOVD_EAX_XMM1: &[u8] = &[0x66, 0x0f, 0x7e, 0xc8];
-const MOV_EDX_EAX: &[u8] = &[0x89, 0xc2];
-const AND_EDX_IMM32: &[u8] = &[0x81, 0xe2];
-const OR_R10D_EDX: &[u8] = &[0x41, 0x09, 0xd2];
-const SHR_EDX_IMM8: &[u8] = &[0xc1, 0xea];
-const AND_EDX_R11D: &[u8] = &[0x44, 0x21, 0xda];
 const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const SAR_ECX_IMM8: &[u8] = &[0xc1, 0xf9];
-const AND_ECX_R9D: &[u8] = &[0x44, 0x21, 0xc9];
-const XOR_ECX_R8D: &[u8] = &[0x44, 0x31, 0xc1];
-const ADD_ECX_EDX: &[u8] = &[0x01, 0xd1];
-const ADD_EAX_ECX: &[u8] = &[0x01, 0xc8];
 const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
 const CMP_ECX_IMM32: &[u8] = &[0x81, 0xf9];
 const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
@@ -79,21 +62,7 @@ fn input_guard(code: &mut Vec<u8>, mode: ConversionMode, helper: &mut Vec<usize>
 fn quantize_scalar(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     packed(code, Host::Xor, RESULT, RESULT);
     code.extend(MOVD_EAX_XMM1);
-    code.extend(MOV_EDX_EAX);
-    code.extend(AND_EDX_IMM32);
-    code.extend(DISCARDED_MASK.to_le_bytes());
-    code.extend(OR_R10D_EDX);
-    code.extend(MOV_EDX_EAX);
-    code.extend(SHR_EDX_IMM8);
-    code.push(DISCARDED_BITS);
-    code.extend(AND_EDX_R11D);
-    code.extend(MOV_ECX_EAX);
-    code.extend(SAR_ECX_IMM8);
-    code.push(SIGN_POSITION);
-    code.extend(AND_ECX_R9D);
-    code.extend(XOR_ECX_R8D);
-    code.extend(ADD_ECX_EDX);
-    code.extend(ADD_EAX_ECX);
+    quantize_bfloat_scalar_bits(code);
     // Rounded infinity takes the same precise cold OFC/IXC path as narrowing.
     code.extend(MOV_ECX_EAX);
     code.extend(AND_ECX_IMM32);
@@ -106,33 +75,6 @@ fn quantize_scalar(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     code.extend(PINSRW_XMM0_EAX_LOW);
 }
 
-/// Record all four lanes' discarded bits in private R10D, then add their bias.
-fn quantize_packed(code: &mut Vec<u8>) {
-    packed(code, Host::MoveAligned, RESULT, SOURCE);
-    packed(code, Host::MoveAligned, TEMPORARY, SOURCE);
-    ShiftOpcode::LeftDword.emit(code, TEMPORARY, SINGLE_BITS - DISCARDED_BITS);
-    packed(code, Host::Xor, ZERO, ZERO);
-    packed(code, Host::EqualDword, TEMPORARY, ZERO);
-    packed(code, Host::DwordSignMask, EAX, TEMPORARY);
-    code.extend(NOT_EAX);
-    code.extend(AND_EAX_IMM8);
-    code.push(VECTOR_LANE_MASK as u8);
-    code.extend(MOV_R10D_EAX);
-
-    packed(code, Host::MoveAligned, SIGN, SOURCE);
-    ShiftOpcode::ArithmeticDword.emit(code, SIGN, SIGN_POSITION);
-    packed(code, Host::MoveAligned, TEMPORARY, SOURCE);
-    ShiftOpcode::RightDword.emit(code, TEMPORARY, DISCARDED_BITS);
-    broadcast_integer_rounding(code, ZERO, IntegerRoundingRegister::Parity);
-    packed(code, Host::And, TEMPORARY, ZERO);
-    broadcast_integer_rounding(code, ZERO, IntegerRoundingRegister::Direction);
-    packed(code, Host::And, ZERO, SIGN);
-    broadcast_integer_rounding(code, CONSTANT, IntegerRoundingRegister::Bias);
-    packed(code, Host::Xor, ZERO, CONSTANT);
-    packed(code, Host::AddDword, TEMPORARY, ZERO);
-    packed(code, Host::AddDword, RESULT, TEMPORARY);
-}
-
 /// Rounding can carry a finite Single into BF16 infinity. The cold core owns
 /// its OFC/IXC policy; no guest state has changed at this guard.
 fn packed_overflow_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
@@ -142,7 +84,7 @@ fn packed_overflow_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     packed(code, Host::EqualDword, CONSTANT, CONSTANT);
     ShiftOpcode::RightDword.emit(code, CONSTANT, EXPONENT_TO_LOW_SHIFT);
     packed(code, Host::EqualDword, TEMPORARY, CONSTANT);
-    packed(code, Host::DwordSignMask, EAX, TEMPORARY);
+    packed(code, Host::DwordSignMask, GPR_RAX, TEMPORARY);
     code.push(TEST_EAX_IMM32);
     code.extend(VECTOR_LANE_MASK.to_le_bytes());
     helper.push(branch(code, Condition::NotZero));
@@ -196,7 +138,7 @@ pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &ConversionOperand, p
     if operand.mode == ConversionMode::Scalar {
         quantize_scalar(code, &mut helper);
     } else {
-        quantize_packed(code);
+        quantize_bfloat_packed(code);
         packed_overflow_guard(code, &mut helper);
         // Arithmetic shift sign-extends each raw BF16 field before PACKSSDW.
         // Logical shift would saturate negative BF16 encodings to positive 0x7fff.
@@ -218,4 +160,42 @@ pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &ConversionOperand, p
             commit(code, operand.destination, SOURCE);
         }
     }
+}
+
+/// Prepare selectors once; preserves every XMM and RSP. R8/R9/R11 retain
+/// rounding selectors and R10 starts fresh. AH selects mandatory nearest-even.
+pub(in crate::x86_64) fn prepare_conversion_rounding(code: &mut Vec<u8>) {
+    integer_rounding_policy(code, DISCARDED_BITS, true);
+}
+
+/// Integer-only packed normal-Single guard and BF16 rounding. Source XMM1
+/// survives; result XMM0 retains rounded Single fields, XMM2..5 are scratch.
+/// R8/R9/R11 selectors survive; R10 records discarded lanes. RAX/RCX/RDX and
+/// flags are scratch. No frame, environment, state writes, or packed slot layout.
+pub(in crate::x86_64) fn quantize_normal_conversion(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+    input_guard(code, ConversionMode::Narrow { upper: false }, failures);
+    quantize_bfloat_packed(code);
+    packed_overflow_guard(code, failures);
+}
+
+/// Callers gate this on any active lane and the effective FA64 policy.
+pub(in crate::x86_64) fn guard_conversion_enables(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
+    guard_ah0_exceptions(code, failures);
+}
+
+/// Return approved fresh BF IXC in EAX without committing guest state. AH1
+/// suppresses all numerical exceptions; accepted normal lanes can only add IXC.
+pub(in crate::x86_64) fn conversion_inexact(code: &mut Vec<u8>) {
+    const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+    const MOV_EAX_IMM32: u8 = 0xb8;
+    code.extend(XOR_EAX_EAX);
+    test_control(code, FPCR_AH);
+    let suppressed = branch(code, Condition::NotZero);
+    code.extend(TEST_R10D_R10D);
+    let exact = branch(code, Condition::Zero);
+    code.push(MOV_EAX_IMM32);
+    code.extend(INEXACT.to_le_bytes());
+    let end = code.len();
+    resolve(code, exact, end);
+    resolve(code, suppressed, end);
 }

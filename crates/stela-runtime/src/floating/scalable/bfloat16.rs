@@ -1,14 +1,21 @@
-//! Staged streaming BF dot and widening completion with complete original scalable sources.
+//! Staged streaming BF completion with complete original scalable sources.
 
 use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
-        floating::{FPCR_EBF, Outcome, bfloat16},
-        scalable::{MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES},
+        floating::{
+            FPCR_EBF, Outcome,
+            bfloat16::{
+                self,
+                arithmetic::{self, BfloatBinaryOperation},
+            },
+            minmax::MinMaxOperation,
+        },
+        scalable::{BITS_PER_BYTE, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES},
         sve::{
             dot::{RightOperand, VectorPart},
-            floating::bfloat16::{Kind, Operand},
+            floating::bfloat16::{BinaryOperation, Kind, Operand},
         },
     },
 };
@@ -19,6 +26,7 @@ use crate::scalable::ScalableState;
 const BFLOAT_BYTES: usize = size_of::<u16>();
 const SINGLE_BYTES: usize = size_of::<u32>();
 const DOT_COMPONENTS: usize = 2;
+const MAX_PREDICATE_BYTES: usize = MAX_VECTOR_BYTES / BITS_PER_BYTE;
 
 fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
     if condition {
@@ -76,6 +84,12 @@ fn read_single(source: &[u8], offset: usize) -> u32 {
     )
 }
 
+fn active(predicate: Option<&[u8]>, byte_offset: usize) -> bool {
+    predicate.is_none_or(|mask| {
+        mask[byte_offset / BITS_PER_BYTE] & (1 << (byte_offset % BITS_PER_BYTE)) != 0
+    })
+}
+
 fn right_offset(operand: &Operand, byte_offset: usize) -> usize {
     match operand.right {
         RightOperand::Vector(_) => byte_offset,
@@ -90,6 +104,36 @@ fn right_offset(operand: &Operand, byte_offset: usize) -> usize {
     }
 }
 
+fn evaluate_binary(
+    operation: BinaryOperation,
+    fpcr: u32,
+    left: u16,
+    right: u16,
+) -> Result<Outcome, CompletionError> {
+    let result = match operation {
+        BinaryOperation::Add => arithmetic::binary(BfloatBinaryOperation::Add, fpcr, left, right)?,
+        BinaryOperation::Subtract => {
+            arithmetic::binary(BfloatBinaryOperation::Subtract, fpcr, left, right)?
+        }
+        BinaryOperation::Multiply => {
+            arithmetic::binary(BfloatBinaryOperation::Multiply, fpcr, left, right)?
+        }
+        BinaryOperation::Maximum => {
+            arithmetic::minmax(MinMaxOperation::Maximum, fpcr, left, right)?
+        }
+        BinaryOperation::MaximumNumber => {
+            arithmetic::minmax(MinMaxOperation::MaximumNumber, fpcr, left, right)?
+        }
+        BinaryOperation::Minimum => {
+            arithmetic::minmax(MinMaxOperation::Minimum, fpcr, left, right)?
+        }
+        BinaryOperation::MinimumNumber => {
+            arithmetic::minmax(MinMaxOperation::MinimumNumber, fpcr, left, right)?
+        }
+    };
+    Ok(result)
+}
+
 fn evaluate(
     operand: &Operand,
     sources: &Sources,
@@ -99,6 +143,32 @@ fn evaluate(
     let fpcr = controls.fpcr;
     let right = right_offset(operand, byte_offset);
     Ok(match operand.kind {
+        Kind::Binary(operation) => evaluate_binary(
+            operation,
+            fpcr,
+            read_bfloat(&sources.left, byte_offset),
+            read_bfloat(&sources.right, right),
+        )?,
+        Kind::Clamp => arithmetic::clamp(
+            fpcr,
+            read_bfloat(&sources.destination, byte_offset),
+            read_bfloat(&sources.left, byte_offset),
+            read_bfloat(&sources.right, right),
+        )?,
+        Kind::MultiplyAdd { subtract } => {
+            let left = read_bfloat(&sources.left, byte_offset);
+            let left = if subtract {
+                bfloat16::negate(fpcr, left)
+            } else {
+                left
+            };
+            arithmetic::fused(
+                fpcr,
+                read_bfloat(&sources.destination, byte_offset),
+                left,
+                read_bfloat(&sources.right, right),
+            )?
+        }
         Kind::Dot => {
             let mut left = [0; DOT_COMPONENTS];
             let mut right_values = [0; DOT_COMPONENTS];
@@ -157,12 +227,23 @@ pub(super) fn complete(
         scalable.mode().streaming(),
         "scalable BF arithmetic requires streaming state",
     )?;
-
-    require(
-        operand.predicate.is_none(),
-        "BF accumulation has no predicated form",
-    )?;
+    if operand.predicate.is_some() {
+        require(
+            matches!(operand.kind, Kind::Binary(_) | Kind::MultiplyAdd { .. }),
+            "BF operation has no predicated form",
+        )?;
+    }
     if let RightOperand::Indexed { index, .. } = operand.right {
+        require(
+            matches!(
+                operand.kind,
+                Kind::Binary(BinaryOperation::Multiply)
+                    | Kind::MultiplyAdd { .. }
+                    | Kind::Dot
+                    | Kind::MultiplyLong { .. }
+            ),
+            "BF operation has no indexed form",
+        )?;
         let indexed_bytes = if operand.kind == Kind::Dot {
             SINGLE_BYTES
         } else {
@@ -174,11 +255,22 @@ pub(super) fn complete(
         )?;
     }
     let sources = Sources::snapshot(state, scalable, operand)?;
+    let mut predicate_storage = [0; MAX_PREDICATE_BYTES];
+    let predicate = if let Some(register) = operand.predicate {
+        let length = scalable.vector_length().predicate_bytes();
+        scalable.read_predicate(register, &mut predicate_storage[..length])?;
+        Some(&predicate_storage[..length])
+    } else {
+        None
+    };
     let length = scalable.vector_length().bytes();
-    let element_bytes = SINGLE_BYTES;
+    let element_bytes = operand.kind.output_bits() as usize / BITS_PER_BYTE;
     let mut result = sources.destination;
     let mut exceptions = 0;
     for byte_offset in (0..length).step_by(element_bytes) {
+        if !active(predicate, byte_offset) {
+            continue;
+        }
         let outcome = evaluate(operand, &sources, byte_offset, controls)?;
         result[byte_offset..byte_offset + element_bytes]
             .copy_from_slice(&outcome.bits.to_le_bytes()[..element_bytes]);
@@ -194,7 +286,8 @@ mod tests {
     use super::*;
     use stela_compiler::aarch64::{
         floating::{
-            FPCR_AH, FPCR_EBF, FPCR_EXCEPTION_ENABLE_MASK, FPSR_QC, features::NumericalFeatures,
+            FPCR_AH, FPCR_EBF, FPCR_EXCEPTION_ENABLE_MASK, FPSR_QC, INVALID,
+            features::NumericalFeatures,
         },
         scalable::{ScalableMode, VectorLength},
     };
@@ -203,6 +296,7 @@ mod tests {
     const LEFT: u8 = 1;
     const RIGHT: u8 = 2;
     const BFLOAT_ONE: u16 = 0x3f80;
+    const BFLOAT_TWO: u16 = 0x4000;
     const BFLOAT_SIGNALING_NAN: u16 = 0x7f81;
     const SINGLE_ONE: u32 = 0x3f80_0000;
     const SINGLE_TWO: u32 = 0x4000_0000;
@@ -267,6 +361,99 @@ mod tests {
         }
     }
 
+    fn put_predicate(scalable: &mut ScalableState, offsets: &[usize]) {
+        let mut bytes = vec![0; scalable.vector_length().predicate_bytes()];
+        for offset in offsets {
+            bytes[offset / BITS_PER_BYTE] |= 1 << (offset % BITS_PER_BYTE);
+        }
+        scalable.write_predicate(0, &bytes).unwrap();
+    }
+
+    #[test]
+    fn indexed_destination_alias_snapshots_each_original_segment() {
+        for length in [16, 32, MAX_VECTOR_BYTES] {
+            let (mut state, mut scalable) = setup(length);
+            let lanes = length / BFLOAT_BYTES;
+            put(
+                &mut scalable,
+                &mut state,
+                LEFT,
+                &vec![u64::from(BFLOAT_ONE); lanes],
+                BFLOAT_BYTES,
+            );
+            let mut values = vec![0; lanes];
+            let per_segment = VECTOR_CHUNK_BYTES / BFLOAT_BYTES;
+            for (segment, output) in values.chunks_exact_mut(per_segment).enumerate() {
+                output[per_segment - 1] = u64::from(BFLOAT_ONE) + (segment as u64 + 1) * 128;
+            }
+            put(
+                &mut scalable,
+                &mut state,
+                DESTINATION,
+                &values,
+                BFLOAT_BYTES,
+            );
+            let before = state.clone();
+            let mut operand = base(Kind::Binary(BinaryOperation::Multiply));
+            operand.right = RightOperand::Indexed {
+                register: DESTINATION,
+                index: (per_segment - 1) as u8,
+            };
+            complete_profile(&mut state, &mut scalable, &operand, false).unwrap();
+            let expected = values
+                .chunks_exact(per_segment)
+                .flat_map(|segment| {
+                    vec![(segment[per_segment - 1] as u16).to_le_bytes(); per_segment]
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(get(&scalable, &state, DESTINATION), expected);
+            let mut expected_state = before;
+            expected_state.v[usize::from(DESTINATION)] = state.v[usize::from(DESTINATION)];
+            assert_eq!(state, expected_state);
+        }
+    }
+
+    #[test]
+    fn inactive_lanes_skip_numeric_controls_and_status() {
+        let (mut state, mut scalable) = setup(64);
+        let lanes = scalable.vector_length().bytes() / BFLOAT_BYTES;
+        for register in [DESTINATION, LEFT, RIGHT] {
+            put(
+                &mut scalable,
+                &mut state,
+                register,
+                &vec![u64::from(BFLOAT_SIGNALING_NAN); lanes],
+                BFLOAT_BYTES,
+            );
+        }
+        state.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
+        let before = state.clone();
+        let mut operand = base(Kind::MultiplyAdd { subtract: false });
+        operand.predicate = Some(0);
+        let original = get(&scalable, &state, DESTINATION);
+        complete_profile(&mut state, &mut scalable, &operand, true).unwrap();
+        assert_eq!(state, before);
+        assert_eq!(get(&scalable, &state, DESTINATION), original);
+        put_predicate(&mut scalable, &[BFLOAT_BYTES]);
+        assert!(matches!(
+            complete_profile(&mut state, &mut scalable, &operand, true),
+            Err(CompletionError::UnsupportedControl(_))
+        ));
+        assert_eq!(state, before);
+        assert_eq!(get(&scalable, &state, DESTINATION), original);
+        complete_profile(&mut state, &mut scalable, &operand, false).unwrap();
+        let actual = get(&scalable, &state, DESTINATION);
+        assert_eq!(&actual[..BFLOAT_BYTES], &original[..BFLOAT_BYTES]);
+        assert_eq!(
+            &actual[BFLOAT_BYTES..2 * BFLOAT_BYTES],
+            &0x7fc1_u16.to_le_bytes()
+        );
+        assert_eq!(&actual[2 * BFLOAT_BYTES..], &original[2 * BFLOAT_BYTES..]);
+        assert_eq!(state.fpcr, FPCR_EXCEPTION_ENABLE_MASK);
+        assert_eq!(state.fpsr, FPSR_QC | INVALID);
+    }
+
     #[test]
     fn widening_parity_reads_original_destructive_accumulator() {
         for part in [VectorPart::Bottom, VectorPart::Top] {
@@ -305,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn widening_alternative_mode_suppresses_exceptions() {
+    fn widening_ah_suppression_differs_from_nonwidening_arithmetic() {
         let (mut state, mut scalable) = setup(16);
         put(
             &mut scalable,
@@ -337,6 +524,17 @@ mod tests {
             get(&scalable, &state, DESTINATION),
             0x7fc1_0000_u32.to_le_bytes().repeat(4)
         );
+        let before = state.clone();
+        assert!(matches!(
+            complete_profile(
+                &mut state,
+                &mut scalable,
+                &base(Kind::MultiplyAdd { subtract: true }),
+                true
+            ),
+            Err(CompletionError::UnsupportedControl(_))
+        ));
+        assert_eq!(state, before);
     }
 
     #[test]
@@ -366,17 +564,42 @@ mod tests {
     }
 
     #[test]
+    fn clamp_and_subtract_use_original_destination_and_named_operands() {
+        let (mut state, mut scalable) = setup(16);
+        put(
+            &mut scalable,
+            &mut state,
+            LEFT,
+            &[u64::from(BFLOAT_ONE); 8],
+            BFLOAT_BYTES,
+        );
+        put(
+            &mut scalable,
+            &mut state,
+            RIGHT,
+            &[u64::from(BFLOAT_TWO); 8],
+            BFLOAT_BYTES,
+        );
+        complete_profile(&mut state, &mut scalable, &base(Kind::Clamp), false).unwrap();
+        assert_eq!(
+            get(&scalable, &state, DESTINATION),
+            BFLOAT_ONE.to_le_bytes().repeat(8)
+        );
+        let mut operand = base(Kind::MultiplyAdd { subtract: true });
+        operand.left = DESTINATION;
+        complete_profile(&mut state, &mut scalable, &operand, false).unwrap();
+        assert_eq!(
+            get(&scalable, &state, DESTINATION),
+            (BFLOAT_ONE | 0x8000).to_le_bytes().repeat(8)
+        );
+    }
+
+    #[test]
     fn invalid_shape_or_index_and_nonstreaming_state_fail_without_effects() {
         let (mut state, mut scalable) = setup(32);
         let before = state.clone();
         let original = get(&scalable, &state, DESTINATION);
-        for mut operand in [
-            base(Kind::Dot),
-            base(Kind::MultiplyLong {
-                subtract: false,
-                part: VectorPart::Bottom,
-            }),
-        ] {
+        for mut operand in [base(Kind::Dot), base(Kind::Clamp)] {
             operand.predicate = Some(0);
             assert!(matches!(
                 complete_profile(&mut state, &mut scalable, &operand, false),
@@ -399,7 +622,12 @@ mod tests {
             .unwrap();
         let before = state.clone();
         assert!(matches!(
-            complete_profile(&mut state, &mut scalable, &base(Kind::Dot), false),
+            complete_profile(
+                &mut state,
+                &mut scalable,
+                &base(Kind::Binary(BinaryOperation::Add)),
+                false
+            ),
             Err(CompletionError::State(_))
         ));
         assert_eq!(state, before);

@@ -1,0 +1,33 @@
+//! True-BF arithmetic families; shared frame and numerical helpers own effects.
+mod binary;
+mod fused;
+mod selection;
+
+use crate::{
+    CompileError, GuestAddress, TargetCpu,
+    aarch64::{
+        floating::features::NumericalFeatures,
+        scalable::VectorLength,
+        sve::floating::bfloat16::{BinaryOperation, Kind, Operand},
+    },
+};
+
+pub(in crate::x86_64) fn emit(
+    code: &mut Vec<u8>,
+    operand: Operand,
+    length: VectorLength,
+    features: NumericalFeatures,
+    pc: GuestAddress,
+    target: TargetCpu,
+) -> Result<bool, CompileError> {
+    match operand.kind {
+        Kind::Binary(
+            BinaryOperation::Add | BinaryOperation::Subtract | BinaryOperation::Multiply,
+        ) => binary::emit(code, operand, length, features, pc, target),
+        Kind::Binary(_) | Kind::Clamp => {
+            selection::emit(code, operand, length, features, pc, target)
+        }
+        Kind::MultiplyAdd { .. } => fused::emit(code, operand, length, features, pc, target),
+        _ => Ok(false),
+    }
+}

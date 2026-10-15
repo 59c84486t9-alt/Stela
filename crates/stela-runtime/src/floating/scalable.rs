@@ -4,6 +4,7 @@ mod bfloat16;
 mod comparison;
 mod conversion;
 mod dot;
+mod rounding;
 mod sme_matrix;
 mod sme_vector;
 
@@ -99,6 +100,7 @@ pub(crate) fn complete(
             Operation::Arithmetic(operand) => {
                 arithmetic::complete(state, scalable, operand, controls)
             }
+            Operation::Rounding(operand) => rounding::complete(state, scalable, operand, controls),
             Operation::Dot(operand) => dot::complete(state, scalable, operand, controls),
             Operation::Bfloat16(operand) => bfloat16::complete(state, scalable, operand, controls),
             Operation::Comparison(operand) => {

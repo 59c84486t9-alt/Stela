@@ -145,7 +145,7 @@ fn scalar_odd_jam(code: &mut Vec<u8>) {
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
 }
 
-fn vector_odd_jam(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
     // Normal S widens exactly and compares with its original normal D lane
     // without raising host status, even after caller MXCSR has been restored.
     // Never use aggregate PE to choose a lane's jam bit. Result-range preparation
@@ -153,11 +153,15 @@ fn vector_odd_jam(code: &mut Vec<u8>) {
     code.extend(CVTPS2PD_XMM6_XMM0);
     code.extend(CMPEQPD_XMM6_XMM1);
     super::shuffle(code, JAM_VECTOR, JAM_VECTOR, COMPACT_QWORD_LOW_DWORDS);
-    packed(code, Host::AndNot, JAM_VECTOR, MINIMUM_EXPONENT_VECTOR);
+    packed(code, Host::AndNot, JAM_VECTOR, one_vector);
     // PSHUFD duplicates masks into inactive upper lanes. Clear those masks so
     // CVTPD2PS's architecturally zero upper qword remains zero.
     clear_scalar(code, Format::Double, JAM_VECTOR);
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
+}
+
+fn vector_odd_jam(code: &mut Vec<u8>) {
+    jam_odd_pair(code, MINIMUM_EXPONENT_VECTOR);
 }
 
 fn emit_scalar(

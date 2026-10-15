@@ -321,7 +321,22 @@
     "crates/stela-compiler/src/x86_64/sve/floating/refinement.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/scale.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/square_root.rs",
-    "crates/stela-compiler/src/x86_64/sve/floating/unsigned_estimates.rs"
+    "crates/stela-compiler/src/x86_64/sve/floating/unsigned_estimates.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/rounding.rs",
+    "crates/stela-compiler/src/x86_64/simd/numerical/bfloat16.rs",
+    "crates/stela-compiler/src/x86_64/simd/rounding/kernel.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/binary.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/fused.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/bfloat16/arithmetic/selection.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/bfloat.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/double_narrowing.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_integer.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_narrowing.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_widening.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/unsigned64.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs"
   ],
   "registry_version": "documented-a64-software-services-v1",
   "profile": {

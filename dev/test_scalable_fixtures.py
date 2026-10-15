@@ -377,5 +377,275 @@ class Future83NumericalModelTests(unittest.TestCase):
 
 
 
+# Pure model guards adapted from retained conversion/rounding/BF selftests.
+# These tests do not execute original Arm or translated native instructions.
+import itertools
+from fractions import Fraction as _Next63Fraction
+from simd_fixtures.sve_floating import conversion as _next63_conversion
+from simd_fixtures.sve_floating import rounding as _next63_rounding
+from simd_fixtures.sve_floating import bfloat16 as _next63_bfloat16
+_NEXT63_FORMATS = {16: (10, 5, 15), 32: (23, 8, 127), 64: (52, 11, 1023)}
+
+def _next63_rounding_reference(op, size, control, bits):
+    f, e, bias = _NEXT63_FORMATS[size]
+    mask = (1 << size) - 1
+    bits &= mask
+    sign = bits >> (size - 1)
+    frac = bits & ((1 << f) - 1)
+    exp = (bits >> f) & ((1 << e) - 1)
+    signbits = sign << (size - 1)
+    maxexp = (1 << e) - 1
+    if exp == maxexp:
+        if frac == 0:
+            return bits, 0
+        status = 0 if frac >> (f - 1) else _next63_rounding.FPSR_INVALID
+        if control & _next63_rounding.FPCR_DN:
+            return ((bool(control & _next63_rounding.FPCR_AH) << (size - 1)) | (maxexp << f) | (1 << (f - 1))), status
+        return bits | (1 << (f - 1)), status
+    if exp == 0:
+        if frac == 0:
+            return signbits, 0
+        if size == 16 and control & _next63_rounding.FPCR_FZ16:
+            return signbits, 0
+        if size != 16:
+            fz = bool(control & _next63_rounding.FPCR_FZ) and not control & _next63_rounding.FPCR_AH
+            if fz or control & _next63_rounding.FPCR_FIZ:
+                return signbits, _next63_rounding.FPSR_INPUT_DENORMAL if fz else 0
+        value = _Next63Fraction(frac) * _Next63Fraction(2) ** (1 - bias - f)
+    else:
+        value = _Next63Fraction((1 << f) + frac) * _Next63Fraction(2) ** (exp - bias - f)
+    if sign:
+        value = -value
+    lower = value.numerator // value.denominator
+    error = value - lower
+    mode = {
+        'FRINTN': 0, 'FRINTP': 1, 'FRINTM': 2, 'FRINTZ': 3, 'FRINTA': 4,
+        'FRINTI': (control >> _next63_rounding.FPCR_ROUNDING_SHIFT) & 3,
+        'FRINTX': (control >> _next63_rounding.FPCR_ROUNDING_SHIFT) & 3,
+    }[op]
+    up = {
+        0: error > _Next63Fraction(1, 2) or error == _Next63Fraction(1, 2) and lower & 1,
+        1: error != 0,
+        2: False,
+        3: error != 0 and lower < 0,
+        4: error > _Next63Fraction(1, 2) or error == _Next63Fraction(1, 2) and lower >= 0,
+    }[mode]
+    integer = lower + bool(up)
+    status = _next63_rounding.FPSR_INEXACT if op == 'FRINTX' and error else 0
+    if integer == 0:
+        return signbits, status
+    integer = abs(integer)
+    exponent = integer.bit_length() - 1
+    mantissa = _Next63Fraction(integer) * _Next63Fraction(2) ** (f - exponent) - (1 << f)
+    assert mantissa.denominator == 1
+    return signbits | ((exponent + bias) << f) | int(mantissa), status
+
+class Next63NumericalModelTests(unittest.TestCase):
+    def test_conversion_lane_controls_and_saturation(self):
+        model = _next63_conversion
+        lane = model.conversion_lane
+        check = self.assertEqual
+        check(lane(0x7c01, 16, 32, model.Kind.PRECISION, model.FPCR_AHP), model.LaneResult(0x7fc02000, model.FPSR_INVALID))
+        check(lane(1, 16, 32, model.Kind.PRECISION, model.FPCR_FZ16), model.LaneResult(0x33800000))
+        check(lane(1, 16, 32, model.Kind.FP_TO_SIGNED, model.FPCR_FZ16), model.LaneResult(0))
+        check(lane(1, 32, 64, model.Kind.PRECISION, model.FPCR_AH).exceptions, model.FPSR_INPUT_DENORMAL)
+        check(lane(1, 32, 64, model.Kind.PRECISION, model.FPCR_FZ), model.LaneResult(0, model.FPSR_INPUT_DENORMAL))
+        check(lane(1, 32, 64, model.Kind.PRECISION, model.FPCR_FIZ), model.LaneResult(0))
+        check(lane(0xbfc00000, 32, 32, model.Kind.FP_TO_UNSIGNED), model.LaneResult(0, model.FPSR_INVALID))
+        check(lane(0xbf000000, 32, 32, model.Kind.FP_TO_UNSIGNED), model.LaneResult(0, model.FPSR_INEXACT))
+        check(lane(0x7f800001, 32, 16, model.Kind.BFLOAT, model.FPCR_AH), model.LaneResult(0x7fc0))
+        check(lane(0x7f800001, 32, 16, model.Kind.BFLOAT, model.FPCR_AH | model.FPCR_DN), model.LaneResult(0xffc0))
+        check(lane(1, 32, 16, model.Kind.BFLOAT, model.FPCR_AH), model.LaneResult(0))
+        check(lane(0x3f808000, 32, 16, model.Kind.BFLOAT), model.LaneResult(0x3f80, model.FPSR_INEXACT))
+        check(lane(0x3ff0000000000001, 64, 32, model.Kind.PRECISION_ODD), model.LaneResult(0x3f800001, model.FPSR_INEXACT))
+        check(lane(0xffffffffffffffff, 64, 16, model.Kind.SIGNED_TO_FP), model.LaneResult(0xbc00))
+        check(lane(0x41e0000000000000, 64, 32, model.Kind.FP_TO_SIGNED), model.LaneResult(0x7fffffff, model.FPSR_INVALID))
+        check(lane(0xc1e0000000000000, 64, 32, model.Kind.FP_TO_SIGNED), model.LaneResult(0x80000000))
+        check(lane(0x43e0000000000000, 64, 64, model.Kind.FP_TO_SIGNED), model.LaneResult(0x7fffffffffffffff, model.FPSR_INVALID))
+        check(lane(0x43e0000000000000, 64, 64, model.Kind.FP_TO_UNSIGNED), model.LaneResult(0x8000000000000000))
+        check(lane(0x43f0000000000000, 64, 64, model.Kind.FP_TO_UNSIGNED), model.LaneResult(0xffffffffffffffff, model.FPSR_INVALID))
+        check(lane(0xffffffffffffffff, 64, 64, model.Kind.UNSIGNED_TO_FP), model.LaneResult(0x43f0000000000000, model.FPSR_INEXACT))
+        check(lane(0xffffffffffffffff, 64, 64, model.Kind.UNSIGNED_TO_FP, 3 << model.FPCR_ROUNDING_SHIFT),
+                  model.LaneResult(0x43efffffffffffff, model.FPSR_INEXACT))
+        check(lane(1, 32, 16, model.Kind.PRECISION), model.LaneResult(0, model.FPSR_UNDERFLOW | model.FPSR_INEXACT))
+        check(lane(0x33800000, 32, 16, model.Kind.PRECISION, model.FPCR_FZ16), model.LaneResult(1))
+        check(lane(0x38000000, 32, 16, model.Kind.PRECISION), model.LaneResult(0x200))
+
+    def test_conversion_vector_routing_and_refusal(self):
+        model = _next63_conversion
+        check = self.assertEqual
+        source = (0xbff0000000000000).to_bytes(8, 'little') * 2
+        old = bytes(range(16))
+        spec = model.ConversionSpec(model.Kind.FP_TO_SIGNED, 64, 32)
+        check(model.evaluate_vector(spec, source, old, b'\x01\x01').destination, b'\xff' * 16)
+        check(model.evaluate_vector(spec, source, old, b'\xfe\xfe').destination, old)
+        # Top narrowing preserves every low half under both predication modes.
+        source = (0x3ff0000000000000).to_bytes(8, 'little') * 2
+        for merging in (False, True):
+            spec = model.ConversionSpec(model.Kind.PRECISION, 64, 32, model.Layout.NARROW_TOP, merging)
+            result = model.evaluate_vector(spec, source, old, b'\x01\x00').destination
+            check(result[:4], old[:4])
+            check(result[4:8], (0x3f800000).to_bytes(4, 'little'))
+            check(result[8:12], old[8:12])
+            check(result[12:], old[12:] if merging else bytes(4))
+        source = b''.join(x.to_bytes(2, 'little') for x in [0, 0x3c00, 0, 0x4000] * 2)
+        spec = model.ConversionSpec(model.Kind.PRECISION, 16, 32, model.Layout.WIDEN_TOP)
+        check(model.evaluate_vector(spec, source, old, b'\x11\x11').destination,
+              b''.join(x.to_bytes(4, 'little') for x in [0x3f800000, 0x40000000] * 2))
+        # Refusal happens before returning any output; inactive lanes never evaluate.
+        spec = model.ConversionSpec(model.Kind.PRECISION, 16, 32)
+        check(model.evaluate_vector(spec, source, old, bytes(2), 1 << 8).destination, old)
+
+        for enable in (1 << x for x in (8, 9, 10, 11, 12, 15)):
+            with self.assertRaises(model.UnsupportedFpControls):
+                model.evaluate_vector(spec, source, old, b"\x01\x00", enable)
+
+    def test_rounding_vectors_aliasing_sticky_status_and_refusal(self):
+        m = _next63_rounding
+        FORMATS = _NEXT63_FORMATS
+        controls = [mode << m.FPCR_ROUNDING_SHIFT for mode in range(4)] + [m.FPCR_AH | m.FPCR_FZ | m.FPCR_DN]
+        for size, (f, e, bias) in FORMATS.items():
+            lane_bytes = size // 8
+            snan = (((1 << e) - 1) << f) | 1
+            halfway = (bias + 1) << f | (1 << (f - 2))  # 2.5
+            for vl in (16, 32, 64, 128, 256):
+                lanes = vl // lane_bytes
+                source = b''.join((halfway if lane % 2 == 0 else snan).to_bytes(lane_bytes, 'little') for lane in range(lanes))
+                tail = bytes(range(31))
+                dest = bytes((index * 73 + 9) & 255 for index in range(vl)) + tail
+                alternating = sum(1 << (lane * lane_bytes) for lane in range(0, lanes, 2))
+                ignored_predicate_bits = sum(1 << (offset + 1) for offset in range(0, vl, lane_bytes))
+                for op, control in itertools.product(m.OPERATIONS, controls):
+                    actual = m.evaluate_vector(op, size, control, 0x88000005, source, dest, alternating | ignored_predicate_bits, vl)
+                    expected = bytearray(dest)
+                    fresh = 0
+                    for lane in range(0, lanes, 2):
+                        bits, status = _next63_rounding_reference(op, size, control, halfway)
+                        offset = lane * lane_bytes
+                        expected[offset:offset + lane_bytes] = bits.to_bytes(lane_bytes, 'little')
+                        fresh |= status
+                    self.assertEqual(actual.destination, bytes(expected))
+                    self.assertEqual(actual.fpsr, 0x88000005 | fresh)
+                    self.assertEqual(actual.exceptions, fresh)
+                    self.assertEqual(actual.active_lanes, (lanes + 1) // 2)
+                    self.assertEqual(actual.destination[vl:], tail)
+                    byte_pred = (alternating | ignored_predicate_bits).to_bytes(vl // 8, 'little')
+                    self.assertEqual(m.evaluate_vector(op, size, control, 0x88000005, source, dest, byte_pred, vl), actual)
+                    # Alias snapshot: inactive bytes preserve original aliased input.
+                    alias = bytearray(source + tail)
+                    alias_original = bytes(alias)
+                    aliased = m.evaluate_vector(op, size, control, 0, alias, alias, alternating, vl)
+                    self.assertEqual(bytes(alias), alias_original)
+                    self.assertEqual(aliased.destination[vl:], tail)
+                    for lane in range(1, lanes, 2):
+                        offset = lane * lane_bytes
+                        self.assertEqual(aliased.destination[offset:offset + lane_bytes], source[offset:offset + lane_bytes])
+
+                for enable in (1, 2, 4, 8, 16, 128, 159):
+                    control = enable << m.FP_EXCEPTION_ENABLE_SHIFT
+                    actual = m.evaluate_vector('FRINTX', size, control, 0x88000005, source, dest, ignored_predicate_bits, vl)
+                    self.assertEqual(actual, m.VectorResult(dest, 0x88000005, 0, 0))
+                    try:
+                        m.evaluate_vector('FRINTX', size, control, 0, source, dest, 1, vl)
+                    except m.UnsupportedControl as error:
+                        self.assertEqual(error.enabled_exceptions, enable)
+                    else:
+                        raise AssertionError('active numerical exception enables silently accepted')
+
+
+        # AHP and NEP are ignored, and enabled controls decline even exact zero.
+        for size, (f, e, bias) in FORMATS.items():
+            for op in m.OPERATIONS:
+                for value in (0, 1, bias << f, (((1 << e) - 1) << f) | 1):
+                    self.assertEqual(m.evaluate_lane(op, size, 0, value), m.evaluate_lane(op, size, (1 << 26) | (1 << 2), value))
+                for enable in (1, 2, 4, 8, 16, 128, 159):
+                    try:
+                        m.evaluate_lane(op, size, enable << m.FP_EXCEPTION_ENABLE_SHIFT, 0)
+                    except m.UnsupportedControl as error:
+                        self.assertEqual(error.enabled_exceptions, enable)
+                    else:
+                        raise AssertionError('exact zero bypassed numerical control decline')
+
+            # Distinct active lanes independently contribute sticky IOC and IXC.
+            lane_bytes = size // 8
+            snan = (((1 << e) - 1) << f) | 1
+            halfway = (bias + 1) << f | (1 << (f - 2))
+            source = snan.to_bytes(lane_bytes, 'little') + halfway.to_bytes(lane_bytes, 'little') + bytes(16 - 2 * lane_bytes)
+            actual = m.evaluate_vector('FRINTX', size, 0, 1 << 27, source, bytes(16), 1 | (1 << lane_bytes))
+            self.assertEqual(actual.exceptions, m.FPSR_INVALID | m.FPSR_INEXACT)
+            self.assertEqual(actual.fpsr, (1 << 27) | m.FPSR_INVALID | m.FPSR_INEXACT)
+
+    def test_bfloat16_directed_controls_and_status(self):
+        m = _next63_bfloat16
+        equal = self.assertEqual
+        def vector(value, width=2, length=16):
+            return value.to_bytes(width, 'little') * (length // width)
+
+        def scalar(kind, a, b, c=0, fpcr=0, width=2, **kwargs):
+            out = m.evaluate(kind, vector(c, width), vector(a), vector(b), fpcr=fpcr, **kwargs)
+            return int.from_bytes(out.value[:width], 'little'), out.exceptions
+
+        for mode in range(4):
+            equal(scalar('add', 0x3f80, 0xbf80, fpcr=mode << 22), (0x8000 if mode == 2 else 0, 0))
+            equal(scalar('mul', 0x3f81, 0x3f7e, fpcr=mode << 22), ([0x3f80, 0x3f80, 0x3f7f, 0x3f7f][mode], 16))
+            equal(scalar('mlal', 0x3f80, 0x3380, 0x3f800000, width=4, fpcr=2 | mode << 22), (0x3f800000, 0))
+        for kind in ('min', 'max'):
+            equal(scalar(kind, 0x7fc1, 0x3f80, fpcr=2), (0x3f80, 1))
+            equal(scalar(kind, 0x3f80, 0x7f81, fpcr=2), (0x7f81, 1))
+        equal(scalar('maxnm', 0x7fc1, 0x3f80, fpcr=2), (0x3f80, 0))
+        equal(scalar('minnm', 0x7fc1, 0x7f81, fpcr=2), (0x7fc1, 1))
+        equal(scalar('mla', 0, 0x7f80, 0x7fc1), (0x7fc0, 1))
+        equal(scalar('mla', 0, 0x7f80, 0x7fc1, fpcr=2), (0x7fc1, 0))
+        equal(scalar('mul', 1, 0x3f80, fpcr=1 << 24), (0, 128))
+        equal(scalar('mul', 1, 0x3f80, fpcr=1), (0, 0))
+        equal(scalar('mul', 1, 0x3f80, fpcr=2), (1, 128))
+        equal(scalar('mlsl', 0x7f80, 0x3f80, width=4, fpcr=2), (0xff800000, 0))
+        equal(scalar('mlsl', 0x7f81, 0x3f80, width=4, fpcr=2), (0x7fc10000, 0))
+        equal(scalar('mul', 0x0080, 0x3f00, fpcr=1 << 24), (0, 8))
+        equal(scalar('mul', 0x0080, 0x3f00, fpcr=2 | 1 << 24), (0, 24))
+        equal(scalar('mul', 0x7f7f, 0x4000), (0x7f80, 20))
+        equal(scalar('mul', 0x7f7f, 0x4000, fpcr=3 << 22), (0x7f7f, 20))
+
+    def test_bfloat16_vector_routing_and_refusal(self):
+        m = _next63_bfloat16
+        equal = self.assertEqual
+        def vector(value, width=2, length=16):
+            return value.to_bytes(width, 'little') * (length // width)
+
+        def scalar(kind, a, b, c=0, fpcr=0, width=2, **kwargs):
+            out = m.evaluate(kind, vector(c, width), vector(a), vector(b), fpcr=fpcr, **kwargs)
+            return int.from_bytes(out.value[:width], 'little'), out.exceptions
+
+        for length in (16, 32, 64, 128, 256):
+            right = b''.join(vector(0x3f80 + segment * 128) for segment in range(length // 16))
+            out = m.evaluate('mul', vector(0x7777, length=length), vector(0x3f80, length=length), right, index=7, fpsr=0xa5000000)
+            equal(out.value, right)
+            equal(out.fpsr, 0xa5000000)
+            out = m.evaluate('mul', vector(0x7777, length=length), vector(0x7f81, length=length), vector(0x3f80, length=length), predicate=0)
+            equal(out.value, vector(0x7777, length=length))
+            equal(out.exceptions, 0)
+            out = m.evaluate('mul', vector(0x7777, length=length), vector(0x3f80, length=length), right, predicate=1)
+            equal(out.value[2:], vector(0x7777, length=length)[2:])
+
+        # Widening bottom/top routing and indexed segment reuse remain independent of destination.
+        for top in (False, True):
+            left = b''.join(x.to_bytes(2, 'little') for x in [0x3f80, 0x4000] * 8)
+            right = vector(0x3f80, length=16) + vector(0x4000, length=16)
+            out = m.evaluate('mlal', vector(0, 4, 32), left, right, top=top, index=7)
+            expected = vector(0x40000000 if top else 0x3f800000, 4) + vector(0x40800000 if top else 0x40000000, 4)
+            equal(out.value, expected)
+        for kwargs in ({'fpcr': -1}, {'fpsr': 1 << 32}, {'predicate': -1}, {'predicate': 1 << 16}, {'index': 8}, {'top': True}):
+            try:
+                m.evaluate('mul', vector(0), vector(0x3f80), vector(0x3f80), **kwargs)
+                raise AssertionError('invalid input was silently accepted')
+            except ValueError:
+                pass
+
+        for kind in ("add", "mul", "mla", "mlal"):
+            with self.assertRaises(m.UnsupportedControl):
+                scalar(kind, 0x3f80, 0x3f80, fpcr=0x100, profile=m.Profile(full_a64=True))
+
+
+
 if __name__ == '__main__':
     unittest.main()

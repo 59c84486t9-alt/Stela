@@ -43,7 +43,7 @@ fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
     code.push(order);
 }
 
-/// Decline predication before emitting; this typed descriptor admits accumulation only.
+/// Return false before emitting for the separately owned BF16 arithmetic forms.
 /// Every output is private until all source/result guards have passed.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
@@ -53,7 +53,8 @@ pub(in crate::x86_64) fn emit(
     pc: GuestAddress,
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
-    if operand.predicate.is_some() {
+    if !matches!(operand.kind, Kind::Dot | Kind::MultiplyLong { .. }) || operand.predicate.is_some()
+    {
         return Ok(false);
     }
     let frame = numerical::begin(
@@ -97,6 +98,7 @@ pub(in crate::x86_64) fn emit(
                 load_z_chunk(code, operand.destination, chunk, ADDEND, length, target);
                 multiply_long::evaluate(code, &frame, &mut failures, target);
             }
+            _ => unreachable!("validated classic BF operation"),
         }
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, LEFT, target);
     }
