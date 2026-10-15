@@ -17,6 +17,13 @@ pub(super) struct DomainState {
 pub struct MemoryExecutionLoan {
     domain: Arc<MemoryDomain>,
 }
+impl MemoryExecutionLoan {
+    /// Domain identity of this actual live mapping-exclusion pin, not PE or
+    /// thread identity, source-attribute authority or a copied epoch permit.
+    pub(crate) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
+        Arc::ptr_eq(&self.domain, domain)
+    }
+}
 impl Drop for MemoryExecutionLoan {
     fn drop(&mut self) {
         match self.domain.state.lock() {

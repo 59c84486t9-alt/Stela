@@ -24,6 +24,8 @@ SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
 SERVICE_PROFILE = 'apple-arm64e-software-pauth-clock-v1'
 SYSTEM_PROFILE = 'system-v1'
 CHECKED_MEMORY_PROFILE = 'checked-gpr-memory-sa0-off-normal-wb-v3'
+CHECKED_PROCESS_PROFILE = 'checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1'
+CHECKED_PROCESS_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1'
 CHECKED_MEMORY_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3'
 BASELINE_CPU_TARGET = 'x86_64-baseline'
 SYSTEM_ABI = 'x86_64-sysv-guest-state-v2-block-exit-system-v1'
@@ -32,6 +34,10 @@ MOVABS_RAX_IMM64 = b'\x48\xb8'
 MOV_EDX_IMM32 = b'\xba'
 X86_RET = b'\xc3'
 SYSTEM_DECODER_MATTRS = ('+mte',)
+SERVICE_DECODERS = {
+    SYSTEM_PROFILE: (SYSTEM_DECODER_MATTRS, 'llvm-system-decoding'),
+    CHECKED_PROCESS_PROFILE: (('+pauth-lr',), 'llvm-checked-process-decoding'),
+}
 # Independent decoding attributes never grant guest execution features.
 LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut', '+faminmax', '+fp8')
 SYSTEM_GUEST_BASE = 0x10000000
@@ -39,6 +45,7 @@ SERVICE_BINDINGS = {
     SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
     SYSTEM_PROFILE: (SYSTEM_ABI, ('--system-boundaries', '--cpu-target', BASELINE_CPU_TARGET)),
     CHECKED_MEMORY_PROFILE: (CHECKED_MEMORY_ABI, ('--checked-memory-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
+    CHECKED_PROCESS_PROFILE: (CHECKED_PROCESS_ABI, ('--checked-process-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
 }
 SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
 DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'
@@ -792,14 +799,15 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 sorted(declined), directory / 'llvm-leaf-decoding', mattrs=LEAF_DECODER_MATTRS)
     if mode == 'service':
         import a64_disassembly
-        declined = sorted({validate_sample(forms[identity], sample)
-            for identity, row in overrides.items()
-            if row['status'] != 'unsupported' and row['profile'] == SYSTEM_PROFILE
-            for sample in row['smoke_samples']
-            if next(decoder.disasm(struct.pack('<I', validate_sample(forms[identity], sample)), 0), None) is None})
-        if declined:
-            independent_receipts[SYSTEM_DECODER_MATTRS] = a64_disassembly.decode_words(
-                declined, directory / 'llvm-system-decoding', mattrs=SYSTEM_DECODER_MATTRS)
+        for service_profile, (attrs, decoding_directory) in SERVICE_DECODERS.items():
+            declined = sorted({validate_sample(forms[identity], sample)
+                for identity, row in overrides.items()
+                if row['status'] != 'unsupported' and row['profile'] == service_profile
+                for sample in row['smoke_samples']
+                if next(decoder.disasm(struct.pack('<I', validate_sample(forms[identity], sample)), 0), None) is None})
+            if declined:
+                independent_receipts[attrs] = a64_disassembly.decode_words(
+                    declined, directory / decoding_directory, mattrs=attrs)
     if mode == 'scalable':
         import a64_disassembly
         declined = {}
@@ -848,8 +856,9 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 independent_receipt = independent_receipts.get(attrs)
                 if independent_receipt is not None:
                     independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
-            elif mode == 'service' and row['profile'] == SYSTEM_PROFILE:
-                independent_receipt = independent_receipts.get(SYSTEM_DECODER_MATTRS)
+            elif mode == 'service' and row['profile'] in SERVICE_DECODERS:
+                attrs, _ = SERVICE_DECODERS[row['profile']]
+                independent_receipt = independent_receipts.get(attrs)
                 if independent_receipt is not None:
                     independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
             mnemonic, assembly, basis = smoke_decoding(

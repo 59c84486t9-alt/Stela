@@ -48426,6 +48426,7 @@
     "crates/stela-compiler/src/x86_64/simd/memory_checked/tests.rs",
     "crates/stela-compiler/src/block/thread.rs",
     "crates/stela-compiler/src/block/pauth_memory.rs",
+    "crates/stela-compiler/src/block/pauth_lr.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
     "crates/stela-compiler/src/aarch64/bitfield.rs",
     "crates/stela-compiler/src/x86_64/bitfield.rs",

@@ -97,14 +97,15 @@ pub struct Keys {
 }
 impl Keys {
     pub fn from_ib_words(low: u64, high: u64) -> Self {
-        Self {
-            words: [None, Some([low, high]), None, None],
-            generic: None,
-        }
+        Self::from_optional_words([None, Some([low, high]), None, None])
     }
     pub fn from_words(ia: [u64; 2], ib: [u64; 2], da: [u64; 2], db: [u64; 2]) -> Self {
+        Self::from_optional_words([Some(ia), Some(ib), Some(da), Some(db)])
+    }
+    /// Initialize this same fresh bank with explicit absent domains, never zero keys.
+    pub(crate) fn from_optional_words(words: [Option<[u64; 2]>; 4]) -> Self {
         Self {
-            words: [Some(ia), Some(ib), Some(da), Some(db)],
+            words,
             generic: None,
         }
     }
@@ -1065,3 +1066,20 @@ mod tests {
         Ok(())
     }
 }
+
+pub(crate) mod features;
+pub use features::UnsupportedInstructionProfile;
+
+pub(crate) mod lr_context;
+
+pub(crate) mod lr_instruction;
+
+pub(crate) mod lr_service;
+
+mod two_modifier;
+
+pub(crate) use two_modifier::ConfigurationError as TwoModifierError;
+
+pub(crate) mod lr_effects;
+
+pub(crate) mod conditional;

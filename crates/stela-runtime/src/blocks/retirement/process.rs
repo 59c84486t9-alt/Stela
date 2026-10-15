@@ -78,23 +78,35 @@ pub(crate) unsafe fn run_protected_services(
         .ok_or_else(|| anyhow::anyhow!("missing actual thread service owner"))?;
     // This bounded software machine has no asynchronous devices or injection
     // APIs. The exclusive registry loan spans construction, FFI and settlement.
+    let debug = DebugControls {
+        halted: false,
+        ignore_traps_in_debug: false,
+        halting_allowed: false,
+        edscr_tda: false,
+        os_locked: true,
+        breakpoint_count: 0,
+        watchpoint_count: 0,
+        raw_bank: 0,
+        effective_bank: 0,
+    };
     let execution = unsafe {
-        ProcessEntryControls::fresh_software(
-            ids.entry_profile()?,
-            ids.base_spe_absence()?,
-            0,
-            DebugControls {
-                halted: false,
-                ignore_traps_in_debug: false,
-                halting_allowed: false,
-                edscr_tda: false,
-                os_locked: true,
-                breakpoint_count: 0,
-                watchpoint_count: 0,
-                raw_bank: 0,
-                effective_bank: 0,
-            },
-        )
+        if system.pacm_state_feature() == crate::system::state::PacmStateFeature::Full {
+            ProcessEntryControls::fresh_software_link_register_pauth(
+                controls
+                    .identification_snapshot_owner()
+                    .ok_or_else(|| anyhow::anyhow!("missing original LR Snapshot allocation"))?,
+                ids.base_spe_absence()?,
+                0,
+                debug,
+            )
+        } else {
+            ProcessEntryControls::fresh_software(
+                ids.entry_profile()?,
+                ids.base_spe_absence()?,
+                0,
+                debug,
+            )
+        }
     }?;
     let mut producers = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
     let pending = producers

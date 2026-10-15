@@ -34,10 +34,15 @@ pub use source::SourceNormalWbDomain;
 mod low128;
 pub(crate) use low128::Low128ProcessMemoryAuthorization;
 pub use low128::PreparedLow128ProcessMemory;
+pub mod extended_controls;
 #[path = "process_memory/scalable.rs"]
 mod scalable;
 pub use scalable::ScalableExecutionError;
 
+pub(crate) const SCTLR_ENIA: u64 = 1 << 31;
+pub(crate) const SCTLR_ENIB: u64 = 1 << 30;
+pub(crate) const SCTLR_ENDA: u64 = 1 << 27;
+pub(crate) const SCTLR_ENDB: u64 = 1 << 13;
 const SCTLR_MMU_ENABLE: u64 = 1;
 const SCTLR_DATA_CACHE_ENABLE: u64 = 1 << 2;
 const SCTLR_NATIVE_NORMAL_WB: u64 = SCTLR_MMU_ENABLE | SCTLR_DATA_CACHE_ENABLE;
@@ -191,6 +196,7 @@ pub struct FixedProcessMemoryControls {
     tcr_el1: u64,
     lower_address: LowerAddressProfile,
     source: SourceNormalWbDomain,
+    extended: Option<extended_controls::ExtendedControlBank>,
 }
 
 impl FixedProcessMemoryControls {
@@ -233,6 +239,7 @@ impl FixedProcessMemoryControls {
             tcr_el1,
             lower_address,
             source,
+            extended: None,
         })
     }
 
@@ -258,6 +265,10 @@ impl FixedProcessMemoryControls {
 
     /// The same immutable source used at construction, if this scope has one.
     /// Legacy raw-ID construction intentionally supplies no scalable authority.
+    pub(crate) fn identification_snapshot_owner(&self) -> Option<&Arc<Snapshot>> {
+        self.identification.as_ref()
+    }
+
     pub fn identification_snapshot(&self) -> Option<&Snapshot> {
         self.identification.as_deref()
     }
@@ -394,7 +405,20 @@ impl FixedProcessMemoryControls {
                 pstate & PSTATE_MODE_MASK,
             ));
         }
-        let unsupported = pstate & !SOURCE_PSTATE_MASK;
+        let mut source_mask = SOURCE_PSTATE_MASK;
+        if system.pacm_state_feature() == crate::system::state::PacmStateFeature::Full {
+            let identification =
+                self.identification_snapshot()
+                    .ok_or(ProcessMemoryError::UnsupportedPstate(
+                        crate::system::state::PSTATE_PACM_MASK,
+                    ))?;
+            crate::pauth::features::LinkRegisterPauthCapability::from_profile(identification)
+                .map_err(|_| {
+                    ProcessMemoryError::UnsupportedPstate(crate::system::state::PSTATE_PACM_MASK)
+                })?;
+            source_mask |= crate::system::state::PSTATE_PACM_MASK;
+        }
+        let unsupported = pstate & !source_mask;
         if unsupported != 0 {
             return Err(ProcessMemoryError::UnsupportedPstate(unsupported));
         }

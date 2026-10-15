@@ -2107,6 +2107,17 @@ class SystemServiceProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             progress.validate_service_profiles(default, {default['id']: default})
 
+    def test_checked_process_profile_retains_distinct_abi_and_decode_features(self):
+        default, additional = self.contracts()
+        additional[progress.CHECKED_PROCESS_PROFILE] = {
+            'id': progress.CHECKED_PROCESS_PROFILE, 'compiler_mode': 'service',
+            'abi': progress.CHECKED_PROCESS_ABI, 'outside_scope': ['Unqualified runtime effects']}
+        profiles = progress.validate_service_profiles(default, additional)
+        self.assertEqual(profiles[progress.CHECKED_PROCESS_PROFILE]['abi'], progress.CHECKED_PROCESS_ABI)
+        self.assertNotEqual(progress.CHECKED_PROCESS_ABI, progress.CHECKED_MEMORY_ABI)
+        self.assertEqual(progress.SERVICE_DECODERS[progress.SYSTEM_PROFILE][0], progress.SYSTEM_DECODER_MATTRS)
+        self.assertEqual(progress.SERVICE_DECODERS[progress.CHECKED_PROCESS_PROFILE][0], ('+pauth-lr',))
+
     def test_mixed_service_rows_select_their_own_profile_without_new_lane(self):
         default, additional = self.contracts()
         registry = fixtures()

@@ -8,6 +8,10 @@ use super::pstate::{DAIF_MASK, MteFeature, NZCV_MASK, SP_SELECT_MASK, TCO_MASK};
 use crate::memory::tags::{TagGenerationControls, TagGenerationState, TagRandomization};
 use stela_compiler::GuestState;
 
+#[path = "state/pacm.rs"]
+mod pacm;
+pub use pacm::{PSTATE_PACM_MASK, PSTATE_PACM_SHIFT, Pacm, PacmStateFeature};
+
 pub const PSTATE_MODE_MASK: u64 = 0x1f;
 pub const PSTATE_EL_SHIFT: u32 = 2;
 pub const PSTATE_EL0T: u64 = 0;
@@ -31,6 +35,7 @@ pub enum StateError {
     El0StackSelection,
     ActiveSpEl0,
     UnsupportedMteProfile,
+    UnsupportedPacmProfile,
 }
 
 /// Architectural storage only. Register-specific write masks and use-time
@@ -148,6 +153,7 @@ pub struct SystemState {
     inactive_sp: u64,
     el1_registers: El1Registers,
     mte: Option<MteState>,
+    pacm_feature: PacmStateFeature,
 }
 
 impl SystemState {
@@ -157,7 +163,13 @@ impl SystemState {
         inactive_sp: u64,
         el1_registers: El1Registers,
     ) -> Result<Self, StateError> {
-        Self::checked(pstate_misc, inactive_sp, el1_registers, None)
+        Self::checked(
+            pstate_misc,
+            inactive_sp,
+            el1_registers,
+            None,
+            PacmStateFeature::Absent,
+        )
     }
 
     /// The authoritative CPU adapter supplies its existing MTE feature value.
@@ -173,7 +185,26 @@ impl SystemState {
         if feature != MteFeature::TwoOrLater {
             return Err(StateError::UnsupportedMteProfile);
         }
-        Self::checked(pstate_misc, inactive_sp, el1_registers, Some(mte))
+        Self::checked(
+            pstate_misc,
+            inactive_sp,
+            el1_registers,
+            Some(mte),
+            PacmStateFeature::Absent,
+        )
+    }
+
+    /// Explicit PACM storage for this original fresh SystemState. The actual PE
+    /// constructor supplies the initial value and same-Snapshot feature fact;
+    /// this does not infer a thread reset value or grant instruction authority.
+    /// Initial scope keeps MTE and BTI storage absent.
+    pub fn new_with_pacm(
+        pstate_misc: u64,
+        inactive_sp: u64,
+        el1_registers: El1Registers,
+        feature: PacmStateFeature,
+    ) -> Result<Self, StateError> {
+        Self::checked(pstate_misc, inactive_sp, el1_registers, None, feature)
     }
 
     fn checked(
@@ -181,13 +212,15 @@ impl SystemState {
         inactive_sp: u64,
         el1_registers: El1Registers,
         mte: Option<MteState>,
+        pacm_feature: PacmStateFeature,
     ) -> Result<Self, StateError> {
-        validate_misc(pstate_misc, mte.is_some())?;
+        validate_misc(pstate_misc, mte.is_some(), pacm_feature)?;
         Ok(Self {
             pstate_misc,
             inactive_sp,
             el1_registers,
             mte,
+            pacm_feature,
         })
     }
 
@@ -263,7 +296,7 @@ impl SystemState {
         psr: u64,
     ) -> Result<(), StateError> {
         let misc = psr & !NZCV_MASK;
-        validate_misc(misc, self.mte.is_some())?;
+        validate_misc(misc, self.mte.is_some(), self.pacm_feature)?;
         self.replace_misc(registers, misc);
         registers.nzcv = (psr & NZCV_MASK) as u32;
         Ok(())
@@ -288,6 +321,26 @@ impl SystemState {
     pub fn mte_mut(&mut self) -> Option<&mut MteState> {
         self.mte.as_mut()
     }
+    /// Storage capacity only; actual CPU/source/control permission is separate.
+    pub const fn pacm_state_feature(&self) -> PacmStateFeature {
+        self.pacm_feature
+    }
+
+    pub const fn pacm(&self) -> Pacm {
+        pacm::read(self.pstate_misc)
+    }
+
+    /// Apply a source-authorized PACM/reset/entry value to this same PSTATE owner.
+    /// The canonical Active/exception owner must validate the complete staged
+    /// effect before GPR/PC commits; this setter is not execution authority.
+    pub fn set_pacm(&mut self, value: Pacm) -> Result<(), StateError> {
+        if self.pacm_feature != PacmStateFeature::Full {
+            return Err(StateError::UnsupportedPacmProfile);
+        }
+        self.pstate_misc = (self.pstate_misc & !PSTATE_PACM_MASK) | value.pstate_bits();
+        Ok(())
+    }
+
     pub fn tag_check_override(&self) -> bool {
         self.pstate_misc & TCO_MASK != 0
     }
@@ -301,11 +354,17 @@ fn stack_bank(misc: u64) -> StackBank {
     }
 }
 
-fn validate_misc(misc: u64, mte: bool) -> Result<(), StateError> {
+fn validate_misc(misc: u64, mte: bool, pacm: PacmStateFeature) -> Result<(), StateError> {
     if misc & NZCV_MASK != 0 {
         return Err(StateError::FlagsInMiscPstate);
     }
-    let allowed = BASE_MISC_MASK | if mte { TCO_MASK } else { 0 };
+    let allowed = BASE_MISC_MASK
+        | if mte { TCO_MASK } else { 0 }
+        | if pacm == PacmStateFeature::Full {
+            PSTATE_PACM_MASK
+        } else {
+            0
+        };
     let unsupported = misc & !allowed;
     if unsupported != 0 {
         return Err(StateError::UnsupportedPstateBits(unsupported));
@@ -541,3 +600,7 @@ mod tests {
         assert_eq!(state.generation().seed, 11);
     }
 }
+
+#[cfg(test)]
+#[path = "state/pacm_tests.rs"]
+mod pacm_tests;

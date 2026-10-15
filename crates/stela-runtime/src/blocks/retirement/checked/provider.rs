@@ -3,8 +3,8 @@
 use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
 use super::super::software_async::NoAsyncSources;
 use super::NativeObservation;
-use super::low128_call;
 use super::source::{BoundSource, Helper};
+use super::{low128_call, pauth_lr};
 use crate::{
     blocks::{ClockEvent, PointerAuthenticationEvent, RunOutcome, ThreadRegisterEvent},
     clock,
@@ -14,11 +14,9 @@ use crate::{
     },
     pauth,
     system::{
-        debug::DebugControls,
         events::EventEndpoint,
         execution::{Boundary, Dispatcher, EntryBoundary, Failure},
         process_memory::{FixedProcessMemoryControls, PreparedProcessMemory},
-        profile::{BaseSpeAbsence, EntryProfile},
         scalable_controls::fp::FpControlOwner,
         state::SystemState,
     },
@@ -30,59 +28,7 @@ use stela_compiler::{
     context::{ExecutionContext, memory::MemoryRequirements},
 };
 
-const MDSCR_SOFTWARE_STEP: u64 = 1;
-const MDSCR_KERNEL_DEBUG_ENABLE: u64 = 1 << 13;
-const MDSCR_MONITOR_DEBUG_ENABLE: u64 = 1 << 15;
-const MDSCR_ACTIVE_DEBUG: u64 =
-    MDSCR_SOFTWARE_STEP | MDSCR_KERNEL_DEBUG_ENABLE | MDSCR_MONITOR_DEBUG_ENABLE;
-
-/// Actual immutable declaration for a NEW software PE's debug/control subset.
-/// EntryProfile has already proved the bounded optional features (including
-/// NMI) absent; BaseSpeAbsence covers branch-history effects separately.
-pub(crate) struct ProcessEntryControls {
-    _features: EntryProfile,
-    _spe: BaseSpeAbsence,
-    mdscr_el1: u64,
-    debug: DebugControls,
-}
-impl ProcessEntryControls {
-    /// # Safety
-    /// These are this fresh software PE's sole actual declared debug controls,
-    /// not readbacks copied from another mutable CPU. Retain this owner for the
-    /// executable PE lifetime. All producers belong to SoftwareAsyncDomain.
-    pub(crate) unsafe fn fresh_software(
-        features: EntryProfile,
-        spe: BaseSpeAbsence,
-        mdscr_el1: u64,
-        debug: DebugControls,
-    ) -> anyhow::Result<Self> {
-        let owner = Self {
-            _features: features,
-            _spe: spe,
-            mdscr_el1,
-            debug,
-        };
-        owner.check()?;
-        Ok(owner)
-    }
-    fn check(&self) -> anyhow::Result<()> {
-        let debug = self.debug;
-        anyhow::ensure!(
-            self.mdscr_el1 & MDSCR_ACTIVE_DEBUG == 0
-                && !debug.halted
-                && !debug.ignore_traps_in_debug
-                && !debug.halting_allowed
-                && !debug.edscr_tda
-                && debug.breakpoint_count == 0
-                && debug.watchpoint_count == 0
-                && debug.raw_bank == 0
-                && debug.effective_bank == 0,
-            "unsupported actual debug/step producer state"
-        );
-        Ok(())
-    }
-}
-
+use super::entry_controls::ProcessEntryControls;
 pub(crate) struct CheckedProcessOwner<'pe> {
     address_space: u64,
     controls: &'pe mut FixedProcessMemoryControls,
@@ -169,9 +115,18 @@ impl<'pe> CheckedProcessOwner<'pe> {
         bound: &BoundSource<'_>,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
         bound.recheck()?;
         self.check_resources()?;
+        self.execution
+            .check_snapshot(self.controls.identification_snapshot(), system)?;
+        if self.execution.link_register() {
+            anyhow::ensure!(
+                bound.trap().is_none(),
+                "LR trap/exception lifecycle is not admitted"
+            );
+        }
         anyhow::ensure!(
             bound.entry.address_space() == self.address_space,
             "source namespace differs"
@@ -181,13 +136,29 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 .controls
                 .identification_snapshot()
                 .ok_or_else(|| anyhow::anyhow!("PAuth identification owner unavailable"))?;
-            super::pauth_policy::qualify(
-                ids,
-                self.controls.sctlr_el1(),
-                self.controls.tcr_el1(),
-                self.pauth,
+            if matches!(
                 instruction.operation,
-            )?;
+                PointerAuthenticationOperation::LinkRegister(_)
+            ) || self.execution.link_register() && pauth_lr::conditional(instruction.operation)
+            {
+                let _service = pauth_lr::service(
+                    &*self.controls,
+                    self.pauth,
+                    system,
+                    registers,
+                    instruction,
+                    self.memory,
+                    outer,
+                )?;
+            } else {
+                super::pauth_policy::qualify(
+                    ids,
+                    self.controls.sctlr_el1(),
+                    self.controls.tcr_el1(),
+                    self.pauth,
+                    instruction.operation,
+                )?;
+            }
         }
         if bound.requirements.required_flags & stela_compiler::context::memory::flags::ASIMD != 0 {
             let fp = self
@@ -233,6 +204,7 @@ pub(crate) trait Owner: sealed::Concrete {
         bound: &BoundSource<'_>,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()>;
     fn invoke(
         &mut self,
@@ -245,6 +217,7 @@ pub(crate) trait Owner: sealed::Concrete {
         helper: &Helper,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: Option<&MemoryExecutionLoan>,
     ) -> HelperOutcome;
     fn complete_trap(
         &mut self,
@@ -258,6 +231,7 @@ pub(crate) trait Owner: sealed::Concrete {
         bound: &BoundSource<'_>,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()>;
 }
 
@@ -272,8 +246,9 @@ impl Owner for CheckedProcessOwner<'_> {
         bound: &BoundSource<'_>,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        self.qualify_current_resources(bound, system, registers)?;
+        self.qualify_current_resources(bound, system, registers, outer)?;
         // Pointer operands may be produced by the ordinary prefix (including
         // loaded LR/SP). They are qualified only at the actual source-validated
         // helper boundary, after the canonical consumer settles that prefix.
@@ -387,8 +362,9 @@ impl Owner for CheckedProcessOwner<'_> {
     fn complete_helper(
         &mut self,
         helper: &Helper,
-        _system: &SystemState,
+        system: &SystemState,
         registers: &mut GuestState,
+        outer: Option<&MemoryExecutionLoan>,
     ) -> HelperOutcome {
         // Actual terminal PC was already stored by the consumer, which retains
         // it exclusively; this provider receives no PC/authority accessor.
@@ -397,6 +373,41 @@ impl Owner for CheckedProcessOwner<'_> {
         }
         match helper {
             Helper::Pauth(instruction) => {
+                if matches!(
+                    instruction.operation,
+                    PointerAuthenticationOperation::LinkRegister(_)
+                ) || self.execution.link_register()
+                    && pauth_lr::conditional(instruction.operation)
+                {
+                    let prepared = (|| -> anyhow::Result<pauth_lr::Prepared> {
+                        let outer = outer.ok_or_else(|| {
+                            anyhow::anyhow!("actual LR outer exclusion unavailable")
+                        })?;
+                        let service = pauth_lr::service(
+                            &*self.controls,
+                            self.pauth,
+                            system,
+                            registers,
+                            *instruction,
+                            self.memory,
+                            outer,
+                        )?;
+                        pauth_lr::prepare(*instruction, &service)
+                    })();
+                    return match prepared {
+                        Ok(pauth_lr::Prepared::Effect(effect)) => HelperOutcome::PreparedPauth {
+                            instruction: *instruction,
+                            effect,
+                        },
+                        Ok(pauth_lr::Prepared::AuthenticationFault { code }) => {
+                            HelperOutcome::AuthenticationFault {
+                                instruction: *instruction,
+                                code,
+                            }
+                        }
+                        Err(error) => HelperOutcome::NoEffect(error),
+                    };
+                }
                 if let Err(error) =
                     super::pauth_policy::qualify_pointer(instruction.operation, registers)
                 {
@@ -483,13 +494,14 @@ impl Owner for CheckedProcessOwner<'_> {
         bound: &BoundSource<'_>,
         system: &SystemState,
         registers: &mut GuestState,
+        outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
         // This is an actual exhaustive registry lease, not an empty queue test
         // or successful pending-delivery stub. Any registered producer fails.
         // A completed helper has changed its operand (for example, signing
         // LR). Revalidate current resources without treating that output as
         // the original input to a second helper invocation.
-        self.qualify_current_resources(bound, system, registers)
+        self.qualify_current_resources(bound, system, registers, outer)
     }
 }
 
@@ -568,6 +580,14 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
 }
 
 pub(crate) enum HelperOutcome {
+    PreparedPauth {
+        instruction: stela_compiler::block::PointerAuthentication,
+        effect: pauth_lr::PreparedEffect,
+    },
+    AuthenticationFault {
+        instruction: stela_compiler::block::PointerAuthentication,
+        code: u8,
+    },
     NoEffect(anyhow::Error),
     Complete {
         continuation: GuestAddress,

@@ -1,7 +1,7 @@
 //! Source-resolved ARM memory attributes for one exact domain generation.
 //! Native storage eligibility is validated separately by the existing domain.
 
-use crate::memory::domain::{DataPolicy, MemoryDomain, MemoryThread};
+use crate::memory::domain::{DataPolicy, MemoryDomain, MemoryExecutionLoan, MemoryThread};
 use std::sync::Arc;
 use stela_compiler::context::memory::MemoryStatus;
 
@@ -57,6 +57,19 @@ impl SourceNormalWbDomain {
 
     pub(super) fn is_current(&self) -> Result<bool, MemoryStatus> {
         Ok(self.domain.generation()? == self.generation)
+    }
+
+    /// Validate this original source generation while its actual counted domain
+    /// pin remains borrowed. No new pin or PE/thread identity is created.
+    pub(super) fn check_current_execution<P: DataPolicy>(
+        &self,
+        thread: &MemoryThread<P>,
+        execution: &MemoryExecutionLoan,
+    ) -> Result<(), MemoryStatus> {
+        if !self.matches(thread) || !execution.belongs_to(&self.domain) {
+            return Err(MemoryStatus::Domain);
+        }
+        Ok(())
     }
 
     pub(super) fn matches<P: DataPolicy>(&self, thread: &MemoryThread<P>) -> bool {

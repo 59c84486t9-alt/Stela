@@ -3,7 +3,9 @@
 
 mod darwin_services;
 mod diagnostics;
+mod entry_controls;
 mod low128_call;
+mod pauth_lr;
 mod pauth_policy;
 mod provider;
 mod source;
@@ -13,7 +15,8 @@ use crate::{
     blocks::{BlockRuntime, RunOutcome, StopReason},
     memory::domain::MemoryExecutionLoan,
 };
-pub(crate) use provider::{CheckedProcessOwner, ProcessEntryControls};
+pub(crate) use entry_controls::ProcessEntryControls;
+pub(crate) use provider::CheckedProcessOwner;
 use source::{BoundSource, ReturnedTerminal};
 use stela_compiler::GuestAddress;
 
@@ -27,6 +30,10 @@ pub(crate) enum OwnedStop {
     BudgetExhausted,
     EntryDeclined(String),
     HelperRefused(String),
+    PointerAuthenticationFault {
+        instruction: stela_compiler::block::PointerAuthentication,
+        code: u8,
+    },
     PointerAuthenticationPoisonedTransfer {
         instruction: stela_compiler::block::PointerAuthentication,
         target: GuestAddress,
@@ -171,9 +178,9 @@ impl BlockRuntime {
                 Ok(bound) => bound,
                 Err(error) => break OwnedStop::EntryDeclined(error.to_string()),
             };
-            if let Err(error) = pe
-                .backend
-                .qualify(&bound, pe.system, &mut pe.thread.registers)
+            if let Err(error) =
+                pe.backend
+                    .qualify(&bound, pe.system, &mut pe.thread.registers, &outer)
             {
                 break OwnedStop::EntryDeclined(error.to_string());
             }
@@ -345,6 +352,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             bound,
                             self.pe.system,
                             &mut self.pe.thread.registers,
+                            self.outer.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!("actual outer exclusion unavailable")
+                            })?,
                         )?;
                         self.finish_retirement(false)?;
                         Ok(None)
@@ -366,6 +376,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             &helper,
                             self.pe.system,
                             &mut self.pe.thread.registers,
+                            self.outer.as_ref(),
                         );
                         use provider::HelperOutcome;
                         match outcome {
@@ -375,6 +386,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     bound,
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("actual outer exclusion unavailable")
+                                    })?,
                                 )?;
                                 anyhow::ensure!(
                                     self.pe.thread.pc == helper.pc()
@@ -391,6 +405,69 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 Ok(Some(OwnedStop::HelperRefused(error.to_string())))
                             }
                             HelperOutcome::Indeterminate(error) => Err(error),
+                            HelperOutcome::PreparedPauth {
+                                instruction,
+                                effect,
+                            } => {
+                                effect.validate(self.pe.system)?;
+                                let continuation = effect.continuation();
+                                let authenticated = effect.authenticated();
+                                self.pe
+                                    .authority
+                                    .start_retirement(&ConsumerKey(()), self.attempt)
+                                    .map_err(|()| {
+                                        anyhow::anyhow!("LR retirement authority failed")
+                                    })?;
+                                effect.commit(&mut self.pe.thread.registers, self.pe.system)?;
+                                // A staged candidate becomes an actual service observation only after commit.
+                                accounting.pointer_authentication_events.push(
+                                    crate::blocks::PointerAuthenticationEvent {
+                                        instruction,
+                                        next_pc: continuation,
+                                        authenticated,
+                                    },
+                                );
+                                self.pe.thread.pc = continuation;
+                                self.ensure_outer()?;
+                                self.pe.backend.post_retirement(
+                                    bound,
+                                    self.pe.system,
+                                    &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("actual LR outer unavailable")
+                                    })?,
+                                )?;
+                                self.finish_retirement(false)?;
+                                Ok(None)
+                            }
+                            HelperOutcome::AuthenticationFault { instruction, code } => {
+                                // Precise no-commit fault. No exception owner or destination/link write is fabricated.
+                                anyhow::ensure!(
+                                    self.pe.thread.pc == instruction.instruction_pc,
+                                    "LR fault lost actual PC"
+                                );
+                                self.pe
+                                    .authority
+                                    .start_retirement(&ConsumerKey(()), self.attempt)
+                                    .map_err(|()| {
+                                        anyhow::anyhow!("LR fault settlement authority failed")
+                                    })?;
+                                self.ensure_outer()?;
+                                self.pe.backend.post_retirement(
+                                    bound,
+                                    self.pe.system,
+                                    &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("actual LR outer unavailable")
+                                    })?,
+                                )?;
+                                self.finish_retirement(true)?;
+                                Ok(Some(OwnedStop::PointerAuthenticationFault {
+                                    instruction,
+                                    code,
+                                }))
+                            }
+
                             HelperOutcome::Complete {
                                 continuation,
                                 event,
@@ -412,6 +489,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     bound,
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("actual outer exclusion unavailable")
+                                    })?,
                                 )?;
                                 self.finish_retirement(poisoned_transfer.is_some())?;
                                 Ok(poisoned_transfer.map(|(instruction, target)| {
@@ -455,6 +535,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 bound,
                                 self.pe.system,
                                 &mut self.pe.thread.registers,
+                                self.outer.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("actual outer exclusion unavailable")
+                                })?,
                             )?;
                             self.finish_retirement(false)?;
                             Ok(None)
@@ -474,9 +557,14 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             self.pe.thread.pc == bound.entry.entry(),
             "entry refusal changed actual PC"
         );
-        self.pe
-            .backend
-            .qualify(bound, self.pe.system, &mut self.pe.thread.registers)?;
+        self.pe.backend.qualify(
+            bound,
+            self.pe.system,
+            &mut self.pe.thread.registers,
+            self.outer
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("actual outer exclusion unavailable"))?,
+        )?;
         self.pe
             .authority
             .finish_native_refusal(&ConsumerKey(()), self.attempt)

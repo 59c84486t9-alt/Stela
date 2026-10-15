@@ -50,6 +50,10 @@ pub(super) enum ReturnedTerminal {
 }
 
 impl<'code> BoundSource<'code> {
+    pub(super) fn trap(&self) -> Option<SynchronousTrap> {
+        self.analysis.trap
+    }
+
     pub(super) fn pauth(&self) -> Option<PointerAuthentication> {
         self.analysis.pointer_authentication
     }

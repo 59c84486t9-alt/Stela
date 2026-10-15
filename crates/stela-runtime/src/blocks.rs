@@ -1569,7 +1569,31 @@ fn complete_pauth_with_memory(
     memory: Option<&mut AuthenticatedMemory<'_>>,
 ) -> Result<(GuestAddress, Option<bool>)> {
     use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
+    const HINT_POINTER_REGISTER: usize = 17;
+    const HINT_MODIFIER_REGISTER: usize = 16;
     match instruction.operation {
+        PointerAuthenticationOperation::LinkRegister(_) => {
+            anyhow::bail!("link-register authentication requires actual retained LR owners")
+        }
+        PointerAuthenticationOperation::Sign1716 { key } => {
+            let value = context.sign(
+                runtime_pauth_key(key),
+                registers.x[HINT_POINTER_REGISTER],
+                registers.x[HINT_MODIFIER_REGISTER],
+            )?;
+            registers.x[HINT_POINTER_REGISTER] = value;
+            Ok((instruction.next_pc, None))
+        }
+        PointerAuthenticationOperation::Authenticate1716 { key } => {
+            let result = context.authenticate_operation(
+                runtime_pauth_key(key),
+                registers.x[HINT_POINTER_REGISTER],
+                registers.x[HINT_MODIFIER_REGISTER],
+                false,
+            )?;
+            registers.x[HINT_POINTER_REGISTER] = result.pointer;
+            Ok((instruction.next_pc, Some(result.authenticated)))
+        }
         PointerAuthenticationOperation::SignIbSp => {
             let signed = context.sign_ib(registers.x[30], registers.sp)?;
             registers.x[30] = signed;

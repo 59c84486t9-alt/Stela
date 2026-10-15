@@ -2,7 +2,11 @@
 //! and SCTLR/TCR bank. No key copies, alternate policy or completion authority.
 use crate::{
     pauth,
-    system::{identification::Register, identification_snapshot::Snapshot},
+    system::{
+        identification::Register,
+        identification_snapshot::Snapshot,
+        process_memory::{SCTLR_ENDA, SCTLR_ENDB, SCTLR_ENIA, SCTLR_ENIB},
+    },
 };
 use stela_compiler::block::{
     PointerAuthenticationKey as Key, PointerAuthenticationOperation as Op,
@@ -20,10 +24,6 @@ const TCR_TBI0: u64 = 1 << 37;
 const TCR_TBI1: u64 = 1 << 38;
 const TCR_TBID0: u64 = 1 << 51;
 const TCR_TBID1: u64 = 1 << 52;
-const SCTLR_ENIA: u64 = 1 << 31;
-const SCTLR_ENIB: u64 = 1 << 30;
-const SCTLR_ENDA: u64 = 1 << 27;
-const SCTLR_ENDB: u64 = 1 << 13;
 
 pub(super) fn qualify(
     ids: &Snapshot,
@@ -42,7 +42,11 @@ pub(super) fn qualify(
     let version = match tuple {
         (APA_QARMA5_CLASSIC, 0, 0) => pauth::Version::Classic,
         (APA_QARMA5_FAULTING_COMBINED, 0, 0) => pauth::Version::FaultingCombined,
-        _ => anyhow::bail!("unsupported actual PAuth algorithm tuple"),
+        _ => {
+            pauth::features::LinkRegisterPauthCapability::from_profile(ids)
+                .map_err(|error| anyhow::anyhow!("actual LR tuple: {error:?}"))?;
+            pauth::Version::FaultingCombined
+        }
     };
     anyhow::ensure!(
         context.version() == version,
@@ -97,11 +101,14 @@ pub(super) fn qualify_pointer(
     registers: &stela_compiler::GuestState,
 ) -> anyhow::Result<()> {
     const LINK_REGISTER: u8 = 30;
+    const HINT_POINTER_REGISTER: u8 = 17;
     const ZERO_REGISTER: u8 = 31;
     const UPPER_REGION: u64 = 1 << 55;
     const VA47_ADDRESS_MASK: u64 = (1 << 47) - 1;
     let register = match operation {
         Op::SignIbSp | Op::AuthenticateIbSp | Op::ReturnIbSp | Op::ReturnIaSp => LINK_REGISTER,
+        Op::Sign1716 { .. } | Op::Authenticate1716 { .. } => HINT_POINTER_REGISTER,
+        Op::LinkRegister(_) => anyhow::bail!("LR operands require actual borrowed control service"),
         Op::Sign { destination, .. }
         | Op::Authenticate { destination, .. }
         | Op::Strip { destination, .. } => destination,
@@ -120,7 +127,10 @@ pub(super) fn qualify_pointer(
         pointer & UPPER_REGION == 0,
         "upper-region PAuth inputs are unsupported"
     );
-    if matches!(operation, Op::SignIbSp | Op::Sign { .. }) {
+    if matches!(
+        operation,
+        Op::SignIbSp | Op::Sign1716 { .. } | Op::Sign { .. }
+    ) {
         anyhow::ensure!(
             pointer & !VA47_ADDRESS_MASK == 0,
             "noncanonical lower signing input is unsupported"

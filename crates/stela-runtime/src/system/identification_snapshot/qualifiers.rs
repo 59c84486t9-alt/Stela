@@ -170,10 +170,9 @@ impl Snapshot {
         self.check_fixed_exception_levels()
     }
 
-    /// Derive the existing bounded entry token from these exact raw IDs. This
-    /// accepts only no-SVE/no-SME and the reviewed absent optional-entry effects.
-    /// It is not a whole CPU-validity check or an instruction-feature allowlist.
-    pub fn entry_profile(&self) -> Result<EntryProfile, Unsupported> {
+    /// Actual fixed-EL optional-effect facts except PAuth_LR. This creates no
+    /// entry grant and makes no claim that PAuth_LR is absent or implemented.
+    pub(crate) fn non_pauth_entry_absence(&self) -> Result<ScalableEntryAbsence, Unsupported> {
         self.check_fixed_exception_levels()?;
         for &field in REQUIRED_ABSENCES {
             self.require_zero(field)?;
@@ -191,6 +190,16 @@ impl Snapshot {
                 value: ras,
             });
         }
+        ScalableEntryAbsence::from_id_registers(
+            self.read(Register::IdAa64Pfr0El1)?,
+            self.read(Register::IdAa64Pfr1El1)?,
+        )
+        .map_err(Unsupported::EntryProfile)
+    }
+
+    /// Derive the existing bounded exception entry token, including LR absence.
+    pub fn entry_profile(&self) -> Result<EntryProfile, Unsupported> {
+        let scalable = self.non_pauth_entry_absence()?;
         let isar1 = self.read(Register::IdAa64Isar1El1)?;
         let isar2 = self.read(Register::IdAa64Isar2El1)?;
         let apa = ((isar1 >> APA_SHIFT) & FIELD_MASK) as u8;
@@ -207,11 +216,6 @@ impl Snapshot {
         ) {
             return Err(Unsupported::PauthLrTuple { apa, api, apa3 });
         }
-        let scalable = ScalableEntryAbsence::from_id_registers(
-            self.read(Register::IdAa64Pfr0El1)?,
-            self.read(Register::IdAa64Pfr1El1)?,
-        )
-        .map_err(Unsupported::EntryProfile)?;
         // Primary MTE=0 is the absence fact. MTE_frac/MTEX are invalid under that
         // primary value and are not interpreted as independent absence claims.
         EntryProfile::base(SystemEntryFeatures::declared_absent(), scalable)

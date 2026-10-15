@@ -177,6 +177,7 @@
     "crates/stela-compiler/src/x86_64/simd/memory_checked/tests.rs",
     "crates/stela-compiler/src/block/thread.rs",
     "crates/stela-compiler/src/block/pauth_memory.rs",
+    "crates/stela-compiler/src/block/pauth_lr.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
     "crates/stela-compiler/src/aarch64/bitfield.rs",
     "crates/stela-compiler/src/x86_64/bitfield.rs",
@@ -420,6 +421,20 @@
         "Debug register bank, raw producer, alternate PE/provider or fabricated native permission"
       ]
     }
+  ,
+    "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1": {
+      "id": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "compiler_mode": "service",
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "description": "Fresh retained EL0 NormalWB/SA0-off checked process with same-Snapshot APA6/PACM2, explicit Full PACM, actual key/control/outer owner and canonical source-validated staged effects. Each reviewed form declares its admitted scope; this profile alone grants no instruction.",
+      "outside_scope": [
+        "EL1/EL2/EL3, exceptions/traps/services/exception return or architectural fault delivery in LR-present scope",
+        "BTI/GCS/BRBE/SPE/debug/CONSTPACFIELD-present effects, unknown extended controls or inferred key/control/PACM state",
+        "Enabled signing of noncanonical lower-VA47 inputs; native pointer or guest feature adoption without qualification",
+        "Feature-absent guest HINT/UNDEF execution outside the declared LR-present profile, full process/OS/boot acceptance",
+        "Physical LR-capable Apple original execution or performance equivalence; model qualification is explicitly derived"
+      ]
+    }
   },
   "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
   "evidence_groups": {
@@ -624,6 +639,74 @@
         "crates/stela-runtime/src/memory/domain.rs",
         "crates/stela-runtime/src/memory/monitor.rs"
       ]
+    }
+  ,
+    "checked_pauth_lr17_current": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/macos/retained-pauth-lr-1/native_gate_2.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/macos/retained-pauth-lr-1/evidence-1.json",
+      "kind": "retained_lr_present_model_native_v1",
+      "comparison_field": "full_state_model_comparisons",
+      "required_positive_counts": [
+        "full_state_model_comparisons",
+        "typed_authentication_faults",
+        "blocked_retry_checks",
+        "qualification_controls",
+        "actual_native_entries",
+        "prepared_entry_declines",
+        "complete_body_transfers"
+      ],
+      "required_measurements": {
+        "canonical_forms": 17,
+        "full_state_model_comparisons": 103,
+        "typed_authentication_faults": 20,
+        "blocked_retry_checks": 20,
+        "qualification_controls": 21,
+        "actual_native_entries": 105,
+        "prepared_entry_declines": 19,
+        "complete_body_transfers": 124,
+        "fresh_original_executions": 0
+      },
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/diagnostics.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/entry_controls/tests.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/entry_controls.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr/tests.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_policy.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/process.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/memory/domain/lifecycle.rs",
+        "crates/stela-runtime/src/pauth/conditional.rs",
+        "crates/stela-runtime/src/pauth/features/lr_tests.rs",
+        "crates/stela-runtime/src/pauth/features.rs",
+        "crates/stela-runtime/src/pauth/lr_context/tests.rs",
+        "crates/stela-runtime/src/pauth/lr_context.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_service.rs",
+        "crates/stela-runtime/src/pauth/pauth_lr_tests.rs",
+        "crates/stela-runtime/src/pauth/two_modifier/tests.rs",
+        "crates/stela-runtime/src/pauth/two_modifier.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/system/identification_snapshot/qualifiers.rs",
+        "crates/stela-runtime/src/system/process_memory/extended_controls/tests.rs",
+        "crates/stela-runtime/src/system/process_memory/extended_controls.rs",
+        "crates/stela-runtime/src/system/process_memory/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/system/state/pacm.rs",
+        "crates/stela-runtime/src/system/state/pacm_tests.rs",
+        "crates/stela-runtime/src/system/state.rs"
+      ],
+      "review_status": "Independent actual source/native/state/body/CLI review passed; exact publication metadata approval follows.",
+      "limits": "Derived June-source model, not physical-original LR execution. Actual host-native body target and baseline emission are separate. Typed precise fault stop and blocked retry are not guest exception delivery. PACM feature-absent HINT is an architectural contract/model control, not execution admitted by this LR-present profile."
     }
   },
   "forms": [
@@ -3871,6 +3954,670 @@
             "stxr"
           ],
           "consumed_source_bytes": 8
+        }
+      ]
+    }
+  ,
+    {
+      "id": "AUTIA171615_64LR_dp_1src",
+      "mnemonic": "AUTIA171615",
+      "category": "base_integer_system",
+      "source_file": "autia171615.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac1bbfe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "4588e0a9fe14037b502499b0a06b084d3c7f1678f595e4224c4f300bd5e3ff89",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier X17 instruction-key operation reads original X16 and X15 before any destination effect, regardless of PACM. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1bbfe",
+          "expected_mnemonics": [
+            "autia171615"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "AUTIASPPCR_64LRR_dp_1src",
+      "mnemonic": "AUTIASPPCR",
+      "category": "base_integer_system",
+      "source_file": "autiasppcr.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xdac1901e",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "fe00822a1b315c1f230fc4359ae9fb04fd454d67d5041988215e3a5e29a8248c",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier authenticate of original X30 with original SP and original Xn (Rn31 is XZR), snapshot before alias writes. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1901e",
+          "expected_mnemonics": [
+            "autiasppcr"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "AUTIASPPC_only_dp_1src_imm",
+      "mnemonic": "AUTIASPPC",
+      "category": "base_integer_system",
+      "source_file": "autiasppc_imm.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xf380001f",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "22cda57d0c70c85fda0f230bace9bf4f0873e57fd07b99747e2db89d6b86fbdb",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier authenticate of original X30 with original SP and source PC minus unsigned imm16 shifted by two, with 64-bit wrapping. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xf380001f",
+          "expected_mnemonics": [
+            "autiasppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "AUTIB171615_64LR_dp_1src",
+      "mnemonic": "AUTIB171615",
+      "category": "base_integer_system",
+      "source_file": "autib171615.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac1bffe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "9737f4a45fc2f541e56eab912b043481097f5ae4208516336ccbc517edad6a06",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier X17 instruction-key operation reads original X16 and X15 before any destination effect, regardless of PACM. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1bffe",
+          "expected_mnemonics": [
+            "autib171615"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "AUTIBSPPCR_64LRR_dp_1src",
+      "mnemonic": "AUTIBSPPCR",
+      "category": "base_integer_system",
+      "source_file": "autibsppcr.xml",
+      "encoding_mask": "0xfffffc1f",
+      "encoding_value": "0xdac1941e",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "9784102b8c5bfd1d845b861ebda9b135ab0fc2735b623c383c3c3cba736c7f1a",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier authenticate of original X30 with original SP and original Xn (Rn31 is XZR), snapshot before alias writes. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1941e",
+          "expected_mnemonics": [
+            "autibsppcr"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "AUTIBSPPC_only_dp_1src_imm",
+      "mnemonic": "AUTIBSPPC",
+      "category": "base_integer_system",
+      "source_file": "autibsppc_imm.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xf3a0001f",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "64c27883603eeaff0d32886ca3392a5520b78c395fb5db1dd14176d28175c6f2",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier authenticate of original X30 with original SP and source PC minus unsigned imm16 shifted by two, with 64-bit wrapping. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xf3a0001f",
+          "expected_mnemonics": [
+            "autibsppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACIA171615_64LR_dp_1src",
+      "mnemonic": "PACIA171615",
+      "category": "base_integer_system",
+      "source_file": "pacia171615.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac18bfe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "abfb676b79985ec228d1bf58b43a8fab3899da3ebd776f9b13a32ff8e125eb14",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier X17 instruction-key operation reads original X16 and X15 before any destination effect, regardless of PACM. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac18bfe",
+          "expected_mnemonics": [
+            "pacia171615"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACIASPPC_64LR_dp_1src",
+      "mnemonic": "PACIASPPC",
+      "category": "base_integer_system",
+      "source_file": "paciasppc.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac1a3fe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "c46d8fd1e05d607e394524be87a22549002280fe08157863f10a242b2bbd8112",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier sign of original X30 with original SP and the exact source instruction PC, regardless of PACM; PACNB variants retain their source-defined absence of implicit BTI. Enabled noncanonical lower-VA47 signing refuses before mutation. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1a3fe",
+          "expected_mnemonics": [
+            "paciasppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACIB171615_64LR_dp_1src",
+      "mnemonic": "PACIB171615",
+      "category": "base_integer_system",
+      "source_file": "pacib171615.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac18ffe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "eaf33ece2143c805782301c3540df8ccc1ccb90d612f4b60374ff12b068e54c3",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier X17 instruction-key operation reads original X16 and X15 before any destination effect, regardless of PACM. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac18ffe",
+          "expected_mnemonics": [
+            "pacib171615"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACIBSPPC_64LR_dp_1src",
+      "mnemonic": "PACIBSPPC",
+      "category": "base_integer_system",
+      "source_file": "pacibsppc.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac1a7fe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "575d49b8a6b70c5608e9895bd742bde9afd8c922202bfd6fa999397c9a807426",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier sign of original X30 with original SP and the exact source instruction PC, regardless of PACM; PACNB variants retain their source-defined absence of implicit BTI. Enabled noncanonical lower-VA47 signing refuses before mutation. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac1a7fe",
+          "expected_mnemonics": [
+            "pacibsppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACM_HI_hints",
+      "mnemonic": "PACM",
+      "category": "base_integer_system",
+      "source_file": "pacm.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50324ff",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "529f835713acb47ec9848acc6a426c3cd8a930f6275a7ea2606ae40146ecac20",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Actual EL0 EnPACM0 sets or clears the sole PSTATE.PACM bit; no GPR or NZCV change. Feature-absent PACM is architecturally HINT NOP, retained as source/model control; the bounded LR-present process refuses unavailable storage/profile before entry. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xd50324ff",
+          "expected_mnemonics": [
+            "hint"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACNBIASPPC_64LR_dp_1src",
+      "mnemonic": "PACNBIASPPC",
+      "category": "base_integer_system",
+      "source_file": "pacnbiasppc.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac183fe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "6d541827f64074416bdf663f8f5d7f885e370d760a3ddc62d5ff026202feefad",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier sign of original X30 with original SP and the exact source instruction PC, regardless of PACM; PACNB variants retain their source-defined absence of implicit BTI. Enabled noncanonical lower-VA47 signing refuses before mutation. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac183fe",
+          "expected_mnemonics": [
+            "pacnbiasppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "PACNBIBSPPC_64LR_dp_1src",
+      "mnemonic": "PACNBIBSPPC",
+      "category": "base_integer_system",
+      "source_file": "pacnbibsppc.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xdac187fe",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "ef8fd66c3a9f627522bee17e3458096b8ea211fea8e776e954029c02e4de0ba4",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier sign of original X30 with original SP and the exact source instruction PC, regardless of PACM; PACNB variants retain their source-defined absence of implicit BTI. Enabled noncanonical lower-VA47 signing refuses before mutation. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xdac187fe",
+          "expected_mnemonics": [
+            "pacnbibsppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "RETAASPPCR_64M_branch_reg",
+      "mnemonic": "RETAASPPCR",
+      "category": "base_integer_system",
+      "source_file": "retasppcr_reg.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xd65f0be0",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "73d14d5cd061001e7286dff689732e203819b67150becef5d1140faa8444f8fa",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier return authenticates original X30 into a temporary branch target with original SP and original Xn; Rm31 belongs to legacy RETAA/RETAB and is excluded from this form. Signed X30 is preserved; BTI/GCS/BRBE effects are absent in the bounded profile. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xd65f0be0",
+          "expected_mnemonics": [
+            "retaasppcr"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "RETAASPPC_only_miscbranch",
+      "mnemonic": "RETAASPPC",
+      "category": "base_integer_system",
+      "source_file": "retasppc_imm.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0x5500001f",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "83b0f6c869061b4eabc0e859d5d2d879d79c4f21e88d74215e9c5a3cd7a41e6a",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier return authenticates original X30 into a temporary branch target with original SP and source PC minus unsigned imm16 shifted by two, with 64-bit wrapping. Signed X30 is preserved; BTI/GCS/BRBE effects are absent in the bounded profile. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0x5500001f",
+          "expected_mnemonics": [
+            "retaasppc"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "RETABSPPCR_64M_branch_reg",
+      "mnemonic": "RETABSPPCR",
+      "category": "base_integer_system",
+      "source_file": "retasppcr_reg.xml",
+      "encoding_mask": "0xffffffe0",
+      "encoding_value": "0xd65f0fe0",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "73d14d5cd061001e7286dff689732e203819b67150becef5d1140faa8444f8fa",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier return authenticates original X30 into a temporary branch target with original SP and original Xn; Rm31 belongs to legacy RETAA/RETAB and is excluded from this form. Signed X30 is preserved; BTI/GCS/BRBE effects are absent in the bounded profile. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0xd65f0fe0",
+          "expected_mnemonics": [
+            "retabsppcr"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "RETABSPPC_only_miscbranch",
+      "mnemonic": "RETABSPPC",
+      "category": "base_integer_system",
+      "source_file": "retasppc_imm.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0x5520001f",
+      "features": [
+        {
+          "feature": "FEAT_PAuth_LR",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "83b0f6c869061b4eabc0e859d5d2d879d79c4f21e88d74215e9c5a3cd7a41e6a",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1",
+      "status": "implemented",
+      "review": "Reviewed canonical same-owner LR source, actual103 full-State model/native matches,20 precise faults/blocked retries,21 controls and current124 complete-body/ABI/source-map transfer; pinned source/model oracle limits retained.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_lr.rs",
+        "crates/stela-runtime/src/pauth/lr_instruction.rs",
+        "crates/stela-runtime/src/pauth/lr_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/pauth_lr.rs"
+      ],
+      "evidence_groups": [
+        "checked_pauth_lr17_current"
+      ],
+      "scope": "Explicit two-modifier return authenticates original X30 into a temporary branch target with original SP and source PC minus unsigned imm16 shifted by two, with 64-bit wrapping. Signed X30 is preserved; BTI/GCS/BRBE effects are absent in the bounded profile. Fresh declared EL0 APA6/PACM2, Full PACM, lower-VA47 instruction TBI off, sole same-Snapshot keys/controls and original outer loan; selected-key disable bypass precedes lookup/canonicalization. Canonical Active stages effects and commits PC once; enabled authentication fault preserves destination/link/PACM/PC and blocks re-entry. NZCV/FP/RAM are preserved. Derived model/native evidence only; no physical Apple original or exception-delivery claim. ",
+      "smoke_samples": [
+        {
+          "word": "0x5520001f",
+          "expected_mnemonics": [
+            "retabsppc"
+          ],
+          "consumed_source_bytes": 4
         }
       ]
     }

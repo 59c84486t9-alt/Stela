@@ -171,6 +171,9 @@ enum Command {
         /// Prepare checked GPR memory with SA0 disabled; no CPU/native entry is supplied.
         #[arg(long, conflicts_with_all = ["system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
         checked_memory_sa0_off: bool,
+        /// Prepare checked memory plus PAuth/clock/TSD exits with SA0 disabled; no native entry.
+        #[arg(long, conflicts_with_all = ["checked_memory_sa0_off", "system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
+        checked_process_sa0_off: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
@@ -1516,8 +1519,13 @@ fn run() -> Result<()> {
             thread_registers,
             system_boundaries,
             checked_memory_sa0_off,
+            checked_process_sa0_off,
         } => {
-            let profile = if checked_memory_sa0_off {
+            let profile = if checked_process_sa0_off {
+                stela_compiler::block::BlockProfile::CheckedMemoryPauthClockThread(
+                    stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
+                )
+            } else if checked_memory_sa0_off {
                 stela_compiler::block::BlockProfile::CheckedMemory(
                     stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
                 )
@@ -1541,7 +1549,7 @@ fn run() -> Result<()> {
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-            let checked_plan = if checked_memory_sa0_off {
+            let checked_plan = if checked_memory_sa0_off || checked_process_sa0_off {
                 Some(stela_compiler::block::CompilationPlan::new(
                     window,
                     stela_compiler::GuestAddress(guest_base),
