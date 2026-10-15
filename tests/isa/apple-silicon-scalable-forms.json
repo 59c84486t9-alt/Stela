@@ -39,6 +39,7 @@
     "crates/stela-compiler/src/aarch64/scalable/profile.rs",
     "crates/stela-compiler/src/aarch64/sve.rs",
     "crates/stela-compiler/src/aarch64/sve/dot.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
@@ -54,6 +55,7 @@
     "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_logic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products.rs",
@@ -454,6 +456,28 @@
         "legacy_declines": 25,
         "reserved_declines": 26,
         "state_bytes": 784
+      }
+    }
+  ,
+    "streaming_floating_copy": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sve-floating/floating-copy/publication-widen-1/admission-report.json",
+      "kind": "arm64_scalable_floating_copy_differential",
+      "comparison_field": "actual_native_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/simd_fixtures/sve_floating/floating_copy.py"
+      ],
+      "required_measurements": {
+        "actual_native_state_comparisons": 600,
+        "direct_original_cases": 270,
+        "excluded_original_enable_storage_policy_cases": 30,
+        "standalone_body_source_map_bridges": 180,
+        "selected_timing_program_body_bridges": 48,
+        "actual_caller_mxcsr_comparisons": 600
       }
     }
   },
@@ -18705,6 +18729,743 @@
           ],
           "svl_bytes": 256,
           "svcr": 3
+        }
+      ]
+    }
+  ,
+    {
+      "id": "fcpy_z_p_i_",
+      "mnemonic": "FCPY",
+      "category": "sve",
+      "source_file": "fcpy_z_p_i.xml",
+      "encoding_mask": "0xff30e000",
+      "encoding_value": "0x0510c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fcpy_z_p_i.xml",
+      "source_sha256": "bea2200aeeaed4760d83b9359517c7702d1d3c3a9e69d51b8a0577b5e1e221a0",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_floating_copy"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Enabled SME2 streaming context leaf; all H/S/D sizes, imm8 values, Z0..31, FCPY P0..15, SVL16/32/64/128/256 and destination aliases. FCPY merges inactive lanes using each element first predicate bit; FDUP fills every active vector byte. VFP immediate construction is bitwise and ignores numerical FP controls/enables, preserving FPCR/FPSR/NZCV and all unrelated architectural storage. No ZA requirement, guest data-memory access or FP exception. Caller owns guest access/feature/control provenance, separate bounded storage and exact context/profile matching. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware or application/OS claim.",
+      "review": "Independent component review immediate2-component-review-1; 417792 allocated descriptor bridges and139264 reserved declines.180 actual production standalone body/source-map bridges and48 selected64-guest timing-program payload bridges.600 entry-zero native full snapshots/callerMXCSR checks include540 direct-original joined comparisons and60 additional requested-enable policy checks;270 distinct direct originals,30 excluded original enable-storage inputs. Current planned compiler preserves all228 complete program bytes/maps, without semantic replay. Compact H/S broadcast; ComplementXor selected only measured H/S SVL64, AndSelect elsewhere. Timings retain direct-wrapper/layout limits and provide no production/application speed claim.",
+      "smoke_samples": [
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x055fc01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x059fce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x05dfdfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 2
+        },
+        {
+          "word": "0x0510ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 32,
+          "svcr": 0
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 32,
+          "svcr": 2
+        },
+        {
+          "word": "0x0510ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 64,
+          "svcr": 0
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 64,
+          "svcr": 2
+        },
+        {
+          "word": "0x0510ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 128,
+          "svcr": 0
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 128,
+          "svcr": 2
+        },
+        {
+          "word": "0x0510ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 256,
+          "svcr": 0
+        },
+        {
+          "word": "0x0550ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 256,
+          "svcr": 2
+        },
+        {
+          "word": "0x0510ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 256,
+          "svcr": 1
+        }
+      ]
+    },
+    {
+      "id": "fdup_z_i_",
+      "mnemonic": "FDUP",
+      "category": "sve",
+      "source_file": "fdup_z_i.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x2539c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fdup_z_i.xml",
+      "source_sha256": "f772ccb49734c39543730fde0f99b7d6b0d795f027bf6d0cadfd7336e9f0d0e8",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_floating_copy"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Enabled SME2 streaming context leaf; all H/S/D sizes, imm8 values, Z0..31, FCPY P0..15, SVL16/32/64/128/256 and destination aliases. FCPY merges inactive lanes using each element first predicate bit; FDUP fills every active vector byte. VFP immediate construction is bitwise and ignores numerical FP controls/enables, preserving FPCR/FPSR/NZCV and all unrelated architectural storage. No ZA requirement, guest data-memory access or FP exception. Caller owns guest access/feature/control provenance, separate bounded storage and exact context/profile matching. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware or application/OS claim.",
+      "review": "Independent component review immediate2-component-review-1; 417792 allocated descriptor bridges and139264 reserved declines.180 actual production standalone body/source-map bridges and48 selected64-guest timing-program payload bridges.600 entry-zero native full snapshots/callerMXCSR checks include540 direct-original joined comparisons and60 additional requested-enable policy checks;270 distinct direct originals,30 excluded original enable-storage inputs. Current planned compiler preserves all228 complete program bytes/maps, without semantic replay. Compact H/S broadcast; ComplementXor selected only measured H/S SVL64, AndSelect elsewhere. Timings retain direct-wrapper/layout limits and provide no production/application speed claim.",
+      "smoke_samples": [
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579c01f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25b9ce1f",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25f9dfff",
+          "expected_mnemonics": [
+            "fmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 2
+        },
+        {
+          "word": "0x2539ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 32,
+          "svcr": 0
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 32,
+          "svcr": 2
+        },
+        {
+          "word": "0x2539ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 64,
+          "svcr": 0
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 64,
+          "svcr": 2
+        },
+        {
+          "word": "0x2539ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 128,
+          "svcr": 0
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 128,
+          "svcr": 2
+        },
+        {
+          "word": "0x2539ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 256,
+          "svcr": 0
+        },
+        {
+          "word": "0x2579ce00",
+          "reason": "streaming mode required",
+          "svl_bytes": 256,
+          "svcr": 2
+        },
+        {
+          "word": "0x2539ce00",
+          "reason": "reserved streaming floating copy encoding",
+          "svl_bytes": 256,
+          "svcr": 1
         }
       ]
     }

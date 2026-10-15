@@ -2,6 +2,7 @@
 //! Feature, mode and execution-profile checks belong to the shared caller.
 
 pub mod dot;
+pub mod floating_copy;
 pub mod integer_arithmetic;
 pub mod integer_logic;
 pub mod integer_products;
@@ -13,6 +14,7 @@ pub mod sign;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Dot(dot::Operand),
+    FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
@@ -43,4 +45,5 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             rearrange_widen::decode(word).map(|operand| operand.map(Operand::RearrangeWiden))
         })
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
+        .or_else(|| floating_copy::decode(word).map(|operand| operand.map(Operand::FloatingCopy)))
 }

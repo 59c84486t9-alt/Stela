@@ -2138,11 +2138,11 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 1828,
+    "implemented": 1830,
     "partial": 5,
-    "unsupported": 2499,
+    "unsupported": 2497,
     "total": 4332,
-    "implementation_percentage": 42.197599261311176,
+    "implementation_percentage": 42.24376731301939,
     "categories": {
       "base_integer_system": {
         "implemented": 530,
@@ -2158,12 +2158,12 @@
         "implemented": 49
       },
       "sve": {
-        "implemented": 272,
-        "unsupported": 1117
+        "implemented": 274,
+        "unsupported": 1115
       }
     }
   },
-  "compiler_source_sha256": "db7ee063c0174baeae0ede10adc8adaa4f8a25889b6721b28e749f70004bdd2d",
+  "compiler_source_sha256": "8759725f52201abf47a20010785260f914058a8df50537c20f8a6ddb91c4a1cf",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -4692,7 +4692,7 @@
     {"id":"fcmne_p_p_z0_","instruction_id":"fcmeq_p_p_z0","mnemonic":"FCMNE","category":"sve","source_file":"fcmeq_p_p_z0.xml","encoding_mask":"0xff3fe010","encoding_value":"0x65132000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"fcmne_p_p_zz_","instruction_id":"fcmeq_p_p_zz","mnemonic":"FCMNE","category":"sve","source_file":"fcmeq_p_p_zz.xml","encoding_mask":"0xff20e010","encoding_value":"0x65006010","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
     {"id":"fcmuo_p_p_zz_","instruction_id":"fcmeq_p_p_zz","mnemonic":"FCMUO","category":"sve","source_file":"fcmeq_p_p_zz.xml","encoding_mask":"0xff20e010","encoding_value":"0x6500c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
-    {"id":"fcpy_z_p_i_","instruction_id":"fcpy_z_p_i","mnemonic":"FCPY","category":"sve","source_file":"fcpy_z_p_i.xml","encoding_mask":"0xff30e000","encoding_value":"0x0510c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
+    {"id":"fcpy_z_p_i_","instruction_id":"fcpy_z_p_i","mnemonic":"FCPY","category":"sve","source_file":"fcpy_z_p_i.xml","encoding_mask":"0xff30e000","encoding_value":"0x0510c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"apple-sme2-streaming-v1","status":"implemented","scope":"Enabled SME2 streaming context leaf; all H/S/D sizes, imm8 values, Z0..31, FCPY P0..15, SVL16/32/64/128/256 and destination aliases. FCPY merges inactive lanes using each element first predicate bit; FDUP fills every active vector byte. VFP immediate construction is bitwise and ignores numerical FP controls/enables, preserving FPCR/FPSR/NZCV and all unrelated architectural storage. No ZA requirement, guest data-memory access or FP exception. Caller owns guest access/feature/control provenance, separate bounded storage and exact context/profile matching. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware or application/OS claim."}]},
     {"id":"fcvt_mz2_z_","instruction_id":"fcvt_mz2_z","mnemonic":"FCVT","category":"sme","source_file":"fcvt_mz2_z.xml","encoding_mask":"0xfffffc01","encoding_value":"0xc1a0e000","features":[{"feature":"FEAT_SME_F16F16","name":"v9Ap4"}],"status":"unsupported","profiles":[]},
     {"id":"fcvt_z8_mz2_","instruction_id":"fcvt_z8_mz2","mnemonic":"FCVT","category":"sme","source_file":"fcvt_z8_mz2.xml","encoding_mask":"0xfffffc20","encoding_value":"0xc124e000","features":[{"feature":"FEAT_SME2 && FEAT_FP8","name":"v9Ap3 && v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"fcvt_z8_mz4_","instruction_id":"fcvt_z8_mz4","mnemonic":"FCVT","category":"sme","source_file":"fcvt_z8_mz4.xml","encoding_mask":"0xfffffc60","encoding_value":"0xc134e000","features":[{"feature":"FEAT_SME2 && FEAT_FP8","name":"v9Ap3 && v9Ap5"}],"status":"unsupported","profiles":[]},
@@ -4787,7 +4787,7 @@
     {"id":"fdot_za_zzv_4x1","instruction_id":"fdot_za_zzv","mnemonic":"FDOT","category":"sme","source_file":"fdot_za_zzv.xml","encoding_mask":"0xfff09c18","encoding_value":"0xc1301000","features":[{"feature":"FEAT_SME2","name":"v9Ap3"}],"status":"unsupported","profiles":[]},
     {"id":"fdot_za_zzw_2x2","instruction_id":"fdot_za_zzw","mnemonic":"FDOT","category":"sme","source_file":"fdot_za_zzw.xml","encoding_mask":"0xffe19c38","encoding_value":"0xc1a01000","features":[{"feature":"FEAT_SME2","name":"v9Ap3"}],"status":"unsupported","profiles":[]},
     {"id":"fdot_za_zzw_4x4","instruction_id":"fdot_za_zzw","mnemonic":"FDOT","category":"sme","source_file":"fdot_za_zzw.xml","encoding_mask":"0xffe39c78","encoding_value":"0xc1a11000","features":[{"feature":"FEAT_SME2","name":"v9Ap3"}],"status":"unsupported","profiles":[]},
-    {"id":"fdup_z_i_","instruction_id":"fdup_z_i","mnemonic":"FDUP","category":"sve","source_file":"fdup_z_i.xml","encoding_mask":"0xff3fe000","encoding_value":"0x2539c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
+    {"id":"fdup_z_i_","instruction_id":"fdup_z_i","mnemonic":"FDUP","category":"sve","source_file":"fdup_z_i.xml","encoding_mask":"0xff3fe000","encoding_value":"0x2539c000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"apple-sme2-streaming-v1","status":"implemented","scope":"Enabled SME2 streaming context leaf; all H/S/D sizes, imm8 values, Z0..31, FCPY P0..15, SVL16/32/64/128/256 and destination aliases. FCPY merges inactive lanes using each element first predicate bit; FDUP fills every active vector byte. VFP immediate construction is bitwise and ignores numerical FP controls/enables, preserving FPCR/FPSR/NZCV and all unrelated architectural storage. No ZA requirement, guest data-memory access or FP exception. Caller owns guest access/feature/control provenance, separate bounded storage and exact context/profile matching. No general nonstreaming SVE, disabled-access trap delivery, scalable block/cache, Apple hardware or application/OS claim."}]},
     {"id":"fexpa_z_z_","instruction_id":"fexpa_z_z","mnemonic":"FEXPA","category":"sve","source_file":"fexpa_z_z.xml","encoding_mask":"0xff3ffc00","encoding_value":"0x0420b800","features":[{"feature":"FEAT_SVE || FEAT_SSVE_FEXPA","name":"(v8Ap2 && PROFILE_A) || v9Ap6"}],"status":"unsupported","profiles":[]},
     {"id":"firstp_r_p_p_","instruction_id":"firstp_r_p_p","mnemonic":"FIRSTP","category":"sve","source_file":"firstp_r_p_p.xml","encoding_mask":"0xff3fc200","encoding_value":"0x25218000","features":[{"feature":"FEAT_SVE2p2 || FEAT_SME2p2","name":"v9Ap6 || v9Ap6"}],"status":"unsupported","profiles":[]},
     {"id":"flogb_z_p_z_m","instruction_id":"flogb_z_p_z","mnemonic":"FLOGB","category":"sve","source_file":"flogb_z_p_z.xml","encoding_mask":"0xfff9e000","encoding_value":"0x6518a000","features":[{"feature":"FEAT_SVE2 || FEAT_SME","name":"v9Ap0 || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
