@@ -741,6 +741,330 @@ def validate_current_compiler(registry, compiler, root=ROOT):
     return {path: hashlib.sha256(data).hexdigest() for path, data in sources.items()}
 
 
+def validate_compiler_source_recipes(registries, compiler, *, root=ROOT):
+    """Check ordered recipes and bytes; this does not discover compiled inputs."""
+    if not registries:
+        raise ValueError('Compiler recipe validation needs execution registries')
+    recipe = registries[0].get('compiler_fingerprint_sources')
+    if any(registry.get('compiler_fingerprint_sources') != recipe for registry in registries[1:]):
+        raise ValueError('Execution-profile fingerprint recipes differ')
+    return validate_current_compiler(registries[0], compiler, root=root)
+
+
+def parse_rust_dep_info(text):
+    """Read rustc/Cargo Make dep-info, declining unsupported Make expressions."""
+    def words(value):
+        result, token, escaped = [], '', False
+        for char in value:
+            if escaped:
+                if char not in ' \\#:\t':
+                    raise ValueError('Unsupported dep-info escape')
+                token += char
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char in '$#':
+                raise ValueError('Unsupported dep-info Make expression/comment')
+            elif char.isspace():
+                if token:
+                    result.append(token)
+                    token = ''
+            else:
+                token += char
+        if escaped:
+            raise ValueError('Truncated dep-info escape')
+        return result + ([token] if token else [])
+
+    rules, environment = {}, {}
+    for line in text.replace('\\\n', '').splitlines():
+        if not line.strip():
+            continue
+        if line.startswith('# env-dep:'):
+            name, separator, value = line[len('# env-dep:'):].partition('=')
+            if not name or name in environment:
+                raise ValueError('Invalid/duplicate rustc environment dependency')
+            environment[name] = value if separator else None
+            continue
+        # rustc writes one or more targets followed by an unescaped colon.
+        escaped = False
+        split = None
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == ':':
+                split = index
+                break
+        if split is None:
+            raise ValueError('Malformed dep-info rule')
+        targets, dependencies = words(line[:split]), words(line[split + 1:])
+        if not targets or len(dependencies) != len(set(dependencies)):
+            raise ValueError('Invalid dep-info targets/dependencies')
+        for target in targets:
+            if target in rules:
+                raise ValueError('Duplicate dep-info target')
+            rules[target] = dependencies
+    if not rules or not any(rules.values()):
+        raise ValueError('Dep-info has no input closure')
+    return rules, environment
+
+
+def _checked_dep_info_artifact(ref):
+    if not isinstance(ref, dict) or set(ref) != {'path', 'sha256'}:
+        raise ValueError('Expected an exact path/hash artifact reference')
+    path = Path(ref['path'])
+    if not path.is_absolute() or sha256(path) != digest(ref['sha256']):
+        raise ValueError('Build capture artifact bytes differ')
+    return path
+
+
+def _validate_dep_info_invocation(capture, root):
+    """Validate the locked production invocation and its toolchain provenance."""
+    invocation = capture['invocation']
+    argv = invocation['argv']
+    if (invocation.get('returncode') != 0 or not isinstance(argv, list)
+            or not all(isinstance(arg, str) for arg in argv)
+            or 'build' not in argv or '--locked' not in argv
+            or not any(arg in ('--message-format=json', '--message-format=json-render-diagnostics') for arg in argv)
+            or argv.count('--bin') != 1 or argv[argv.index('--bin') + 1:][:1] != ['stela']
+            or any(arg in argv for arg in ('--tests', '--all-targets', '--examples', '--workspace'))):
+        raise ValueError('Capture is not a successful locked production stela build')
+    cwd = Path(invocation['cwd'])
+    if not cwd.is_absolute():
+        raise ValueError('Build cwd must be explicit and absolute')
+    def selectors(flag):
+        values = []
+        for index, arg in enumerate(argv):
+            if arg == flag:
+                if index + 1 == len(argv) or argv[index + 1].startswith('-'):
+                    raise ValueError('Missing Cargo argument: ' + flag)
+                values.append(argv[index + 1])
+            elif arg.startswith(flag + '='):
+                values.append(arg.split('=', 1)[1])
+        return values
+    manifests = selectors('--manifest-path')
+    target_dirs = selectors('--target-dir')
+    if len(target_dirs) > 1:
+        raise ValueError('Ambiguous Cargo target directory')
+    target_directory = Path(target_dirs[0]) if target_dirs else root / 'target'
+    if not target_directory.is_absolute():
+        raise ValueError('Cargo target directory must be absolute')
+    if (len(manifests) > 1 or (manifests and manifests != [str(root / 'Cargo.toml')])
+            or (not manifests and cwd != root)):
+        raise ValueError('Cargo invocation does not select the frozen workspace manifest')
+    compiler_cwd = Path(capture['compiler_dep_info_cwd'])
+    if compiler_cwd != root:
+        raise ValueError('Compiler dep-info cwd lacks selected frozen-workspace provenance')
+    stderr_path = _checked_dep_info_artifact(invocation['stderr'])
+    for tool in ('rustc', 'cargo'):
+        _checked_dep_info_artifact(capture['toolchain'][tool])
+        version = _checked_dep_info_artifact(capture['toolchain'][tool + '_version']).read_text()
+        if not version.startswith(tool + ' '):
+            raise ValueError('Missing production toolchain version')
+    if argv[0] != str(_checked_dep_info_artifact(capture['toolchain']['cargo_invocation'])):
+        raise ValueError('Cargo invocation executable lacks hash-bound provenance')
+    return target_directory, compiler_cwd, stderr_path
+
+
+def _validate_dep_info_artifacts(capture, cli, target_directory, stderr_path):
+    """Bind Cargo artifacts, rustc CLI linkage and the compiler fingerprint."""
+    records = [json.loads(line) for line in _checked_dep_info_artifact(capture['invocation']['stdout']).read_text().splitlines() if line]
+    finishes = [row for row in records if row.get('reason') == 'build-finished']
+    if len(finishes) != 1 or finishes[0].get('success') is not True or records[-1] != finishes[0]:
+        raise ValueError('Cargo did not finish this artifact stream successfully')
+    artifacts = [row for row in records if row.get('reason') == 'compiler-artifact']
+    selected = [row for row in artifacts if row.get('package_id') == capture['compiler_package_id']
+                and row.get('target', {}).get('name') == 'stela_compiler'
+                and row.get('target', {}).get('kind') == ['lib']
+                and row.get('profile', {}).get('test') is False]
+    executables = [row for row in artifacts if row.get('executable') == str(cli)
+                   and row.get('target', {}).get('name') == 'stela'
+                   and row.get('target', {}).get('kind') == ['bin']
+                   and row.get('profile', {}).get('test') is False]
+    if len(selected) != 1 or len(executables) != 1:
+        raise ValueError('Ambiguous/missing production compiler or CLI artifact')
+    if (target_directory.resolve() != target_directory or any(
+            not Path(filename).resolve().is_relative_to(target_directory)
+            for artifact in (selected[0], executables[0]) for filename in artifact['filenames'])):
+        raise ValueError('Selected production outputs contradict Cargo target directory')
+    library = selected[0]
+    libraries = [Path(path) for path in library['filenames'] if path.endswith('.rlib')]
+    if len(libraries) != 1 or not libraries[0].name.startswith('libstela_compiler-'):
+        raise ValueError('Missing selected production compiler library')
+    import shlex
+    commands = [shlex.split(line.strip()[len('Running `'):-1])
+                for line in stderr_path.read_text().splitlines()
+                if line.strip().startswith('Running `') and line.strip().endswith('`')]
+    commands = [args for args in commands if '--crate-name' in args
+                and args[args.index('--crate-name') + 1:][:1] == ['stela']
+                and '--test' not in args and '--crate-type' in args
+                and args[args.index('--crate-type') + 1:][:1] == ['bin']]
+    if len(commands) != 1:
+        raise ValueError('Missing/ambiguous production rustc CLI link command')
+    args = commands[0]
+    rustc = str(_checked_dep_info_artifact(capture['toolchain']['rustc']))
+    command = list(args)
+    while command and '=' in command[0] and not command[0].startswith('-'):
+        key = command[0].split('=', 1)[0]
+        if not key.replace('_', 'a').isalnum() or key[0].isdigit():
+            break
+        command.pop(0)
+    if not command or command[0] != rustc or ('stela_compiler=' + str(libraries[0])) not in [
+            args[index + 1] for index, arg in enumerate(args[:-1]) if arg == '--extern']:
+        raise ValueError('Production rustc executable/compiler library link differs')
+    if 'CARGO=' + str(_checked_dep_info_artifact(capture['toolchain']['cargo'])) not in args:
+        raise ValueError('Production rustc command names another Cargo executable')
+    if 'CARGO_MANIFEST_DIR=' + str(Path(executables[0]['manifest_path']).parent) not in args:
+        raise ValueError('Production rustc command belongs to another workspace')
+    fingerprint_json = _checked_dep_info_artifact(capture['compiler_fingerprint_json'])
+    fingerprint_dep = _checked_dep_info_artifact(capture['compiler_fingerprint_dep'])
+    stem = libraries[0].stem[len('libstela_compiler-'):]
+    expected_directory = libraries[0].parent.parent / '.fingerprint' / ('stela-compiler-' + stem)
+    if (fingerprint_json.parent != expected_directory
+            or fingerprint_json.name != 'lib-stela_compiler.json'
+            or fingerprint_dep != fingerprint_json.with_name('dep-lib-stela_compiler')):
+        raise ValueError('Compiler Cargo fingerprint does not match selected artifact')
+    fingerprint = json.loads(fingerprint_json.read_text())
+    links = [row.get('CheckDepInfo', {}).get('dep_info') for row in fingerprint.get('local', [])]
+    if links != [str(fingerprint_dep.relative_to(target_directory))]:
+        raise ValueError('Compiler Cargo fingerprint lost its dep-info link')
+    for artifact in artifacts:
+        for filename in artifact['filenames']:
+            if _checked_dep_info_artifact({'path': filename, 'sha256': capture['artifacts_sha256'][filename]}) != Path(filename):
+                raise ValueError('Cargo artifact identity differs')
+    return artifacts, library, executables[0], libraries[0]
+
+
+def _validate_dep_info_packages(capture, artifacts, root):
+    """Validate frozen workspace inventories and external lockfile identities."""
+    lock_path = _checked_dep_info_artifact(capture['cargo_lock'])
+    if lock_path != root / 'Cargo.lock':
+        raise ValueError('Build lockfile must belong to the frozen compiler root')
+    import tomllib
+    locked = {(p['name'], p['version'], p.get('source'), p.get('checksum'))
+              for p in tomllib.loads(lock_path.read_text())['package']}
+    inventories = {}
+    for name, origin in capture['source_roots'].items():
+        origin_path = Path(origin['path'])
+        if not origin_path.is_absolute() or origin_path.resolve() != origin_path:
+            raise ValueError('Frozen source roots must be canonical absolute paths')
+        inventories[name] = (origin_path, json.loads(_checked_dep_info_artifact(origin['inventory']).read_text())['files'])
+    if len({path for path, _ in inventories.values()}) != len(inventories):
+        raise ValueError('Duplicate frozen source root provenance')
+    for artifact in artifacts:
+        package = capture['packages'][artifact['package_id']]
+        if package['kind'] == 'external_locked':
+            identity = tuple(package[key] for key in ('name', 'version', 'source', 'checksum'))
+            if identity not in locked or not identity[2] or not identity[3]:
+                raise ValueError('External artifact is not checksum-bound in Cargo.lock')
+            if artifact['package_id'] != f'{identity[2]}#{identity[0]}@{identity[1]}':
+                raise ValueError('External Cargo package identity differs')
+        elif package['kind'] == 'workspace':
+            manifest = Path(artifact['manifest_path'])
+            matches = [(origin, files) for origin, files in inventories.values()
+                       if manifest.is_relative_to(origin)]
+            if len(matches) != 1:
+                raise ValueError('Workspace Cargo manifest lacks frozen provenance')
+            origin, files = matches[0]
+            relative = str(manifest.relative_to(origin))
+            if files.get(relative) != sha256(manifest):
+                raise ValueError('Workspace Cargo manifest differs from frozen inventory')
+        else:
+            raise ValueError('Unknown Cargo artifact ownership')
+        if package['manifest_path'] != artifact['manifest_path']:
+            raise ValueError('Cargo manifest provenance differs')
+
+    return inventories
+
+
+def _validate_dep_info_inputs(capture, library, executable, library_path, compiler_cwd, cli, inventories, sources):
+    """Match literal emitted paths and hashes to their frozen origins and recipe."""
+    compiler_d = _checked_dep_info_artifact(capture['compiler_dep_info'])
+    if compiler_d != library_path.with_name(library_path.name[3:]).with_suffix('.d'):
+        raise ValueError('Compiler dep-info does not match the selected artifact stem')
+    compiler_rules, compiler_env = parse_rust_dep_info(compiler_d.read_text())
+    cargo_rules, cargo_env = parse_rust_dep_info(_checked_dep_info_artifact(capture['cli_dep_info']).read_text())
+    if compiler_env or cargo_env:
+        raise ValueError('Environment-dependent compiler inputs need separate reviewed provenance')
+    compiler_inputs = compiler_rules.get(str(library_path))
+    cli_inputs = cargo_rules.get(str(cli))
+    def emitted_path(spelling):
+        path = Path(spelling)
+        return path if path.is_absolute() else compiler_cwd / path
+    if (library['target'].get('src_path') not in [str(emitted_path(p).resolve()) for p in compiler_inputs or []]
+            or executable['target'].get('src_path') not in [str(emitted_path(p).resolve()) for p in cli_inputs or []]):
+        raise ValueError('Cargo target source is absent from emitted production closure')
+    if not compiler_inputs or not cli_inputs:
+        raise ValueError('Dep-info target differs from production artifact')
+    if any(deps and deps != compiler_inputs for deps in compiler_rules.values()):
+        raise ValueError('Selected compiler dep-info closures disagree')
+    if any(deps and deps != cli_inputs for deps in cargo_rules.values()):
+        raise ValueError('Final Cargo executable dep-info closures disagree')
+    emitted = set(compiler_inputs) | set(cli_inputs)
+    if set(capture['inputs']) != emitted:
+        raise ValueError('Capture lost or invented literal emitted dependency paths')
+    logical = {}
+    for spelling in sorted(emitted):
+        item = capture['inputs'][spelling]
+        if item.get('kind') != 'workspace':
+            raise ValueError('Unknown external/generated emitted input; source closure declined')
+        origin, inventory = inventories[item['root']]
+        relative = str(repository_path(item['relative_path']))
+        path = emitted_path(spelling)
+        expected = origin / relative
+        # Keep spelling as the receipt key; resolution only checks declared provenance.
+        if path.resolve() != expected or expected.resolve() != expected:
+            raise ValueError('Emitted dependency escapes or contradicts its frozen provenance')
+        identity = digest(item['sha256'])
+        if inventory.get(relative) != identity or sha256(path) != identity:
+            raise ValueError('Emitted dependency bytes differ from frozen inventory')
+        logical[spelling] = (relative, identity)
+    discovered = {logical[path][0] for path in compiler_inputs}
+    if discovered != set(sources):
+        raise ValueError('Compiler-emitted input closure differs from fingerprint recipe')
+    for path in compiler_inputs:
+        relative, identity = logical[path]
+        if sources[relative] != identity:
+            raise ValueError('Compiler input origin differs from selected recipe bytes')
+    if not {logical[p] for p in compiler_inputs}.issubset({logical[p] for p in cli_inputs}):
+        raise ValueError('Final Cargo executable dep-info omits compiler inputs')
+    return len(compiler_inputs), len(emitted)
+
+
+def validate_compiler_dep_info(capture_path, capture_sha256, registries, *, cli,
+                               compiler, root=ROOT):
+    """Validate a retained production capture, not a retrospective build attestation.
+
+    Each literal emitted path is checked against its own frozen-source inventory.
+    Generated compiler inputs are unsupported; external crates remain lock-bound.
+    Undeclared reads by external build scripts/proc macros are not discovered.
+    Final CLI bytes/linkage are bound; this is not a complete CLI env-input proof.
+    No Rust syntax or macro expansion is inferred here. Callers must retain this
+    capture in the build invocation that produced the selected CLI/artifacts.
+    """
+    if sha256(capture_path) != digest(capture_sha256):
+        raise ValueError('Production build capture identity differs')
+    capture = json.loads(Path(capture_path).read_text())
+    if capture.get('kind') != 'production_compiler_dep_info_v1':
+        raise ValueError('Unknown production dep-info capture')
+    sources = validate_compiler_source_recipes(registries, compiler, root=root)
+    if capture.get('compiler_source_sha256') != compiler or _checked_dep_info_artifact(capture['cli']) != Path(cli):
+        raise ValueError('Production CLI/compiler identity differs')
+    target_directory, compiler_cwd, stderr_path = _validate_dep_info_invocation(capture, root)
+    artifacts, library, executable, library_path = _validate_dep_info_artifacts(
+        capture, cli, target_directory, stderr_path)
+    inventories = _validate_dep_info_packages(capture, artifacts, root)
+    compiler_inputs, literal_input_paths = _validate_dep_info_inputs(
+        capture, library, executable, library_path, compiler_cwd, cli, inventories, sources)
+    return {'compiler_source_sha256': compiler, 'cli_sha256': capture['cli']['sha256'],
+            'capture_sha256': capture_sha256, 'compiler_inputs': compiler_inputs,
+            'literal_input_paths': literal_input_paths, 'source_roots': len(inventories),
+            'external_locked_packages': len({row['package_id'] for row in artifacts
+                if capture['packages'][row['package_id']]['kind'] == 'external_locked'}),
+            'generated_inputs': 'unsupported', 'ordered_recipe_sources': sources}
+
+
 def markdown(report):
     if 'apple_codegen_candidates' in report:
         row = report['apple_codegen_candidates']['summary']['union']

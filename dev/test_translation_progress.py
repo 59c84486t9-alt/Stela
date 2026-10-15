@@ -1523,5 +1523,276 @@ class PreferredAliasSourceGuards(unittest.TestCase):
                 disassembly.validate_canonical(changed_row, fact['id'], fact, preferred_aliases=verified)
 
 
+class CompilerDepInfoGuards(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name).resolve()
+        self.root = self.directory / 'source'
+        self.root.mkdir()
+        self.target = self.directory / 'target'
+        self.target.mkdir()
+        self.recipe = ['crates/stela-compiler/src/lib.rs', 'crates/stela-compiler/Cargo.toml', 'Cargo.lock']
+        for relative, text in zip(self.recipe, ['use std::include as expand; expand!("hidden.rs");', '[package]', 'version = 4\n[[package]]\nname = "serde"\nversion = "1"\nsource = "registry+test"\nchecksum = "abc"\n']):
+            self.write(self.root / relative, text)
+        self.write(self.root / 'Cargo.toml', '[workspace]')
+        self.write(self.root / 'src/main.rs', 'fn main() {}')
+        self.inventory = self.directory / 'inventory.json'
+        self.refresh_inventory()
+        self.compiler = hashlib.sha256(b''.join((self.root / p).read_bytes() for p in self.recipe)).hexdigest()
+        self.cli = self.target / 'stela'
+        self.library = self.target / 'libstela_compiler-123.rlib'
+        self.write(self.cli, 'executable')
+        self.write(self.library, 'library')
+        self.compiler_d = self.target / 'stela_compiler-123.d'
+        self.cli_d = self.target / 'stela.d'
+        self.inputs = [str(self.root / p) for p in self.recipe]
+        self.cli_inputs = self.inputs + [str(self.root / 'src/main.rs')]
+        self.write_dep_info()
+        self.stdout = self.directory / 'cargo.jsonl'
+        self.records = [
+            {'reason': 'compiler-artifact', 'package_id': 'compiler', 'manifest_path': str(self.root / self.recipe[1]),
+             'target': {'name': 'stela_compiler', 'kind': ['lib'], 'src_path': str(self.root / self.recipe[0])}, 'profile': {'test': False},
+             'filenames': [str(self.library)], 'executable': None},
+            {'reason': 'compiler-artifact', 'package_id': 'cli', 'manifest_path': str(self.root / 'Cargo.toml'),
+             'target': {'name': 'stela', 'kind': ['bin'], 'src_path': str(self.root / 'src/main.rs')}, 'profile': {'test': False},
+             'filenames': [str(self.cli)], 'executable': str(self.cli)},
+            {'reason': 'build-finished', 'success': True}]
+        self.write_stdout()
+        stderr = self.directory / 'stderr'
+        self.write(stderr, 'temporary')
+        tools = {}
+        for name in ('rustc', 'cargo'):
+            binary, version = self.directory / name, self.directory / (name + '.version')
+            self.write(binary, name)
+            self.write(version, name + ' 1.0\n')
+            tools[name], tools[name + '_version'] = self.ref(binary), self.ref(version)
+        self.write(stderr, 'Running `' + str(self.directory / 'rustc') + ' CARGO_MANIFEST_DIR=' + str(self.root)
+                   + ' CARGO=' + str(self.directory / 'cargo') + ' --crate-name stela --crate-type bin --extern stela_compiler=' + str(self.library) + '`\n')
+        fingerprint_json = self.target.parent / '.fingerprint/stela-compiler-123/lib-stela_compiler.json'
+        fingerprint_dep = fingerprint_json.with_name('dep-lib-stela_compiler')
+        self.write(fingerprint_dep, 'cargo binary dep-info')
+        self.write(fingerprint_json, json.dumps({'local': [{'CheckDepInfo': {
+            'dep_info': '.fingerprint/stela-compiler-123/dep-lib-stela_compiler'}}]}))
+        self.capture = {'kind': 'production_compiler_dep_info_v1', 'compiler_source_sha256': self.compiler,
+            'compiler_fingerprint_json': self.ref(fingerprint_json), 'compiler_fingerprint_dep': self.ref(fingerprint_dep),
+            'cli': self.ref(self.cli), 'compiler_package_id': 'compiler', 'toolchain': tools,
+            'invocation': {'argv': [str(self.directory / 'cargo'), 'build', '--locked', '--message-format=json', '--bin', 'stela', '--target-dir', str(self.target.parent)],
+                'cwd': str(self.root), 'returncode': 0, 'stdout': self.ref(self.stdout), 'stderr': self.ref(stderr)},
+            'artifacts_sha256': {str(p): progress.sha256(p) for p in (self.cli, self.library)},
+            'compiler_dep_info': self.ref(self.compiler_d), 'compiler_dep_info_cwd': str(self.root), 'cli_dep_info': self.ref(self.cli_d),
+            'cargo_lock': self.ref(self.root / 'Cargo.lock'),
+            'source_roots': {'freeze': {'path': str(self.root), 'inventory': self.ref(self.inventory)}},
+            'packages': {'compiler': {'kind': 'workspace', 'manifest_path': str(self.root / self.recipe[1])},
+                         'cli': {'kind': 'workspace', 'manifest_path': str(self.root / 'Cargo.toml')}},
+            'inputs': {p: {'kind': 'workspace', 'root': 'freeze', 'relative_path': str(Path(p).relative_to(self.root)),
+                           'sha256': progress.sha256(p)} for p in self.cli_inputs}}
+        self.registry = {'compiler_fingerprint_sources': self.recipe}
+        self.capture['toolchain']['cargo_invocation'] = dict(tools['cargo'])
+        self.capture_path = self.directory / 'capture.json'
+
+    @staticmethod
+    def write(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    @staticmethod
+    def ref(path):
+        return {'path': str(path), 'sha256': progress.sha256(path)}
+
+    def refresh_inventory(self):
+        self.write(self.inventory, json.dumps({'files': {str(p.relative_to(self.root)): progress.sha256(p)
+                                                       for p in self.root.rglob('*') if p.is_file()}}))
+
+    def write_dep_info(self):
+        escape = lambda p: p.replace(' ', '\\ ')
+        self.write(self.compiler_d, escape(str(self.library)) + ': ' + ' '.join(map(escape, self.inputs)) + '\n')
+        self.write(self.cli_d, escape(str(self.cli)) + ': ' + ' '.join(map(escape, self.cli_inputs)) + '\n')
+
+    def write_stdout(self):
+        self.write(self.stdout, '\n'.join(json.dumps(row) for row in self.records) + '\n')
+
+    def validate(self):
+        self.write(self.capture_path, json.dumps(self.capture))
+        return progress.validate_compiler_dep_info(self.capture_path, progress.sha256(self.capture_path),
+            [self.registry] * 4, cli=self.cli, compiler=self.compiler, root=self.root)
+
+    def test_production_capture_and_recipe_equality(self):
+        self.assertEqual(self.validate()['compiler_inputs'], 3)
+        other = {'compiler_fingerprint_sources': list(reversed(self.recipe))}
+        with self.assertRaisesRegex(ValueError, 'recipes differ'):
+            progress.validate_compiler_source_recipes([self.registry, other], self.compiler, root=self.root)
+
+    def test_alias_include_and_procedural_module_inputs_cannot_hide(self):
+        for text in ('use std::include as expand; expand!("hidden.rs");', '#[generate_module] mod generated {}'):
+            with self.subTest(source=text):
+                self.write(self.root / 'hidden.rs', text)
+                self.refresh_inventory()
+                hidden = str(self.root / 'hidden.rs')
+                self.inputs.append(hidden)
+                self.cli_inputs.append(hidden)
+                self.write_dep_info()
+                self.capture['compiler_dep_info'] = self.ref(self.compiler_d)
+                self.capture['cli_dep_info'] = self.ref(self.cli_d)
+                self.capture['source_roots']['freeze']['inventory'] = self.ref(self.inventory)
+                self.capture['inputs'][hidden] = {'kind': 'workspace', 'root': 'freeze', 'relative_path': 'hidden.rs',
+                                                  'sha256': progress.sha256(hidden)}
+                with self.assertRaisesRegex(ValueError, 'input closure differs'):
+                    self.validate()
+                self.inputs.pop()
+                self.cli_inputs.pop()
+
+    def test_production_artifact_ambiguity_and_test_profile_decline(self):
+        self.records.insert(1, dict(self.records[0]))
+        self.write_stdout(); self.capture['invocation']['stdout'] = self.ref(self.stdout)
+        with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+            self.validate()
+        self.records.pop(1); self.records[0]['profile']['test'] = True
+        self.write_stdout(); self.capture['invocation']['stdout'] = self.ref(self.stdout)
+        with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+            self.validate()
+
+    def test_stale_dep_info_and_wrong_artifact_stem_decline(self):
+        self.write(self.compiler_d, self.compiler_d.read_text() + '\n')
+        with self.assertRaisesRegex(ValueError, 'artifact bytes differ'):
+            self.validate()
+        other = self.target / 'stela_compiler-other.d'
+        self.write(other, self.compiler_d.read_text())
+        self.capture['compiler_dep_info'] = self.ref(other)
+        with self.assertRaisesRegex(ValueError, 'artifact stem'):
+            self.validate()
+
+    def test_each_literal_alias_needs_its_own_provenance(self):
+        old = self.inputs[1]
+        alias = str(self.root / 'crates/stela-compiler/src/../Cargo.toml')
+        self.inputs[1] = alias
+        self.cli_inputs.append(alias)
+        self.write_dep_info()
+        self.capture['compiler_dep_info'] = self.ref(self.compiler_d)
+        self.capture['cli_dep_info'] = self.ref(self.cli_d)
+        with self.assertRaisesRegex(ValueError, 'literal emitted'):
+            self.validate()
+        self.capture['inputs'][alias] = dict(self.capture['inputs'][old])
+        self.assertEqual(self.validate()['literal_input_paths'], 5)
+        self.capture['inputs'][alias]['sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'frozen inventory'):
+            self.validate()
+
+    def test_path_escape_and_source_inventory_mismatch_decline(self):
+        item = self.capture['inputs'][self.inputs[0]]
+        item['relative_path'] = '../source/' + self.recipe[0]
+        with self.assertRaises(ValueError):
+            self.validate()
+        item['relative_path'] = 'Cargo.lock'
+        with self.assertRaisesRegex(ValueError, 'provenance'):
+            self.validate()
+
+    def test_environment_and_generated_inputs_decline(self):
+        self.write(self.compiler_d, self.compiler_d.read_text() + '# env-dep:OUT_DIR=/tmp/generated\n')
+        self.capture['compiler_dep_info'] = self.ref(self.compiler_d)
+        with self.assertRaisesRegex(ValueError, 'Environment-dependent'):
+            self.validate()
+        self.write_dep_info(); self.capture['compiler_dep_info'] = self.ref(self.compiler_d)
+        self.capture['inputs'][self.inputs[0]]['kind'] = 'generated'
+        with self.assertRaisesRegex(ValueError, 'generated emitted input'):
+            self.validate()
+
+    def test_build_failure_and_wrong_executable_decline(self):
+        self.capture['invocation']['returncode'] = 1
+        with self.assertRaisesRegex(ValueError, 'successful locked'):
+            self.validate()
+        self.capture['invocation']['returncode'] = 0
+        self.records[-1]['success'] = False
+        self.write_stdout(); self.capture['invocation']['stdout'] = self.ref(self.stdout)
+        with self.assertRaisesRegex(ValueError, 'finish'):
+            self.validate()
+
+    def test_actual_link_command_must_select_captured_compiler(self):
+        stderr = Path(self.capture['invocation']['stderr']['path'])
+        self.write(stderr, stderr.read_text().replace(str(self.library), '/other/compiler.rlib'))
+        self.capture['invocation']['stderr'] = self.ref(stderr)
+        with self.assertRaisesRegex(ValueError, 'library link differs'):
+            self.validate()
+
+    def test_wrapper_and_unrelated_cwd_decline(self):
+        stderr = Path(self.capture['invocation']['stderr']['path'])
+        original = stderr.read_text()
+        self.write(stderr, original.replace('Running `', 'Running `/unbound/wrapper '))
+        self.capture['invocation']['stderr'] = self.ref(stderr)
+        with self.assertRaisesRegex(ValueError, 'library link differs'):
+            self.validate()
+        self.write(stderr, original); self.capture['invocation']['stderr'] = self.ref(stderr)
+        self.capture['invocation']['cwd'] = str(self.directory)
+        with self.assertRaisesRegex(ValueError, 'workspace manifest'):
+            self.validate()
+
+    def test_fingerprint_must_link_selected_dep_info(self):
+        path = Path(self.capture['compiler_fingerprint_json']['path'])
+        for link in ('other/dep-lib-stela_compiler', 'dep-lib-stela_compiler',
+                     'stela-compiler-123/dep-lib-stela_compiler'):
+            with self.subTest(link=link):
+                self.write(path, json.dumps({'local': [{'CheckDepInfo': {'dep_info': link}}]}))
+                self.capture['compiler_fingerprint_json'] = self.ref(path)
+                with self.assertRaisesRegex(ValueError, 'lost its dep-info link'):
+                    self.validate()
+
+    def test_target_directory_and_fingerprint_link_cannot_be_substituted_together(self):
+        path = Path(self.capture['compiler_fingerprint_json']['path'])
+        dep = Path(self.capture['compiler_fingerprint_dep']['path'])
+        args = self.capture['invocation']['argv']
+        args[args.index('--target-dir') + 1] = str(dep.parent)
+        self.write(path, json.dumps({'local': [{'CheckDepInfo': {'dep_info': dep.name}}]}))
+        self.capture['compiler_fingerprint_json'] = self.ref(path)
+        with self.assertRaisesRegex(ValueError, 'contradict Cargo target'):
+            self.validate()
+
+    def test_equals_missing_and_duplicate_manifest_flags_decline(self):
+        original = list(self.capture['invocation']['argv'])
+        for suffix in (['--manifest-path=/other/Cargo.toml'], ['--manifest-path'],
+                       ['--manifest-path', str(self.root / 'Cargo.toml'), '--manifest-path=' + str(self.root / 'Cargo.toml')]):
+            with self.subTest(arguments=suffix):
+                self.capture['invocation']['argv'] = original + suffix
+                with self.assertRaisesRegex(ValueError, 'manifest'):
+                    self.validate()
+
+    def test_relative_rustc_inputs_keep_explicit_cwd_and_literal_spelling(self):
+        absolute = list(self.inputs)
+        self.inputs = [str(Path(p).relative_to(self.root)) for p in absolute]
+        self.write_dep_info()
+        self.capture['compiler_dep_info'] = self.ref(self.compiler_d)
+        self.capture['cli_dep_info'] = self.ref(self.cli_d)
+        for relative, old in zip(self.inputs, absolute):
+            self.capture['inputs'][relative] = dict(self.capture['inputs'][old])
+        self.assertEqual(self.validate()['literal_input_paths'], 7)
+        self.capture['compiler_dep_info_cwd'] = str(self.directory)
+        with self.assertRaisesRegex(ValueError, 'dep-info cwd'):
+            self.validate()
+
+    def test_external_artifacts_need_exact_lock_identity(self):
+        external = self.target / 'libserde.rlib'; self.write(external, 'locked crate')
+        identity = 'registry+test#serde@1'
+        self.records.insert(0, {'reason': 'compiler-artifact', 'package_id': identity,
+            'manifest_path': '/external/serde/Cargo.toml', 'target': {'name': 'serde', 'kind': ['lib']},
+            'profile': {'test': False}, 'filenames': [str(external)], 'executable': None})
+        self.write_stdout(); self.capture['invocation']['stdout'] = self.ref(self.stdout)
+        self.capture['artifacts_sha256'][str(external)] = progress.sha256(external)
+        package = {'kind': 'external_locked', 'manifest_path': '/external/serde/Cargo.toml',
+                   'name': 'serde', 'version': '1', 'source': 'registry+test', 'checksum': 'abc'}
+        self.capture['packages'][identity] = package
+        self.assertEqual(self.validate()['external_locked_packages'], 1)
+        package['checksum'] = 'wrong'
+        with self.assertRaisesRegex(ValueError, 'checksum-bound'):
+            self.validate()
+
+    def test_dep_info_parser_declines_make_expressions_and_duplicates(self):
+        rules, env = progress.parse_rust_dep_info('/target: /a\\ b /c\\\n /d\n/a\\ b:\n')
+        self.assertEqual(rules['/target'], ['/a b', '/c', '/d'])
+        self.assertEqual(env, {})
+        for text in ('/target: $(wildcard *.rs)', '/target: /x\n/target: /x', '/target: /x\\q',
+                     '/target: /x\n# env-dep:A=x\n# env-dep:A=y'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                progress.parse_rust_dep_info(text)
+
+
 if __name__ == '__main__':
     unittest.main()
