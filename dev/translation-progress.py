@@ -32,6 +32,8 @@ SCALABLE_FEATURES = (
 )
 SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
+BASELINE_CPU_TARGET = 'x86_64-baseline'
+MAX_CPU_TARGET_LENGTH = 256
 CONTEXT_ENTRY_PREFIX_BYTES = 13
 SCALABLE_VECTOR_BYTES = (16, 32, 64, 128, 256)
 SCALABLE_GUEST_BASE = 0x10000000
@@ -278,6 +280,9 @@ def validate_registry(registry):
                 if scalable_profiles is not None else row.get('profile') != profile)):
             raise ValueError('Form support scope/profile missing')
         row_contract = scalable_profiles[row['profile']] if scalable_profiles is not None else None
+        if row_contract is None and any('cpu_target' in sample for sample in
+                                        row.get('smoke_samples', []) + row.get('rejected_samples', [])):
+            raise ValueError('Host target samples require the context compiler lane')
         if row['status'] != 'unsupported':
             if not row.get('review') or not row.get('compiler_sources') or not row.get('smoke_samples'):
                 raise ValueError('Support requires reviewed implementation and smoke samples')
@@ -416,10 +421,24 @@ def validate_scalable_profiles(default_profile, execution_profiles=None):
     return profiles
 
 
+def validate_cpu_target(value):
+    # Rust TargetCpu::FromStr owns syntax and capabilities. Successful probes
+    # must bind the returned canonical TargetCpu::id to this exact argument.
+    if (not isinstance(value, str) or not value or len(value) > MAX_CPU_TARGET_LENGTH
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError('Host cpu_target must be a bounded nonempty argument')
+    try:
+        value.encode('utf-8')
+    except UnicodeEncodeError:
+        raise ValueError('Host cpu_target must be a UTF-8 argument') from None
+    return value
+
+
 def validate_scalable_sample(sample, contract):
-    allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason'}
+    allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason', 'cpu_target'}
     if set(sample) - allowed:
         raise ValueError('Samples must use declared fields and select guest features/controls through the row profile')
+    validate_cpu_target(sample.get('cpu_target', BASELINE_CPU_TARGET))
     return scalable_execution_profile(contract['id'], sample.get('svl_bytes'), sample.get('svcr'),
                                        **scalable_declaration(contract))
 
@@ -459,16 +478,17 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
                   expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
-                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None):
+                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
         raise ValueError('Invalid declared compiler probe boundary')
     if mode == 'scalable':
+        cpu_target = validate_cpu_target(BASELINE_CPU_TARGET if cpu_target is None else cpu_target)
         execution = scalable_execution_profile(guest_profile, svl_bytes, svcr, features=features,
             max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit)
     elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
-                                            max_svl_bytes, zt0_enabled, dit)):
+                                            max_svl_bytes, zt0_enabled, dit, cpu_target)):
         raise ValueError('Scalable configuration requires the context compiler lane')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
@@ -479,7 +499,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         command.extend(['--guest-base', '0x10000000'])
     if mode == 'scalable':
         command.extend(['--guest-profile', guest_profile, '--svl-bytes', str(svl_bytes),
-                        '--svcr', str(svcr), '--cpu-target', 'baseline'])
+                        '--svcr', str(svcr), '--cpu-target', cpu_target])
         if guest_profile == DECLARED_SCALABLE_PROFILE:
             for feature in execution['features']:
                 command.extend(['--guest-feature', feature])
@@ -511,7 +531,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         raise ValueError('Compiler probe native output identity mismatch')
     if mode == 'scalable':
         validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,
-            guest_profile, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
+            guest_profile, expected_target_cpu=cpu_target, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
                              if guest_profile == DECLARED_SCALABLE_PROFILE else {}))
     fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
@@ -561,6 +581,8 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             configuration = declaration if sample is None else sample
             result.update(guest_profile=declaration['id'], svl_bytes=configuration['svl_bytes'],
                           svcr=configuration['svcr'], **scalable_declaration(declaration))
+            if 'cpu_target' in configuration:
+                result['cpu_target'] = configuration['cpu_target']
         return result
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None

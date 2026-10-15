@@ -477,7 +477,7 @@ class ScalableProgressTests(unittest.TestCase):
             self.assertEqual(command[1], 'compile-leaf')
             self.assertEqual(command[command.index('--guest-profile') + 1], progress.SCALABLE_PROFILE)
             self.assertEqual(command[command.index('--guest-base') + 1], '0x10000000')
-            self.assertEqual(command[command.index('--cpu-target') + 1], 'baseline')
+            self.assertEqual(command[command.index('--cpu-target') + 1], 'x86_64-baseline')
             source = Path(command[2])
             output = Path(command[command.index('--output-dir') + 1])
             output.mkdir()
@@ -1792,6 +1792,103 @@ class CompilerDepInfoGuards(unittest.TestCase):
                      '/target: /x\n# env-dep:A=x\n# env-dep:A=y'):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 progress.parse_rust_dep_info(text)
+
+
+class SampleHostTargetTests(unittest.TestCase):
+    def fake_compiler(self, manifest_target=None):
+        def fake(command, **kwargs):
+            target = command[command.index('--cpu-target') + 1]
+            baseline_command = list(command)
+            baseline_command[baseline_command.index('--cpu-target') + 1] = 'x86_64-baseline'
+            result = ScalableProgressTests().fake_compiler()(baseline_command, **kwargs)
+            manifest = json.loads(result.stdout)
+            manifest['target_cpu'] = target if manifest_target is None else manifest_target
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return fake
+
+    def probe(self, directory, **kwargs):
+        return progress.compile_probe('cli', progress.RET, directory, mode='scalable',
+            guest_profile=progress.SCALABLE_PROFILE, svl_bytes=16, svcr=3, **kwargs)
+
+    def test_absent_host_target_keeps_canonical_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.probe(Path(directory), run=self.fake_compiler())
+        self.assertEqual(result['target_cpu'], 'x86_64-baseline')
+        self.assertEqual(result['execution_profile'], {'id': progress.SCALABLE_PROFILE, 'svl_bytes': 16, 'svcr': 3})
+
+    def test_optional_host_target_is_forwarded_and_exact_manifest_target_retained(self):
+        for target in ('x86_64-baseline+atomic-load16', 'x86_64-baseline+cx16',
+                       'x86_64-baseline+atomic-load16+cx16'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                result = self.probe(Path(directory), cpu_target=target, run=self.fake_compiler())
+            self.assertEqual(result['target_cpu'], target)
+            self.assertEqual(result['execution_profile']['id'], progress.SCALABLE_PROFILE)
+
+    def test_mismatched_canonical_target_and_alias_native_targets_decline(self):
+        for target in ('x86_64-baseline+cx16', 'baseline', 'native'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, 'source/native metadata mismatch'):
+                    self.probe(Path(directory), cpu_target=target, run=self.fake_compiler('x86_64-baseline'))
+
+    def test_invalid_transport_values_decline_before_compiler(self):
+        for target in ('', 1, True, [], {}, 'a' * 257, 'bad\nargument', 'bad\x00argument', '\ud800'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                with patch.object(progress.subprocess, 'run') as run:
+                    with self.assertRaises(ValueError):
+                        self.probe(Path(directory), cpu_target=target, run=run)
+                    run.assert_not_called()
+                    self.assertEqual(list(Path(directory).iterdir()), [])
+        sample = {'word': '0xd65f03c0', 'expected_mnemonics': ['ret'], 'svl_bytes': 16, 'svcr': 3, 'cpu_target': None}
+        with self.assertRaises(ValueError):
+            progress.validate_scalable_sample(sample, ScalableProgressTests().profile())
+
+    def test_target_syntax_and_capability_rejection_stays_with_rust(self):
+        # Mock transport/error propagation; Rust's existing parser remains the
+        # sole authority for unknown, duplicate and reordered suffixes.
+        for target in ('x86_64-baseline+unknown', 'x86_64-baseline+cx16+cx16',
+                       'x86_64-baseline+cx16+atomic-load16'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                calls = []
+                def rejected(command, **kwargs):
+                    calls.append(command)
+                    return subprocess.CompletedProcess(command, 1, '', 'Rust target parser rejected target')
+                with self.assertRaisesRegex(ValueError, 'Rust target parser rejected target'):
+                    self.probe(Path(directory), cpu_target=target, run=rejected)
+                self.assertEqual(calls[0][calls[0].index('--cpu-target') + 1], target)
+
+    def test_sample_target_routes_to_supported_and_rejected_probes(self):
+        registry = DeclaredScalableProgressTests().registry()
+        row = registry['forms'][1]
+        target = 'x86_64-baseline+atomic-load16'
+        row['smoke_samples'][0]['cpu_target'] = target
+        row['rejected_samples'] = [{'word': '0xd65f03c0', 'reason': 'scope limit', 'svl_bytes': 16,
+                                    'svcr': 3, 'cpu_target': 'x86_64-baseline+cx16'}]
+        rows = progress.validate_registry(registry)
+        with tempfile.TemporaryDirectory() as directory, patch.object(progress, 'compile_probe', return_value={
+                'compiler_source_sha256': COMPILER}) as probe:
+            progress.smoke_forms('cli', rows, rows, Path(directory), mode='scalable',
+                profile=registry['profile'], execution_profiles=registry['execution_profiles'])
+        targets = [call.kwargs['cpu_target'] for call in probe.call_args_list if 'cpu_target' in call.kwargs]
+        self.assertEqual(targets, [target, 'x86_64-baseline+cx16'])
+        for call in probe.call_args_list:
+            self.assertNotIn('cpu_target', call.kwargs.get('features', []))
+
+    def test_legacy_samples_cannot_silently_ignore_explicit_host_target(self):
+        for collection in ('smoke_samples', 'rejected_samples'):
+            registry = fixtures()
+            if collection == 'smoke_samples':
+                registry['forms'][0][collection][0]['cpu_target'] = 'x86_64-baseline+cx16'
+            else:
+                registry['forms'][0][collection] = [{'cpu_target': 'x86_64-baseline+cx16'}]
+            with self.subTest(collection=collection), self.assertRaisesRegex(ValueError, 'context compiler lane'):
+                progress.validate_registry(registry)
+
+    def test_host_target_is_not_a_guest_profile_declaration(self):
+        profile = {**ScalableProgressTests().profile(), 'cpu_target': 'x86_64-baseline+cx16'}
+        with self.assertRaises(ValueError):
+            progress.validate_scalable_profile(profile)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'context compiler lane'):
+            progress.compile_probe('cli', progress.RET, Path(directory), cpu_target='x86_64-baseline+cx16')
 
 
 if __name__ == '__main__':
