@@ -274,11 +274,13 @@ fn transfer_requirements(
 ) -> MemoryRequirements {
     let required_flags = transfer.descriptor(non_temporal);
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: profile.address_requirements(false),
         required_flags,
         required_host_caps: if transfer.load
             && !(transfer.naturally_aligned()
                 && (transfer.base != Register::Sp
-                    || profile == CheckedMemoryProfile::SpAlignmentEnabled))
+                    || profile.sp_requirement() == SpAlignmentRequirement::Enabled))
             && matches!(
                 transfer.quantity_bytes(),
                 HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES
@@ -301,10 +303,16 @@ fn transfer_requirements(
     }
 }
 
-fn address(code: &mut Vec<u8>, transfer: Transfer) {
+fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile) {
     match transfer.address {
         Address::Immediate { displacement, mode } => {
-            service::address::immediate(code, transfer.base, displacement, mode);
+            service::address::immediate_with_checks(
+                code,
+                transfer.base,
+                displacement,
+                mode,
+                profile.address_checks(false),
+            );
             if transfer.writeback() {
                 code.extend(MOV_RSP_DISP8_RDX);
                 code.push(WRITEBACK_OFFSET);
@@ -315,7 +323,14 @@ fn address(code: &mut Vec<u8>, transfer: Transfer) {
             extend,
             shift,
         } => {
-            service::address::register_offset(code, transfer.base, index, extend, shift);
+            service::address::register_offset_with_checks(
+                code,
+                transfer.base,
+                index,
+                extend,
+                shift,
+                profile.address_checks(false),
+            );
         }
     }
 }
@@ -399,12 +414,12 @@ fn emit_transfer(
     code.push(SCRATCH_BYTES);
     service::begin(code);
     let mut failed = Vec::new();
-    if profile == CheckedMemoryProfile::SpAlignmentEnabled
+    if profile.sp_requirement() == SpAlignmentRequirement::Enabled
         && let Some(failure) = service::address::check_sp(code, transfer.base, pc)
     {
         failed.push(failure);
     }
-    address(code, transfer);
+    address(code, transfer, profile);
     if !transfer.load {
         stage_sources(code, transfer);
     }

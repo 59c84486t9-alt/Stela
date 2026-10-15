@@ -166,6 +166,8 @@ fn multi_requirements_fold_every_effect_and_preserve_four_argument_descriptor() 
         )
         .unwrap(),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::TAG_CHECKED | flags::WRITE | flags::NON_TEMPORAL,
             required_host_caps: host_caps::ATOMIC_LOAD16,
             required_profile: profile_requirements::NATIVE_ACCESS
@@ -183,6 +185,8 @@ fn multi_requirements_fold_every_effect_and_preserve_four_argument_descriptor() 
         )
         .unwrap(),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: 0,
             required_host_caps: 0,
             required_profile: profile_requirements::NATIVE_ACCESS,

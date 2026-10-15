@@ -27,14 +27,21 @@ use stela_compiler::{
     },
 };
 
+pub mod extended_controls;
+#[path = "process_memory/pointer.rs"]
+mod pointer;
+#[path = "process_memory/pointer_checks.rs"]
+mod pointer_checks;
 #[path = "process_memory/source.rs"]
 mod source;
+pub(crate) use pointer::PointerMemoryAuthorization;
+pub use pointer_checks::Error as PointerChecksError;
+pub(crate) use pointer_checks::ResolvedPointerChecks;
 pub use source::SourceNormalWbDomain;
 #[path = "process_memory/low128.rs"]
 mod low128;
 pub(crate) use low128::Low128ProcessMemoryAuthorization;
 pub use low128::PreparedLow128ProcessMemory;
-pub mod extended_controls;
 #[path = "process_memory/scalable.rs"]
 mod scalable;
 pub use scalable::ScalableExecutionError;
@@ -103,6 +110,7 @@ pub enum ProcessMemoryError {
     MissingEventEndpoint,
     Memory(MemoryStatus),
     Low128(super::fp_access::Error),
+    PointerChecks(PointerChecksError),
 }
 
 /// Checked facts for this bounded data contract, not a complete CPU inventory.
@@ -112,6 +120,7 @@ pub enum ProcessMemoryError {
 #[derive(Debug)]
 pub struct ProcessMemoryFeatures {
     _base_spe_absence: BaseSpeAbsence,
+    cpa: pointer_checks::CpaFeature,
 }
 
 impl ProcessMemoryFeatures {
@@ -141,6 +150,31 @@ impl ProcessMemoryFeatures {
         id_aa64pfr1_el1: u64,
         base_spe_absence: BaseSpeAbsence,
     ) -> Result<Self, ProcessMemoryError> {
+        let cpa = pointer_checks::CpaFeature::from_raw(id_aa64isar3_el1)
+            .map_err(ProcessMemoryError::PointerChecks)?;
+        if cpa == pointer_checks::CpaFeature::Checked {
+            return Err(ProcessMemoryError::UnsupportedFeature {
+                register: "ID_AA64ISAR3_EL1",
+                field: "CPA",
+                value: id_aa64isar3_el1 & ISAR3_CPA_MASK,
+            });
+        }
+        Self::from_qualified_ids(
+            id_aa64mmfr0_el1,
+            id_aa64mmfr2_el1,
+            id_aa64pfr1_el1,
+            base_spe_absence,
+            cpa,
+        )
+    }
+
+    fn from_qualified_ids(
+        id_aa64mmfr0_el1: u64,
+        id_aa64mmfr2_el1: u64,
+        id_aa64pfr1_el1: u64,
+        base_spe_absence: BaseSpeAbsence,
+        cpa: pointer_checks::CpaFeature,
+    ) -> Result<Self, ProcessMemoryError> {
         let granule = (id_aa64mmfr0_el1 >> MMFR0_TGRAN4_SHIFT) & ID_FIELD_MASK;
         if !matches!(granule, TGRAN4_SUPPORTED | TGRAN4_LPA2) {
             return Err(ProcessMemoryError::UnsupportedFeature {
@@ -155,12 +189,6 @@ impl ProcessMemoryFeatures {
                 "AT",
                 (id_aa64mmfr2_el1 >> MMFR2_AT_SHIFT) & ID_FIELD_MASK,
                 MMFR2_AT_LSE2,
-            ),
-            (
-                "ID_AA64ISAR3_EL1",
-                "CPA",
-                id_aa64isar3_el1 & ISAR3_CPA_MASK,
-                FEATURE_ABSENT,
             ),
             (
                 "ID_AA64PFR1_EL1",
@@ -179,6 +207,7 @@ impl ProcessMemoryFeatures {
         }
         Ok(Self {
             _base_spe_absence: base_spe_absence,
+            cpa,
         })
     }
 }
@@ -190,7 +219,7 @@ impl ProcessMemoryFeatures {
 /// establish effective ARM attributes. This does not implement a page-table walk.
 #[derive(Debug)]
 pub struct FixedProcessMemoryControls {
-    _features: ProcessMemoryFeatures,
+    features: ProcessMemoryFeatures,
     identification: Option<Arc<Snapshot>>,
     sctlr_el1: u64,
     tcr_el1: u64,
@@ -233,7 +262,7 @@ impl FixedProcessMemoryControls {
             });
         }
         Ok(Self {
-            _features: features,
+            features,
             identification: None,
             sctlr_el1,
             tcr_el1,
@@ -258,6 +287,39 @@ impl FixedProcessMemoryControls {
             .check_el10_regime()
             .map_err(ProcessMemoryError::Identification)?;
         let features = ProcessMemoryFeatures::from_snapshot(&identification)?;
+        let mut controls = Self::new(features, sctlr_el1, tcr_el1, lower_address_bits, source)?;
+        controls.identification = Some(identification);
+        Ok(controls)
+    }
+
+    // Only the same-bank extended-control factory may construct CPA2 data
+    // authority. Generic/raw-ID constructors continue to reject that feature.
+    fn new_with_pointer_identification(
+        identification: Arc<Snapshot>,
+        sctlr_el1: u64,
+        tcr_el1: u64,
+        lower_address_bits: u8,
+        source: SourceNormalWbDomain,
+    ) -> Result<Self, ProcessMemoryError> {
+        identification
+            .check_el10_regime()
+            .map_err(ProcessMemoryError::Identification)?;
+        let read = |register| {
+            identification
+                .read(register)
+                .map_err(ProcessMemoryError::Identification)
+        };
+        let cpa = pointer_checks::CpaFeature::from_snapshot(&identification)
+            .map_err(ProcessMemoryError::PointerChecks)?;
+        let features = ProcessMemoryFeatures::from_qualified_ids(
+            read(Register::IdAa64Mmfr0El1)?,
+            read(Register::IdAa64Mmfr2El1)?,
+            read(Register::IdAa64Pfr1El1)?,
+            identification
+                .base_spe_absence()
+                .map_err(ProcessMemoryError::Identification)?,
+            cpa,
+        )?;
         let mut controls = Self::new(features, sctlr_el1, tcr_el1, lower_address_bits, source)?;
         controls.identification = Some(identification);
         Ok(controls)
@@ -314,6 +376,12 @@ impl FixedProcessMemoryControls {
         endpoint: Option<&'run EventEndpoint>,
     ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
         let execution_loan = self.acquire_source_loan(boundary, system, registers, thread)?;
+        if self.features.cpa == pointer_checks::CpaFeature::Checked {
+            return Err(ProcessMemoryError::PointerChecks(
+                PointerChecksError::UnsupportedProfile,
+            ));
+        }
+
         // ASIMD/structure/scalable and the other typed memory categories require
         // their own reviewed CPU contracts. Exclusive is not an Atomic alias.
         let unsupported_classes =
@@ -388,6 +456,7 @@ impl FixedProcessMemoryControls {
             thread,
             endpoint,
             requirements,
+            pointer: None,
         })
     }
 
@@ -490,11 +559,16 @@ pub struct PreparedProcessMemory<'run> {
     thread: &'run mut MemoryThread<MemoryControls>,
     endpoint: Option<&'run EventEndpoint>,
     requirements: MemoryRequirements,
+    pointer: Option<PointerMemoryAuthorization<'run>>,
 }
 
 impl PreparedProcessMemory<'_> {
     pub const fn profile_id(&self) -> &'static str {
-        ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID
+        if self.pointer.is_some() {
+            stela_compiler::block::CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID
+        } else {
+            ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID
+        }
     }
 
     /// Exact compiler requirements retained by the typed entry factory.
@@ -533,6 +607,11 @@ impl PreparedProcessMemory<'_> {
         // same-domain execution loan through once-only PC settlement, then drop
         // that outer guard before entering a Darwin mapping service transaction.
         let _execution_loan = self.execution_loan;
+        let policy = if let Some(pointer) = &self.pointer {
+            policy.with_pointer_authority(pointer)
+        } else {
+            policy
+        };
         let loan = PolicyLoan::new(self.thread, policy);
         if let Some(endpoint) = self.endpoint {
             // Actual retained same-PE identity, rechecked immediately before

@@ -1,12 +1,12 @@
 //! Checked context block emission from the same source-derived decoded plan.
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
-    block::Terminator,
-    extended::{self, Decoded},
+    block::{Terminator, memory::CheckedOperation},
+    extended,
 };
 
 pub(crate) fn emit(
-    instructions: &[(GuestAddress, Decoded)],
+    instructions: &[(GuestAddress, CheckedOperation)],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: TargetCpu,
@@ -18,7 +18,7 @@ pub(crate) fn emit(
     let mut fixups = Vec::new();
     for (pc, instruction) in instructions {
         block.source_map.push((*pc, block.x86_64_code.len()));
-        instruction.emit_checked_ordinary(&mut block.x86_64_code, *pc, target, &mut fixups)?;
+        instruction.emit(&mut block.x86_64_code, *pc, target, &mut fixups)?;
     }
     if !fixups.is_empty() {
         return Err(CompileError(

@@ -298,6 +298,8 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         Operand::Prefetch(_) => return MemoryRequirements::default(),
     };
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_flags,
         required_host_caps,
         required_profile: profile_requirements::NATIVE_ACCESS

@@ -143,6 +143,8 @@ fn access_flags(operand: Operand) -> u32 {
 /// naturally aligned; unconstrained multibyte GPR-base reads may cross8 inside16.
 pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_sp_alignment: if operand.address.base == Register::Sp {
             SpAlignmentRequirement::Enabled
         } else {
@@ -441,6 +443,8 @@ mod tests {
         assert_eq!(
             requirements(decoded(LD1B_Z1_P0_X5)),
             MemoryRequirements {
+                required_pointer_arithmetic: None,
+                required_address_checks: Default::default(),
                 required_sp_alignment: SpAlignmentRequirement::Any,
                 required_flags: checked,
                 required_host_caps: 0,
@@ -450,6 +454,8 @@ mod tests {
         assert_eq!(
             requirements(decoded(LD1D_Z1_P0_X5)),
             MemoryRequirements {
+                required_pointer_arithmetic: None,
+                required_address_checks: Default::default(),
                 required_sp_alignment: SpAlignmentRequirement::Any,
                 required_flags: checked,
                 required_host_caps: host_caps::ATOMIC_LOAD16,
@@ -459,6 +465,8 @@ mod tests {
         assert_eq!(
             requirements(decoded(LD1D_Z1_P0_SP)),
             MemoryRequirements {
+                required_pointer_arithmetic: None,
+                required_address_checks: Default::default(),
                 required_sp_alignment: SpAlignmentRequirement::Enabled,
                 required_flags: flags::SVE_PREDICATED,
                 required_host_caps: 0,

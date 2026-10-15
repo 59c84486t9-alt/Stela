@@ -62,7 +62,85 @@ impl FixedProcessMemoryControls {
         thread: &'run mut MemoryThread<MemoryControls>,
         endpoint: Option<&'run EventEndpoint>,
     ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
+        self.prepare_low128_profile(
+            boundary,
+            requirements,
+            system,
+            context,
+            registers,
+            thread,
+            endpoint,
+            None,
+        )
+    }
+
+    /// Same low128 owner with source-bound CPA specialization; no separate FP
+    /// bank, RAM authority or policy-installation path is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_profile_with_low128<'run, 'loan, 'id>(
+        &'run self,
+        boundary: &'run EntryBoundary,
+        profile: stela_compiler::block::CheckedMemoryProfile,
+        requirements: MemoryRequirements,
+        system: &'run SystemState,
+        debug: &'run crate::system::debug::DebugControls,
+        context: &'run Low128FpContext<'loan, 'id>,
+        registers: &GuestState,
+        thread: &'run mut MemoryThread<MemoryControls>,
+        endpoint: Option<&'run EventEndpoint>,
+    ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
+        self.prepare_low128_profile(
+            boundary,
+            requirements,
+            system,
+            context,
+            registers,
+            thread,
+            endpoint,
+            if matches!(
+                profile,
+                stela_compiler::block::CheckedMemoryProfile::AddressChecks(_)
+            ) {
+                Some((profile, debug))
+            } else {
+                None
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_low128_profile<'run, 'loan, 'id>(
+        &'run self,
+        boundary: &'run EntryBoundary,
+        requirements: MemoryRequirements,
+        system: &'run SystemState,
+        context: &'run Low128FpContext<'loan, 'id>,
+        registers: &GuestState,
+        thread: &'run mut MemoryThread<MemoryControls>,
+        endpoint: Option<&'run EventEndpoint>,
+        pointer_profile: Option<(
+            stela_compiler::block::CheckedMemoryProfile,
+            &'run crate::system::debug::DebugControls,
+        )>,
+    ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
         let execution_loan = self.acquire_source_loan(boundary, system, registers, thread)?;
+        let pointer = match pointer_profile {
+            Some((profile, debug)) => Some(self.qualify_pointer(
+                profile,
+                requirements,
+                system,
+                debug,
+                thread,
+                &execution_loan,
+            )?),
+            None if self.features.cpa == super::pointer_checks::CpaFeature::Checked => {
+                return Err(ProcessMemoryError::PointerChecks(
+                    super::PointerChecksError::UnsupportedProfile,
+                ));
+            }
+            None => None,
+        };
+
         let authorization = Low128ProcessMemoryAuthorization {
             boundary,
             context,
@@ -80,8 +158,9 @@ impl FixedProcessMemoryControls {
         {
             return Err(ProcessMemoryError::Memory(MemoryStatus::Unsupported));
         }
-        let prepared =
+        let mut prepared =
             self.finish_prepare(requirements, system, thread, endpoint, execution_loan)?;
+        prepared.pointer = pointer;
         Ok(PreparedLow128ProcessMemory {
             authorization,
             prepared,

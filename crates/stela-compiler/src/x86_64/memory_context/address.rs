@@ -6,7 +6,7 @@ use super::{fault, patch_branch};
 use crate::x86_64::{load, right_operand};
 use crate::{
     aarch64::{AddressMode, Register, Shift, Width, register_offset::IndexExtend},
-    context::memory::MemoryStatus,
+    context::memory::{MemoryStatus, address::AddressAddChecks},
 };
 
 const STACK_ALIGNMENT_MASK: u8 = 15;
@@ -22,6 +22,8 @@ const LEA_RDX_RAX_DISP8: &[u8] = &[0x48, 0x8d, 0x50];
 const LEA_RDX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x90];
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
 const MOV_RAX_RDX: &[u8] = &[0x48, 0x89, 0xd0];
+const MOV_R8_RAX: &[u8] = &[0x49, 0x89, 0xc0];
+const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
 const MOV_ECX_ECX: &[u8] = &[0x89, 0xc9];
 const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
 const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
@@ -84,6 +86,46 @@ pub(crate) fn immediate(code: &mut Vec<u8>, base: Register, displacement: i32, m
     }
 }
 
+/// Source AddressAdd, using the actual access level's resolved specialization.
+/// Original-SP checks and store staging precede this helper. RAX is the access
+/// address; Pre/Post also produce RDX=pending writeback. No guest effect occurs.
+/// PostIndex retains the original access address while marking only writeback.
+pub(crate) fn immediate_with_checks(
+    code: &mut Vec<u8>,
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+    checks: AddressAddChecks,
+) {
+    // Zero-offset marking is idempotent, including an already marked base.
+    // The containing body must still retain its actual control requirement.
+    if checks == AddressAddChecks::Disabled || displacement == 0 {
+        immediate(code, base, displacement, mode);
+        return;
+    }
+    load(code, base);
+    code.extend(MOV_RDX_RAX);
+    if mode == AddressMode::PostIndex {
+        code.extend(MOV_R8_RAX);
+    }
+    if let Ok(compact) = i8::try_from(displacement) {
+        code.extend(LEA_RAX_RAX_DISP8);
+        code.push(compact as u8);
+    } else {
+        code.extend(LEA_RAX_RAX_DISP32);
+        code.extend(displacement.to_le_bytes());
+    }
+    // The common CPA recipe preserves original RDX and, without multiplication,
+    // R8. Only RAX/RCX/R9/R10/R11 and host flags are scratch.
+    crate::x86_64::pointer_checks::emit(code, false);
+    if mode != AddressMode::Offset {
+        code.extend(MOV_RDX_RAX);
+    }
+    if mode == AddressMode::PostIndex {
+        code.extend(MOV_RAX_R8);
+    }
+}
+
 /// Unchecked arithmetic AFTER check_sp. RAX=EA; no base writeback. Operands are
 /// the existing validated decoder types, including W extension and ZR index.
 pub(crate) fn register_offset(
@@ -105,4 +147,37 @@ pub(crate) fn register_offset(
         code.push(shift);
     }
     code.extend(LEA_RAX_RAX_RCX);
+}
+
+/// Source AddressAdd for a decoded extended/shifted register offset. RAX=EA;
+/// RDX retains original base across the shared marker. No writeback is present.
+pub(crate) fn register_offset_with_checks(
+    code: &mut Vec<u8>,
+    base: Register,
+    index: Register,
+    extend: IndexExtend,
+    shift: u8,
+    checks: AddressAddChecks,
+) {
+    if checks == AddressAddChecks::Disabled {
+        register_offset(code, base, index, extend, shift);
+        return;
+    }
+    load(code, base);
+    if index == Register::Zero {
+        return;
+    }
+    code.extend(MOV_RDX_RAX);
+    right_operand(code, index, Width::X64, Shift::Lsl, 0);
+    match extend {
+        IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
+        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_ECX),
+        IndexExtend::Lsl | IndexExtend::Sxtx => {}
+    }
+    if shift != 0 {
+        code.extend(SHL_RCX_IMM8);
+        code.push(shift);
+    }
+    code.extend(LEA_RAX_RAX_RCX);
+    crate::x86_64::pointer_checks::emit(code, false);
 }

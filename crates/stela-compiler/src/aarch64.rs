@@ -2,6 +2,7 @@
 use crate::{GuestAddress, Lifter, UnsupportedReason};
 pub mod atomic;
 pub mod bitfield;
+pub mod checked_pointer;
 pub mod conditional_select;
 pub mod constrained;
 pub mod crc;
@@ -210,6 +211,7 @@ impl From<simd::refinement::Operand> for FloatingPointOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    CheckedPointer(checked_pointer::Operand),
     Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),
@@ -441,6 +443,8 @@ impl Lifter for Decoder {
             Operation::ConditionalCompare(decoded)
         } else if let Some(decoded) = crc::decode(word) {
             Operation::Crc(decoded.map_err(|()| unsupported())?)
+        } else if let Some(decoded) = checked_pointer::decode(word) {
+            Operation::CheckedPointer(decoded)
         } else if let Some(decoded) = flags::decode(word) {
             Operation::Flags(decoded)
         } else if let Some(decoded) = fp_register::decode(word) {

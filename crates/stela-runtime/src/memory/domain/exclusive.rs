@@ -63,6 +63,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             return self.clear_reservation().map_err(fail);
         }
         let requirements = MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: request.flags,
             required_host_caps: if request.bytes as usize == SCA_BYTES {
                 if write {

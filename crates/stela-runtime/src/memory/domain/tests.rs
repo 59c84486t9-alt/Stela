@@ -101,6 +101,30 @@ impl DataPolicy for Policy {
     }
 }
 
+#[test]
+fn unqualified_policy_refuses_both_checked_and_disabled_cpa_specializations_before_entry() {
+    use stela_compiler::context::memory::address::{
+        AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
+    };
+    let domain = domain(Vec::new());
+    let mut thread = domain.thread(Policy::default());
+    assert!(thread.prepare(MemoryRequirements::default()).is_ok());
+    for access_el in [AccessEl::El0, AccessEl::El1] {
+        for checks in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
+            let required = MemoryRequirements {
+                required_address_checks: AddressCheckRequirements::for_access(access_el, checks)
+                    .with_increment_choice(IncrementChoice::Unchecked),
+                ..Default::default()
+            };
+            assert_eq!(
+                thread.prepare(required).err(),
+                Some(MemoryStatus::Unsupported)
+            );
+            assert!(thread.policy.checked.is_empty());
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Outcome {
     status: u32,
@@ -1688,6 +1712,8 @@ fn exclusive_service_faults_and_declines_preserve_all_payload_bytes() {
     );
     assert_eq!(data, before);
     let req = MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_flags: flags::EXCLUSIVE,
         required_host_caps: 0,
         required_profile: stela_compiler::context::memory::profile_requirements::NATIVE_ACCESS,
@@ -1997,6 +2023,8 @@ fn exclusive_service_shifted_relative_erg_geometry_declines_before_prefix_only_f
     let domain = domain(vec![mapping]);
     let mut thread = domain.thread(ExclusivePolicy::default());
     let req = MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_flags: flags::EXCLUSIVE,
         required_host_caps: 0,
         required_profile: stela_compiler::context::memory::profile_requirements::NATIVE_ACCESS,
@@ -2129,6 +2157,8 @@ fn exclusive_service_dedicated_tag_entry_cannot_bypass_typed_class_preflight() {
         flags::ATOMIC | flags::ORDERED | flags::EXCLUSIVE,
     ] {
         let req = MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: class,
             required_host_caps: 0,
             required_profile: 0,

@@ -162,6 +162,8 @@ fn stores_preflight_write_caps_tags_and_original_sp_for_the_complete_body() {
     assert_eq!(
         requirements(&[ST1B_Z1_P0_SP, RET_X30]),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::WRITE | flags::SVE_PREDICATED,
             required_host_caps: 0,
             required_profile: profile_requirements::NATIVE_ACCESS,
@@ -171,6 +173,8 @@ fn stores_preflight_write_caps_tags_and_original_sp_for_the_complete_body() {
     assert_eq!(
         requirements(&[STR_Z1_X5, RET_X30]),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::WRITE | flags::TAG_CHECKED,
             required_host_caps: 0,
             required_profile: profile_requirements::NATIVE_ACCESS
@@ -182,6 +186,8 @@ fn stores_preflight_write_caps_tags_and_original_sp_for_the_complete_body() {
     assert_eq!(
         requirements(&[NOP, ST1B_Z1_P0_SP, STNT1D_Z1_P0_X5, ST2Q_Z1_P0_X5, RET_X30]),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::WRITE
                 | flags::TAG_CHECKED
                 | flags::NON_TEMPORAL

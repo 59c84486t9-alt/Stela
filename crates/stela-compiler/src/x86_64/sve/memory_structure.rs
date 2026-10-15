@@ -115,6 +115,8 @@ fn access_flags(operand: Operand) -> u32 {
 pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
     let required_flags = access_flags(operand);
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_flags,
         required_host_caps: if operand.element == ElementSize::Quadword
             || (operand.element != ElementSize::Byte && operand.address.base != Register::Sp)

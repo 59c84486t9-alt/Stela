@@ -87,6 +87,7 @@ pub struct MemoryControls {
     tag_check_fault_mode: TagCheckFaultMode,
     tag_check_mask: bool,
     effective_sp_alignment: Option<bool>,
+    pointer_checks: Option<crate::system::process_memory::ResolvedPointerChecks>,
     memory_implementation_profile: Option<MemoryImplementationProfile>,
     operation_scope: OperationScope,
 }
@@ -108,6 +109,7 @@ impl MemoryControls {
             tag_check_fault_mode,
             tag_check_mask,
             effective_sp_alignment: None,
+            pointer_checks: None,
             memory_implementation_profile: None,
             operation_scope: OperationScope::Unbound,
         }
@@ -134,6 +136,14 @@ impl MemoryControls {
         let mut controls = authority.memory_controls();
         controls.operation_scope = OperationScope::FixedEl0ProcessLow128;
         controls
+    }
+
+    pub(crate) fn with_pointer_authority(
+        mut self,
+        authority: &crate::system::process_memory::PointerMemoryAuthorization<'_>,
+    ) -> Self {
+        self.pointer_checks = Some(authority.checks());
+        self
     }
 
     /// Bind the actual current-EL selected SA0/SA effect from the CPU owner.
@@ -233,6 +243,44 @@ impl DataPolicy for MemoryControls {
             ) => Ok(()),
             // The compiler implements the checking contract only. A known
             // suppression choice is explicit incompatibility, not authorization.
+            _ => Err(MemoryStatus::Unsupported),
+        }
+    }
+
+    fn validate_address_checks(
+        &self,
+        required: stela_compiler::context::memory::address::AddressCheckRequirements,
+    ) -> Result<(), MemoryStatus> {
+        if required.is_empty() {
+            return Ok(());
+        }
+        match self.pointer_checks {
+            Some(checks)
+                if required.matches(
+                    checks.address_checks(),
+                    stela_compiler::context::memory::address::IncrementChoice::Unchecked,
+                ) =>
+            {
+                Ok(())
+            }
+            _ => Err(MemoryStatus::Unsupported),
+        }
+    }
+    fn validate_pointer_arithmetic(
+        &self,
+        required: Option<stela_compiler::context::pointer::PointerArithmeticRequirement>,
+    ) -> Result<(), MemoryStatus> {
+        let Some(required) = required else {
+            return Ok(());
+        };
+        match self.pointer_checks {
+            Some(checks)
+                if checks.feature().has_arithmetic()
+                    && required.access_el() == stela_compiler::context::pointer::AccessEl::El0
+                    && checks.arithmetic_at(required.access_el()) == required.checks() =>
+            {
+                Ok(())
+            }
             _ => Err(MemoryStatus::Unsupported),
         }
     }

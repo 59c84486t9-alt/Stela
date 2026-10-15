@@ -162,6 +162,8 @@ fn structure_requirements_fold_the_complete_body() {
         )
         .unwrap(),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::SVE_PREDICATED | flags::TAG_CHECKED,
             required_host_caps: host_caps::ATOMIC_LOAD16,
             required_profile: profile_requirements::NATIVE_ACCESS

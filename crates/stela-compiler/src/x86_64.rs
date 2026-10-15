@@ -14,7 +14,10 @@ pub(crate) fn validate_target(
     instruction: &Instruction,
     target: crate::TargetCpu,
 ) -> Result<(), UnsupportedReason> {
-    if matches!(instruction.operation, Operation::Exclusive(_)) {
+    if matches!(
+        instruction.operation,
+        Operation::Exclusive(_) | Operation::CheckedPointer(_)
+    ) {
         return Err(UnsupportedReason::PrivilegedOperation {
             address: instruction.pc,
         });
@@ -54,6 +57,7 @@ pub(crate) fn validate_target(
 mod atomic;
 mod bitfield;
 pub(crate) mod block;
+pub(crate) mod checked_pointer;
 mod conditional_select;
 mod crc;
 pub(crate) mod exclusive;
@@ -69,6 +73,7 @@ pub(crate) mod memory_store;
 mod non_temporal;
 mod ordered;
 mod pc_relative;
+mod pointer_checks;
 mod prefetch;
 mod region;
 mod register_offset;
@@ -587,6 +592,9 @@ pub(crate) fn emit_instruction(
         }
         Operation::Return => code.push(0xc3),
         Operation::Exclusive(_) => unreachable!("exclusive requires checked context emitter"),
+        Operation::CheckedPointer(_) => {
+            unreachable!("CPA arithmetic requires checked context emitter")
+        }
         Operation::Nop => code.push(0x90),
         Operation::MoveWide {
             width,

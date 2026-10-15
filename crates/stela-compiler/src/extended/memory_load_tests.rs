@@ -169,6 +169,8 @@ fn requirements_cover_the_complete_body_and_explicit_pure_case() {
         )
         .unwrap(),
         MemoryRequirements {
+            required_pointer_arithmetic: None,
+            required_address_checks: Default::default(),
             required_flags: flags::TAG_CHECKED | flags::SVE_PREDICATED,
             required_host_caps: host_caps::ATOMIC_LOAD16,
             required_profile: profile_requirements::NATIVE_ACCESS

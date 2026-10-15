@@ -4,6 +4,7 @@
 //! These borrowed views grant no ownership or permission to access guest RAM.
 
 pub mod memory;
+pub mod pointer;
 use std::ffi::c_void;
 
 pub const EXECUTION_CONTEXT_VERSION: u32 = 1;

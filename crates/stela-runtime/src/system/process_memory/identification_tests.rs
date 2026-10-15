@@ -7,6 +7,7 @@ const LOWER_ADDRESS_BITS: u8 = 39;
 const LOWER_SIZE: u64 = u64::BITS as u64 - LOWER_ADDRESS_BITS as u64;
 const EL10_IMPLEMENTED: u64 = 0x11;
 const FEATURE_PRESENT: u64 = 1;
+const CPA_WITH_CHECKING: u64 = 2;
 const EL2_FIELD_SHIFT: u32 = 8;
 const SPE_VERSION_SHIFT: u32 = 32;
 const TEST_ADDRESS_SPACE: u64 = 7;
@@ -112,7 +113,7 @@ fn same_source_feature_and_regime_failures_are_not_normalized() {
             ID_FIELD_MASK << MMFR0_TGRAN4_SHIFT,
         ),
         (Register::IdAa64Mmfr2El1, FEATURE_ABSENT),
-        (Register::IdAa64Isar3El1, FEATURE_PRESENT),
+        (Register::IdAa64Isar3El1, CPA_WITH_CHECKING),
         (Register::IdAa64Pfr1El1, FEATURE_PRESENT << PFR1_MTE_SHIFT),
         (
             Register::IdAa64Dfr0El1,
@@ -152,4 +153,29 @@ fn same_source_feature_and_regime_failures_are_not_normalized() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn arithmetic_only_cpa_preserves_unchecked_data_constructor_without_extended_bank() {
+    let domain = domain();
+    let mut entries = ids();
+    entries
+        .iter_mut()
+        .find(|entry| entry.0 == Register::IdAa64Isar3El1)
+        .unwrap()
+        .1 = FEATURE_PRESENT;
+    let identification = snapshot(&entries);
+    let controls = FixedProcessMemoryControls::new_with_identification(
+        Arc::clone(&identification),
+        SCTLR_NATIVE_NORMAL_WB,
+        LOWER_SIZE,
+        LOWER_ADDRESS_BITS,
+        source(&domain),
+    )
+    .unwrap();
+    assert!(controls.extended.is_none());
+    assert_eq!(
+        controls.features.cpa,
+        pointer_checks::CpaFeature::Arithmetic
+    );
 }

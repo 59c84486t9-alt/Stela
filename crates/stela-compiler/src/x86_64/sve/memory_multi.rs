@@ -175,6 +175,8 @@ fn access_flags(operand: &Operand) -> u32 {
 /// Scalar stores use XCHG and need no optional host capability.
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_sp_alignment: if operand.address.base == Register::Sp {
             SpAlignmentRequirement::Enabled
         } else {
@@ -354,6 +356,8 @@ mod tests {
             assert_eq!(
                 requirements(&operand),
                 MemoryRequirements {
+                    required_pointer_arithmetic: None,
+                    required_address_checks: Default::default(),
                     required_sp_alignment: if operand.address.base == Register::Sp {
                         SpAlignmentRequirement::Enabled
                     } else {

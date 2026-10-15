@@ -167,6 +167,8 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         ),
     };
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: Default::default(),
         required_flags,
         required_host_caps: required_host_caps(operand),
         required_profile: profile_requirements::NATIVE_ACCESS

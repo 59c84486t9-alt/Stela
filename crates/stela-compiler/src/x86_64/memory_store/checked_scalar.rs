@@ -166,6 +166,8 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let write = matches!(operand.transfer, MemoryTransfer::Store);
     let tag_checked = operand.tag_checked();
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: operand.profile.address_requirements(operand.unprivileged),
         required_flags: if write { flags::WRITE } else { 0 }
             | if tag_checked { flags::TAG_CHECKED } else { 0 },
         // Any dynamic multibyte read may cross the enclosing aligned8 while
@@ -212,7 +214,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     code.extend(SUB_RSP);
     service::begin(code);
     let mut failures = vec![];
-    if operand.profile == CheckedMemoryProfile::SpAlignmentEnabled
+    if operand.profile.sp_requirement() == SpAlignmentRequirement::Enabled
         && let Some(failed) = address::check_sp(code, operand.base, pc)
     {
         failures.push(failed);
@@ -223,14 +225,25 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         code.extend(DATA_OFFSET.to_le_bytes());
     }
     match operand.address {
-        Address::Immediate { displacement, mode } => {
-            address::immediate(code, operand.base, displacement, mode)
-        }
+        Address::Immediate { displacement, mode } => address::immediate_with_checks(
+            code,
+            operand.base,
+            displacement,
+            mode,
+            operand.profile.address_checks(operand.unprivileged),
+        ),
         Address::RegisterOffset {
             index,
             extend,
             shift,
-        } => address::register_offset(code, operand.base, index, extend, shift),
+        } => address::register_offset_with_checks(
+            code,
+            operand.base,
+            index,
+            extend,
+            shift,
+            operand.profile.address_checks(operand.unprivileged),
+        ),
     }
     if operand.writeback() {
         code.extend(MOV_RSP_RDX);

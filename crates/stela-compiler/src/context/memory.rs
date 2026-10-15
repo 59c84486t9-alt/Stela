@@ -8,6 +8,8 @@ use std::ffi::c_void;
 #[path = "memory/operation.rs"]
 mod operation;
 pub use operation::{MemoryOperationClass, MemoryOrder};
+#[path = "memory/address.rs"]
+pub mod address;
 #[path = "memory/exclusive.rs"]
 pub mod exclusive;
 
@@ -52,6 +54,15 @@ pub struct MemoryRequirements {
     pub required_host_caps: u32,
     pub required_profile: u32,
     pub required_sp_alignment: SpAlignmentRequirement,
+    /// Original source AddressAdd and constrained AddressIncrement effects.
+    #[serde(
+        default,
+        skip_serializing_if = "address::AddressCheckRequirements::is_empty"
+    )]
+    pub required_address_checks: address::AddressCheckRequirements,
+    /// Feature-qualified CPA arithmetic at the original current EL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_pointer_arithmetic: Option<crate::context::pointer::PointerArithmeticRequirement>,
 }
 
 /// Original-SP checking specialized into one consumed native body. This is
@@ -90,11 +101,29 @@ impl MemoryRequirements {
             (first, second) if first == second => first,
             _ => return None,
         };
+        let required_pointer_arithmetic = match (
+            self.required_pointer_arithmetic,
+            other.required_pointer_arithmetic,
+        ) {
+            (None, required) | (required, None) => required,
+            (Some(first), Some(second)) if first == second => Some(first),
+            _ => return None,
+        };
+        let required_address_checks = self
+            .required_address_checks
+            .merge(other.required_address_checks)?;
+        if let Some(required) = required_pointer_arithmetic
+            && !required_address_checks.compatible_arithmetic(required)
+        {
+            return None;
+        }
         Some(Self {
             required_flags: self.required_flags | other.required_flags,
             required_host_caps: self.required_host_caps | other.required_host_caps,
             required_profile: self.required_profile | other.required_profile,
             required_sp_alignment,
+            required_address_checks,
+            required_pointer_arithmetic,
         })
     }
 }
@@ -106,7 +135,8 @@ pub mod host_caps {
 }
 
 pub mod profile_requirements {
-    /// Native Normal-WB/SCA16 data access, AlignmentEnforced=false and CPA2 off.
+    /// Native Normal-WB/SCA16 data access with AlignmentEnforced=false.
+    /// CPA arithmetic/address specialization is separately typed and validated.
     /// Original-SP checking is separately specialized and validated.
     pub const NATIVE_ACCESS: u32 = 1 << 0;
     /// Physical allocation-tag granules retain guest/physical alignment.

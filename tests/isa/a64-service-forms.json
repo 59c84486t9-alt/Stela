@@ -170,6 +170,15 @@
     "crates/stela-compiler/src/x86_64/system/synchronization.rs",
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/block/memory.rs",
+    "crates/stela-compiler/src/block/memory/address.rs",
+    "crates/stela-compiler/src/block/memory/address/tests.rs",
+    "crates/stela-compiler/src/block/memory/pointer.rs",
+    "crates/stela-compiler/src/block/memory/pointer/tests.rs",
+    "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+    "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+    "crates/stela-compiler/src/context/memory/address.rs",
+    "crates/stela-compiler/src/context/pointer.rs",
+    "crates/stela-compiler/src/x86_64/pointer_checks.rs",
     "crates/stela-compiler/src/x86_64/block/checked_memory.rs",
     "crates/stela-compiler/src/x86_64/memory_store/checked_scalar.rs",
     "crates/stela-compiler/src/x86_64/memory_store/checked_pair.rs",
@@ -433,6 +442,18 @@
         "Enabled signing of noncanonical lower-VA47 inputs; native pointer or guest feature adoption without qualification",
         "Feature-absent guest HINT/UNDEF execution outside the declared LR-present profile, full process/OS/boot acceptance",
         "Physical LR-capable Apple original execution or performance equivalence; model qualification is explicitly derived"
+      ]
+    }
+  ,
+    "checked-pointer-memory-el0-v1": {
+      "id": "checked-pointer-memory-el0-v1",
+      "compiler_mode": "service",
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v2",
+      "description": "One immutable checked-memory profile combines source-derived per-access EL address checks and feature-qualified CPA arithmetic with actual same-bank controls. All three arithmetic modes share canonical source/outer/PE ownership; the manifest/cache digest binds the complete typed profile and requirements.",
+      "outside_scope": [
+        "Physical Apple CPA original execution, existing-machine adoption and complete OS compatibility",
+        "CPA2 entry through legacy or scalable preparation, unsupported controls/modes and asynchronous tag checks",
+        "Guest exception delivery, external writers or fabricated source/PE authority"
       ]
     }
   },
@@ -707,6 +728,88 @@
       ],
       "review_status": "Independent actual source/native/state/body/CLI review passed; exact publication metadata approval follows.",
       "limits": "Derived June-source model, not physical-original LR execution. Actual host-native body target and baseline emission are separate. Typed precise fault stop and blocked retry are not guest exception delivery. PACM feature-absent HINT is an architectural contract/model control, not execution admitted by this LR-present profile."
+    }
+  ,
+    "checked_pointer4_current": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/scalar-system/m6-pointer/cpa2-address-1/current-cli-bridge-13.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/scalar-system/m6-pointer/cpa2-address-1/evidence-13.json",
+      "kind": "checked_pointer_memory_model_native_v1",
+      "comparison_field": "full_state_memory_model_comparisons",
+      "required_positive_counts": [
+        "full_state_memory_model_comparisons",
+        "typed_memory_faults",
+        "blocked_retry_checks",
+        "historical_inner_body_transfers",
+        "complete_body_transfers",
+        "mode_probes"
+      ],
+      "required_measurements": {
+        "canonical_forms": 4,
+        "full_state_memory_model_comparisons": 27,
+        "typed_memory_faults": 8,
+        "blocked_retry_checks": 8,
+        "historical_inner_body_transfers": 126,
+        "complete_body_transfers": 27,
+        "mode_probes": 12,
+        "fresh_original_executions": 0
+      },
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v2",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64.rs",
+        "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/block/memory/address.rs",
+        "crates/stela-compiler/src/block/memory/address/tests.rs",
+        "crates/stela-compiler/src/block/memory/pointer.rs",
+        "crates/stela-compiler/src/block/memory/pointer/tests.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/context/memory.rs",
+        "crates/stela-compiler/src/context/memory/address.rs",
+        "crates/stela-compiler/src/context/pointer.rs",
+        "crates/stela-compiler/src/extended/memory_load_tests.rs",
+        "crates/stela-compiler/src/extended/memory_multi_tests.rs",
+        "crates/stela-compiler/src/extended/memory_store_tests.rs",
+        "crates/stela-compiler/src/extended/memory_structure_tests.rs",
+        "crates/stela-compiler/src/lib.rs",
+        "crates/stela-compiler/src/x86_64.rs",
+        "crates/stela-compiler/src/x86_64/block/checked_memory.rs",
+        "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/memory_context/address.rs",
+        "crates/stela-compiler/src/x86_64/memory_store/checked_pair.rs",
+        "crates/stela-compiler/src/x86_64/memory_store/checked_scalar.rs",
+        "crates/stela-compiler/src/x86_64/pointer_checks.rs",
+        "crates/stela-compiler/src/x86_64/simd/memory_checked.rs",
+        "crates/stela-compiler/src/x86_64/sme/memory.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_load.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_multi.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_structure.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/low128_call.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/domain/exclusive.rs",
+        "crates/stela-runtime/src/memory/domain/tests.rs",
+        "crates/stela-runtime/src/memory/policy.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/system/process_memory/extended_controls.rs",
+        "crates/stela-runtime/src/system/process_memory/identification_tests.rs",
+        "crates/stela-runtime/src/system/process_memory/low128.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer/tests.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer_checks.rs",
+        "crates/stela-runtime/src/system/process_memory/scalable.rs",
+        "dev/translation-progress.py",
+        "src/checked_memory_profile.rs",
+        "src/main.rs"
+      ],
+      "review_status": "Substantive source and fixture reviews passed; final current publication review pending.",
+      "limits": "Derived model/native scope, current whole-body transfer distinct from historical inner-body lineage; no physical original or OS claim."
     }
   },
   "forms": [
@@ -4618,6 +4721,159 @@
             "retabsppc"
           ],
           "consumed_source_bytes": 4
+        }
+      ]
+    }
+  ,
+    {
+      "id": "ADDPT_64_addsub_pt",
+      "mnemonic": "ADDPT",
+      "category": "base_integer_system",
+      "source_file": "addpt.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0x9a002000",
+      "features": [
+        {
+          "feature": "FEAT_CPA",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "efd46ed2baf766d1e5f9381fff2085304d5231d2dadaf4e618ee4fe6420f79df",
+      "profile": "checked-pointer-memory-el0-v1",
+      "status": "implemented",
+      "review": "Reviewed June semantics, actual same-owner native27 full CPU/RAM and precise fault/retry comparisons;126 retained historical inner bodies and current27 complete CLI bodies/maps/requirements transferred. Source/model oracle limits remain explicit.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+        "crates/stela-compiler/src/block/memory/pointer.rs",
+        "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer_checks.rs"
+      ],
+      "evidence_groups": [
+        "checked_pointer4_current"
+      ],
+      "scope": "Feature-qualified fresh EL0 CPA2, SA0 disabled, TBI0 enabled, original same-Snapshot SCTLR2 controls, actual SystemState/debug/outer source and canonical checked retirement. Disabled/addition/addition-and-multiplication modes, wrapping operands, poison-marker overflow, aliases, discarded ZR and preserved NZCV/FP/PACM. Ordinary memory uses source-derived per-access EL checks; secondary AddressIncrement selects the documented unchecked implementation choice. Reached faults preserve earlier retired CPA effects and block retry. Base/scalable CPA2 preparation, unsupported modes and unowned controls explicitly decline; no physical-original CPA or guest exception-delivery/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0x9a022024",
+          "expected_mnemonics": [
+            "addpt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "MADDPT_64A_dp_3src",
+      "mnemonic": "MADDPT",
+      "category": "base_integer_system",
+      "source_file": "maddpt.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b600000",
+      "features": [
+        {
+          "feature": "FEAT_CPA",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "4bc373aa10ddabde9afeb9db05f5958a2dc840f7f18a9e8e73a18e2d9dd49563",
+      "profile": "checked-pointer-memory-el0-v1",
+      "status": "implemented",
+      "review": "Reviewed June semantics, actual same-owner native27 full CPU/RAM and precise fault/retry comparisons;126 retained historical inner bodies and current27 complete CLI bodies/maps/requirements transferred. Source/model oracle limits remain explicit.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+        "crates/stela-compiler/src/block/memory/pointer.rs",
+        "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer_checks.rs"
+      ],
+      "evidence_groups": [
+        "checked_pointer4_current"
+      ],
+      "scope": "Feature-qualified fresh EL0 CPA2, SA0 disabled, TBI0 enabled, original same-Snapshot SCTLR2 controls, actual SystemState/debug/outer source and canonical checked retirement. Disabled/addition/addition-and-multiplication modes, wrapping operands, poison-marker overflow, aliases, discarded ZR and preserved NZCV/FP/PACM. Ordinary memory uses source-derived per-access EL checks; secondary AddressIncrement selects the documented unchecked implementation choice. Reached faults preserve earlier retired CPA effects and block retry. Base/scalable CPA2 preparation, unsupported modes and unowned controls explicitly decline; no physical-original CPA or guest exception-delivery/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0x9b620c24",
+          "expected_mnemonics": [
+            "maddpt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "MSUBPT_64A_dp_3src",
+      "mnemonic": "MSUBPT",
+      "category": "base_integer_system",
+      "source_file": "msubpt.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x9b608000",
+      "features": [
+        {
+          "feature": "FEAT_CPA",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "365907006235a056eeb348bac9ad0f093b608144ab4e4fbac090533642b2c01d",
+      "profile": "checked-pointer-memory-el0-v1",
+      "status": "implemented",
+      "review": "Reviewed June semantics, actual same-owner native27 full CPU/RAM and precise fault/retry comparisons;126 retained historical inner bodies and current27 complete CLI bodies/maps/requirements transferred. Source/model oracle limits remain explicit.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+        "crates/stela-compiler/src/block/memory/pointer.rs",
+        "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer_checks.rs"
+      ],
+      "evidence_groups": [
+        "checked_pointer4_current"
+      ],
+      "scope": "Feature-qualified fresh EL0 CPA2, SA0 disabled, TBI0 enabled, original same-Snapshot SCTLR2 controls, actual SystemState/debug/outer source and canonical checked retirement. Disabled/addition/addition-and-multiplication modes, wrapping operands, poison-marker overflow, aliases, discarded ZR and preserved NZCV/FP/PACM. Ordinary memory uses source-derived per-access EL checks; secondary AddressIncrement selects the documented unchecked implementation choice. Reached faults preserve earlier retired CPA effects and block retry. Base/scalable CPA2 preparation, unsupported modes and unowned controls explicitly decline; no physical-original CPA or guest exception-delivery/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0x9b628c24",
+          "expected_mnemonics": [
+            "msubpt"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "SUBPT_64_addsub_pt",
+      "mnemonic": "SUBPT",
+      "category": "base_integer_system",
+      "source_file": "subpt.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xda002000",
+      "features": [
+        {
+          "feature": "FEAT_CPA",
+          "name": "v9Ap5"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "4d5527412ca7dc30e541ce0c19b0ef2792e9c1950e70c48336f80c8b87bd0972",
+      "profile": "checked-pointer-memory-el0-v1",
+      "status": "implemented",
+      "review": "Reviewed June semantics, actual same-owner native27 full CPU/RAM and precise fault/retry comparisons;126 retained historical inner bodies and current27 complete CLI bodies/maps/requirements transferred. Source/model oracle limits remain explicit.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/checked_pointer.rs",
+        "crates/stela-compiler/src/block/memory/pointer.rs",
+        "crates/stela-compiler/src/x86_64/checked_pointer.rs",
+        "crates/stela-runtime/src/system/process_memory/pointer_checks.rs"
+      ],
+      "evidence_groups": [
+        "checked_pointer4_current"
+      ],
+      "scope": "Feature-qualified fresh EL0 CPA2, SA0 disabled, TBI0 enabled, original same-Snapshot SCTLR2 controls, actual SystemState/debug/outer source and canonical checked retirement. Disabled/addition/addition-and-multiplication modes, wrapping operands, poison-marker overflow, aliases, discarded ZR and preserved NZCV/FP/PACM. Ordinary memory uses source-derived per-access EL checks; secondary AddressIncrement selects the documented unchecked implementation choice. Reached faults preserve earlier retired CPA effects and block retry. Base/scalable CPA2 preparation, unsupported modes and unowned controls explicitly decline; no physical-original CPA or guest exception-delivery/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0xda022024",
+          "expected_mnemonics": [
+            "subpt"
+          ],
+          "consumed_source_bytes": 8
         }
       ]
     }

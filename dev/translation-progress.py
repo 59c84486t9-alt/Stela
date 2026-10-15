@@ -25,6 +25,8 @@ SERVICE_PROFILE = 'apple-arm64e-software-pauth-clock-v1'
 SYSTEM_PROFILE = 'system-v1'
 CHECKED_MEMORY_PROFILE = 'checked-gpr-memory-sa0-off-normal-wb-v3'
 CHECKED_PROCESS_PROFILE = 'checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1'
+CHECKED_POINTER_PROFILE = 'checked-pointer-memory-el0-v1'
+CHECKED_POINTER_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v2'
 CHECKED_PROCESS_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1'
 CHECKED_MEMORY_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3'
 BASELINE_CPU_TARGET = 'x86_64-baseline'
@@ -37,6 +39,7 @@ SYSTEM_DECODER_MATTRS = ('+mte',)
 SERVICE_DECODERS = {
     SYSTEM_PROFILE: (SYSTEM_DECODER_MATTRS, 'llvm-system-decoding'),
     CHECKED_PROCESS_PROFILE: (('+pauth-lr',), 'llvm-checked-process-decoding'),
+    CHECKED_POINTER_PROFILE: (('+cpa',), 'llvm-checked-pointer-decoding'),
 }
 # Independent decoding attributes never grant guest execution features.
 LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut', '+faminmax', '+fp8')
@@ -46,6 +49,7 @@ SERVICE_BINDINGS = {
     SYSTEM_PROFILE: (SYSTEM_ABI, ('--system-boundaries', '--cpu-target', BASELINE_CPU_TARGET)),
     CHECKED_MEMORY_PROFILE: (CHECKED_MEMORY_ABI, ('--checked-memory-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
     CHECKED_PROCESS_PROFILE: (CHECKED_PROCESS_ABI, ('--checked-process-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
+    CHECKED_POINTER_PROFILE: (CHECKED_POINTER_ABI, ('--checked-process-sa0-off', '--checked-pointer-mode', 'addition-multiplication', '--cpu-target', BASELINE_CPU_TARGET)),
 }
 SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
 DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'

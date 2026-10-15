@@ -50,6 +50,15 @@ pub(super) enum ReturnedTerminal {
 }
 
 impl<'code> BoundSource<'code> {
+    pub(super) fn memory_profile(
+        &self,
+    ) -> anyhow::Result<stela_compiler::block::CheckedMemoryProfile> {
+        self.runtime
+            .profile
+            .checked_memory()
+            .ok_or_else(|| anyhow::anyhow!("bound source lacks checked memory profile"))
+    }
+
     pub(super) fn trap(&self) -> Option<SynchronousTrap> {
         self.analysis.trap
     }
@@ -158,7 +167,9 @@ impl<'code> BoundSource<'code> {
             .ok_or_else(|| anyhow::anyhow!("checked plan requirements absent"))?;
         anyhow::ensure!(
             plan.source_bytes() == block.source_bytes
-                && manifest.memory_requirements == Some(requirements),
+                && manifest.memory_requirements == Some(requirements)
+                && identity.memory_specialization_sha256
+                    == crate::memory_specialization_sha256(runtime.profile, Some(requirements))?,
             "loaded requirements differ from exact original plan"
         );
         let analysis = analyze_with_profile(source, pc, runtime.profile)?;

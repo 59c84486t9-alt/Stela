@@ -174,6 +174,8 @@ impl Operand {
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let required_flags = operand.flags();
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: operand.profile.address_requirements(false),
         required_flags,
         required_host_caps: if matches!(operand.transfer, MemoryTransfer::Load { .. }) {
             // Dynamic read parts can cross aligned8 within SCA16. The canonical
@@ -181,7 +183,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             host_caps::ATOMIC_LOAD16
         } else if operand.bytes == DOUBLEWORD_BYTES
             && (operand.base != Register::Sp
-                || operand.profile == CheckedMemoryProfile::SpAlignmentDisabled
+                || operand.profile.sp_requirement() == SpAlignmentRequirement::Disabled
                 || operand.mode == AddressMode::PostIndex
                 || operand.displacement % i32::from(DOUBLEWORD_PAIR_BYTES) == 0)
         {
@@ -240,7 +242,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     code.extend(SUB_RSP_IMM8);
     code.push(STACK_BYTES as u8);
     memory::begin(code);
-    let sp_failure = if operand.profile == CheckedMemoryProfile::SpAlignmentEnabled {
+    let sp_failure = if operand.profile.sp_requirement() == SpAlignmentRequirement::Enabled {
         address::check_sp(code, operand.base, pc)
     } else {
         None
@@ -256,7 +258,13 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
             );
         }
     }
-    address::immediate(code, operand.base, operand.displacement, operand.mode);
+    address::immediate_with_checks(
+        code,
+        operand.base,
+        operand.displacement,
+        operand.mode,
+        operand.profile.address_checks(false),
+    );
     if operand.mode != AddressMode::Offset {
         code.extend(MOV_RSP_DISP8_RDX);
         code.push(WRITEBACK_OFFSET as u8);

@@ -1,3 +1,4 @@
+mod checked_memory_profile;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use std::{fs::File, path::PathBuf};
@@ -174,6 +175,9 @@ enum Command {
         /// Prepare checked memory plus PAuth/clock/TSD exits with SA0 disabled; no native entry.
         #[arg(long, conflicts_with_all = ["checked_memory_sa0_off", "system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
         checked_process_sa0_off: bool,
+        /// Select explicit CPA effects for checked preparation; no CPU/native grant.
+        #[arg(long,requires="checked_process_sa0_off",value_parser=checked_memory_profile::parse_pointer_mode)]
+        checked_pointer_mode: Option<stela_compiler::context::pointer::EffectivePointerChecks>,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
@@ -1520,10 +1524,11 @@ fn run() -> Result<()> {
             system_boundaries,
             checked_memory_sa0_off,
             checked_process_sa0_off,
+            checked_pointer_mode,
         } => {
             let profile = if checked_process_sa0_off {
                 stela_compiler::block::BlockProfile::CheckedMemoryPauthClockThread(
-                    stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
+                    checked_memory_profile::checked_process(checked_pointer_mode)?,
                 )
             } else if checked_memory_sa0_off {
                 stela_compiler::block::BlockProfile::CheckedMemory(

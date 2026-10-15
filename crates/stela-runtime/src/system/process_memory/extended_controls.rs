@@ -156,7 +156,7 @@ impl FixedProcessMemoryControls {
             PFR1_MTE_SHIFT,
             FEATURE_ABSENT,
         )?;
-        let mut bank = Self::new_with_identification(
+        let mut bank = Self::new_with_pointer_identification(
             identification,
             sctlr_el1,
             tcr_el1,

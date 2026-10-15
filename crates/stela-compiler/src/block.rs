@@ -17,7 +17,10 @@ use serde::Serialize;
 pub mod memory;
 pub mod pauth_lr;
 pub mod pauth_memory;
-pub use memory::{CheckedMemoryProfile, ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID};
+pub use memory::{
+    CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
+    ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
+};
 pub mod system;
 pub use system::{SystemInstruction, decode_system_instruction};
 pub mod scalable;
@@ -938,8 +941,10 @@ impl CompilationPlan {
     ) -> Result<Self, CompileError> {
         let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
         for instruction in &parsed.instructions {
-            if !matches!(instruction.operation, Operation::Exclusive(_))
-                || profile.checked_memory().is_none()
+            if !matches!(
+                instruction.operation,
+                Operation::Exclusive(_) | Operation::CheckedPointer(_)
+            ) || profile.checked_memory().is_none()
             {
                 crate::x86_64::validate_target(instruction, target)
                     .map_err(|error| CompileError(format!("{error:?}")))?;

@@ -24,7 +24,7 @@ use crate::{
 };
 use stela_compiler::{
     GuestAddress, GuestState,
-    block::{ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID, PointerAuthenticationOperation},
+    block::PointerAuthenticationOperation,
     context::{ExecutionContext, memory::MemoryRequirements},
 };
 
@@ -168,6 +168,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 bound,
                 &*self.controls,
                 fp,
+                self.execution.debug_controls(),
                 system,
                 registers,
                 self.memory,
@@ -178,10 +179,12 @@ impl<'pe> CheckedProcessOwner<'pe> {
         // source generation/domain, required category and SP specialization.
         // The unused token is dropped before FFI: it changes no policy/effect.
         self.controls
-            .prepare(
+            .prepare_profile(
                 &bound.entry,
+                bound.memory_profile()?,
                 bound.requirements,
                 system,
+                self.execution.debug_controls(),
                 registers,
                 self.memory,
                 Some(self.endpoint),
@@ -268,6 +271,7 @@ impl Owner for CheckedProcessOwner<'_> {
                 bound,
                 &*self.controls,
                 fp,
+                self.execution.debug_controls(),
                 system,
                 registers,
                 self.memory,
@@ -278,6 +282,7 @@ impl Owner for CheckedProcessOwner<'_> {
         let mut dispatcher = ProcessDispatcher {
             address_space: self.address_space,
             controls: &*self.controls,
+            debug: self.execution.debug_controls(),
             system,
             memory: self.memory,
             endpoint: self.endpoint,
@@ -292,7 +297,7 @@ impl Owner for CheckedProcessOwner<'_> {
                 &bound.entry,
                 bound.source,
                 &bound.block.prepared.manifest.source_map,
-                ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
+                bound.memory_profile()?.process_memory_profile_id(),
                 bound.requirements,
                 &bound.block.mapping,
                 registers,
@@ -509,6 +514,7 @@ impl Owner for CheckedProcessOwner<'_> {
 struct ProcessDispatcher<'call, 'code> {
     address_space: u64,
     controls: &'call FixedProcessMemoryControls,
+    debug: &'call crate::system::debug::DebugControls,
     system: &'call SystemState,
     memory: &'call mut MemoryThread<MemoryControls>,
     endpoint: &'call EventEndpoint,
@@ -535,10 +541,14 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
             .recheck()
             .map_err(|error| Failure::Backend(error.to_string()))?;
         self.controls
-            .prepare(
+            .prepare_profile(
                 boundary,
+                self.bound
+                    .memory_profile()
+                    .map_err(|error| Failure::Backend(error.to_string()))?,
                 self.bound.requirements,
                 self.system,
+                self.debug,
                 registers,
                 self.memory,
                 Some(self.endpoint),
@@ -558,10 +568,14 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
             return Err(Failure::Unsupported("source requirements mismatch"));
         }
         self.controls
-            .prepare(
+            .prepare_profile(
                 boundary,
+                self.bound
+                    .memory_profile()
+                    .map_err(|error| Failure::Backend(error.to_string()))?,
                 requirements,
                 self.system,
+                self.debug,
                 registers,
                 self.memory,
                 Some(self.endpoint),

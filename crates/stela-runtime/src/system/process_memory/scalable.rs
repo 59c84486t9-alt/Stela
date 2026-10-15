@@ -107,6 +107,15 @@ impl FixedProcessMemoryControls {
         // before identification, source or service access.
         self.validate_source_state(system, registers)
             .map_err(memory_error)?;
+        if self.features.cpa == super::pointer_checks::CpaFeature::Checked {
+            return Err(ScalableExecutionError::MemoryAuthority {
+                pc,
+                cause: ProcessMemoryError::PointerChecks(
+                    super::PointerChecksError::UnsupportedProfile,
+                ),
+            });
+        }
+
         // Legacy raw-ID GPR controls carry no shared identification authority.
         // This MTE0-only provider must retain the same actual Snapshot allocation.
         let identification = self

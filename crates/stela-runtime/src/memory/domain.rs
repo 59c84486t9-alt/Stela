@@ -77,6 +77,30 @@ pub trait DataPolicy {
             Err(MemoryStatus::Unsupported)
         }
     }
+    /// Validate emitted CPA address specialization against the actual CPU owner.
+    /// Arbitrary policies cannot silently adopt a specialized native body.
+    fn validate_address_checks(
+        &self,
+        required: stela_compiler::context::memory::address::AddressCheckRequirements,
+    ) -> Result<(), MemoryStatus> {
+        if required.is_empty() {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
+    /// CPA arithmetic requires actual same-CPU feature/mode qualification even
+    /// when a discarded result emits no visible register or memory effect.
+    fn validate_pointer_arithmetic(
+        &self,
+        required: Option<stela_compiler::context::pointer::PointerArithmeticRequirement>,
+    ) -> Result<(), MemoryStatus> {
+        if required.is_none() {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
     /// Check the source-bound implementation identity selected by the body.
     /// An unproven CPU implementation must decline rather than assume a choice.
     fn validate_implementation_profile(
@@ -485,6 +509,12 @@ impl<P: DataPolicy> MemoryThread<P> {
             owner
                 .policy
                 .validate_sp_alignment(requirements.required_sp_alignment)?;
+            owner
+                .policy
+                .validate_address_checks(requirements.required_address_checks)?;
+            owner
+                .policy
+                .validate_pointer_arithmetic(requirements.required_pointer_arithmetic)?;
             if requirements.required_profile & profile_requirements::SCALABLE_TAG_CHECKS != 0 {
                 owner.policy.validate_implementation_profile(
                     MemoryImplementationProfile::ScalableTagChecks,

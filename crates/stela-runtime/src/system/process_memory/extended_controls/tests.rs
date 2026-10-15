@@ -291,7 +291,7 @@ fn lr_service_consumes_original_bank_loan_and_retains_actual_frame() {
 }
 
 #[test]
-fn cpt_fields_require_cpa2_without_widening_the_memory_contract() {
+fn cpt_fields_require_cpa2_and_the_qualified_same_bank_constructor() {
     let domain = new_domain();
     for cpa in [0, 1, 2, FIELD_MASK] {
         let mut values = entries(0);
@@ -312,9 +312,14 @@ fn cpt_fields_require_cpa2_without_widening_the_memory_contract() {
             0,
         );
         if cpa == u64::from(CPA_WITH_CHECKING) {
-            // The current data contract still refuses CPA2. A later separately
-            // reviewed arithmetic-only owner must make memory unavailable.
-            assert!(matches!(result, Err(Error::Process(_))));
+            // The separately qualified same-bank constructor now retains CPA2;
+            // actual entry still needs its exact source/profile/owner token.
+            let bank = result.expect("qualified CPA2 same-bank declaration");
+            assert_eq!(bank.extended.as_ref().unwrap().sctlr2_el1, SCTLR2_CPTA);
+            assert_eq!(
+                bank.features.cpa,
+                super::super::pointer_checks::CpaFeature::Checked
+            );
         } else {
             assert!(matches!(result, Err(Error::Identification(_))));
         }

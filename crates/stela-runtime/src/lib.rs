@@ -52,6 +52,27 @@ pub struct Identity {
     pub guest_base: u64,
     pub abi: String,
     pub target_cpu: String,
+    /// Compiler specialization identity; never runtime authority or secret state.
+    /// Absent for old profiles, preserving their exact serialized cache key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_specialization_sha256: Option<String>,
+}
+
+fn memory_specialization_sha256(
+    profile: stela_compiler::block::BlockProfile,
+    requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
+) -> Result<Option<String>> {
+    use stela_compiler::block::CheckedMemoryProfile;
+    if !matches!(
+        profile.checked_memory(),
+        Some(CheckedMemoryProfile::AddressChecks(_))
+    ) {
+        return Ok(None);
+    }
+    let required = requirements.context("specialized checked plan requirements absent")?;
+    // Aggregation alone loses the source-role -> access-EL association. Bind the
+    // full typed compilation profile as well as every consumed requirement.
+    Ok(Some(sha256(&serde_json::to_vec(&(profile, required))?)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,6 +99,7 @@ fn validate(
     directory: &Path,
     identity: &Identity,
     memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
+    profile: stela_compiler::block::BlockProfile,
 ) -> Result<Manifest> {
     let manifest_bytes = bounded_file(&directory.join("manifest.json"), MAX_CACHE_MANIFEST_BYTES)?;
     let expected: String = serde_json::from_slice(&bounded_file(
@@ -89,6 +111,11 @@ fn validate(
         "cached manifest checksum mismatch"
     );
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
+    ensure!(
+        manifest.identity.memory_specialization_sha256
+            == memory_specialization_sha256(profile, manifest.memory_requirements)?,
+        "cached memory specialization differs from complete requirements"
+    );
     ensure!(
         manifest.memory_requirements == memory_requirements,
         "cached memory requirements differ from freshly decoded source"
@@ -129,10 +156,15 @@ pub fn prepare_leaf_for_target(
         guest_base: base.0,
         abi: NATIVE_ABI.into(),
         target_cpu: target.id(),
+        memory_specialization_sha256: None,
     };
-    prepare(identity, root, None, || {
-        stela_compiler::compile_for_target(source, base, target)
-    })
+    prepare(
+        identity,
+        root,
+        None,
+        stela_compiler::block::BlockProfile::Ordinary,
+        || stela_compiler::compile_for_target(source, base, target),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -187,8 +219,9 @@ pub fn prepare_block_for_target(
         guest_base: base.0,
         abi: profile.abi().into(),
         target_cpu: target.id(),
+        memory_specialization_sha256: memory_specialization_sha256(profile, memory_requirements)?,
     };
-    let prepared = prepare(identity, root, memory_requirements, || {
+    let prepared = prepare(identity, root, memory_requirements, profile, || {
         plan.compile().map(|b| b.native)
     })?;
     Ok(PreparedBlock {
@@ -201,6 +234,7 @@ fn prepare(
     identity: Identity,
     root: &Path,
     memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
+    profile: stela_compiler::block::BlockProfile,
     generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
 ) -> Result<Prepared> {
     let key = sha256(&serde_json::to_vec(&identity)?);
@@ -208,7 +242,7 @@ fn prepare(
     let root = root.canonicalize()?;
     let directory = root.join(&key);
     if directory.exists() {
-        let manifest = validate(&directory, &identity, memory_requirements)
+        let manifest = validate(&directory, &identity, memory_requirements, profile)
             .context("refusing invalid cached translation; remove this cache entry to rebuild")?;
         return Ok(Prepared {
             key,
@@ -249,7 +283,7 @@ fn prepare(
             manifest,
         }),
         Err(error) if directory.exists() => {
-            let manifest = validate(&directory, &identity, memory_requirements)
+            let manifest = validate(&directory, &identity, memory_requirements, profile)
                 .with_context(|| format!("concurrent cache publication failed: {error}"))?;
             Ok(Prepared {
                 key,
@@ -510,6 +544,314 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn old_identity_serialization_and_legacy_deserialization_keep_the_same_key() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let prepared = prepare_leaf(&source(42), GuestAddress(0x1000), root.path())?;
+        let identity = prepared.manifest.identity;
+        assert!(identity.memory_specialization_sha256.is_none());
+        let actual = serde_json::to_value(&identity)?;
+        let legacy = serde_json::json!({
+            "schema_version": identity.schema_version,
+            "source_sha256": identity.source_sha256,
+            "compiler_source_sha256": identity.compiler_source_sha256,
+            "guest_base": identity.guest_base,
+            "abi": identity.abi,
+            "target_cpu": identity.target_cpu,
+        });
+        assert_eq!(actual, legacy);
+        let restored: Identity = serde_json::from_value(legacy)?;
+        assert_eq!(restored, identity);
+        assert_eq!(sha256(&serde_json::to_vec(&restored)?), prepared.key);
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_access_specializations_have_distinct_keys_and_exact_cache_reuse() -> Result<()> {
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, EffectiveAddressChecks,
+        };
+        use stela_compiler::{
+            TargetCpu,
+            block::{BlockProfile, CheckedMemoryProfile},
+        };
+        const LDR_X0_X9_8: u32 = 0xf940_0520;
+        const LDTR_X1_X9_8: u32 = 0xf840_8921;
+        const RET_X30: u32 = 0xd65f_03c0;
+        const BASE_REGISTER_SHIFT: u32 = 5;
+        const REGISTER_FIELD_MASK: u32 = 31;
+        let source: Vec<_> = [LDR_X0_X9_8, LDTR_X1_X9_8, RET_X30]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let root = tempfile::tempdir()?;
+        let mut keys = std::collections::HashSet::new();
+        for stack in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            // SP is explicitly used by the first access to make SA compile-affecting.
+            let mut source = source.clone();
+            let stack_word = (LDR_X0_X9_8 & !(REGISTER_FIELD_MASK << BASE_REGISTER_SHIFT))
+                | (REGISTER_FIELD_MASK << BASE_REGISTER_SHIFT);
+            source[..size_of::<u32>()].copy_from_slice(&stack_word.to_le_bytes());
+            for el0 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
+                for el1 in [AddressAddChecks::Disabled, AddressAddChecks::Enabled] {
+                    let profile = BlockProfile::CheckedMemory(stack.with_address_checks(
+                        AccessEl::El1,
+                        AccessEl::El0,
+                        EffectiveAddressChecks::new(el0, el1),
+                    ));
+                    let first = prepare_block_for_target(
+                        &source,
+                        GuestAddress(0x1000),
+                        root.path(),
+                        profile,
+                        TargetCpu::Baseline,
+                    )?;
+                    assert!(
+                        first
+                            .prepared
+                            .manifest
+                            .identity
+                            .memory_specialization_sha256
+                            .is_some()
+                    );
+                    assert_eq!(first.source_bytes, source.len());
+                    assert!(keys.insert(first.prepared.key.clone()));
+                    let second = prepare_block_for_target(
+                        &source,
+                        GuestAddress(0x1000),
+                        root.path(),
+                        profile,
+                        TargetCpu::Baseline,
+                    )?;
+                    assert_eq!(first.prepared.key, second.prepared.key);
+                    assert!(second.prepared.cache_hit);
+                }
+            }
+        }
+        assert_eq!(keys.len(), 8);
+        Ok(())
+    }
+
+    #[test]
+    fn swapped_source_role_access_levels_cannot_reuse_identical_aggregate_requirements()
+    -> Result<()> {
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, EffectiveAddressChecks,
+        };
+        use stela_compiler::{
+            TargetCpu,
+            block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+        };
+        const LDR_X0_X9_8: u32 = 0xf940_0520;
+        const LDTR_X1_X9_8: u32 = 0xf840_8921;
+        const RET_X30: u32 = 0xd65f_03c0;
+        let source: Vec<_> = [LDR_X0_X9_8, LDTR_X1_X9_8, RET_X30]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let effects =
+            EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Enabled);
+        let profile = |normal, unprivileged| {
+            BlockProfile::CheckedMemory(
+                CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
+                    normal,
+                    unprivileged,
+                    effects,
+                ),
+            )
+        };
+        let first_profile = profile(AccessEl::El1, AccessEl::El0);
+        let second_profile = profile(AccessEl::El0, AccessEl::El1);
+        let first_plan = CompilationPlan::new(
+            &source,
+            GuestAddress(0x1000),
+            first_profile,
+            TargetCpu::Baseline,
+        )?;
+        let second_plan = CompilationPlan::new(
+            &source,
+            GuestAddress(0x1000),
+            second_profile,
+            TargetCpu::Baseline,
+        )?;
+        assert_eq!(
+            first_plan.memory_requirements(),
+            second_plan.memory_requirements()
+        );
+        assert_ne!(
+            first_plan.compile()?.native.x86_64_code,
+            second_plan.compile()?.native.x86_64_code
+        );
+        let root = tempfile::tempdir()?;
+        let first = prepare_block_for_target(
+            &source,
+            GuestAddress(0x1000),
+            root.path(),
+            first_profile,
+            TargetCpu::Baseline,
+        )?;
+        let second = prepare_block_for_target(
+            &source,
+            GuestAddress(0x1000),
+            root.path(),
+            second_profile,
+            TargetCpu::Baseline,
+        )?;
+        assert_ne!(first.prepared.key, second.prepared.key);
+        assert_ne!(
+            first
+                .prepared
+                .manifest
+                .identity
+                .memory_specialization_sha256,
+            second
+                .prepared
+                .manifest
+                .identity
+                .memory_specialization_sha256
+        );
+        for (profile, expected) in [
+            (first_profile, first.prepared.key),
+            (second_profile, second.prepared.key),
+        ] {
+            let reused = prepare_block_for_target(
+                &source,
+                GuestAddress(0x1000),
+                root.path(),
+                profile,
+                TargetCpu::Baseline,
+            )?;
+            assert_eq!(reused.prepared.key, expected);
+            assert!(reused.prepared.cache_hit);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn checksummed_specialized_cache_cannot_drop_its_specialization_identity() -> Result<()> {
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, EffectiveAddressChecks,
+        };
+        use stela_compiler::{
+            TargetCpu,
+            block::{BlockProfile, CheckedMemoryProfile},
+        };
+        const LDR_X0_X9_8: u32 = 0xf940_0520;
+        const RET_X30: u32 = 0xd65f_03c0;
+        let source: Vec<_> = [LDR_X0_X9_8, RET_X30]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let profile = BlockProfile::CheckedMemory(
+            CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
+                AccessEl::El0,
+                AccessEl::El0,
+                EffectiveAddressChecks::new(AddressAddChecks::Enabled, AddressAddChecks::Disabled),
+            ),
+        );
+        let root = tempfile::tempdir()?;
+        let prepared = prepare_block_for_target(
+            &source,
+            GuestAddress(0x1000),
+            root.path(),
+            profile,
+            TargetCpu::Baseline,
+        )?;
+        let directory = prepared.prepared.directory;
+        let mut manifest = prepared.prepared.manifest;
+        assert!(
+            manifest
+                .identity
+                .memory_specialization_sha256
+                .take()
+                .is_some()
+        );
+        write_json(&directory.join("manifest.json"), &manifest)?;
+        let metadata = std::fs::read(directory.join("manifest.json"))?;
+        write_json(&directory.join("manifest.sha256.json"), &sha256(&metadata))?;
+        assert!(
+            prepare_block_for_target(
+                &source,
+                GuestAddress(0x1000),
+                root.path(),
+                profile,
+                TargetCpu::Baseline
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn specialization_hash_binds_complete_requirements_and_increment_choice() -> Result<()> {
+        use stela_compiler::context::memory::address::{
+            AccessEl, AddressAddChecks, AddressCheckRequirements, IncrementChoice,
+        };
+        use stela_compiler::context::memory::{MemoryRequirements, flags};
+        let profile = stela_compiler::block::BlockProfile::CheckedMemory(
+            stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
+                AccessEl::El0,
+                AccessEl::El0,
+                stela_compiler::context::memory::address::EffectiveAddressChecks::new(
+                    AddressAddChecks::Enabled,
+                    AddressAddChecks::Disabled,
+                ),
+            ),
+        );
+        let required = MemoryRequirements {
+            required_address_checks: AddressCheckRequirements::for_access(
+                AccessEl::El0,
+                AddressAddChecks::Enabled,
+            )
+            .with_increment_choice(IncrementChoice::Unchecked),
+            ..Default::default()
+        };
+        let original = memory_specialization_sha256(profile, Some(required))?;
+        assert!(original.is_some());
+        assert_ne!(
+            original,
+            memory_specialization_sha256(
+                profile,
+                Some(MemoryRequirements {
+                    required_flags: flags::WRITE,
+                    ..required
+                })
+            )?
+        );
+        assert_ne!(
+            original,
+            memory_specialization_sha256(
+                profile,
+                Some(MemoryRequirements {
+                    required_address_checks: required
+                        .required_address_checks
+                        .with_increment_choice(IncrementChoice::Checked),
+                    ..required
+                })
+            )?
+        );
+        assert!(
+            memory_specialization_sha256(
+                stela_compiler::block::BlockProfile::Ordinary,
+                Some(MemoryRequirements::default())
+            )?
+            .is_none()
+        );
+        let legacy = serde_json::json!({
+            "required_flags": 0,
+            "required_host_caps": 0,
+            "required_profile": 0,
+            "required_sp_alignment": "Any",
+        });
+        assert_eq!(serde_json::to_value(MemoryRequirements::default())?, legacy);
+        let restored: MemoryRequirements = serde_json::from_value(legacy)?;
+        assert_eq!(restored, MemoryRequirements::default());
+        Ok(())
+    }
+
     #[test]
     fn oversized_cache_files_are_rejected_before_reading_payloads() -> Result<()> {
         let root = tempfile::tempdir()?;

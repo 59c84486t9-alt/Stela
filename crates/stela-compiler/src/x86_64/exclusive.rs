@@ -175,7 +175,8 @@ pub(crate) fn requirements(checked: &CheckedOperand) -> MemoryRequirements {
             if bytes == u32::from(DOUBLEWORD_PAIR_BYTES)
                 || bytes > u32::from(BYTE_BYTES)
                     && (base != Register::Sp
-                        || checked.profile == CheckedMemoryProfile::SpAlignmentDisabled) =>
+                        || checked.profile.sp_requirement()
+                            == SpAlignmentRequirement::Disabled) =>
         {
             host_caps::ATOMIC_LOAD16
         }
@@ -183,6 +184,8 @@ pub(crate) fn requirements(checked: &CheckedOperand) -> MemoryRequirements {
         _ => 0,
     };
     MemoryRequirements {
+        required_pointer_arithmetic: None,
+        required_address_checks: checked.profile.direct_address_requirements(),
         required_flags: descriptor(operand),
         required_host_caps,
         required_profile: profile_requirements::NATIVE_ACCESS
@@ -321,7 +324,7 @@ pub(crate) fn emit_context(
             )
         }
     };
-    let sp_failure = if checked.profile == CheckedMemoryProfile::SpAlignmentEnabled {
+    let sp_failure = if checked.profile.sp_requirement() == SpAlignmentRequirement::Enabled {
         base.and_then(|base| memory::address::check_sp(code, base, pc))
     } else {
         None

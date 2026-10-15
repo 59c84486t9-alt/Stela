@@ -25,6 +25,7 @@ pub(super) fn qualify(
     bound: &BoundSource<'_>,
     controls: &FixedProcessMemoryControls,
     fp: &FpControlOwner<'_>,
+    debug: &crate::system::debug::DebugControls,
     system: &SystemState,
     registers: &mut GuestState,
     memory: &mut MemoryThread<MemoryControls>,
@@ -50,10 +51,12 @@ pub(super) fn qualify(
                     .check_guest(actual_guest)
                     .map_err(|error| anyhow::anyhow!("actual FP bank: {error:?}"))?;
                 controls
-                    .prepare_with_low128(
+                    .prepare_profile_with_low128(
                         &bound.entry,
+                        bound.memory_profile()?,
                         bound.requirements,
                         system,
+                        debug,
                         context,
                         actual_guest,
                         memory,
@@ -74,6 +77,7 @@ pub(super) fn call(
     bound: &BoundSource<'_>,
     controls: &FixedProcessMemoryControls,
     fp: &FpControlOwner<'_>,
+    debug: &crate::system::debug::DebugControls,
     system: &SystemState,
     registers: &mut GuestState,
     memory: &mut MemoryThread<MemoryControls>,
@@ -81,6 +85,7 @@ pub(super) fn call(
     execution: &mut ExecutionContext,
 ) -> anyhow::Result<NativeObservation> {
     let _floating_environment = HostFloatingEnvironment::capture();
+    let profile = bound.memory_profile()?;
     anyhow::ensure!(
         execution.has_supported_header(),
         "unsupported actual checked context"
@@ -105,12 +110,12 @@ pub(super) fn call(
         bound.entry.entry(),
         |mut access| {
             access.with_guest(|context, actual_guest| {
-                let prepared = match controls.prepare_with_low128(&bound.entry,
-                    bound.requirements, system, context, actual_guest, memory, Some(endpoint)) {
+                let prepared = match controls.prepare_profile_with_low128(&bound.entry,
+                    profile, bound.requirements, system, debug, context, actual_guest, memory, Some(endpoint)) {
                     Ok(prepared) => prepared,
                     Err(error) => return NativeObservation::CpuDeclined(format!("actual low128 preparation: {error:?}")),
                 };
-                if prepared.profile_id() != stela_compiler::block::ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID
+                if prepared.profile_id() != profile.process_memory_profile_id()
                     || prepared.requirements() != bound.requirements {
                     return NativeObservation::UnqualifiedCallFailure("typed entry/body requirements differ".into());
                 }
