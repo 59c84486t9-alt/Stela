@@ -299,6 +299,7 @@ pub struct ServiceRunOutcome {
     pub csr_services: Vec<BsdServiceEvent>,
     pub entropy_services: Vec<BsdServiceEvent>,
     pub mach_vm_services: Vec<crate::mach::Event>,
+    pub mach_vm_map_services: Vec<mach_vm::map::Event>,
 }
 impl ServiceRunOutcome {
     /// Preserve the common report shape when no OS service backend is selected.
@@ -313,6 +314,7 @@ impl ServiceRunOutcome {
             csr_services: Vec::new(),
             entropy_services: Vec::new(),
             mach_vm_services: Vec::new(),
+            mach_vm_map_services: Vec::new(),
         }
     }
 }
@@ -322,6 +324,7 @@ pub struct ExecutionServices<'a> {
     pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
     pub mach_vm: bool,
+    pub mach_vm_map: bool,
     pub crossarch: bool,
     /// Caller-established absence of an owned guest shared-region attachment.
     pub absent_shared_region: bool,
@@ -464,6 +467,7 @@ pub unsafe fn run_services(
     let mut csr_events = Vec::new();
     let mut entropy_events = Vec::new();
     let mut mach_vm_events = Vec::new();
+    let mut mach_vm_map_events = Vec::new();
     anyhow::ensure!(
         services.mach_ports.is_none() || services.thread.is_none(),
         "thread services and independent Mach ports cannot have different owners"
@@ -561,6 +565,20 @@ pub unsafe fn run_services(
             } else {
                 false
             }
+        } else if services.mach_vm_map && mach_vm::map::handles(state, &trap) {
+            let ports = services
+                .thread
+                .as_deref()
+                .map(|thread| thread.ports())
+                .or(services.mach_ports.as_deref());
+            if let Some(ports) = ports {
+                let event = mach_vm::map::service(state, &trap, ports, memory, runtime);
+                let serviced = event.result.is_some();
+                mach_vm_map_events.push(event);
+                serviced
+            } else {
+                false
+            }
         } else if (state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32) < 0 {
             let ports = if let Some(thread) = services.thread.as_deref_mut() {
                 Some(thread.ports_mut())
@@ -626,6 +644,7 @@ pub unsafe fn run_services(
         csr_services: csr_events,
         entropy_services: entropy_events,
         mach_vm_services: mach_vm_events,
+        mach_vm_map_services: mach_vm_map_events,
     })
 }
 

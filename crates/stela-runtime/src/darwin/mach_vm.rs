@@ -13,6 +13,8 @@ use crate::{
 use anyhow::{Result, ensure};
 use stela_compiler::block::SynchronousTrap;
 
+pub mod map;
+
 pub const PROFILE_ID: &str = "darwin-arm64-owned-data-mach-vm-protect-v1";
 pub const PROTECT_TRAP: u32 = 14;
 pub const KERN_SUCCESS: i32 = 0;

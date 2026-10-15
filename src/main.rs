@@ -179,6 +179,9 @@ enum Command {
         /// Service ordinary Mach VM protection using owned current-task data pages.
         #[arg(long, requires = "memory")]
         mach_vm_services: bool,
+        /// Allocate anonymous guest data through an owned current-task Mach map call.
+        #[arg(long, requires = "memory")]
+        mach_vm_map_services: bool,
         /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
         #[arg(long)]
         csr_active_configuration: Option<u32>,
@@ -1396,6 +1399,7 @@ fn run() -> Result<()> {
             absent_shared_region_services,
             entropy_services,
             mach_vm_services,
+            mach_vm_map_services,
             csr_active_configuration,
             mach_port_services,
             thread_services,
@@ -1444,7 +1448,9 @@ fn run() -> Result<()> {
                     .transpose()?
             };
             ensure!(
-                !mach_vm_services || mach_port_services || thread_services,
+                !(mach_vm_services || mach_vm_map_services)
+                    || mach_port_services
+                    || thread_services,
                 "Mach VM services require an owned Mach port or thread context"
             );
             let mut memory = raw_memory(memory_path.as_deref())?;
@@ -1518,6 +1524,7 @@ fn run() -> Result<()> {
                     || absent_shared_region_services
                     || csr_policy.is_some()
                     || mach_vm_services
+                    || mach_vm_map_services
                     || entropy_services
                 {
                     stela_runtime::darwin::run_services(
@@ -1533,6 +1540,7 @@ fn run() -> Result<()> {
                             crossarch: crossarch_services,
                             absent_shared_region: absent_shared_region_services,
                             mach_vm: mach_vm_services,
+                            mach_vm_map: mach_vm_map_services,
                             csr: csr_policy.as_ref(),
                             entropy: entropy_services,
                             mach_ports: mach_ports.as_mut(),
@@ -1573,6 +1581,13 @@ fn run() -> Result<()> {
             })) }).collect::<Result<Vec<_>>>()?;
             let memory_report = serde_json::json!({"memory_regions":memory.regions(),"memory_before":memory_before,
                 "memory_after":memory_after,"memory_reads":memory_reads});
+            let clock_report = clock.as_ref().map(|clock| -> Result<_> { Ok(serde_json::json!({
+                    "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
+                    "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region(),
+                    "legacy_configuration":clock.legacy_configuration(),
+                    "legacy_commpage_profile":clock.legacy_configuration().profile_id(),
+                    "page_sha256":clock.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES).map(|bytes| stela_core::sha256(&bytes))?
+                })) }).transpose()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"kind":"native_block_run",
@@ -1594,6 +1609,8 @@ fn run() -> Result<()> {
                 "entropy_service_events":service_run.entropy_services,
                 "mach_vm_service_profile":mach_vm_services.then_some(stela_runtime::darwin::mach_vm::PROFILE_ID),
                 "mach_vm_service_events":service_run.mach_vm_services,
+                "mach_vm_map_service_profile":mach_vm_map_services.then_some(stela_runtime::darwin::mach_vm::map::PROFILE_ID),
+                "mach_vm_map_service_events":service_run.mach_vm_map_services,
                 "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
                     "profile_id":page.profile_id(),"address_space":page.address_space(),
                     "region":page.region(),"supported_fields":page.supported_fields(),
@@ -1601,13 +1618,7 @@ fn run() -> Result<()> {
                 })) }).transpose()?,
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":service_run.services,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
-                "clock":clock.as_ref().map(|clock| -> Result<_> { Ok(serde_json::json!({
-                    "snapshot":clock.snapshot(),"events":clock.events(),"profile_id":clock.profile_id(),
-                    "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region(),
-                    "legacy_configuration":clock.legacy_configuration(),
-                    "legacy_commpage_profile":clock.legacy_configuration().profile_id(),
-                    "page_sha256":clock.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES).map(|bytes| stela_core::sha256(&bytes))?
-                })) }).transpose()?,
+                "clock":clock_report,
                 "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "complete_binary_verified":false}))?
