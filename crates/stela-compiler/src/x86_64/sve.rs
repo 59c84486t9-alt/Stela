@@ -16,4 +16,6 @@ pub(crate) mod rearrange;
 pub(crate) mod rearrange_extract;
 pub(crate) mod rearrange_widen;
 pub(crate) mod reductions;
+pub(crate) mod shifts;
+pub(crate) mod shifts_narrow;
 pub(crate) mod sign;

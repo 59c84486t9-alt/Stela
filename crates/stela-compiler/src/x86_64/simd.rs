@@ -32,7 +32,7 @@ mod sha256;
 mod sha3;
 mod sha32;
 mod sha512;
-mod shifts;
+pub(crate) mod shifts;
 mod sqrt;
 mod structure_memory;
 mod widening;

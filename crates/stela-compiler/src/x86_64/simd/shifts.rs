@@ -36,7 +36,7 @@ fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
         source,
     );
 }
-pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
+pub(crate) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
     if amount == 0 {
         return;
     }
@@ -61,7 +61,7 @@ pub(super) fn logical_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount:
         packed(code, Host::And, xmm, 5);
     }
 }
-pub(super) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
+pub(crate) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
     if amount == 0 {
         return;
     }
@@ -90,7 +90,7 @@ pub(super) fn right_shift(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, amount: u
         _ => unreachable!("reviewed lane width"),
     }
 }
-pub(super) fn rounded_right(
+pub(crate) fn rounded_right(
     code: &mut Vec<u8>,
     lane_bytes: u8,
     amount: u8,

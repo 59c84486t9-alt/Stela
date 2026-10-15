@@ -55,9 +55,12 @@
     "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/aarch64/sve/reductions.rs",
+    "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+    "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
     "crates/stela-compiler/src/aarch64/sme.rs",
     "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+    "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
     "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
@@ -87,10 +90,16 @@
     "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/x86_64/sve/reductions.rs",
+    "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+    "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+    "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+    "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+    "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
     "crates/stela-compiler/src/x86_64/sme.rs",
     "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
     "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+    "crates/stela-compiler/src/x86_64/sme/integer_vector.rs",
     "crates/stela-compiler/src/x86_64/sme/length.rs",
     "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
@@ -784,6 +793,57 @@
         "representative_endpoint_portion_classes": 7,
         "cli_form_probes": 4,
         "cli_scope_guards": 12
+      }
+    },
+    "sve_integer_shifts": {
+      "harness": ".stela/research/coverage-race/integration/shifts-production-1/transfer-production.py",
+      "report": ".stela/research/coverage-race/integration/shifts-production-3/metadata-fragment-1/main43-evidence.json",
+      "kind": "sve_integer_shifts_exact_current_emission_transfer",
+      "comparison_field": "preserved_original_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_frame.py",
+        "dev/scalable_fixture_runner.py",
+        "dev/differential.py",
+        "dev/evidence.py",
+        "dev/simd_fixtures/sve_integer/shifts.py"
+      ],
+      "required_positive_counts": [
+        "canonical_forms",
+        "complete_body_matches",
+        "source_map_matches",
+        "preserved_context_entry_comparisons",
+        "current_cli_full_manifest_comparisons"
+      ],
+      "required_measurements": {
+        "fresh_semantic_comparisons": 0,
+        "fresh_original_executions": 0
+      }
+    },
+    "sve_integer_shifts_narrow": {
+      "harness": ".stela/research/coverage-race/integration/shifts-production-1/transfer-production.py",
+      "report": ".stela/research/coverage-race/integration/shifts-production-3/metadata-fragment-1/narrow26-evidence.json",
+      "kind": "sve_integer_narrow_exact_current_emission_transfer",
+      "comparison_field": "preserved_original_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_frame.py",
+        "dev/scalable_fixture_runner.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/shifts_narrow.py"
+      ],
+      "required_positive_counts": [
+        "canonical_forms",
+        "complete_body_matches",
+        "source_map_matches",
+        "preserved_context_entry_comparisons",
+        "current_cli_full_manifest_comparisons"
+      ],
+      "required_measurements": {
+        "fresh_semantic_comparisons": 0,
+        "fresh_original_executions": 0
       }
     }
   },
@@ -36777,6 +36837,4821 @@
         }
       ],
       "alias": false
+    },
+    {
+      "id": "asr_z_p_zi_",
+      "category": "sve",
+      "source_file": "asr_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04008000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASR",
+      "source_sha256": "43d8878035cb17580d6292c64edcaaa8ae207dc19358597d5c0b07dad0f74881",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040081e0",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040083e0",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044083e0",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04c083e0",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040081e0",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asr_z_p_zw_",
+      "category": "sve",
+      "source_file": "asr_z_p_zw.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04188000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASR",
+      "source_sha256": "f45a4797e50df9819b80807227153f910fad51cea5d753b48e533c976e346fd8",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04188040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04588040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04988040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04188040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asr_z_p_zz_",
+      "category": "sve",
+      "source_file": "asr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04108000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASR",
+      "source_sha256": "ac916b7a9120e3a4e94d7bccab42978c51f9a6cc3c56339bff862c00c13b17bd",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04108040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04508040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04908040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d08040",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04108040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asr_z_zi_",
+      "category": "sve",
+      "source_file": "asr_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04209000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASR",
+      "source_sha256": "324fa7fbf9f54595a98391c830e4f86d2d315d0d38e7a9cb6c8177b47b160664",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x042f9020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x043f9020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x047f9020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04ff9020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x042f9020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asr_z_zw_",
+      "category": "sve",
+      "source_file": "asr_z_zw.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04208000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASR",
+      "source_sha256": "e52d0ff23d68c4e99f62bda6dae1df6083a4d9ed8d7135f6cead1710b99a1ca9",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04228020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04628020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04a28020",
+          "expected_mnemonics": [
+            "asr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04228020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asrd_z_p_zi_",
+      "category": "sve",
+      "source_file": "asrd_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04048000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASRD",
+      "source_sha256": "ff931ae8c1aa5bcfb5bc8198d9a81dd2caaf0129a248470045936625868393ca",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040481e0",
+          "expected_mnemonics": [
+            "asrd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040483e0",
+          "expected_mnemonics": [
+            "asrd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044483e0",
+          "expected_mnemonics": [
+            "asrd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04c483e0",
+          "expected_mnemonics": [
+            "asrd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040481e0",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "asrr_z_p_zz_",
+      "category": "sve",
+      "source_file": "asrr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04148000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "ASRR",
+      "source_sha256": "b4e83ab98230d583817d04850cc294dcc5ec302d595bc85ce8587a709520e8d3",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04148040",
+          "expected_mnemonics": [
+            "asrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04548040",
+          "expected_mnemonics": [
+            "asrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04948040",
+          "expected_mnemonics": [
+            "asrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d48040",
+          "expected_mnemonics": [
+            "asrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04148040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsl_z_p_zi_",
+      "category": "sve",
+      "source_file": "lsl_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04038000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSL",
+      "source_sha256": "af6566aaab2cf0b82f5c947598d5bb110523713c0f25d48a673c692e73a7dfe1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x04038100",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04038200",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04438000",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04838000",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04038100",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsl_z_p_zw_",
+      "category": "sve",
+      "source_file": "lsl_z_p_zw.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041b8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSL",
+      "source_sha256": "1910a348a2550b25be87c2f9098585ca4315bf8d36ae15cc1d71fbaf49a2fdf0",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x041b8040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x045b8040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x049b8040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x041b8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsl_z_p_zz_",
+      "category": "sve",
+      "source_file": "lsl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04138000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSL",
+      "source_sha256": "8e1255cb2f473aeb13579de7b78bb7df3c82b411fabcb4af3aa97d2c3ee458c0",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04138040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04538040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04938040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d38040",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04138040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsl_z_zi_",
+      "category": "sve",
+      "source_file": "lsl_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04209c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSL",
+      "source_sha256": "f37c68d048a242cabbc51eade677efef3c8fa3e2c83e1e7f8aeb5729ee6c145b",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x04289c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04309c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04609c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04a09c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04289c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsl_z_zw_",
+      "category": "sve",
+      "source_file": "lsl_z_zw.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04208c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSL",
+      "source_sha256": "59efab9b2b7f4cf21a15b633b6942c7dc1fa1aa1d42587d33efbadec65246d0c",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04228c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04628c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04a28c20",
+          "expected_mnemonics": [
+            "lsl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04228c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lslr_z_p_zz_",
+      "category": "sve",
+      "source_file": "lslr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04178000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSLR",
+      "source_sha256": "5495275357dacdb7112e770f8cea4115091538fd665eea652097e98cbc0b54af",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04178040",
+          "expected_mnemonics": [
+            "lslr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04578040",
+          "expected_mnemonics": [
+            "lslr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04978040",
+          "expected_mnemonics": [
+            "lslr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d78040",
+          "expected_mnemonics": [
+            "lslr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04178040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsr_z_p_zi_",
+      "category": "sve",
+      "source_file": "lsr_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04018000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSR",
+      "source_sha256": "394d2838c02906eeff4df725ff29560247585f35bb198c66c850277fe484ed7f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040181e0",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040183e0",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044183e0",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04c183e0",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040181e0",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsr_z_p_zw_",
+      "category": "sve",
+      "source_file": "lsr_z_p_zw.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04198000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSR",
+      "source_sha256": "38d38c98e40a1a7540a409fa610b9be323aaeaa9e9c48260d727a2e370a38c39",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04198040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04598040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04998040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04198040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsr_z_p_zz_",
+      "category": "sve",
+      "source_file": "lsr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04118000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSR",
+      "source_sha256": "c36dae9c772a4c161d896062df4cbabfc8f433017a914e3388c12dca798e4683",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04118040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04518040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04918040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d18040",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04118040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsr_z_zi_",
+      "category": "sve",
+      "source_file": "lsr_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04209400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSR",
+      "source_sha256": "abe599e7c7d7f05efe4b523c8b993f9673d958714beb8b1d9d4cbb24ba5d4e8f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x042f9420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x043f9420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x047f9420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04ff9420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x042f9420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsr_z_zw_",
+      "category": "sve",
+      "source_file": "lsr_z_zw.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04208400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSR",
+      "source_sha256": "cd2ac5119db183eb6b5671e3139764d0e8a22e48bbe6b4dc6e7359b00934095f",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04228420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04628420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04a28420",
+          "expected_mnemonics": [
+            "lsr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04228420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "lsrr_z_p_zz_",
+      "category": "sve",
+      "source_file": "lsrr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04158000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "LSRR",
+      "source_sha256": "d34ef0bcfa5d0c479febe303f9505db7a7c1eae07ef43a9a75c9392479acfab4",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x04158040",
+          "expected_mnemonics": [
+            "lsrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04558040",
+          "expected_mnemonics": [
+            "lsrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04958040",
+          "expected_mnemonics": [
+            "lsrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04d58040",
+          "expected_mnemonics": [
+            "lsrr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04158040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sli_z_zzi_",
+      "category": "sve",
+      "source_file": "sli_z_zzi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SLI",
+      "source_sha256": "f4c40bd90951117159942fdf35c80385b937267d9ee767545683b5b7e1ed324b",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x4508f420",
+          "expected_mnemonics": [
+            "sli"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4510f420",
+          "expected_mnemonics": [
+            "sli"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4540f420",
+          "expected_mnemonics": [
+            "sli"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4580f420",
+          "expected_mnemonics": [
+            "sli"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4508f420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "sqrshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440a8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHL",
+      "source_sha256": "e0d419d05d943e8a87ab3982e54a88bfbf15759065f4f6ba514c99db0314a652",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440a8040",
+          "expected_mnemonics": [
+            "sqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444a8040",
+          "expected_mnemonics": [
+            "sqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448a8040",
+          "expected_mnemonics": [
+            "sqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44ca8040",
+          "expected_mnemonics": [
+            "sqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440a8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "sqrshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440e8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHLR",
+      "source_sha256": "1a22a37fbe4449ddbfeb0e4c7fdb9f43ba0449dc3a1a962e568e007d6de902f1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440e8040",
+          "expected_mnemonics": [
+            "sqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444e8040",
+          "expected_mnemonics": [
+            "sqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448e8040",
+          "expected_mnemonics": [
+            "sqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44ce8040",
+          "expected_mnemonics": [
+            "sqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440e8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshl_z_p_zi_",
+      "category": "sve",
+      "source_file": "sqshl_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04068000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHL",
+      "source_sha256": "a61b7e2936e3cdfc8d34bd1f6c11709039fbaabb4f2df3ffb27fff0e7505c1a7",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x04068100",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04068200",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04468000",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04868000",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04068100",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "sqshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44088000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHL",
+      "source_sha256": "a9de3f0c937d491d86ebb0d861cc94aaa6e6dcabedd858405da539264713898c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x44088040",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44488040",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44888040",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c88040",
+          "expected_mnemonics": [
+            "sqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44088040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "sqshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440c8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHLR",
+      "source_sha256": "7f5f8b841886276ec1b16cbb7ef2a834a4f8e3069f03803cc42655c072f1a2c9",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440c8040",
+          "expected_mnemonics": [
+            "sqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444c8040",
+          "expected_mnemonics": [
+            "sqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448c8040",
+          "expected_mnemonics": [
+            "sqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44cc8040",
+          "expected_mnemonics": [
+            "sqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440c8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshlu_z_p_zi_",
+      "category": "sve",
+      "source_file": "sqshlu_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x040f8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHLU",
+      "source_sha256": "41a448e01a424b367b45b2a0fb7f2b08a50c4f7b9a79753ce64d0ffab1fb245e",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040f8100",
+          "expected_mnemonics": [
+            "sqshlu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040f8200",
+          "expected_mnemonics": [
+            "sqshlu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044f8000",
+          "expected_mnemonics": [
+            "sqshlu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x048f8000",
+          "expected_mnemonics": [
+            "sqshlu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040f8100",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sri_z_zzi_",
+      "category": "sve",
+      "source_file": "sri_z_zzi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SRI",
+      "source_sha256": "76affad3c382f617d8f4d5a35e6fa09168f19eac80a55e4bebcdaa5bdb23a6a1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x450ff020",
+          "expected_mnemonics": [
+            "sri"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x451ff020",
+          "expected_mnemonics": [
+            "sri"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x455ff020",
+          "expected_mnemonics": [
+            "sri"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45dff020",
+          "expected_mnemonics": [
+            "sri"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x450ff020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "srshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "srshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44028000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SRSHL",
+      "source_sha256": "2d73986bb09e6484d66f67c686b6cbb1f4666f1486d1ee8a5a16ae93d2f09484",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x44028040",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44428040",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44828040",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c28040",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44028040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "srshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "srshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44068000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SRSHLR",
+      "source_sha256": "b4482d8b12b1960542d5eca75bc55e5035fdc6c55d4fab449bcb5d64b58e75e3",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x44068040",
+          "expected_mnemonics": [
+            "srshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44468040",
+          "expected_mnemonics": [
+            "srshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44868040",
+          "expected_mnemonics": [
+            "srshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c68040",
+          "expected_mnemonics": [
+            "srshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44068040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "srshr_z_p_zi_",
+      "category": "sve",
+      "source_file": "srshr_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x040c8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SRSHR",
+      "source_sha256": "bcd6463006b7214c249fd2c19c36c3f0f2017a6d7a7c3f041bff7cf638327f39",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040c81e0",
+          "expected_mnemonics": [
+            "srshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040c83e0",
+          "expected_mnemonics": [
+            "srshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044c83e0",
+          "expected_mnemonics": [
+            "srshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04cc83e0",
+          "expected_mnemonics": [
+            "srshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040c81e0",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "srsra_z_zi_",
+      "category": "sve",
+      "source_file": "srsra_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500e800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SRSRA",
+      "source_sha256": "a3bbf4c3a9d6cc480a09f8eb7710adad3e1377896578ec90282064e5a6c7594c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x450fe820",
+          "expected_mnemonics": [
+            "srsra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x451fe820",
+          "expected_mnemonics": [
+            "srsra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x455fe820",
+          "expected_mnemonics": [
+            "srsra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45dfe820",
+          "expected_mnemonics": [
+            "srsra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x450fe820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "ssra_z_zi_",
+      "category": "sve",
+      "source_file": "ssra_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SSRA",
+      "source_sha256": "f9f1068a23e153ec5f751e351253053f39760713568834746807229227776077",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x450fe020",
+          "expected_mnemonics": [
+            "ssra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x451fe020",
+          "expected_mnemonics": [
+            "ssra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x455fe020",
+          "expected_mnemonics": [
+            "ssra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45dfe020",
+          "expected_mnemonics": [
+            "ssra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x450fe020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqrshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "uqrshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440b8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQRSHL",
+      "source_sha256": "01cefaeb53b2cc6512af77807c2cc3032e103abc5f8ebc44cb656181f7e0ede0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440b8040",
+          "expected_mnemonics": [
+            "uqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444b8040",
+          "expected_mnemonics": [
+            "uqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448b8040",
+          "expected_mnemonics": [
+            "uqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44cb8040",
+          "expected_mnemonics": [
+            "uqrshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440b8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqrshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "uqrshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440f8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQRSHLR",
+      "source_sha256": "3e4be2c4f047b78f19a91f069eadfee3859aafb67d67a9e53cd59db57c834eb5",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440f8040",
+          "expected_mnemonics": [
+            "uqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444f8040",
+          "expected_mnemonics": [
+            "uqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448f8040",
+          "expected_mnemonics": [
+            "uqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44cf8040",
+          "expected_mnemonics": [
+            "uqrshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440f8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqshl_z_p_zi_",
+      "category": "sve",
+      "source_file": "uqshl_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x04078000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQSHL",
+      "source_sha256": "f1f0661f9887fbed16381e3b1bc4f8996f615823f8836eabecb0d2d54fe48f7f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x04078100",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04078200",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04478000",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04878000",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x04078100",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "uqshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44098000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQSHL",
+      "source_sha256": "07745fef4c8bda8c8d9f9cc6228ec46bc1c35ae62be6ef611aaf4852fb6edd84",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x44098040",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44498040",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44898040",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c98040",
+          "expected_mnemonics": [
+            "uqshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44098040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "uqshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x440d8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQSHLR",
+      "source_sha256": "10a78d8d4ce18168b1c0cbfeb65ef7f181db287a938cff0a70b6878624e4d97c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x440d8040",
+          "expected_mnemonics": [
+            "uqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x444d8040",
+          "expected_mnemonics": [
+            "uqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x448d8040",
+          "expected_mnemonics": [
+            "uqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44cd8040",
+          "expected_mnemonics": [
+            "uqshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x440d8040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "urshl_z_p_zz_",
+      "category": "sve",
+      "source_file": "urshl_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44038000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "URSHL",
+      "source_sha256": "c876604d3b96735073b099bd9aaed458f7b72b51f4992968be8060b573cac849",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme-svl16",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile. This registry row uses declared V2 DIT=0 because selected scalar variable routes have count-dependent control flow. Packed Byte same-width LSL/LSR (including reverse forms) remains available under V1; source-bound policy evidence records that boundary.",
+      "smoke_samples": [
+        {
+          "word": "0x44038040",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44438040",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44838040",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c38040",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44038040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "urshlr_z_p_zz_",
+      "category": "sve",
+      "source_file": "urshlr_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x44078000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "URSHLR",
+      "source_sha256": "d2e8c0f69cb72be86187df6664527c5435639e3e467b55e16b2708150e67916e",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x44078040",
+          "expected_mnemonics": [
+            "urshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44478040",
+          "expected_mnemonics": [
+            "urshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44878040",
+          "expected_mnemonics": [
+            "urshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c78040",
+          "expected_mnemonics": [
+            "urshlr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44078040",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "urshr_z_p_zi_",
+      "category": "sve",
+      "source_file": "urshr_z_p_zi.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x040d8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "URSHR",
+      "source_sha256": "202bdb3c54fde3cb2dee0e9eebc212a1f2de530ab8265ff13ca93bc112d75256",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x040d81e0",
+          "expected_mnemonics": [
+            "urshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x040d83e0",
+          "expected_mnemonics": [
+            "urshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x044d83e0",
+          "expected_mnemonics": [
+            "urshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04cd83e0",
+          "expected_mnemonics": [
+            "urshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x040d81e0",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "ursra_z_zi_",
+      "category": "sve",
+      "source_file": "ursra_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500ec00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "URSRA",
+      "source_sha256": "1908ed1a625e5ad3283e598455b965470ccb6f8772ccb67db66fee2e8cf1d31a",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x450fec20",
+          "expected_mnemonics": [
+            "ursra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x451fec20",
+          "expected_mnemonics": [
+            "ursra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x455fec20",
+          "expected_mnemonics": [
+            "ursra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45dfec20",
+          "expected_mnemonics": [
+            "ursra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x450fec20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "usra_z_zi_",
+      "category": "sve",
+      "source_file": "usra_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x4500e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "USRA",
+      "source_sha256": "a8423d0e98e4b6071b75f6677f260fa408e864d8b23b2e78de7d93ceb3b991cf",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x450fe420",
+          "expected_mnemonics": [
+            "usra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x451fe420",
+          "expected_mnemonics": [
+            "usra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x455fe420",
+          "expected_mnemonics": [
+            "usra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45dfe420",
+          "expected_mnemonics": [
+            "usra"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x450fe420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "xar_z_zzi_",
+      "category": "sve",
+      "source_file": "xar_z_zzi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x04203400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "XAR",
+      "source_sha256": "ad440a1855062cb6d401a1af920b1b497d6f04ed75838ab06417f5c365cbd516",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/saturating.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/scalar.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts/variable.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/simd/shifts.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts"
+      ],
+      "review": "June Arm canonical semantics and all allocated widths reviewed; baseline and checked x86 catalog candidates compared with actual emitted body inspection, retained original/native full-state fixtures and paired-address timing.",
+      "scope": "Enabled streaming SME integer shifts, accumulates, inserts and XOR rotates at SVL16/32/64/128/256. Basic variable counts use the full unsigned lane or full enclosing 64-bit count; bidirectional counts use full signed lanes with architectural saturation bounds. Predicate merging uses each element first bit. Original source/count/destination aliases, reverse forms and QC/NZCV/FPCR preservation are modeled. Requires FEAT_SME and SM=1, independent of ZA; no extra SME2 requirement. General nonstreaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x042f3440",
+          "expected_mnemonics": [
+            "xar"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x043f3440",
+          "expected_mnemonics": [
+            "xar"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x047f3440",
+          "expected_mnemonics": [
+            "xar"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04ff3440",
+          "expected_mnemonics": [
+            "xar"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x042f3440",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "rshrnb_z_zi_",
+      "category": "sve",
+      "source_file": "rshrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45201800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "RSHRNB",
+      "source_sha256": "081e593fa4ea56a277d4a13a156afdd864f5f04baf0dc6dd39ddfcd914615f86",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f1820",
+          "expected_mnemonics": [
+            "rshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f1820",
+          "expected_mnemonics": [
+            "rshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f1820",
+          "expected_mnemonics": [
+            "rshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f1820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "rshrnt_z_zi_",
+      "category": "sve",
+      "source_file": "rshrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45201c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "RSHRNT",
+      "source_sha256": "a7d63d1692eba4258ee78548f1fdb29fc429649fec07181767cac64f8e854da5",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f1c20",
+          "expected_mnemonics": [
+            "rshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f1c20",
+          "expected_mnemonics": [
+            "rshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f1c20",
+          "expected_mnemonics": [
+            "rshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f1c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "shrnb_z_zi_",
+      "category": "sve",
+      "source_file": "shrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45201000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SHRNB",
+      "source_sha256": "a33e15dbee2be536161dc02d26274da2334d1b85e4826a033ae7bffe154f1ce9",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f1020",
+          "expected_mnemonics": [
+            "shrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f1020",
+          "expected_mnemonics": [
+            "shrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f1020",
+          "expected_mnemonics": [
+            "shrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f1020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "shrnt_z_zi_",
+      "category": "sve",
+      "source_file": "shrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45201400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SHRNT",
+      "source_sha256": "005bdb44b46cfdf7f696578dfe17d3052c08316fbb69803eb65c7b0745451242",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f1420",
+          "expected_mnemonics": [
+            "shrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f1420",
+          "expected_mnemonics": [
+            "shrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f1420",
+          "expected_mnemonics": [
+            "shrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f1420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshrnb_z_zi_",
+      "category": "sve",
+      "source_file": "sqrshrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45202800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHRNB",
+      "source_sha256": "27899d30dbcdffefc695a1c8777b4520efea01314012eecc6e96231a6a92832e",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f2820",
+          "expected_mnemonics": [
+            "sqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f2820",
+          "expected_mnemonics": [
+            "sqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f2820",
+          "expected_mnemonics": [
+            "sqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f2820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshrnt_z_zi_",
+      "category": "sve",
+      "source_file": "sqrshrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45202c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHRNT",
+      "source_sha256": "15492a5d2214590262ac78b6a3eb2c70807f8981d6a3572b83ca2d2df122f2c0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f2c20",
+          "expected_mnemonics": [
+            "sqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f2c20",
+          "expected_mnemonics": [
+            "sqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f2c20",
+          "expected_mnemonics": [
+            "sqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f2c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshrunb_z_zi_",
+      "category": "sve",
+      "source_file": "sqrshrunb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45200800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHRUNB",
+      "source_sha256": "eb61d8ab389816f30eaaa6947fe5b16a1be1ad286bb4b3079aea19b1c1ae4c11",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f0820",
+          "expected_mnemonics": [
+            "sqrshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f0820",
+          "expected_mnemonics": [
+            "sqrshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f0820",
+          "expected_mnemonics": [
+            "sqrshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f0820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqrshrunt_z_zi_",
+      "category": "sve",
+      "source_file": "sqrshrunt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45200c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQRSHRUNT",
+      "source_sha256": "f25e75e0398e47013776c64241a539453409e9d452db015fd49fba618a3ea3d8",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f0c20",
+          "expected_mnemonics": [
+            "sqrshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f0c20",
+          "expected_mnemonics": [
+            "sqrshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f0c20",
+          "expected_mnemonics": [
+            "sqrshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f0c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshrnb_z_zi_",
+      "category": "sve",
+      "source_file": "sqshrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45202000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHRNB",
+      "source_sha256": "e4d6d63c6523deeb1f07c919a760bde50c99cda6ec158e126eef64c5056b7b1a",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f2020",
+          "expected_mnemonics": [
+            "sqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f2020",
+          "expected_mnemonics": [
+            "sqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f2020",
+          "expected_mnemonics": [
+            "sqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f2020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshrnt_z_zi_",
+      "category": "sve",
+      "source_file": "sqshrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45202400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHRNT",
+      "source_sha256": "2dd9623df5db224e506d35ac879e59072fe7c25405012a5f20701c4a6b924619",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f2420",
+          "expected_mnemonics": [
+            "sqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f2420",
+          "expected_mnemonics": [
+            "sqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f2420",
+          "expected_mnemonics": [
+            "sqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f2420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshrunb_z_zi_",
+      "category": "sve",
+      "source_file": "sqshrunb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45200000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHRUNB",
+      "source_sha256": "e62c64b3601aeeed80fea505436cc7204b77b24a4c6ef81cfec551a103711716",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f0020",
+          "expected_mnemonics": [
+            "sqshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f0020",
+          "expected_mnemonics": [
+            "sqshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f0020",
+          "expected_mnemonics": [
+            "sqshrunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f0020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqshrunt_z_zi_",
+      "category": "sve",
+      "source_file": "sqshrunt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45200400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQSHRUNT",
+      "source_sha256": "d6a950197320bee32840247accc8576f70a41d80b61cbcc20823e9643a9c80c5",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f0420",
+          "expected_mnemonics": [
+            "sqshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f0420",
+          "expected_mnemonics": [
+            "sqshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f0420",
+          "expected_mnemonics": [
+            "sqshrunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f0420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqxtnb_z_zz_",
+      "category": "sve",
+      "source_file": "sqxtnb_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45204000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQXTNB",
+      "source_sha256": "29242a39872055420eb39eb23ec54c694152adbb0d8824298e217186105a3d11",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45284020",
+          "expected_mnemonics": [
+            "sqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45304020",
+          "expected_mnemonics": [
+            "sqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45604020",
+          "expected_mnemonics": [
+            "sqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45284020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqxtnt_z_zz_",
+      "category": "sve",
+      "source_file": "sqxtnt_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45204400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQXTNT",
+      "source_sha256": "22e38e40012268efa8c59e30f3008d17a46738d7adc7a026077141a8db257be0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45284420",
+          "expected_mnemonics": [
+            "sqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45304420",
+          "expected_mnemonics": [
+            "sqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45604420",
+          "expected_mnemonics": [
+            "sqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45284420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqxtunb_z_zz_",
+      "category": "sve",
+      "source_file": "sqxtunb_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45205000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQXTUNB",
+      "source_sha256": "d990d5625ac0a7afa0cb54c227aebc56c524b6e5abcaaa1cb9e6ae6fb694abab",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45285020",
+          "expected_mnemonics": [
+            "sqxtunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45305020",
+          "expected_mnemonics": [
+            "sqxtunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45605020",
+          "expected_mnemonics": [
+            "sqxtunb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45285020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sqxtunt_z_zz_",
+      "category": "sve",
+      "source_file": "sqxtunt_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45205400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SQXTUNT",
+      "source_sha256": "dc6a6ce77397935778a0c0dabe8e5bd8bfd84e8380e84703a372153087a2d2b6",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45285420",
+          "expected_mnemonics": [
+            "sqxtunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45305420",
+          "expected_mnemonics": [
+            "sqxtunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45605420",
+          "expected_mnemonics": [
+            "sqxtunt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45285420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sshllb_z_zi_",
+      "category": "sve",
+      "source_file": "sshllb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x4500a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SSHLLB",
+      "source_sha256": "ac9150efd20708d1cc5fd3da921d2d99cc43ba84f3d4afc31eb31908bf796d49",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x4508a020",
+          "expected_mnemonics": [
+            "sshllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4510a020",
+          "expected_mnemonics": [
+            "sshllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4540a020",
+          "expected_mnemonics": [
+            "sshllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4508a020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sshllt_z_zi_",
+      "category": "sve",
+      "source_file": "sshllt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x4500a400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "SSHLLT",
+      "source_sha256": "47d083337bc1429c6a8a86085ef7334e9dc3775e01eb2cab9326e0812e0e6f06",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x4508a420",
+          "expected_mnemonics": [
+            "sshllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4510a420",
+          "expected_mnemonics": [
+            "sshllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4540a420",
+          "expected_mnemonics": [
+            "sshllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4508a420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqrshrnb_z_zi_",
+      "category": "sve",
+      "source_file": "uqrshrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45203800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQRSHRNB",
+      "source_sha256": "b352905dc5ede62690d2673c86118301825cf46905e192be10e1158c5eae539b",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f3820",
+          "expected_mnemonics": [
+            "uqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f3820",
+          "expected_mnemonics": [
+            "uqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f3820",
+          "expected_mnemonics": [
+            "uqrshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f3820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqrshrnt_z_zi_",
+      "category": "sve",
+      "source_file": "uqrshrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45203c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQRSHRNT",
+      "source_sha256": "70ffc888a814c7a210347c25fa863fa401f48ff0e67dd2cdb8ac04cc1a1c3b0f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f3c20",
+          "expected_mnemonics": [
+            "uqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f3c20",
+          "expected_mnemonics": [
+            "uqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f3c20",
+          "expected_mnemonics": [
+            "uqrshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f3c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqshrnb_z_zi_",
+      "category": "sve",
+      "source_file": "uqshrnb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45203000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQSHRNB",
+      "source_sha256": "197819169a3ce1f9570cf0db7eca60a41ea5db848530a529d6eb3951633692e0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f3020",
+          "expected_mnemonics": [
+            "uqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f3020",
+          "expected_mnemonics": [
+            "uqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f3020",
+          "expected_mnemonics": [
+            "uqshrnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f3020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqshrnt_z_zi_",
+      "category": "sve",
+      "source_file": "uqshrnt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x45203400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQSHRNT",
+      "source_sha256": "4d5c0bab88abc9c5a9674678a8445f340e64a92e5c8d01e99dff23927bda3c83",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x452f3420",
+          "expected_mnemonics": [
+            "uqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x453f3420",
+          "expected_mnemonics": [
+            "uqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x457f3420",
+          "expected_mnemonics": [
+            "uqshrnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x452f3420",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqxtnb_z_zz_",
+      "category": "sve",
+      "source_file": "uqxtnb_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45204800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQXTNB",
+      "source_sha256": "d7a252bc3acaff3f2b00d86a22a8878ae1dbc8ba2ad0d07f193fdc6f6418ebd1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45284820",
+          "expected_mnemonics": [
+            "uqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45304820",
+          "expected_mnemonics": [
+            "uqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45604820",
+          "expected_mnemonics": [
+            "uqxtnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45284820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uqxtnt_z_zz_",
+      "category": "sve",
+      "source_file": "uqxtnt_z_zz.xml",
+      "encoding_mask": "0xffa7fc00",
+      "encoding_value": "0x45204c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "UQXTNT",
+      "source_sha256": "8a893d9297c47c96db722136b4b774c421be50b83fc858ac989340adbf0360f9",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x45284c20",
+          "expected_mnemonics": [
+            "uqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45304c20",
+          "expected_mnemonics": [
+            "uqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x45604c20",
+          "expected_mnemonics": [
+            "uqxtnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x45284c20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "ushllb_z_zi_",
+      "category": "sve",
+      "source_file": "ushllb_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x4500a800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "USHLLB",
+      "source_sha256": "fc32229364f5b46a4b13186b9ded82ef2d48c03a1a3e28d98704cb3ccaabf50d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x4508a820",
+          "expected_mnemonics": [
+            "ushllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4510a820",
+          "expected_mnemonics": [
+            "ushllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4540a820",
+          "expected_mnemonics": [
+            "ushllb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4508a820",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "ushllt_z_zi_",
+      "category": "sve",
+      "source_file": "ushllt_z_zi.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x4500ac00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "USHLLT",
+      "source_sha256": "18e2a1470691a2975ca95c3a786b6435e299ee25e3b0736d8266e946c39bb030",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/sve/shifts_narrow.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_shifts_narrow"
+      ],
+      "review": "June Arm encoding and semantics reviewed; packed SSE2 and checked SSE4.1 mappings selected from pinned x86 candidates using actual-byte original/native proofs and paired-address timings.",
+      "scope": "Enabled streaming SME-compatible interleaved widening/narrowing at SVL16/32/64/128/256. All allocated 8/16/32 smaller widths, B/T selection, shift boundaries and Z aliases; B narrow zeros odd lanes, T preserves even lanes. Saturation preserves FPSR.QC, NZCV and FPCR. Requires SM=1, independent of ZA. General non-streaming SVE, disabled-feature traps, MOVPRFX pairs and full exception delivery remain outside this profile.",
+      "smoke_samples": [
+        {
+          "word": "0x4508ac20",
+          "expected_mnemonics": [
+            "ushllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4510ac20",
+          "expected_mnemonics": [
+            "ushllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4540ac20",
+          "expected_mnemonics": [
+            "ushllt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4508ac20",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
     }
   ],
   "execution_profiles": {

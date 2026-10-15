@@ -2,4 +2,5 @@
 
 pub(crate) mod integer_dots;
 pub(crate) mod integer_products;
+pub(crate) mod integer_vector;
 pub(crate) mod length;

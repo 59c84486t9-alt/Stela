@@ -16,6 +16,8 @@ pub mod rearrange;
 pub mod rearrange_extract;
 pub mod rearrange_widen;
 pub mod reductions;
+pub mod shifts;
+pub mod shifts_narrow;
 pub mod sign;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub enum Operand {
     RearrangeExtract(rearrange_extract::Operand),
     RearrangeWiden(rearrange_widen::Operand),
     Reductions(reductions::Operand),
+    Shifts(shifts::Operand),
+    ShiftsNarrow(shifts_narrow::Operand),
     Sign(sign::Operand),
 }
 
@@ -75,6 +79,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .or_else(|| {
             integer_comparison::decode(word).map(|operand| operand.map(Operand::IntegerComparison))
         })
+        .or_else(|| shifts::decode(word).map(|operand| operand.map(Operand::Shifts)))
+        .or_else(|| shifts_narrow::decode(word).map(|operand| operand.map(Operand::ShiftsNarrow)))
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
         .or_else(|| floating_copy::decode(word).map(|operand| operand.map(Operand::FloatingCopy)))
 }
