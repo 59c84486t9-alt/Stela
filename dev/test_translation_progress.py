@@ -2192,5 +2192,168 @@ class FollowingWordProbeTests(unittest.TestCase):
             progress.compile_probe('cli', self.PREFIX, Path(directory), following_words=[self.FOLLOWING])
 
 
+class ContextCompilerProgressTests(unittest.TestCase):
+    def profile(self, *, block=True):
+        profile = DeclaredScalableProgressTests().profile()
+        if block:
+            profile.update(compiler_command='compile-block', abi=progress.CONTEXT_BLOCK_ABI,
+                           numerical_features={'full_a64': False, 'ebf16': False, 'rpres': True})
+        return profile
+
+    def fake_compiler(self, consumed=4, mutation=None):
+        def fake(command, **kwargs):
+            source = Path(command[2]); output = Path(command[command.index('--output-dir') + 1])
+            output.mkdir(); native = bytes(13) + bytes(consumed // 4) + b'\xc3'
+            (output / 'native.bin').write_bytes(native)
+            block = command[1] == 'compile-block'
+            data = source.read_bytes()[:consumed] if block else source.read_bytes()
+            features = [command[i + 1] for i, value in enumerate(command) if value == '--guest-feature']
+            execution = progress.scalable_execution_profile(
+                command[command.index('--guest-profile') + 1],
+                int(command[command.index('--svl-bytes') + 1]), int(command[command.index('--svcr') + 1]),
+                features=features, max_svl_bytes=int(command[command.index('--max-svl-bytes') + 1]),
+                zt0_enabled=command[command.index('--zt0-enabled') + 1] == 'true', dit=False)
+            manifest = {'schema_version': 2, 'kind': 'raw_arm64_block_aot' if block else 'raw_arm64_leaf_aot',
+                'abi': progress.CONTEXT_BLOCK_ABI if block else progress.CONTEXT_LEAF_ABI,
+                'target_cpu': command[command.index('--cpu-target') + 1],
+                'guest_base': progress.SCALABLE_GUEST_BASE, 'guest_instructions': len(data) // 4,
+                'execution_profile': execution, 'entry_prefix_bytes': 13, 'native_bytes': len(native),
+                'source_map': [[progress.SCALABLE_GUEST_BASE + i * 4, 13 + i] for i in range(len(data) // 4)],
+                'source_sha256': hashlib.sha256(data).hexdigest(), 'native_sha256': progress.sha256(output / 'native.bin'),
+                'compiler_source_sha256': COMPILER}
+            if block:
+                manifest['source_bytes'] = consumed
+                manifest['numerical_features'] = {key: command[command.index('--' + key.replace('_', '-')) + 1] == 'true'
+                                                  for key in progress.NUMERICAL_FEATURE_FIELDS}
+            if mutation:
+                mutation(manifest)
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return fake
+
+    def probe(self, directory, *, block=True, **kwargs):
+        profile = self.profile(block=block)
+        return progress.compile_probe('cli', progress.RET, directory, mode='scalable',
+            guest_profile=profile['id'], svl_bytes=profile['svl_bytes'], svcr=profile['svcr'],
+            compiler_command=profile['compiler_command'], context_abi=profile['abi'],
+            numerical_features=profile.get('numerical_features'), **progress.scalable_declaration(profile), **kwargs)
+
+    def test_context_block_command_and_numerical_manifest(self):
+        for consumed in (4, 8):
+            with self.subTest(consumed=consumed), tempfile.TemporaryDirectory() as directory:
+                result = self.probe(Path(directory), expected_source_bytes=consumed, run=self.fake_compiler(consumed))
+                self.assertEqual(result['source_bytes'], consumed)
+                self.assertEqual(result['abi'], progress.CONTEXT_BLOCK_ABI)
+                self.assertEqual(len(result['source_map']), consumed // 4)
+                self.assertEqual(result['numerical_features'], self.profile()['numerical_features'])
+                self.assertEqual(result['compiler_command'], 'compile-block')
+
+    def test_block_extent_is_checked_before_hashes(self):
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'declared consumed boundary'):
+            self.probe(Path(directory), expected_source_bytes=8,
+                run=self.fake_compiler(4, lambda m: m.update(source_sha256='bad')))
+
+    def test_block_manifest_requires_exact_schema_abi_and_numerical_fields(self):
+        mutations = [lambda m: m.update(schema_version=1), lambda m: m.update(abi=progress.BLOCK_ABI),
+                     lambda m: m.update(kind='raw_arm64_leaf_aot'), lambda m: m.pop('numerical_features'),
+                     lambda m: m['numerical_features'].update(full_a64=0),
+                     lambda m: m['numerical_features'].update(rpres=False),
+                     lambda m: m['numerical_features'].update(unknown=False),
+                     lambda m: m.update(source_map=[[progress.SCALABLE_GUEST_BASE, 0]]),
+                     lambda m: m.update(guest_instructions=2)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                self.probe(Path(directory), run=self.fake_compiler(mutation=mutation))
+
+    def test_direct_block_manifest_rejects_misaligned_or_wrong_consumed_extent(self):
+        profile = self.profile()
+        with tempfile.TemporaryDirectory() as directory:
+            captured = {}
+            fake = self.fake_compiler()
+            def run(command, **kwargs):
+                result = fake(command, **kwargs); captured.update(json.loads(result.stdout)); return result
+            self.probe(Path(directory), run=run)
+        for data in (b'', b'abc', bytes(8)):
+            with self.subTest(source_bytes=len(data)), self.assertRaises(ValueError):
+                progress.validate_context_manifest(captured, data, captured['native_bytes'], 16, 3,
+                    guest_profile=profile['id'], compiler_command='compile-block',
+                    context_abi=profile['abi'], numerical_features=profile['numerical_features'],
+                    **progress.scalable_declaration(profile))
+
+    def test_block_profile_requires_explicit_numerical_contract_and_exact_pair(self):
+        for changed in ({'numerical_features': None}, {'numerical_features': {}},
+                        {'numerical_features': {'full_a64': False, 'ebf16': False, 'rpres': 1}},
+                        {'abi': progress.CONTEXT_LEAF_ABI}, {'compiler_command': 'compile-service'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                progress.validate_scalable_profile({**self.profile(), **changed})
+        for value in (None, self.profile()['numerical_features']):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                progress.validate_scalable_profile({**self.profile(block=False), 'numerical_features': value})
+
+    def test_profile_identity_separates_command_abi_and_numerical_features(self):
+        block = self.profile(); other = copy.deepcopy(block); other['numerical_features']['ebf16'] = True
+        contracts = {'leaf': self.profile(block=False), 'block': block, 'other-numerical': other}
+        profiles = progress.validate_scalable_profiles(ScalableProgressTests().profile(), contracts)
+        self.assertEqual(set(profiles), set(contracts) | {progress.SCALABLE_PROFILE})
+        with self.assertRaisesRegex(ValueError, 'Duplicate semantic'):
+            progress.validate_scalable_profiles(ScalableProgressTests().profile(), {'one': block, 'same': copy.deepcopy(block)})
+
+    def test_explicit_host_target_reaches_cli_and_exact_manifest_for_leaf_and_block(self):
+        for block in (False, True):
+            for target in ('x86_64-baseline+atomic-load16', 'x86_64-baseline+cx16'):
+                with self.subTest(block=block, target=target), tempfile.TemporaryDirectory() as directory:
+                    result = self.probe(Path(directory), block=block, cpu_target=target,
+                                        run=self.fake_compiler(consumed=4 if block else 8))
+                    self.assertEqual(result['target_cpu'], target)
+                with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'source/native metadata'):
+                    self.probe(Path(directory), block=block, cpu_target=target,
+                        run=self.fake_compiler(consumed=4 if block else 8,
+                            mutation=lambda m: m.update(target_cpu='x86_64-baseline')))
+
+
+
+    def test_sample_options_keep_host_target_separate_from_guest_and_route_blocks(self):
+        registry = DeclaredScalableProgressTests().registry()
+        registry['execution_profiles']['sme-i16i64-v2'] = self.profile()
+        row = registry['forms'][1]
+        row['smoke_samples'][0]['cpu_target'] = 'x86_64-baseline+atomic-load16'
+        row['smoke_samples'][0]['consumed_source_bytes'] = 4
+        rows = progress.validate_registry(registry)
+        with tempfile.TemporaryDirectory() as directory, patch.object(progress, 'compile_probe', return_value={
+                'compiler_source_sha256': COMPILER}) as probe:
+            progress.smoke_forms('cli', rows, rows, Path(directory), mode='scalable',
+                profile=registry['profile'], execution_profiles=registry['execution_profiles'])
+        options = next(call.kwargs for call in probe.call_args_list if 'cpu_target' in call.kwargs)
+        self.assertEqual(options['cpu_target'], 'x86_64-baseline+atomic-load16')
+        self.assertEqual(options['compiler_command'], 'compile-block')
+        self.assertEqual(options['numerical_features'], self.profile()['numerical_features'])
+        self.assertEqual(options['expected_source_bytes'], 4)
+        for name in ('features', 'numerical_features', 'max_svl_bytes'):
+            with self.subTest(field=name), self.assertRaises(ValueError):
+                progress.validate_scalable_sample({**row['smoke_samples'][0], name: {}}, self.profile())
+
+
+class ContextFollowingBoundaryTests(unittest.TestCase):
+    def test_block_sample_cannot_declare_leaf_source_bundle(self):
+        contract = ContextCompilerProgressTests().profile()
+        sample = {'word': '0xd65f03c0', 'expected_mnemonics': ['ret'],
+                  'svl_bytes': contract['svl_bytes'], 'svcr': contract['svcr'],
+                  'following_words': ['0x041a0040']}
+        with self.assertRaisesRegex(ValueError, 'context leaf command'):
+            progress.validate_scalable_sample(sample, contract)
+
+    def test_block_bundle_declines_before_source_or_compiler(self):
+        contract = ContextCompilerProgressTests().profile()
+        with tempfile.TemporaryDirectory() as directory:
+            location = Path(directory)
+            with self.assertRaisesRegex(ValueError, 'context leaf command'):
+                progress.compile_probe('cli', 0x0420bc20, location, mode='scalable',
+                    guest_profile=contract['id'], svl_bytes=contract['svl_bytes'], svcr=contract['svcr'],
+                    compiler_command=contract['compiler_command'], context_abi=contract['abi'],
+                    numerical_features=contract['numerical_features'], following_words=['0x041a0040'],
+                    run=lambda *args, **kwargs: self.fail('Unsupported command combination launched compiler'),
+                    **progress.scalable_declaration(contract))
+            self.assertEqual(list(location.iterdir()), [])
+
+
 if __name__ == '__main__':
     unittest.main()

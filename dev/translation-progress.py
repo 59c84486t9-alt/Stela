@@ -46,6 +46,8 @@ SCALABLE_FEATURES = (
 )
 SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
+CONTEXT_BLOCK_ABI = 'x86_64-sysv-guest-state-v1-context-block-exit-direct-ram'
+NUMERICAL_FEATURE_FIELDS = ('full_a64', 'ebf16', 'rpres')
 MAX_CPU_TARGET_LENGTH = 256
 MAX_FOLLOWING_WORDS = 1
 CONTEXT_ENTRY_PREFIX_BYTES = 13
@@ -432,12 +434,35 @@ def scalable_declaration(profile):
     return {key: profile[key] for key in SCALABLE_DECLARATION_FIELDS if key in profile}
 
 
+def validate_context_contract(compiler_command, abi, numerical_features):
+    if compiler_command == 'compile-leaf' and abi == CONTEXT_LEAF_ABI:
+        if numerical_features is not None:
+            raise ValueError('Context leaf profiles forbid numerical_features')
+    elif compiler_command == 'compile-block' and abi == CONTEXT_BLOCK_ABI:
+        if (not isinstance(numerical_features, dict)
+                or set(numerical_features) != set(NUMERICAL_FEATURE_FIELDS)
+                or any(type(numerical_features[key]) is not bool for key in NUMERICAL_FEATURE_FIELDS)):
+            raise ValueError('Context block profiles require exactly three explicit numerical bools')
+    else:
+        raise ValueError('Unsupported context compiler command/ABI pair')
+
+
+def scalable_profile_identity(profile, execution):
+    identity = {'compiler_command': profile['compiler_command'], 'abi': profile['abi'],
+                'execution_profile': execution}
+    if 'numerical_features' in profile:
+        identity['numerical_features'] = profile['numerical_features']
+    return json.dumps(identity, sort_keys=True)
+
+
 def validate_scalable_profile(profile):
     common = {'id', 'compiler_command', 'abi', 'svl_bytes', 'svcr', 'description', 'outside_scope',
-              'decoder_mattrs'}
-    if (not isinstance(profile, dict) or set(profile) - common - set(SCALABLE_DECLARATION_FIELDS)
-            or profile.get('compiler_command') != 'compile-leaf' or profile.get('abi') != CONTEXT_LEAF_ABI):
-        raise ValueError('Scalable registry must declare only supported context-leaf profile fields')
+              'decoder_mattrs', 'numerical_features'}
+    if not isinstance(profile, dict) or set(profile) - common - set(SCALABLE_DECLARATION_FIELDS):
+        raise ValueError('Scalable registry must declare only supported context profile fields')
+    if profile.get('compiler_command') == 'compile-leaf' and 'numerical_features' in profile:
+        raise ValueError('Context leaf profiles forbid numerical_features')
+    validate_context_contract(profile.get('compiler_command'), profile.get('abi'), profile.get('numerical_features'))
     execution = scalable_execution_profile(profile.get('id'), profile.get('svl_bytes'), profile.get('svcr'),
                                             **scalable_declaration(profile))
     if 'decoder_mattrs' in profile:
@@ -454,7 +479,7 @@ def validate_scalable_profile(profile):
 def validate_scalable_profiles(default_profile, execution_profiles=None):
     default = validate_scalable_profile(default_profile)
     profiles = {default_profile['id']: default_profile}
-    identities = {json.dumps(default, sort_keys=True)}
+    identities = {scalable_profile_identity(default_profile, default)}
     if execution_profiles is not None:
         if not isinstance(execution_profiles, dict) or not execution_profiles:
             raise ValueError('Execution profiles must be a nonempty specialization-key mapping')
@@ -464,7 +489,7 @@ def validate_scalable_profiles(default_profile, execution_profiles=None):
             execution = validate_scalable_profile(contract)
             if not contract.get('outside_scope'):
                 raise ValueError('Execution profile specialization needs explicit scope limits')
-            identity = json.dumps(execution, sort_keys=True)
+            identity = scalable_profile_identity(contract, execution)
             if identity in identities:
                 raise ValueError('Duplicate semantic execution-profile contract')
             identities.add(identity)
@@ -493,16 +518,31 @@ def validate_scalable_sample(sample, contract):
     validate_cpu_target(sample.get('cpu_target', BASELINE_CPU_TARGET))
     if 'following_words' in sample:
         validate_following_words(sample['following_words'])
+        if contract['compiler_command'] != 'compile-leaf':
+            raise ValueError('Following source bundles require the context leaf command')
     return scalable_execution_profile(contract['id'], sample.get('svl_bytes'), sample.get('svcr'),
                                        **scalable_declaration(contract))
 
 
 def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, svcr,
                               guest_profile=SCALABLE_PROFILE,
-                              expected_target_cpu='x86_64-baseline', **declaration):
-    if (type(manifest.get('schema_version')) is not int or manifest['schema_version'] != 2 or manifest.get('kind') != 'raw_arm64_leaf_aot'
-            or manifest.get('abi') != CONTEXT_LEAF_ABI):
+                              expected_target_cpu=BASELINE_CPU_TARGET, compiler_command='compile-leaf',
+                              context_abi=CONTEXT_LEAF_ABI, numerical_features=None, **declaration):
+    validate_context_contract(compiler_command, context_abi, numerical_features)
+    block = compiler_command == 'compile-block'
+    if (type(manifest.get('schema_version')) is not int or manifest['schema_version'] != 2 or manifest.get('kind') != ('raw_arm64_block_aot' if block else 'raw_arm64_leaf_aot')
+            or manifest.get('abi') != context_abi):
         raise ValueError('Compiler scalable probe schema/ABI mismatch')
+    if not source_data or len(source_data) % 4:
+        raise ValueError('Compiler context source must be a nonempty instruction prefix')
+    if block:
+        if type(manifest.get('source_bytes')) is not int or manifest['source_bytes'] != len(source_data):
+            raise ValueError('Compiler context consumed source extent mismatch')
+        if (manifest.get('numerical_features') != numerical_features
+                or any(type(manifest.get('numerical_features', {}).get(key)) is not bool for key in NUMERICAL_FEATURE_FIELDS)):
+            raise ValueError('Compiler context numerical features mismatch')
+    elif 'numerical_features' in manifest:
+        raise ValueError('Context leaf manifest unexpectedly declares numerical features')
     expected = scalable_execution_profile(guest_profile, svl_bytes, svcr, **declaration)
     profile = manifest.get('execution_profile')
     if (not isinstance(profile, dict) or profile != expected
@@ -532,19 +572,26 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
                   expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
-                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None, following_words=None):
+                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None,
+                  following_words=None, compiler_command=None, context_abi=None, numerical_features=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8, 12):
         raise ValueError('Invalid declared compiler probe boundary')
     following = []
     if mode == 'scalable':
+        compiler_command = 'compile-leaf' if compiler_command is None else compiler_command
+        context_abi = CONTEXT_LEAF_ABI if context_abi is None else context_abi
+        validate_context_contract(compiler_command, context_abi, numerical_features)
+        if following_words is not None and compiler_command != 'compile-leaf':
+            raise ValueError('Following source bundles require the context leaf command')
         following = validate_following_words(following_words) if following_words is not None else []
         cpu_target = validate_cpu_target(BASELINE_CPU_TARGET if cpu_target is None else cpu_target)
         execution = scalable_execution_profile(guest_profile, svl_bytes, svcr, features=features,
             max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit)
     elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
-                                            max_svl_bytes, zt0_enabled, dit, cpu_target, following_words)):
+                                            max_svl_bytes, zt0_enabled, dit, cpu_target, following_words,
+                                            compiler_command, context_abi, numerical_features)):
         raise ValueError('Scalable configuration requires the context compiler lane')
     if service_profile is not None and mode != 'service':
         raise ValueError('Service profile requires the service compiler lane')
@@ -558,7 +605,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     input_data = struct.pack('<' + 'I' * len(words), *words)
     source.write_bytes(input_data)
     output = directory / 'native'
-    compiler_mode = 'leaf' if mode == 'scalable' else 'block' if mode == 'service' else mode
+    compiler_mode = compiler_command.removeprefix('compile-') if mode == 'scalable' else 'block' if mode == 'service' else mode
     command = [str(cli), 'compile-' + compiler_mode, str(source), '--output-dir', str(output)]
     if mode != 'leaf':
         command.extend(['--guest-base', hex(SYSTEM_GUEST_BASE)])
@@ -570,6 +617,9 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
                 command.extend(['--guest-feature', feature])
             command.extend(['--max-svl-bytes', str(max_svl_bytes),
                             '--zt0-enabled', str(zt0_enabled).lower()])
+    if mode == 'scalable' and compiler_command == 'compile-block':
+        for key in NUMERICAL_FEATURE_FIELDS:
+            command.extend(['--' + key.replace('_', '-'), str(numerical_features[key]).lower()])
     if mode == 'service':
         command.extend(SERVICE_BINDINGS[selected_service][1])
     process = run(command,
@@ -584,8 +634,10 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     if process.returncode != 0:
         raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
     manifest = json.loads(process.stdout)
-    if mode in ('block', 'service'):
-        if manifest.get('abi') != (SERVICE_BINDINGS[selected_service][0] if mode == 'service' else BLOCK_ABI):
+    context_block = mode == 'scalable' and compiler_command == 'compile-block'
+    if mode in ('block', 'service') or context_block:
+        expected_abi = context_abi if context_block else SERVICE_BINDINGS[selected_service][0] if mode == 'service' else BLOCK_ABI
+        if manifest.get('abi') != expected_abi:
             raise ValueError('Compiler block probe ABI mismatch')
         consumed = manifest.get('source_bytes')
         if type(consumed) is not int or consumed != expected_source_bytes:
@@ -604,7 +656,8 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
             raise ValueError('System probe must preserve the exact source-bound baseline System exit')
     if mode == 'scalable':
         validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,
-            guest_profile, expected_target_cpu=cpu_target, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
+            guest_profile, expected_target_cpu=cpu_target, compiler_command=compiler_command,
+            context_abi=context_abi, numerical_features=numerical_features, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
                              if guest_profile == DECLARED_SCALABLE_PROFILE else {}))
     fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:
@@ -615,8 +668,10 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
             'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
             'native_bytes': native.stat().st_size,
             **({'probe_source_words': [f'0x{item:08x}' for item in words]} if following else {}),
-            **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode}
-               if mode in ('block', 'service') else {}),
+            **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': 'block' if context_block else mode}
+               if mode in ('block', 'service') or context_block else {}),
+            **({'numerical_features': manifest['numerical_features'], 'compiler_command': compiler_command}
+               if context_block else {}),
             **({key: manifest[key] for key in ('abi', 'execution_profile', 'source_map', 'entry_prefix_bytes',
                                                'guest_base', 'target_cpu')} if mode == 'scalable' else {})}
 
@@ -682,6 +737,9 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 result['cpu_target'] = configuration['cpu_target']
             if 'following_words' in configuration:
                 result['following_words'] = configuration['following_words']
+            if declaration['compiler_command'] == 'compile-block':
+                result.update(compiler_command='compile-block', context_abi=declaration['abi'],
+                              numerical_features=declaration['numerical_features'])
         return result
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
