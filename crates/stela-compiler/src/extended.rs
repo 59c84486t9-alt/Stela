@@ -15,7 +15,7 @@ use crate::{
             features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
             profile::ScalableControls,
         },
-        sme::{integer_dots, integer_vector, length, movement},
+        sme::{integer_dots, integer_vector, length, movement, tables},
         sve::{
             address, dot, floating_copy, integer_arithmetic, integer_bits, integer_comparison,
             integer_logic::{self, CopySource, Kind},
@@ -238,6 +238,7 @@ enum Decoded {
     PredicateGeneration(predicate_generation::Operand),
     PredicateLogic(predicate_logic::Operand),
     Length(length::Operand),
+    SmeTables(tables::Operand),
     SmeMovement(movement::Operand),
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
@@ -802,6 +803,45 @@ fn decode(
         }
         return Ok(Decoded::SmeMovement(operand));
     }
+    if let Some(operand) = tables::decode(word) {
+        if x86_64::sme::tables::requires_dit_zero(&operand, profile.length, target)
+            && profile.required_dit() != Some(false)
+        {
+            return Err(CompileError(format!(
+                "scalar SME lookup requires a declared DIT=0 profile at {:#x}",
+                pc.0
+            )));
+        }
+        let mut features = ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2);
+        if operand.feature == tables::Feature::Sme2p1 {
+            features = features.with(ScalableFeature::Sme2p1);
+        }
+        profile.require_features(FeatureRequirement::all(features), pc)?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        let minimum = operand.minimum_svl_bits();
+        if profile.length.bits() < minimum
+            || profile.controls().max_vector_length().bits() < minimum
+        {
+            return Err(CompileError(format!(
+                "SME table operands require SVL >= {minimum} bits at {:#x}",
+                pc.0
+            )));
+        }
+        if operand.requires_zt0()
+            && (!profile.mode.za_enabled() || !profile.controls().zt0_enabled())
+        {
+            return Err(CompileError(format!(
+                "SME lookup requires ZA and enabled ZT0 at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::SmeTables(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -917,6 +957,9 @@ fn emit_decoded(
         Decoded::SmeMovement(operand) => {
             x86_64::sme::movement::emit(code, &operand, profile.length, target)
                 .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+        }
+        Decoded::SmeTables(operand) => {
+            x86_64::sme::tables::emit(code, &operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -3042,6 +3085,235 @@ mod tests {
             .contains("MOVPRFX pair validation")
         );
         assert!(crate::compile(&words(&[SSHLLB_Z0_H_Z1_B, RET_X30]), GuestAddress(0)).is_err());
+    }
+    const TABLE_LOOKUP: u32 = 0xc0cc0000;
+    const TABLE_SELECT: u32 = 0xc1208000;
+    const TABLE_ZIP_PAIR_Q: u32 = 0xc120d400;
+    const TABLE_ZIP_QUAD_Q: u32 = 0xc137e000;
+
+    fn table_profile(
+        bytes: usize,
+        mode: ScalableMode,
+        features: ScalableFeatures,
+        zt0_enabled: bool,
+    ) -> ScalableProfile {
+        ScalableProfile::new_with_features(
+            VectorLength::from_bytes(bytes).unwrap(),
+            mode,
+            features,
+            ScalableControls::new(VectorLength::from_bytes(256).unwrap(), zt0_enabled),
+        )
+        .unwrap()
+    }
+
+    fn table_features() -> ScalableFeatures {
+        ScalableFeatures::of(ScalableFeature::Sme)
+            .with(ScalableFeature::Sme2)
+            .with(ScalableFeature::Sme2p1)
+    }
+
+    #[test]
+    fn fixed_table_routes_retain_compatible_legacy_profiles() {
+        let legacy = ScalableProfile::new(
+            VectorLength::from_bytes(64).unwrap(),
+            ScalableMode::new(true, false),
+        );
+        for word in [TABLE_SELECT, TABLE_ZIP_PAIR_Q, TABLE_ZIP_QUAD_Q, 0xc165e000] {
+            assert!(
+                compile_for_profile(
+                    &words(&[word, RET_X30]),
+                    GuestAddress(0x1000),
+                    legacy,
+                    TargetCpu::Baseline
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_lookup_policy_tracks_the_selected_recipe() {
+        use crate::aarch64::scalable::ElementSize;
+        let mut operand = tables::decode(TABLE_LOOKUP).unwrap();
+        let short = VectorLength::from_bytes(16).unwrap();
+        let long = VectorLength::from_bytes(64).unwrap();
+        operand.element = ElementSize::Word;
+        assert!(x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            short,
+            TargetCpu::Baseline
+        ));
+        assert!(x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            short,
+            TargetCpu::Ssse3
+        ));
+        assert!(!x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            long,
+            TargetCpu::Ssse3
+        ));
+        operand.element = ElementSize::Halfword;
+        assert!(x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            short,
+            TargetCpu::Baseline
+        ));
+        assert!(!x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            long,
+            TargetCpu::Baseline
+        ));
+        assert!(!x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            short,
+            TargetCpu::Ssse3
+        ));
+        operand.element = ElementSize::Byte;
+        assert!(!x86_64::sme::tables::requires_dit_zero(
+            &operand,
+            short,
+            TargetCpu::Baseline
+        ));
+        let legacy = ScalableProfile::new(short, ScalableMode::new(true, true));
+        let scalar_word = TABLE_LOOKUP | (2 << 12);
+        let error = compile_for_profile(
+            &words(&[scalar_word, RET_X30]),
+            GuestAddress(0x1000),
+            legacy,
+            TargetCpu::Baseline,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("scalar SME lookup"));
+    }
+
+    #[test]
+    fn table_lookup_requires_za_and_enabled_zt0() {
+        for (za_enabled, zt0_enabled) in [(false, false), (false, true), (true, false)] {
+            let profile = table_profile(
+                16,
+                ScalableMode::new(true, za_enabled),
+                table_features(),
+                zt0_enabled,
+            );
+            let error = compile_for_profile(
+                &words(&[TABLE_LOOKUP, RET_X30]),
+                GuestAddress(0x1000),
+                profile,
+                TargetCpu::Baseline,
+            )
+            .unwrap_err();
+            assert!(error.0.contains("ZA and enabled ZT0"));
+        }
+        let profile = table_profile(16, ScalableMode::new(true, true), table_features(), true);
+        assert!(
+            compile_for_profile(
+                &words(&[TABLE_LOOKUP, RET_X30]),
+                GuestAddress(0x1000),
+                profile,
+                TargetCpu::Baseline
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn table_strided_lookups_require_sme2p1() {
+        let feature_base = ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2);
+        let base = table_profile(16, ScalableMode::new(true, true), feature_base, true);
+        let complete = table_profile(16, ScalableMode::new(true, true), table_features(), true);
+        for word in [0xc09c4000, 0xc09c8000, 0xc09a4000, 0xc09a9000] {
+            let input = words(&[word, RET_X30]);
+            let error =
+                compile_for_profile(&input, GuestAddress(0x1000), base, TargetCpu::Baseline)
+                    .unwrap_err();
+            assert!(error.0.contains("FEAT_SME2p1"));
+            assert!(
+                compile_for_profile(&input, GuestAddress(0x1000), complete, TargetCpu::Baseline)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn table_permutations_validate_current_length_despite_larger_maximum() {
+        for (word, too_short, minimum) in [(TABLE_ZIP_PAIR_Q, 16, 32), (TABLE_ZIP_QUAD_Q, 32, 64)] {
+            let input = words(&[word, RET_X30]);
+            let short = table_profile(
+                too_short,
+                ScalableMode::new(true, false),
+                table_features(),
+                false,
+            );
+            let error =
+                compile_for_profile(&input, GuestAddress(0x1000), short, TargetCpu::Baseline)
+                    .unwrap_err();
+            assert!(error.0.contains("require SVL"));
+            let valid = table_profile(
+                minimum,
+                ScalableMode::new(true, false),
+                table_features(),
+                false,
+            );
+            assert!(
+                compile_for_profile(&input, GuestAddress(0x1000), valid, TargetCpu::Baseline)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn every_table_family_routes_through_the_shared_context_entry() {
+        let profile = table_profile(64, ScalableMode::new(true, true), table_features(), true);
+        for word in [
+            0xc08c4000, 0xc09c4000, 0xc08c8000, 0xc09c8000, 0xc0cc0000, 0xc08a4000, 0xc09a4000,
+            0xc08a9000, 0xc09a9000, 0xc0ca0000, 0xc1208000, 0xc1218000, 0xc165e000, 0xc175e000,
+            0xc165e001, 0xc175e001, 0xc136e002, 0xc137e002, 0xc120d001, 0xc120d401, 0xc136e000,
+            0xc137e000, 0xc120d000, 0xc120d400,
+        ] {
+            let result = compile_for_profile(
+                &words(&[word, RET_X30]),
+                GuestAddress(0x1000),
+                profile,
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            assert_eq!(result.source_map.len(), 2);
+            assert_eq!(
+                result.source_map[0],
+                (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES)
+            );
+            assert_eq!(result.source_map[1].0, GuestAddress(0x1004));
+            assert!(result.source_map[1].1 > result.source_map[0].1);
+        }
+    }
+
+    #[test]
+    fn table_admission_requires_sme2_and_streaming() {
+        let sme_only = table_profile(
+            16,
+            ScalableMode::new(true, false),
+            ScalableFeatures::of(ScalableFeature::Sme),
+            false,
+        );
+        let error = compile_for_profile(
+            &words(&[TABLE_SELECT, RET_X30]),
+            GuestAddress(0x1000),
+            sme_only,
+            TargetCpu::Baseline,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("FEAT_SME2"));
+        let non_streaming =
+            table_profile(16, ScalableMode::new(false, false), table_features(), false);
+        let error = compile_for_profile(
+            &words(&[TABLE_SELECT, RET_X30]),
+            GuestAddress(0x1000),
+            non_streaming,
+            TargetCpu::Baseline,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("streaming mode required"));
     }
 }
 

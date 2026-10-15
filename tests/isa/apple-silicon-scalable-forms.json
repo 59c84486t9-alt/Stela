@@ -64,14 +64,17 @@
     "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/aarch64/sme/movement.rs",
+    "crates/stela-compiler/src/aarch64/sme/tables.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
     "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
     "crates/stela-compiler/src/x86_64/scalable/predicate.rs",
+    "crates/stela-compiler/src/x86_64/scalable/routing.rs",
     "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/address.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate/counter_mask.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate/flags.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
@@ -106,6 +109,8 @@
     "crates/stela-compiler/src/x86_64/sme/integer_vector.rs",
     "crates/stela-compiler/src/x86_64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/sme/movement.rs",
+    "crates/stela-compiler/src/x86_64/sme/tables.rs",
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
     "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
     "crates/stela-compiler/src/aarch64/system.rs",
@@ -926,6 +931,27 @@
         "historical_state_comparisons": 220,
         "fresh_semantic_replays": 0
       }
+    },
+    "tables24": {
+      "harness": ".stela/research/coverage-race/sme/tables_rearrangement/luti_mapping/final-publication-prep-1/verify_spans.py",
+      "report": ".stela/research/coverage-race/sme/tables_rearrangement/final-publication-1/admission/report.json",
+      "kind": "arm64_sme_tables_production_admission",
+      "comparison_field": "retained_original_native_checks",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_frame.py",
+        "dev/scalable_fixture_runner.py",
+        "dev/simd_fixtures/sme/tables.py",
+        "dev/simd_fixtures/sve_memory/counter.py"
+      ],
+      "required_measurements": {
+        "canonical_forms": 24,
+        "retained_original_inputs": 612,
+        "retained_original_native_checks": 1224,
+        "boundary_model_native_checks": 184,
+        "production_body_matches": 3804
+      },
+      "require_current_executable": true
     }
   },
   "forms": [
@@ -49373,6 +49399,1090 @@
       ],
       "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
       "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, EZT0 enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "luti2_mz2_ztz_1",
+      "mnemonic": "LUTI2",
+      "category": "sme",
+      "source_file": "luti2_mz2_ztz.xml",
+      "encoding_mask": "0xfffc4c01",
+      "encoding_value": "0xc08c4000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_mz2_ztz.xml",
+      "source_sha256": "b71698ad515eec5e0ee1fc275d5b4db2deb7ec25cb4cc9ba9d305a3eaf53948f",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc08c4000",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti2_mz2_ztz_8",
+      "mnemonic": "LUTI2",
+      "category": "sme",
+      "source_file": "luti2_mz2_ztz.xml",
+      "encoding_mask": "0xfffc4c08",
+      "encoding_value": "0xc09c4000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_mz2_ztz.xml",
+      "source_sha256": "b71698ad515eec5e0ee1fc275d5b4db2deb7ec25cb4cc9ba9d305a3eaf53948f",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc09c4000",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti2_mz4_ztz_1",
+      "mnemonic": "LUTI2",
+      "category": "sme",
+      "source_file": "luti2_mz4_ztz.xml",
+      "encoding_mask": "0xfffccc03",
+      "encoding_value": "0xc08c8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_mz4_ztz.xml",
+      "source_sha256": "c18b17794a4d10e4b6f63ec31408616b105087b85a8082926eb855794e6b1198",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc08c8000",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti2_mz4_ztz_4",
+      "mnemonic": "LUTI2",
+      "category": "sme",
+      "source_file": "luti2_mz4_ztz.xml",
+      "encoding_mask": "0xfffccc0c",
+      "encoding_value": "0xc09c8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_mz4_ztz.xml",
+      "source_sha256": "c18b17794a4d10e4b6f63ec31408616b105087b85a8082926eb855794e6b1198",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc09c8000",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti2_z_ztz_",
+      "mnemonic": "LUTI2",
+      "category": "sme",
+      "source_file": "luti2_z_ztz.xml",
+      "encoding_mask": "0xfffc0c00",
+      "encoding_value": "0xc0cc0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_z_ztz.xml",
+      "source_sha256": "0ae7ad73d69a8f5d8e9ac4ebb767140a92b0b4619ef1c03083a27e6178d98b3f",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc0cc0000",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti4_mz2_ztz_1",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz2_ztz.xml",
+      "encoding_mask": "0xfffe4c01",
+      "encoding_value": "0xc08a4000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz2_ztz.xml",
+      "source_sha256": "98547dcd74662bfdb4050d3abe0441fd0b45ba87307a21b9b36c194bcb81fdd8",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc08a4000",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti4_mz2_ztz_8",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz2_ztz.xml",
+      "encoding_mask": "0xfffe4c08",
+      "encoding_value": "0xc09a4000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz2_ztz.xml",
+      "source_sha256": "98547dcd74662bfdb4050d3abe0441fd0b45ba87307a21b9b36c194bcb81fdd8",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc09a4000",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti4_mz4_ztz_1",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz4_ztz.xml",
+      "encoding_mask": "0xfffecc03",
+      "encoding_value": "0xc08a8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz4_ztz.xml",
+      "source_sha256": "40b29a698da35732fecf08679c4ef001ea7b77089680f27fdfedbe5785132eb0",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc08a9000",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti4_mz4_ztz_4",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz4_ztz.xml",
+      "encoding_mask": "0xfffecc0c",
+      "encoding_value": "0xc09a8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz4_ztz.xml",
+      "source_sha256": "40b29a698da35732fecf08679c4ef001ea7b77089680f27fdfedbe5785132eb0",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc09a9000",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "luti4_z_ztz_",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_z_ztz.xml",
+      "encoding_mask": "0xfffe0c00",
+      "encoding_value": "0xc0ca0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_z_ztz.xml",
+      "source_sha256": "e5fbc750d6db841cda9c3dbc61c800ffb1ff888b57dfcf88732fa93f0b36761e",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S forms, packed 2-bit or 4-bit Z indices, immediate segments and contiguous/strided output groups; strided forms admit B/H only and four-output LUTI4 admits H/S (H only when strided). ZA and enabled ZT0 required. Scalar selected recipes require a declared DIT=0; fixed-load Boolean/shuffle recipes do not impose that compiler restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc0ca0000",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sel_mz_p_zz_2",
+      "mnemonic": "SEL",
+      "category": "sme",
+      "source_file": "sel_mz_p_zz.xml",
+      "encoding_mask": "0xff21e021",
+      "encoding_value": "0xc1208000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sel_mz_p_zz.xml",
+      "source_sha256": "7c3b2db6322b74a7bf8f56edb178f2879d87c5f9fde76e9c89042098a2f68690",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter_mask.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D forms and two/four register groups, PN8..PN15 CounterToPredicate selection, empty/partial/full/inverted counters and aliases; ZA independent. Governing-predicate independence is the architectural programmer condition; PN-derived branches do not impose a compiler DIT=0 restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc1208000",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sel_mz_p_zz_4",
+      "mnemonic": "SEL",
+      "category": "sme",
+      "source_file": "sel_mz_p_zz.xml",
+      "encoding_mask": "0xff23e063",
+      "encoding_value": "0xc1218000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sel_mz_p_zz.xml",
+      "source_sha256": "7c3b2db6322b74a7bf8f56edb178f2879d87c5f9fde76e9c89042098a2f68690",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter_mask.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D forms and two/four register groups, PN8..PN15 CounterToPredicate selection, empty/partial/full/inverted counters and aliases; ZA independent. Governing-predicate independence is the architectural programmer condition; PN-derived branches do not impose a compiler DIT=0 restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc1218000",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sunpk_mz_z_2",
+      "mnemonic": "SUNPK",
+      "category": "sme",
+      "source_file": "sunpk_mz_z.xml",
+      "encoding_mask": "0xff3ffc01",
+      "encoding_value": "0xc125e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sunpk_mz_z.xml",
+      "source_sha256": "380cea1dbf6a0330c2fdbe69aa38e9db7d8bfdfb43b4bbed51242a0fd6fce995",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated H/S/D widening forms, one-to-two and two-to-four register groups, signed/unsigned data and destructive aliases; ZA independent. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc165e000",
+          "expected_mnemonics": [
+            "sunpk"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sunpk_mz_z_4",
+      "mnemonic": "SUNPK",
+      "category": "sme",
+      "source_file": "sunpk_mz_z.xml",
+      "encoding_mask": "0xff3ffc23",
+      "encoding_value": "0xc135e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sunpk_mz_z.xml",
+      "source_sha256": "380cea1dbf6a0330c2fdbe69aa38e9db7d8bfdfb43b4bbed51242a0fd6fce995",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated H/S/D widening forms, one-to-two and two-to-four register groups, signed/unsigned data and destructive aliases; ZA independent. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc175e000",
+          "expected_mnemonics": [
+            "sunpk"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uunpk_mz_z_2",
+      "mnemonic": "UUNPK",
+      "category": "sme",
+      "source_file": "uunpk_mz_z.xml",
+      "encoding_mask": "0xff3ffc01",
+      "encoding_value": "0xc125e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uunpk_mz_z.xml",
+      "source_sha256": "b74df6dc2f4caa1255f0ef4b7966c1232997fd3d1339083fdba78bbee7903d7e",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated H/S/D widening forms, one-to-two and two-to-four register groups, signed/unsigned data and destructive aliases; ZA independent. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc165e001",
+          "expected_mnemonics": [
+            "uunpk"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uunpk_mz_z_4",
+      "mnemonic": "UUNPK",
+      "category": "sme",
+      "source_file": "uunpk_mz_z.xml",
+      "encoding_mask": "0xff3ffc23",
+      "encoding_value": "0xc135e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uunpk_mz_z.xml",
+      "source_sha256": "b74df6dc2f4caa1255f0ef4b7966c1232997fd3d1339083fdba78bbee7903d7e",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated H/S/D widening forms, one-to-two and two-to-four register groups, signed/unsigned data and destructive aliases; ZA independent. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc175e001",
+          "expected_mnemonics": [
+            "uunpk"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uzp_mz_z_4",
+      "mnemonic": "UZP",
+      "category": "sme",
+      "source_file": "uzp_mz_z.xml",
+      "encoding_mask": "0xff3ffc63",
+      "encoding_value": "0xc136e002",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uzp_mz_z.xml",
+      "source_sha256": "37e67319539abf60677041ac3157d7f730a7cc27a297245311ca371c6a41e616",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc136e002",
+          "expected_mnemonics": [
+            "uzp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uzp_mz_z_4q",
+      "mnemonic": "UZP",
+      "category": "sme",
+      "source_file": "uzp_mz_z.xml",
+      "encoding_mask": "0xfffffc63",
+      "encoding_value": "0xc137e002",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uzp_mz_z.xml",
+      "source_sha256": "37e67319539abf60677041ac3157d7f730a7cc27a297245311ca371c6a41e616",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc137e002",
+          "expected_mnemonics": [
+            "uzp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uzp_mz_zz_2",
+      "mnemonic": "UZP",
+      "category": "sme",
+      "source_file": "uzp_mz_zz.xml",
+      "encoding_mask": "0xff20fc01",
+      "encoding_value": "0xc120d001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uzp_mz_zz.xml",
+      "source_sha256": "b6f7b6044a1c6ecfd43af0140465c8ca14281db8112262a37cebdf63ccbe6f3d",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc120d001",
+          "expected_mnemonics": [
+            "uzp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uzp_mz_zz_2q",
+      "mnemonic": "UZP",
+      "category": "sme",
+      "source_file": "uzp_mz_zz.xml",
+      "encoding_mask": "0xffe0fc01",
+      "encoding_value": "0xc120d401",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uzp_mz_zz.xml",
+      "source_sha256": "b6f7b6044a1c6ecfd43af0140465c8ca14281db8112262a37cebdf63ccbe6f3d",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc120d401",
+          "expected_mnemonics": [
+            "uzp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "zip_mz_z_4",
+      "mnemonic": "ZIP",
+      "category": "sme",
+      "source_file": "zip_mz_z.xml",
+      "encoding_mask": "0xff3ffc63",
+      "encoding_value": "0xc136e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zip_mz_z.xml",
+      "source_sha256": "aa81d29449a4090a9a989900baf38d0e4b9a8d01d5745c6f38839c5b2dd680bc",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc136e000",
+          "expected_mnemonics": [
+            "zip"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "zip_mz_z_4q",
+      "mnemonic": "ZIP",
+      "category": "sme",
+      "source_file": "zip_mz_z.xml",
+      "encoding_mask": "0xfffffc63",
+      "encoding_value": "0xc137e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zip_mz_z.xml",
+      "source_sha256": "aa81d29449a4090a9a989900baf38d0e4b9a8d01d5745c6f38839c5b2dd680bc",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc137e000",
+          "expected_mnemonics": [
+            "zip"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "zip_mz_zz_2",
+      "mnemonic": "ZIP",
+      "category": "sme",
+      "source_file": "zip_mz_zz.xml",
+      "encoding_mask": "0xff20fc01",
+      "encoding_value": "0xc120d000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zip_mz_zz.xml",
+      "source_sha256": "75ee208ee4fbaaee9bde9696c853a04a356b776e230f1dbe444f85209bdae587",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc120d000",
+          "expected_mnemonics": [
+            "zip"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "zip_mz_zz_2q",
+      "mnemonic": "ZIP",
+      "category": "sme",
+      "source_file": "zip_mz_zz.xml",
+      "encoding_mask": "0xffe0fc01",
+      "encoding_value": "0xc120d400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zip_mz_zz.xml",
+      "source_sha256": "75ee208ee4fbaaee9bde9696c853a04a356b776e230f1dbe444f85209bdae587",
+      "status": "implemented",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "tables24"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables.rs",
+        "crates/stela-compiler/src/x86_64/scalable/routing.rs",
+        "crates/stela-compiler/src/aarch64/sme.rs",
+        "crates/stela-compiler/src/x86_64/sme.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Complete allocated operands over SVL16/32/64/128/256, subject to per-form minimum SVL and exact guest feature gates. All allocated B/H/S/D and separate Q forms, pair/quad groups and destructive/cross-chunk aliases; ZA independent. Q pair requires current/max SVL >=32 bytes and Q quad >=64 bytes. Fixed dataflow has no compiler DIT declaration restriction. Evidence is bound to the shared declared V2 profile; compatible fixed V1 compilation is separate. Raw FPCR/FPSR/NZCV, unrelated registers and caller MXCSR are preserved. No general fault, runtime/cache, application or OS claim.",
+      "review": "Pinned June source and scalar-only DIT policy retain independent component review. The immutable component evidence separates 612 retained original inputs/1224 original-native checks from 184 boundary model-native checks and 3804 production body matches. Final source/CLI/report transfer: compiler 25eccf8c879dddcc683b754a1dcaf8feafe5e13d3990ee4e54a49221de9376ce, CLI 0499f0e334eae67a9d713758a694e8d03411f3eec5710f3bc983d37828753e94, report c0b229be0fc1fa9dc8d58aec863f834c2606f1ddb133354d58941558c71dd2e6. Boundary and FFR oracle limits remain explicit; no DIT1 timing, runtime/cache, application or performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc120d400",
+          "expected_mnemonics": [
+            "zip"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ]
     }
   ],
   "execution_profiles": {

@@ -96,6 +96,7 @@ catalog! {
     AverageWord => ("pavgw", Baseline, [0x66,0x0f,0xe3]),
     MultiplyAddWords => ("pmaddwd", Baseline, [0x66,0x0f,0xf5]),
     MultiplyAddUnsignedBytes => ("pmaddubsw", Ssse3, [0x66,0x0f,0x38,0x04]),
+    SignExtendByteToWord => ("pmovsxbw", Sse41, [0x66,0x0f,0x38,0x20]),
     SignExtendWordToDword => ("pmovsxwd", Sse41, [0x66,0x0f,0x38,0x23]),
     ZeroExtendWordToDword => ("pmovzxwd", Sse41, [0x66,0x0f,0x38,0x33]),
     SignExtendWordToQword => ("pmovsxwq", Sse41, [0x66,0x0f,0x38,0x24]),
@@ -315,6 +316,27 @@ mod tests {
                 opcode.append(&mut code, target);
                 assert_eq!(code, encoding);
             }
+        }
+    }
+    #[test]
+    fn signed_byte_widening_requires_checked_sse41() {
+        let opcode = SimdOpcode::SignExtendByteToWord;
+        let encoding = [0x66, 0x0f, 0x38, 0x20];
+        assert_eq!(opcode.mnemonic(), "pmovsxbw");
+        assert_eq!(opcode.encoding(), encoding);
+        assert_eq!(opcode.requires(), TargetCpu::Sse41);
+        for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
+            let mut code = Vec::new();
+            let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                opcode.append(&mut code, target);
+            }));
+            assert!(declined.is_err());
+            assert!(code.is_empty());
+        }
+        for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
+            let mut code = Vec::new();
+            opcode.append(&mut code, target);
+            assert_eq!(code, encoding);
         }
     }
 }

@@ -1,8 +1,10 @@
 //! Exact-footprint packed multiple-structure transfers within one granule.
 use super::super::{commit, read_vector};
 use crate::TargetCpu;
+use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::simd::structure_memory::{Direction, Layout, Operand};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
+use crate::x86_64::scalable::routing;
 
 const QWORD_BYTES: u8 = 8;
 const VECTOR_BYTES: u8 = 16;
@@ -14,15 +16,12 @@ const THREE_STRUCTURES: u8 = 3;
 const RESULT_XMM: u8 = 4;
 const PARTIAL_XMM: u8 = 5;
 const SCRATCH_XMM: u8 = 6;
-const BITS_PER_BYTE: u8 = 8;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 const MODRM_DISP8: u8 = 0x40;
 const MODRM_RIP: u8 = 0x05;
 const MOVQ_STORE: &[u8] = &[0x66, 0x0f, 0xd6];
 const JMP_REL32: u8 = 0xe9;
 const SHUFFLE_ZERO: u8 = 0x80;
-const EVEN_DWORDS: u8 = 0x88;
-const ODD_DWORDS: u8 = 0xdd;
 
 /// RAX is the original guest address. RDI and pending writeback RDX survive.
 pub(super) fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
@@ -189,64 +188,18 @@ fn dword_three(code: &mut Vec<u8>, operand: &Operand, bytes: u8) {
     }
 }
 
-/// Split two complete input vectors into even/odd element streams. Outputs
-/// differ from both inputs and XMM6/7; input registers remain unchanged.
+/// Reuse the shared exact-width SSE2 chunk network, preserving the established
+/// multiple-structure operand API and complete baseline recipe.
 fn split(code: &mut Vec<u8>, first: u8, second: u8, even: u8, odd: u8, bytes: u8) {
-    const SECOND_EVEN_XMM: u8 = 6;
-    const SECOND_ODD_XMM: u8 = 7;
-    if bytes == DWORD_BYTES {
-        for (destination, source, control) in [
-            (even, first, EVEN_DWORDS),
-            (SECOND_EVEN_XMM, second, EVEN_DWORDS),
-            (odd, first, ODD_DWORDS),
-            (SECOND_ODD_XMM, second, ODD_DWORDS),
-        ] {
-            simd(code, Host::ShuffleDword, destination, source);
-            code.push(control);
-        }
-        simd(code, Host::UnpackLowQword, even, SECOND_EVEN_XMM);
-        simd(code, Host::UnpackLowQword, odd, SECOND_ODD_XMM);
-    } else if bytes == QWORD_BYTES {
-        copy(code, even, first);
-        copy(code, odd, first);
-        simd(code, Host::UnpackLowQword, even, second);
-        simd(code, Host::UnpackHighQword, odd, second);
-    } else {
-        for (destination, source) in [
-            (even, first),
-            (odd, first),
-            (SECOND_EVEN_XMM, second),
-            (SECOND_ODD_XMM, second),
-        ] {
-            copy(code, destination, source);
-        }
-        // Pack only representable values: zero-extended Bytes or sign-extended
-        // Halfwords. Saturation therefore cannot alter any guest bit pattern.
-        let (left, right, pack, bits) = if bytes == 1 {
-            (
-                Shift::LeftWord,
-                Shift::RightWord,
-                Host::PackUnsignedWordToByte,
-                BITS_PER_BYTE,
-            )
-        } else {
-            (
-                Shift::LeftDword,
-                Shift::ArithmeticDword,
-                Host::PackSignedDwordToWord,
-                2 * BITS_PER_BYTE,
-            )
-        };
-        for destination in [even, SECOND_EVEN_XMM] {
-            left.emit(code, destination, bits);
-            right.emit(code, destination, bits);
-        }
-        for destination in [odd, SECOND_ODD_XMM] {
-            right.emit(code, destination, bits);
-        }
-        simd(code, pack, even, SECOND_EVEN_XMM);
-        simd(code, pack, odd, SECOND_ODD_XMM);
-    }
+    routing::split(
+        code,
+        first,
+        second,
+        even,
+        odd,
+        ElementSize::from_bytes(usize::from(bytes)).unwrap(),
+        TargetCpu::Baseline,
+    );
 }
 
 fn load_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes: u8) {
@@ -293,25 +246,16 @@ fn load_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes
     }
 }
 
-fn unpack(bytes: u8, high: bool) -> Host {
-    match (bytes, high) {
-        (1, false) => Host::UnpackLowByte,
-        (1, true) => Host::UnpackHighByte,
-        (2, false) => Host::UnpackLowWord,
-        (2, true) => Host::UnpackHighWord,
-        (4, false) => Host::UnpackLowDword,
-        (4, true) => Host::UnpackHighDword,
-        (8, false) => Host::UnpackLowQword,
-        (8, true) => Host::UnpackHighQword,
-        _ => unreachable!("decoded element width"),
-    }
-}
-
 fn merge(code: &mut Vec<u8>, first: u8, second: u8, low: u8, high: u8, bytes: u8) {
-    copy(code, low, first);
-    copy(code, high, first);
-    simd(code, unpack(bytes, false), low, second);
-    simd(code, unpack(bytes, true), high, second);
+    routing::merge(
+        code,
+        first,
+        second,
+        low,
+        high,
+        ElementSize::from_bytes(usize::from(bytes)).unwrap(),
+        TargetCpu::Baseline,
+    );
 }
 
 fn store_interleaved(code: &mut Vec<u8>, operand: &Operand, structures: u8, bytes: u8) {

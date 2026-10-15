@@ -6,6 +6,7 @@
 //! access architectural state storage, never guest data RAM or monitor metadata.
 
 mod legacy;
+pub(crate) mod routing;
 pub(crate) use legacy::clear_z_upper;
 
 mod predicate;
