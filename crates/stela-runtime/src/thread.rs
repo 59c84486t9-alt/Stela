@@ -12,9 +12,11 @@ use crate::{
     },
     mach::{self, HostPorts},
     memory::DIRECT_RAM_USER_END,
+    process,
 };
 use anyhow::{Result, ensure};
 use serde::Serialize;
+use std::rc::Rc;
 use stela_compiler::block::SynchronousTrap;
 
 pub const PROFILE_ID: &str = "darwin-host-thread-arm-tsd-v1";
@@ -47,6 +49,7 @@ pub struct Context {
     identity: u64,
     thread_specific_data: u64,
     vm_maximum: VmMaximum,
+    process: Option<Rc<process::Context>>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
@@ -55,6 +58,8 @@ pub struct Snapshot {
     pub thread_id: u64,
     pub thread_specific_data: u64,
     pub guest_vm_max_address: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<process::Snapshot>,
 }
 impl Context {
     pub fn native(address_space: u64, vm_maximum: VmMaximum) -> Result<Self> {
@@ -65,7 +70,18 @@ impl Context {
             identity,
             thread_specific_data: 0,
             vm_maximum,
+            process: None,
         })
+    }
+    /// Bind this actual thread/task owner to one explicitly declared process.
+    /// Acquires the existing native thread identity and rights exactly once.
+    pub fn native_in_process(process: Rc<process::Context>, vm_maximum: VmMaximum) -> Result<Self> {
+        let mut thread = Self::native(process.address_space(), vm_maximum)?;
+        thread.process = Some(process);
+        Ok(thread)
+    }
+    pub fn process(&self) -> Option<&process::Context> {
+        self.process.as_deref()
     }
     pub fn address_space(&self) -> u64 {
         self.ports.address_space()
@@ -80,6 +96,7 @@ impl Context {
             thread_id: self.identity,
             thread_specific_data: self.thread_specific_data,
             guest_vm_max_address: self.vm_maximum.address(),
+            process: self.process.as_ref().map(|process| process.snapshot()),
         }
     }
     pub fn ports(&self) -> &HostPorts {

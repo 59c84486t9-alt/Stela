@@ -18,6 +18,7 @@ pub mod csr;
 pub mod entropy;
 pub mod mach_vm;
 pub mod platform;
+pub mod process;
 pub mod shared_region;
 
 pub const MAX_BSD_ARGUMENTS: usize = 8;
@@ -298,6 +299,7 @@ pub struct ServiceRunOutcome {
     pub shared_region_services: Vec<BsdServiceEvent>,
     pub csr_services: Vec<BsdServiceEvent>,
     pub entropy_services: Vec<BsdServiceEvent>,
+    pub process_services: Vec<BsdServiceEvent>,
     pub mach_vm_services: Vec<crate::mach::Event>,
     pub mach_vm_map_services: Vec<mach_vm::map::Event>,
 }
@@ -313,6 +315,7 @@ impl ServiceRunOutcome {
             shared_region_services: Vec::new(),
             csr_services: Vec::new(),
             entropy_services: Vec::new(),
+            process_services: Vec::new(),
             mach_vm_services: Vec::new(),
             mach_vm_map_services: Vec::new(),
         }
@@ -466,6 +469,7 @@ pub unsafe fn run_services(
     let mut shared_region_events = Vec::new();
     let mut csr_events = Vec::new();
     let mut entropy_events = Vec::new();
+    let mut process_events = Vec::new();
     let mut mach_vm_events = Vec::new();
     let mut mach_vm_map_events = Vec::new();
     anyhow::ensure!(
@@ -608,6 +612,16 @@ pub unsafe fn run_services(
             let serviced = event.completion.is_some();
             csr_events.push(event);
             serviced
+        } else if let Some(context) = services
+            .thread
+            .as_deref()
+            .and_then(crate::thread::Context::process)
+            .filter(|_| process::handles(state, &trap))
+        {
+            let event = process::service(state, &trap, context);
+            let serviced = event.completion.is_some();
+            process_events.push(event);
+            serviced
         } else if services.entropy && entropy::handles(state, &trap) {
             let event = entropy::service(state, &trap, memory);
             let serviced = event.completion.is_some();
@@ -643,6 +657,7 @@ pub unsafe fn run_services(
         shared_region_services: shared_region_events,
         csr_services: csr_events,
         entropy_services: entropy_events,
+        process_services: process_events,
         mach_vm_services: mach_vm_events,
         mach_vm_map_services: mach_vm_map_events,
     })

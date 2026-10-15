@@ -195,6 +195,9 @@ enum Command {
             conflicts_with = "mach_port_services"
         )]
         thread_services: bool,
+        /// Explicit normal guest process ID, shared by its actual thread/task owner.
+        #[arg(long, requires = "thread_services")]
+        guest_process_id: Option<u32>,
         /// Explicit guest vm_map_max for ARM TSD sanitization; never inferred from host RAM.
         #[arg(long, requires = "thread_services", value_parser = parse_address)]
         guest_vm_max_address: Option<u64>,
@@ -1403,6 +1406,7 @@ fn run() -> Result<()> {
             csr_active_configuration,
             mach_port_services,
             thread_services,
+            guest_process_id,
             guest_vm_max_address,
             arm_commpage_kernel_page_shift,
             read_memory,
@@ -1503,13 +1507,19 @@ fn run() -> Result<()> {
                 .then(|| stela_runtime::mach::HostPorts::new(ADDRESS_SPACE_ID))
                 .transpose()?;
             let mut thread_context = if thread_services {
-                Some(stela_runtime::thread::Context::native(
-                    ADDRESS_SPACE_ID,
-                    stela_runtime::thread::VmMaximum::new(
-                        guest_vm_max_address
-                            .context("thread services require explicit guest VM maximum")?,
-                    )?,
-                )?)
+                let maximum = stela_runtime::thread::VmMaximum::new(
+                    guest_vm_max_address
+                        .context("thread services require explicit guest VM maximum")?,
+                )?;
+                Some(if let Some(pid) = guest_process_id {
+                    let process = std::rc::Rc::new(stela_runtime::process::Context::new(
+                        ADDRESS_SPACE_ID,
+                        pid,
+                    )?);
+                    stela_runtime::thread::Context::native_in_process(process, maximum)?
+                } else {
+                    stela_runtime::thread::Context::native(ADDRESS_SPACE_ID, maximum)?
+                })
             } else {
                 None
             };
@@ -1597,6 +1607,9 @@ fn run() -> Result<()> {
                 "mach_port_events":service_run.mach_services,"mach_port_rights":mach_ports.as_ref()
                     .or_else(|| thread_context.as_ref().map(|thread| thread.ports())).map(|ports| ports.rights()),
                 "thread_context":thread_context.as_ref().map(|context| context.snapshot()),
+                "process_service_profile":thread_context.as_ref().and_then(|thread| thread.process())
+                    .map(|_| stela_runtime::process::PROFILE_ID),
+                "process_service_events":service_run.process_services,
                 "thread_service_events":service_run.thread_services,
                 "crossarch_service_profile":crossarch_services.then_some(stela_runtime::darwin::crossarch::PROFILE_ID),
                 "crossarch_service_events":service_run.crossarch_services,
@@ -2364,6 +2377,56 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod process_identity_cli_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_process_id_requires_its_thread_owner_and_has_no_default() {
+        assert!(
+            Cli::try_parse_from(["stela", "run-blocks", "raw.bin", "--guest-process-id", "42",])
+                .is_err()
+        );
+        let with_process = Cli::try_parse_from([
+            "stela",
+            "run-blocks",
+            "raw.bin",
+            "--thread-services",
+            "--guest-vm-max-address",
+            "0x800000000000",
+            "--guest-process-id",
+            "42",
+        ])
+        .unwrap();
+        let Command::RunBlocks {
+            thread_services,
+            guest_process_id,
+            ..
+        } = with_process.command
+        else {
+            panic!("expected run-blocks command");
+        };
+        assert!(thread_services);
+        assert_eq!(guest_process_id, Some(42));
+        let legacy = Cli::try_parse_from([
+            "stela",
+            "run-blocks",
+            "raw.bin",
+            "--thread-services",
+            "--guest-vm-max-address",
+            "0x800000000000",
+        ])
+        .unwrap();
+        let Command::RunBlocks {
+            guest_process_id, ..
+        } = legacy.command
+        else {
+            panic!("expected run-blocks command");
+        };
+        assert_eq!(guest_process_id, None);
     }
 }
 

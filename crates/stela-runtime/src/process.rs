@@ -5,7 +5,10 @@
 //! ordering/padding here is our deterministic layout, not an exact kernel dump.
 //! This module neither reads the host environment nor creates a running process.
 use crate::memory::OwnedMemory;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as _, Result, ensure};
+
+mod identity;
+pub use identity::{Context, MAX_PROCESS_ID, PROFILE_ID, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// Resource bounds for this planner, not Darwin ARG_MAX or a kernel ABI limit.

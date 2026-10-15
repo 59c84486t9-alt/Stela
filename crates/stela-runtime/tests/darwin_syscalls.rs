@@ -1662,3 +1662,6 @@ mod native_shared_region;
 
 #[path = "darwin/mach_vm_map.rs"]
 mod native_mach_vm_map;
+
+#[path = "darwin/process.rs"]
+mod native_process;

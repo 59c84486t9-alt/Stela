@@ -1,0 +1,87 @@
+//! Immutable identity for one declared guest process lifetime.
+//!
+//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea uses signed32 pid_t
+//! and PID_MAX99999. This normal userspace profile accepts1..PID_MAX; it does
+//! not allocate a PID namespace, represent kernel proc0, fork or execute images.
+
+use anyhow::{Result, ensure};
+use serde::Serialize;
+
+pub const PROFILE_ID: &str = "darwin-explicit-process-identity-v1";
+pub const MAX_PROCESS_ID: u32 = 99_999;
+
+/// Shared by the actual guest thread/task owner through Rc. Cloning that owner
+/// represents the same process; it must never implement fork. Caller-owned
+/// address-space identity supplies the execution binding, not the numeric PID.
+/// Future exec must preserve PID under a reviewed address-space replacement
+/// protocol; constructing or mutating this immutable owner is not that protocol.
+#[derive(Debug)]
+pub struct Context {
+    address_space: u64,
+    pid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Snapshot {
+    pub profile_id: &'static str,
+    pub address_space: u64,
+    pub process_id: u32,
+}
+
+impl Context {
+    pub fn new(address_space: u64, pid: u32) -> Result<Self> {
+        ensure!(
+            (1..=MAX_PROCESS_ID).contains(&pid),
+            "guest process ID is outside the declared normal userspace profile"
+        );
+        Ok(Self { address_space, pid })
+    }
+
+    pub fn address_space(&self) -> u64 {
+        self.address_space
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            profile_id: PROFILE_ID,
+            address_space: self.address_space,
+            process_id: self.pid,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_process_profile_rejects_kernel_and_unallocated_ids() {
+        for pid in [0, MAX_PROCESS_ID + 1, u32::MAX] {
+            assert!(Context::new(1, pid).is_err());
+        }
+        for pid in [1, MAX_PROCESS_ID] {
+            let process = Context::new(1, pid).unwrap();
+            assert_eq!(process.pid(), pid);
+        }
+    }
+
+    #[test]
+    fn declared_process_identity_preserves_independent_address_space_binding() {
+        for address_space in [0, 1, u64::MAX] {
+            let process = Context::new(address_space, MAX_PROCESS_ID).unwrap();
+            assert_eq!(process.address_space(), address_space);
+            assert_eq!(
+                process.snapshot(),
+                Snapshot {
+                    profile_id: PROFILE_ID,
+                    address_space,
+                    process_id: MAX_PROCESS_ID,
+                }
+            );
+        }
+    }
+}
