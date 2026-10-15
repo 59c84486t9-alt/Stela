@@ -242,7 +242,7 @@ enum Decoded {
     SmeIntegerDots(integer_dots::Operand),
 }
 
-fn ordinary_permitted(operation: &Operation) -> bool {
+pub(crate) fn ordinary_permitted(operation: &Operation) -> bool {
     matches!(
         operation,
         Operation::Bitfield(_)

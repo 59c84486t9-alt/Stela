@@ -16,7 +16,9 @@ pub mod domain;
 pub mod monitor;
 pub mod policy;
 mod storage;
+pub mod tag_execution;
 pub mod tag_store;
+pub mod tag_transfer;
 pub mod tags;
 
 use anyhow::{Context, Result, bail, ensure};

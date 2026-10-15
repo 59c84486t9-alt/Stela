@@ -2,7 +2,7 @@
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
 use crate::{
-    Prepared, clock, execution::platform, floating, pauth, prepare_block_for_target, thread,
+    Prepared, clock, execution::platform, floating, pauth, prepare_block_for_target, system, thread,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -19,8 +19,9 @@ use stela_compiler::{
         BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, ClockOperation, DynamicEdge,
         ExitKind, MAX_BLOCK_INSTRUCTIONS, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation, SynchronousTrap,
-        ThreadRegisterInstruction, analyze_with_profile, decode_clock_instruction,
-        decode_pointer_authentication, decode_thread_register_instruction, decode_trap,
+        SystemInstruction, ThreadRegisterInstruction, analyze_with_profile,
+        decode_clock_instruction, decode_pointer_authentication, decode_system_instruction,
+        decode_thread_register_instruction, decode_trap,
     },
 };
 use stela_core::sha256;
@@ -82,6 +83,18 @@ pub enum StopReason {
     },
     ThreadRegisterRequired {
         instruction: ThreadRegisterInstruction,
+    },
+    SystemContextRequired {
+        instruction_pc: GuestAddress,
+    },
+    SystemEntryFailure {
+        instruction_pc: GuestAddress,
+        word: u32,
+        failure: system::execution::Failure,
+    },
+    SystemFailure {
+        instruction: SystemInstruction,
+        failure: system::execution::Failure,
     },
     ClockRequired {
         instruction: ClockInstruction,
@@ -147,6 +160,38 @@ struct LoadedBlock {
     source_bytes: usize,
     prepared: Prepared,
     mapping: platform::Mapping,
+}
+
+/// Services borrowed for one serialized run; absent owners remain explicit stops.
+struct RuntimeServices<'a> {
+    pointer_authentication: Option<&'a pauth::Context>,
+    clock: Option<&'a mut clock::Context>,
+    thread: Option<&'a thread::Context>,
+    system: Option<&'a mut dyn system::execution::Dispatcher>,
+}
+
+impl<'a> RuntimeServices<'a> {
+    fn legacy(
+        pointer_authentication: Option<&'a pauth::Context>,
+        clock: Option<&'a mut clock::Context>,
+        thread: Option<&'a thread::Context>,
+    ) -> Self {
+        Self {
+            pointer_authentication,
+            clock,
+            thread,
+            system: None,
+        }
+    }
+
+    fn system(dispatcher: &'a mut dyn system::execution::Dispatcher) -> Self {
+        Self {
+            pointer_authentication: None,
+            clock: None,
+            thread: None,
+            system: Some(dispatcher),
+        }
+    }
 }
 
 /// Source registration, resolution and execution are serialized through &mut.
@@ -551,7 +596,14 @@ impl BlockRuntime {
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
     ) -> Result<RunOutcome> {
-        unsafe { self.run_inner(state, stop_pc, block_budget, None, None, None) }
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::legacy(None, None, None),
+            )
+        }
     }
 
     /// Execute the explicit software PAuth profile with a process-owned key domain.
@@ -576,7 +628,14 @@ impl BlockRuntime {
             context.address_space() == self.address_space,
             "PAuth context belongs to another guest address space"
         );
-        unsafe { self.run_inner(state, stop_pc, block_budget, Some(context), None, None) }
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::legacy(Some(context), None, None),
+            )
+        }
     }
 
     /// Execute explicit PAC/clock helpers using caller-owned address-space services.
@@ -607,7 +666,14 @@ impl BlockRuntime {
             clock.address_space() == self.address_space,
             "clock context belongs to another guest address space"
         );
-        unsafe { self.run_inner(state, stop_pc, block_budget, Some(pauth), Some(clock), None) }
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::legacy(Some(pauth), Some(clock), None),
+            )
+        }
     }
 
     /// Execute explicit thread-register helpers from the same context used by
@@ -654,7 +720,46 @@ impl BlockRuntime {
                 "clock context belongs to another guest address space"
             );
         }
-        unsafe { self.run_inner(state, stop_pc, block_budget, pauth, clock, Some(thread)) }
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::legacy(pauth, clock, Some(thread)),
+            )
+        }
+    }
+
+    /// Execute the restricted System service profile. Registered prefixes have
+    /// no ordinary RAM effects; dedicated memory services use their actual
+    /// shared domain. System failures retain their exact original PC and prefix.
+    ///
+    /// # Safety
+    /// Same trusted-code and invocation exclusions as [`Self::run`]. The service
+    /// backend owns its architectural effects and memory synchronization domain.
+    pub unsafe fn run_with_system(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        dispatcher: &mut dyn system::execution::Dispatcher,
+    ) -> Result<RunOutcome> {
+        ensure!(
+            self.profile.supports_system(),
+            "System execution requires the explicit System block profile"
+        );
+        ensure!(
+            dispatcher.address_space() == self.address_space,
+            "System dispatcher belongs to another guest address space"
+        );
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::system(dispatcher),
+            )
+        }
     }
 
     unsafe fn run_inner(
@@ -662,10 +767,14 @@ impl BlockRuntime {
         state: &mut ThreadState,
         stop_pc: Option<GuestAddress>,
         block_budget: usize,
-        context: Option<&pauth::Context>,
-        mut clock_context: Option<&mut clock::Context>,
-        thread_context: Option<&thread::Context>,
+        services: RuntimeServices<'_>,
     ) -> Result<RunOutcome> {
+        let RuntimeServices {
+            pointer_authentication: context,
+            clock: mut clock_context,
+            thread: thread_context,
+            system: mut system_dispatcher,
+        } = services;
         platform::ensure_supported()?;
         let mut outcome = RunOutcome {
             reason: StopReason::BudgetExhausted,
@@ -715,6 +824,40 @@ impl BlockRuntime {
                 outcome.reason = StopReason::TruncatedInstruction;
                 break;
             }
+            // Current PSTATE and CPU controls take precedence over decoding an
+            // available word. This guard performs no architectural effect.
+            let system_entry = if self.profile.supports_system() {
+                let Some(dispatcher) = system_dispatcher.as_deref_mut() else {
+                    outcome.reason = StopReason::SystemContextRequired { instruction_pc: pc };
+                    break;
+                };
+                let word = validate_terminal_word(pc, pc, INSTRUCTION_BYTES, base, &region.source)?;
+                let boundary = system::execution::EntryBoundary::new(
+                    self.address_space,
+                    region.generation,
+                    pc,
+                    GuestAddress(base),
+                    region.source.len(),
+                    word,
+                );
+                let offset = usize::try_from(pc.0 - base)?;
+                let available = ((region.source.len() - offset) / INSTRUCTION_BYTES)
+                    .min(MAX_BLOCK_INSTRUCTIONS)
+                    * INSTRUCTION_BYTES;
+                let source = &region.source[offset..offset + available];
+                if let Err(failure) = dispatcher.validate_entry(&boundary, source, &state.registers)
+                {
+                    outcome.reason = StopReason::SystemEntryFailure {
+                        instruction_pc: pc,
+                        word,
+                        failure,
+                    };
+                    break;
+                }
+                Some(boundary)
+            } else {
+                None
+            };
             // Decode ahead of loading so an unsupported instruction is a typed
             // dispatch stop. Disk corruption and allocation errors remain errors.
             if !self.loaded.contains_key(&pc.0) {
@@ -798,6 +941,26 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let system_boundary = if exit_kind == ExitKind::System {
+                ensure!(
+                    self.profile.supports_system(),
+                    "block produced an unrequested System helper exit"
+                );
+                let instruction = validate_system_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?;
+                Some(system::execution::Boundary::new(
+                    system_entry.context("System exit lacks validated entry")?,
+                    block.source_bytes,
+                    instruction,
+                ))
+            } else {
+                None
+            };
             let numerical = if exit_kind == ExitKind::FloatingPoint {
                 Some(validate_numerical_exit(
                     pc,
@@ -812,6 +975,22 @@ impl BlockRuntime {
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
             outcome.blocks_executed += 1;
+            if let Some(boundary) = system_boundary {
+                let instruction = boundary.instruction();
+                let dispatcher = system_dispatcher
+                    .as_deref_mut()
+                    .context("System exit lacks validated dispatcher")?;
+                match dispatcher.complete(boundary, &mut state.registers) {
+                    Ok(next) => state.pc = next,
+                    Err(failure) => {
+                        outcome.reason = StopReason::SystemFailure {
+                            instruction,
+                            failure,
+                        };
+                        break;
+                    }
+                }
+            }
             if let Some((operand, continuation)) = numerical {
                 if let Err(error) = floating::complete(&mut state.registers, &operand) {
                     outcome.reason = StopReason::FloatingPointUnsupported {
@@ -1220,6 +1399,18 @@ fn validate_terminal_word(
             .context("native helper exceeds immutable source")?
             .try_into()?,
     ))
+}
+
+fn validate_system_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<SystemInstruction> {
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
+    decode_system_instruction(exit, word)?
+        .context("native System exit is not an immutable System instruction")
 }
 
 fn validate_thread_register_exit(
@@ -2043,5 +2234,126 @@ mod basic_pauth_tests {
             matches!(outcome.reason, StopReason::PointerAuthenticationPoisonedReturn { poisoned_target, .. } if poisoned_target == state.pc)
         );
         Ok(())
+    }
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod system_boundary_tests {
+    use super::*;
+    use crate::system::execution::{Boundary, Dispatcher, EntryBoundary, Failure};
+
+    const ADDRESS_SPACE: u64 = 7;
+    const BASE: GuestAddress = GuestAddress(0x1000);
+    const ADD: u32 = 0x9100_0400;
+    const SVC: u32 = 0xd400_0001;
+    const UDF: u32 = 0x0000_0042;
+
+    struct Recorder {
+        seen: Vec<(u64, u32)>,
+    }
+    impl Dispatcher for Recorder {
+        fn address_space(&self) -> u64 {
+            ADDRESS_SPACE
+        }
+        fn validate_entry(
+            &mut self,
+            boundary: &EntryBoundary,
+            source: &[u8],
+            _: &GuestState,
+        ) -> Result<(), Failure> {
+            assert_eq!(boundary.entry(), BASE);
+            assert!(source.len().is_multiple_of(INSTRUCTION_BYTES));
+            assert!(source.len() <= MAX_BLOCK_INSTRUCTIONS * INSTRUCTION_BYTES);
+            assert_eq!(
+                u32::from_le_bytes(source[..INSTRUCTION_BYTES].try_into().unwrap()),
+                boundary.word()
+            );
+            Ok(())
+        }
+        fn complete(
+            &mut self,
+            boundary: Boundary,
+            _: &mut GuestState,
+        ) -> Result<GuestAddress, Failure> {
+            self.seen
+                .push((boundary.source().generation(), boundary.instruction().word));
+            Ok(boundary.instruction().next_pc)
+        }
+    }
+
+    #[test]
+    fn replacement_uses_new_registered_generation_and_original_word() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_with_profile(
+            ADDRESS_SPACE,
+            cache.path().into(),
+            BlockProfile::SystemV1,
+        );
+        let mut state = ThreadState {
+            registers: GuestState::default(),
+            pc: BASE,
+        };
+        let mut recorder = Recorder { seen: Vec::new() };
+        let first = runtime.register_code(BASE, SVC.to_le_bytes().to_vec())?;
+        // SAFETY: exact trusted fixture; the service boundary performs no RAM access.
+        let outcome = unsafe {
+            runtime.run_with_system(&mut state, Some(GuestAddress(BASE.0 + 4)), 1, &mut recorder)?
+        };
+        assert!(matches!(outcome.reason, StopReason::StopAddress));
+        let second = runtime.register_code(BASE, UDF.to_le_bytes().to_vec())?;
+        assert!(second > first);
+        state.pc = BASE;
+        // SAFETY: replacement is serialized; the immutable original is revalidated.
+        unsafe {
+            runtime.run_with_system(&mut state, Some(GuestAddress(BASE.0 + 4)), 1, &mut recorder)?
+        };
+        assert_eq!(recorder.seen, [(first, SVC), (second, UDF)]);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_system_context_stops_before_native_prefix() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_with_profile(
+            ADDRESS_SPACE,
+            cache.path().into(),
+            BlockProfile::SystemV1,
+        );
+        runtime.register_code(
+            BASE,
+            [ADD, SVC].into_iter().flat_map(u32::to_le_bytes).collect(),
+        )?;
+        let mut state = ThreadState {
+            registers: GuestState::default(),
+            pc: BASE,
+        };
+        let original = state.registers.clone();
+        // SAFETY: trusted pure prefix; missing context must prevent invocation.
+        let outcome = unsafe { runtime.run(&mut state, None, 1)? };
+        assert!(matches!(
+            outcome.reason,
+            StopReason::SystemContextRequired {
+                instruction_pc: BASE
+            }
+        ));
+        assert_eq!(outcome.blocks_executed, 0);
+        assert_eq!(state.registers, original);
+        assert_eq!(state.pc, BASE);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_recovery_rejects_forged_pc_extent_and_non_system_word() {
+        let source: Vec<_> = [ADD, SVC].into_iter().flat_map(u32::to_le_bytes).collect();
+        let terminal = GuestAddress(BASE.0 + 4);
+        assert!(validate_system_exit(BASE, terminal, source.len(), BASE.0, &source).is_ok());
+        assert!(validate_system_exit(BASE, BASE, source.len(), BASE.0, &source).is_err());
+        assert!(validate_system_exit(BASE, terminal, source.len() + 4, BASE.0, &source).is_err());
+        assert!(validate_system_exit(BASE, BASE, 4, BASE.0, &source).is_err());
+        assert!(validate_system_exit(BASE, terminal, source.len(), BASE.0, &source[..4]).is_err());
     }
 }

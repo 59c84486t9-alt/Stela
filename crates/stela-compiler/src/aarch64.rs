@@ -23,6 +23,7 @@ pub mod sme;
 pub mod sve;
 pub mod system;
 pub mod tag_arithmetic;
+pub mod tag_memory;
 pub mod unprivileged;
 
 const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;

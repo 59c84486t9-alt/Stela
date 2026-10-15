@@ -1,0 +1,14 @@
+//! Shared A64 system decisions, authoritative state and checked effect dispatch.
+
+pub mod access;
+pub mod debug;
+pub mod events;
+pub mod exception;
+pub mod execution;
+pub mod identification;
+pub mod interrupt;
+pub mod profile;
+pub mod pstate;
+pub mod state;
+pub mod timer;
+pub mod translation;

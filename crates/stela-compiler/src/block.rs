@@ -14,6 +14,8 @@ use crate::{
 };
 use serde::Serialize;
 
+pub mod system;
+pub use system::{SystemInstruction, decode_system_instruction};
 mod thread;
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 
@@ -33,11 +35,16 @@ pub const PAUTH_THREAD_BLOCK_ABI: &str =
 pub const CLOCK_THREAD_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-thread-v1";
 
+/// Restricted context-independent prefixes and checked System runtime exits.
+/// This identifies a service boundary, not CPU feature availability.
+pub const SYSTEM_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-system-v1";
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockProfile {
     #[default]
     Ordinary,
+    SystemV1,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
     DarwinArm64ThreadV1,
@@ -49,12 +56,17 @@ impl BlockProfile {
     pub const fn abi(self) -> &'static str {
         match self {
             Self::Ordinary => BLOCK_ABI,
+            Self::SystemV1 => SYSTEM_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
             Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthThreadV1 => PAUTH_THREAD_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockThreadV1 => CLOCK_THREAD_BLOCK_ABI,
         }
+    }
+
+    pub const fn supports_system(self) -> bool {
+        matches!(self, Self::SystemV1)
     }
 
     pub const fn supports_pointer_authentication(self) -> bool {
@@ -99,6 +111,7 @@ pub enum ExitKind {
     Clock = 7,
     ThreadRegister = 8,
     FloatingPoint = 9,
+    System = 11,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -116,6 +129,7 @@ impl TryFrom<u64> for ExitKind {
             7 => Ok(Self::Clock),
             8 => Ok(Self::ThreadRegister),
             9 => Ok(Self::FloatingPoint),
+            11 => Ok(Self::System),
             _ => Err(()),
         }
     }
@@ -461,6 +475,7 @@ pub(crate) enum Terminator {
         kind: ExitKind,
     },
     Trap(SynchronousTrap),
+    System(SystemInstruction),
     PointerAuthentication(PointerAuthentication),
     Clock(ClockInstruction),
     ThreadRegister(ThreadRegisterInstruction),
@@ -554,6 +569,7 @@ pub struct BlockAnalysis {
     pub static_successors: Vec<StaticSuccessor>,
     pub dynamic_edge: Option<DynamicEdge>,
     pub trap: Option<SynchronousTrap>,
+    pub system_instruction: Option<SystemInstruction>,
     pub pointer_authentication: Option<PointerAuthentication>,
     pub clock_instruction: Option<ClockInstruction>,
     pub thread_register_instruction: Option<ThreadRegisterInstruction>,
@@ -574,6 +590,7 @@ pub fn analyze_with_profile(
     let mut successors = Vec::new();
     let mut dynamic_edge = None;
     let mut trap = None;
+    let mut system_instruction = None;
     let mut pointer_authentication = None;
     let mut clock_instruction = None;
     let mut thread_register_instruction = None;
@@ -616,6 +633,12 @@ pub fn analyze_with_profile(
             }
         }
         Some(Terminator::Trap(value)) => trap = Some(*value),
+        Some(Terminator::System(value)) => {
+            system_instruction = Some(*value);
+            if matches!(value.operation, system::SystemOperation::TagMemory(_)) {
+                add(SuccessorKind::Fallthrough, value.next_pc);
+            }
+        }
         Some(Terminator::PointerAuthentication(value)) => {
             pointer_authentication = Some(*value);
             if value.operation.is_return() {
@@ -649,6 +672,7 @@ pub fn analyze_with_profile(
         static_successors: successors,
         dynamic_edge,
         trap,
+        system_instruction,
         pointer_authentication,
         clock_instruction,
         thread_register_instruction,
@@ -684,6 +708,16 @@ fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
+        if profile.supports_system()
+            && let Some(decoded) =
+                decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
+        {
+            terminal = Some((pc, Terminator::System(decoded)));
+            break;
+        }
         if profile.supports_pointer_authentication()
             && let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
@@ -727,6 +761,13 @@ fn parse(
             pc,
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
+        if profile.supports_system() && !crate::extended::ordinary_permitted(&instruction.operation)
+        {
+            return Err(BlockAnalysisError {
+                pc,
+                detail: "operation outside restricted System prefix profile".into(),
+            });
+        }
         if let Operation::FloatingPoint(operand) = &instruction.operation
             && crate::x86_64::numerical_always_exits(operand)
         {
@@ -809,6 +850,62 @@ pub fn compile_for_target(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn system_profile_has_one_source_bound_exit_and_rejects_memory_prefixes() {
+        const BASE: GuestAddress = GuestAddress(0x1000);
+        const ADD: u32 = 0x9100_0400;
+        const SVC: u32 = 0xd400_0001;
+        const UDF: u32 = 0x0000_0042;
+        const IRG: u32 = 0x9ac0_1000;
+        const LDG: u32 = 0xd960_0000;
+        const RETURN: u8 = 0xc3;
+        const MOV_RAX_IMMEDIATE: [u8; 2] = [0x48, 0xb8];
+        const MOV_EDX_IMMEDIATE: u8 = 0xba;
+        for word in [SVC, UDF, IRG, LDG] {
+            let source: Vec<_> = [ADD, word, ADD]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let analysis = analyze_with_profile(&source, BASE, BlockProfile::SystemV1).unwrap();
+            let instruction = analysis.system_instruction.unwrap();
+            assert_eq!(analysis.source_bytes, 2 * size_of::<u32>());
+            assert_eq!(
+                instruction.instruction_pc,
+                GuestAddress(BASE.0 + size_of::<u32>() as u64)
+            );
+            let compiled = compile_for_target(
+                &source,
+                BASE,
+                BlockProfile::SystemV1,
+                crate::TargetCpu::Baseline,
+            )
+            .unwrap();
+            let at = compiled.native.source_map.last().unwrap().1;
+            let mut expected = MOV_RAX_IMMEDIATE.to_vec();
+            expected.extend(instruction.instruction_pc.0.to_le_bytes());
+            expected.push(MOV_EDX_IMMEDIATE);
+            expected.extend((ExitKind::System as u32).to_le_bytes());
+            expected.push(RETURN);
+            assert_eq!(&compiled.native.x86_64_code[at..], expected);
+        }
+        // Ordinary RAM, exclusives and legacy FP/SIMD cannot bypass shared owners.
+        for word in [0xf940_0000_u32, 0xf900_0000, 0xc85f_fc00, 0x1e20_2800] {
+            let source: Vec<_> = [word, SVC].into_iter().flat_map(u32::to_le_bytes).collect();
+            assert!(analyze_with_profile(&source, BASE, BlockProfile::SystemV1).is_err());
+        }
+        assert_eq!(
+            ExitKind::try_from(ExitKind::System as u64),
+            Ok(ExitKind::System)
+        );
+        assert_ne!(BlockProfile::SystemV1.abi(), BlockProfile::Ordinary.abi());
+        assert!(
+            analyze_with_profile(&SVC.to_le_bytes(), BASE, BlockProfile::Ordinary)
+                .unwrap()
+                .trap
+                .is_some()
+        );
+    }
     use super::*;
 
     fn bytes(words: &[u32]) -> Vec<u8> {

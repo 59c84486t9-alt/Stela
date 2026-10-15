@@ -96,6 +96,9 @@ pub(crate) fn emit_for_target(
                     ExitKind::PointerAuthentication,
                 );
             }
+            Terminator::System(request) => {
+                direct_exit(code, request.instruction_pc, ExitKind::System);
+            }
             Terminator::Trap(trap) => {
                 // The original instruction remains the stop PC for both SVC
                 // and BRK. Exception-return metadata stays with the decoder;

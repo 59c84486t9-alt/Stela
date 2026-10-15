@@ -9,6 +9,8 @@ mod publication;
 pub use publication::PublicationFault;
 #[path = "domain/profile.rs"]
 mod profile;
+#[path = "domain/tag_transfer.rs"]
+mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
 
 use std::collections::HashMap;
