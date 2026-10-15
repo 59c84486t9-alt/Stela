@@ -1,8 +1,8 @@
 //! Context-backed leaf compilation with immutable scalable specialization.
 //!
-//! The profile admits streaming integer logic/arithmetic/saturation, SME length
-//! arithmetic, floating sign operations and existing pure GPR/control mappings.
-//! Other effects remain explicit declines.
+//! The profile admits streaming integer logic, arithmetic, saturation and dot
+//! products, SME length arithmetic, floating sign operations and existing pure
+//! GPR/control mappings. Other effects remain explicit declines.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use crate::{
         scalable::{ScalableMode, VectorLength},
         sme::length,
         sve::{
-            integer_arithmetic,
+            dot, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
             integer_saturation, sign,
         },
@@ -33,7 +33,7 @@ const CALL_BYTES: usize = 1 + size_of::<i32>();
 const CALL_END: usize = PUSH_R15.len() + MOV_R15_RSI.len() + CALL_BYTES;
 pub const CONTEXT_WRAPPER_BYTES: usize = CALL_END + POP_R15.len() + 1;
 
-/// A declared SME2 integer execution profile, not an Apple hardware capture.
+/// A declared SME2 streaming execution profile, not an Apple hardware capture.
 /// Host capability selection remains a separate TargetCpu value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScalableProfile {
@@ -87,6 +87,7 @@ impl ScalableProfile {
 
 enum Decoded {
     Ordinary(Instruction),
+    IntegerDot(dot::Operand),
     IntegerLogic(integer_logic::Operand),
     IntegerSaturation(integer_saturation::Operand),
     Sign(sign::Operand),
@@ -128,6 +129,27 @@ fn decode(
     profile: ScalableProfile,
     target: TargetCpu,
 ) -> Result<Decoded, CompileError> {
+    if let Some(decoded) = dot::decode_integer(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming integer dot encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if operand.requires_i8mm() {
+            return Err(CompileError(format!(
+                "guest I8MM is outside the streaming profile at {:#x}",
+                pc.0
+            )));
+        }
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::IntegerDot(operand));
+    }
     if let Some(decoded) = integer_logic::decode(word) {
         let operand = decoded.map_err(|()| {
             CompileError(format!(
@@ -270,6 +292,14 @@ pub fn compile_for_profile(
             Decoded::Ordinary(instruction) => {
                 x86_64::emit_instruction(&mut code, &instruction, &mut fixups, target);
             }
+            Decoded::IntegerDot(operand) => {
+                if !x86_64::sve::dot::emit_integer(&mut code, &operand, profile.length, target) {
+                    return Err(CompileError(format!(
+                        "unsupported streaming integer dot operands at {:#x}",
+                        pc.0
+                    )));
+                }
+            }
             Decoded::IntegerLogic(operand) => {
                 x86_64::sve::integer_logic::emit(&mut code, operand, profile.length, target);
             }
@@ -329,6 +359,116 @@ mod tests {
 
     fn words(input: &[u32]) -> Vec<u8> {
         input.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn integer_dot_admission_requires_streaming_without_requiring_za() {
+        const SDOT_Z0_S_Z1_B_Z2_B: u32 = 0x4482_0020;
+        const CDOT_RESERVED_BYTE: u32 = 0x4400_1000;
+        let source = words(&[SDOT_Z0_S_Z1_B_Z2_B, RET_X30]);
+        assert!(crate::compile(&source, GuestAddress(0)).is_err());
+        assert!(matches!(
+            crate::aarch64::sve::decode(SDOT_Z0_S_Z1_B_Z2_B),
+            Some(Ok(crate::aarch64::sve::Operand::Dot(_)))
+        ));
+        for bytes in [16, 32, 64, 128, 256] {
+            for streaming in [false, true] {
+                for za in [false, true] {
+                    let profile = ScalableProfile::new(
+                        VectorLength::from_bytes(bytes).unwrap(),
+                        ScalableMode::new(streaming, za),
+                    );
+                    let result =
+                        compile_for_profile(&source, GuestAddress(0), profile, TargetCpu::Baseline);
+                    if streaming {
+                        assert!(result.is_ok());
+                    } else {
+                        assert!(result.unwrap_err().0.contains("streaming mode required"));
+                    }
+                }
+            }
+            assert!(
+                compile_for_profile(
+                    &words(&[CDOT_RESERVED_BYTE, RET_X30]),
+                    GuestAddress(0),
+                    profile(bytes, true),
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err()
+                .0
+                .contains("reserved streaming integer dot")
+            );
+        }
+    }
+
+    #[test]
+    fn integer_dot_registration_keeps_half_numerical_and_prefix_inputs_explicit() {
+        const HALF_NUMERICAL_WORDS: [u32; 10] = [
+            0x6420_8000,
+            0x6420_4000,
+            0x64a0_8000,
+            0x64a0_8400,
+            0x64a0_a000,
+            0x64a0_a400,
+            0x64a0_4000,
+            0x64a0_4400,
+            0x64a0_6000,
+            0x64a0_6400,
+        ];
+        const SDOT_Z0_S_Z1_B_Z2_B: u32 = 0x4482_0020;
+        for word in HALF_NUMERICAL_WORDS {
+            assert!(dot::decode(word).unwrap().is_ok());
+            assert_eq!(crate::aarch64::sve::decode(word), None);
+            assert!(
+                compile_for_profile(
+                    &words(&[word, RET_X30]),
+                    GuestAddress(0),
+                    profile(32, true),
+                    TargetCpu::Baseline,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            compile_for_profile(
+                &words(&[MOVPRFX_Z0_Z1, SDOT_Z0_S_Z1_B_Z2_B, RET_X30]),
+                GuestAddress(0),
+                profile(32, true),
+                TargetCpu::Baseline,
+            )
+            .unwrap_err()
+            .0
+            .contains("MOVPRFX pair validation")
+        );
+    }
+
+    #[test]
+    fn mixed_signedness_dot_requires_an_explicit_guest_i8mm_profile() {
+        const MIXED_SIGNEDNESS_WORDS: [u32; 3] = [0x44a0_1c00, 0x4480_7800, 0x44a0_1800];
+        for word in MIXED_SIGNEDNESS_WORDS {
+            assert!(dot::decode_integer(word).unwrap().unwrap().requires_i8mm());
+            for bytes in [16, 32, 64, 128, 256] {
+                for za in [false, true] {
+                    for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
+                        let profile = ScalableProfile::new(
+                            VectorLength::from_bytes(bytes).unwrap(),
+                            ScalableMode::new(true, za),
+                        );
+                        assert!(
+                            compile_for_profile(
+                                &words(&[word, RET_X30]),
+                                GuestAddress(0),
+                                profile,
+                                target,
+                            )
+                            .unwrap_err()
+                            .0
+                            .contains("guest I8MM is outside the streaming profile")
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

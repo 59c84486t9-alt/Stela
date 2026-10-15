@@ -35,6 +35,7 @@
     "crates/stela-compiler/src/extended.rs",
     "crates/stela-compiler/src/aarch64/scalable.rs",
     "crates/stela-compiler/src/aarch64/sve.rs",
+    "crates/stela-compiler/src/aarch64/sve/dot.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
@@ -43,6 +44,7 @@
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
+    "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_logic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
@@ -291,6 +293,26 @@
       "required_positive_counts": [
         "retained_affected_original_native_comparisons"
       ],
+      "require_current_executable": true
+    },
+    "streaming_integer_dot": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sve-floating/crypto-dot/integer-dot/production-bridge-1/publication-transfers/20261014T234706.616369Z/report.json",
+      "kind": "arm64_scalable_context_differential",
+      "comparison_field": "integer_dot_full_snapshot_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/simd_fixtures/sve_integer/dot.py"
+      ],
+      "required_measurements": {
+        "integer_dot_full_snapshot_comparisons": 1120,
+        "original_full_snapshot_comparisons": 560,
+        "actual_production_bodies_byte_identical": 700,
+        "caller_mxcsr_full_snapshot_comparisons": 2080,
+        "owned_integer_dot_full_state_comparisons": 130
+      },
       "require_current_executable": true
     }
   },
@@ -6265,6 +6287,1876 @@
       ],
       "review": "Exact June allocation/mode/CPU review, controlled fixed-allocation mapping measurements, 5,328 genuine original inputs and 10,656 same-input native comparisons at SVL16/32/256. Broader native-only matrices cover all five supported streaming lengths. Parent compiler body/source-map bridges preserve unchanged evidence and verify bounded dead-setup deletions. MOVPRFX pairs remain an explicit separate decline.",
       "scope": "Declared SME2 guest profile with SME enabled and SM=1; validated power-of-two streaming length16..256 bytes; M4/M5 candidate membership only. All allocated B/H/W/D arrangements and register/immediate aliases; widening forms allocate H/W/D and byte immediate shift8 is reserved. Governing predicate uses each element-leading bit. Changes only destination Z, preserving other Z/P, GPR/SP/NZCV/FPCR/FPSR including sticky QC, ZA/ZT0, SVCR and TPIDR2. No guest RAM access. No original FFR/FPMR observation credit, general non-streaming SVE, Apple hardware conformance, production block/cache entry, complete exception delivery, application or macOS claim."
+    },
+    {
+      "id": "sdot_z_zzz_",
+      "mnemonic": "SDOT",
+      "category": "sve",
+      "source_file": "sdot_z_zzz.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x44800000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_z_zzz.xml",
+      "source_sha256": "bb00a347239e07153ad68a65aa12b3129cb2c2d19dcc6b4bb81661d564aef82b",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4482003f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44c2003f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "udot_z_zzz_",
+      "mnemonic": "UDOT",
+      "category": "sve",
+      "source_file": "udot_z_zzz.xml",
+      "encoding_mask": "0xffa0fc00",
+      "encoding_value": "0x44800400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_z_zzz.xml",
+      "source_sha256": "53a883766202add8ee48b41497bcc316800084db9f0d9b2c6833221d32e26468",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4482043f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44c2043f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "sdot_z_zzzi_s",
+      "mnemonic": "SDOT",
+      "category": "sve",
+      "source_file": "sdot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44a00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_z_zzzi.xml",
+      "source_sha256": "98f4584b165a6104e57242c39dbbdb2851e946187ed954c918a310be14d49f02",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44a2003f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "sdot_z_zzzi_d",
+      "mnemonic": "SDOT",
+      "category": "sve",
+      "source_file": "sdot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44e00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_z_zzzi.xml",
+      "source_sha256": "98f4584b165a6104e57242c39dbbdb2851e946187ed954c918a310be14d49f02",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2003f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44e2003f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "udot_z_zzzi_s",
+      "mnemonic": "UDOT",
+      "category": "sve",
+      "source_file": "udot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44a00400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_z_zzzi.xml",
+      "source_sha256": "f7f3769ebb8f773bbdb13b9d00f9bb6e8bf97336210ee917532e851efa026f07",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44a2043f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "udot_z_zzzi_d",
+      "mnemonic": "UDOT",
+      "category": "sve",
+      "source_file": "udot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44e00400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_z_zzzi.xml",
+      "source_sha256": "f7f3769ebb8f773bbdb13b9d00f9bb6e8bf97336210ee917532e851efa026f07",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2043f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44e2043f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "sdot_z32_zzz_",
+      "mnemonic": "SDOT",
+      "category": "sve",
+      "source_file": "sdot_z32_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4400c800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_z32_zzz.xml",
+      "source_sha256": "41fdcb19f91c819e3eaf8123a3681d7481955f49c743e27c5fd5043a31707d08",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4402c83f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "udot_z32_zzz_",
+      "mnemonic": "UDOT",
+      "category": "sve",
+      "source_file": "udot_z32_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4400cc00",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_z32_zzz.xml",
+      "source_sha256": "5b742dfc35b7ca5902865a155554f3e3182de50f5caec7760ffad30643d63b84",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4402cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4402cc3f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "sdot_z32_zzzi_",
+      "mnemonic": "SDOT",
+      "category": "sve",
+      "source_file": "sdot_z32_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4480c800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_z32_zzzi.xml",
+      "source_sha256": "751310cd958d91744343b014305fa72c6e913858e20be2d9403c3c0312f5f88d",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482c83f",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4482c83f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "udot_z32_zzzi_",
+      "mnemonic": "UDOT",
+      "category": "sve",
+      "source_file": "udot_z32_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x4480cc00",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_z32_zzzi.xml",
+      "source_sha256": "f5eb4e2f7272aad5618b7be6d9e575f86af22245df9e46e69f9a6c1b863ce962",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482cc3f",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4482cc3f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "cdot_z_zzz_",
+      "mnemonic": "CDOT",
+      "category": "sve",
+      "source_file": "cdot_z_zzz.xml",
+      "encoding_mask": "0xff20f000",
+      "encoding_value": "0x44001000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cdot_z_zzz.xml",
+      "source_sha256": "41960f09b9223379498e33073612b33635f648787886721b81259355f7e05218",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x4482103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44c2103f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x4482103f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44c2103f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "cdot_z_zzzi_s",
+      "mnemonic": "CDOT",
+      "category": "sve",
+      "source_file": "cdot_z_zzzi.xml",
+      "encoding_mask": "0xffe0f000",
+      "encoding_value": "0x44a04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cdot_z_zzzi.xml",
+      "source_sha256": "d16d3f8ee56a2b566707f009d410aa840d06553675acea1cf2511e4ddfde17a8",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44a2403f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
+    },
+    {
+      "id": "cdot_z_zzzi_d",
+      "mnemonic": "CDOT",
+      "category": "sve",
+      "source_file": "cdot_z_zzzi.xml",
+      "encoding_mask": "0xffe0f000",
+      "encoding_value": "0x44e04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/cdot_z_zzzi.xml",
+      "source_sha256": "d16d3f8ee56a2b566707f009d410aa840d06553675acea1cf2511e4ddfde17a8",
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "evidence_groups": [
+        "streaming_integer_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/lib.rs"
+      ],
+      "scope": "Declared SME2 streaming context leaf, all defined integer/complex dot operands and widths, SVL16/32/64/128/256 and ZA independent; destructive aliases and indexing within each128-bit segment. Integer modulo accumulation preserves raw FPCR/FPSR/NZCV and all unrelated state. Guest I8MM mixed-sign forms explicitly decline in V1. Caller owns access/control provenance and storage bounds; no general non-streaming SVE, scalable block/cache, architectural fault delivery, Apple hardware, application or OS claim.",
+      "review": "Independent DOT13 production review9fec1c47;700 exact actual body/source-map bridges,1120 native full snapshots against560 architectural originals,2080 caller-MXCSR checks,130 published owned-runtime executions.60 I8MM and78 ordinary/non-streaming CLI declines produce no artifacts. Native mappings retain checked SSSE3 reduction selected by controlled timing; whole production CALL overhead has no performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44e2403f",
+          "expected_mnemonics": [
+            "cdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44e2403f",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        }
+      ]
     }
   ]
 }
