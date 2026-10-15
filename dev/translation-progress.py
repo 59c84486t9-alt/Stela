@@ -47,6 +47,7 @@ SCALABLE_FEATURES = (
 SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
 MAX_CPU_TARGET_LENGTH = 256
+MAX_FOLLOWING_WORDS = 1
 CONTEXT_ENTRY_PREFIX_BYTES = 13
 SCALABLE_VECTOR_BYTES = (16, 32, 64, 128, 256)
 SCALABLE_GUEST_BASE = 0x10000000
@@ -317,9 +318,9 @@ def validate_registry(registry):
                 or row['profile'] not in declared_profiles):
             raise ValueError('Form support scope/profile missing')
         row_contract = scalable_profiles[row['profile']] if scalable_profiles is not None else None
-        if row_contract is None and any('cpu_target' in sample for sample in
+        if row_contract is None and any('cpu_target' in sample or 'following_words' in sample for sample in
                                         row.get('smoke_samples', []) + row.get('rejected_samples', [])):
-            raise ValueError('Host target samples require the context compiler lane')
+            raise ValueError('Host target/source bundle samples require the context compiler lane')
         if row['status'] != 'unsupported':
             if not row.get('review') or not row.get('compiler_sources') or not row.get('smoke_samples'):
                 raise ValueError('Support requires reviewed implementation and smoke samples')
@@ -340,6 +341,18 @@ def validate_registry(registry):
     return rows
 
 
+def validate_following_words(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_FOLLOWING_WORDS:
+        raise ValueError('Following source bundle requires exactly one hexadecimal word')
+    words = []
+    for word in value:
+        if (not isinstance(word, str) or len(word) != 10 or not word.startswith('0x')
+                or any(char not in '0123456789abcdefABCDEF' for char in word[2:])):
+            raise ValueError('Following source word must be an explicit 32-bit hexadecimal word')
+        words.append(int(word, 16))
+    return words
+
+
 def validate_sample(form, sample):
     word = int(sample['word'], 16)
     if not 0 <= word <= 0xffffffff or word & int(form['encoding_mask'], 16) != int(form['encoding_value'], 16):
@@ -354,8 +367,9 @@ def validate_sample(form, sample):
     expected = sample.get('expected_mnemonics')
     if not isinstance(expected, list) or not expected:
         raise ValueError('Smoke needs an independent decoded mnemonic expectation')
+    following = validate_following_words(sample['following_words']) if 'following_words' in sample else []
     consumed = sample.get('consumed_source_bytes', 4)
-    if type(consumed) is not int or consumed not in (4, 8):
+    if type(consumed) is not int or consumed not in range(4, 4 * (len(following) + 2) + 1, 4):
         raise ValueError('Smoke must declare a valid instruction/RET boundary')
     return word
 
@@ -473,10 +487,12 @@ def validate_cpu_target(value):
 
 
 def validate_scalable_sample(sample, contract):
-    allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason', 'cpu_target'}
+    allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason', 'cpu_target', 'following_words'}
     if set(sample) - allowed:
         raise ValueError('Samples must use declared fields and select guest features/controls through the row profile')
     validate_cpu_target(sample.get('cpu_target', BASELINE_CPU_TARGET))
+    if 'following_words' in sample:
+        validate_following_words(sample['following_words'])
     return scalable_execution_profile(contract['id'], sample.get('svl_bytes'), sample.get('svcr'),
                                        **scalable_declaration(contract))
 
@@ -516,25 +532,31 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
                   expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
-                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None):
+                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None, following_words=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
-    if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
+    if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8, 12):
         raise ValueError('Invalid declared compiler probe boundary')
+    following = []
     if mode == 'scalable':
+        following = validate_following_words(following_words) if following_words is not None else []
         cpu_target = validate_cpu_target(BASELINE_CPU_TARGET if cpu_target is None else cpu_target)
         execution = scalable_execution_profile(guest_profile, svl_bytes, svcr, features=features,
             max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit)
     elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
-                                            max_svl_bytes, zt0_enabled, dit, cpu_target)):
+                                            max_svl_bytes, zt0_enabled, dit, cpu_target, following_words)):
         raise ValueError('Scalable configuration requires the context compiler lane')
     if service_profile is not None and mode != 'service':
         raise ValueError('Service profile requires the service compiler lane')
     selected_service = service_profile or SERVICE_PROFILE
     if mode == 'service' and selected_service not in SERVICE_BINDINGS:
         raise ValueError('Unknown service compiler profile')
+    words = [word, *following, RET]
+    if expected_source_bytes > 4 * len(words):
+        raise ValueError('Declared compiler probe boundary exceeds supplied source')
     source = directory / 'source.arm64'
-    source.write_bytes(struct.pack('<II', word, RET))
+    input_data = struct.pack('<' + 'I' * len(words), *words)
+    source.write_bytes(input_data)
     output = directory / 'native'
     compiler_mode = 'leaf' if mode == 'scalable' else 'block' if mode == 'service' else mode
     command = [str(cli), 'compile-' + compiler_mode, str(source), '--output-dir', str(output)]
@@ -552,6 +574,9 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         command.extend(SERVICE_BINDINGS[selected_service][1])
     process = run(command,
                   capture_output=True, text=True, timeout=30)
+    source_data = source.read_bytes()
+    if source_data != input_data:
+        raise ValueError('Compiler probe input changed during compilation')
     if expect_failure:
         if process.returncode == 0 or expect_failure not in process.stderr or output.exists():
             raise ValueError(f'Expected unsupported scope boundary {word:#x}: {process.stderr}')
@@ -559,7 +584,6 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     if process.returncode != 0:
         raise ValueError(f'Reviewed supported form no longer emits {word:#x}: {process.stderr}')
     manifest = json.loads(process.stdout)
-    source_data = source.read_bytes()
     if mode in ('block', 'service'):
         if manifest.get('abi') != (SERVICE_BINDINGS[selected_service][0] if mode == 'service' else BLOCK_ABI):
             raise ValueError('Compiler block probe ABI mismatch')
@@ -590,6 +614,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     return {'word': f'0x{word:08x}', 'emitted': True, 'compiler_source_sha256': fingerprint,
             'source_sha256': manifest['source_sha256'], 'native_sha256': manifest['native_sha256'],
             'native_bytes': native.stat().st_size,
+            **({'probe_source_words': [f'0x{item:08x}' for item in words]} if following else {}),
             **({'abi': manifest['abi'], 'source_bytes': consumed, 'compiler_mode': mode}
                if mode in ('block', 'service') else {}),
             **({key: manifest[key] for key in ('abi', 'execution_profile', 'source_map', 'entry_prefix_bytes',
@@ -618,6 +643,23 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_ro
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
 
 
+def decode_following_word(decoder, word, independent_rows):
+    """Retain allocated decoding, without assigning a canonical coverage ID."""
+    instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
+    if instruction is not None:
+        return instruction.mnemonic, f'{instruction.mnemonic} {instruction.op_str}', 'capstone'
+    row = independent_rows.get(word)
+    if row is None:
+        raise ValueError(f'Independent decoder declined following source word: {word:#x}')
+    mnemonic, operands = row.get('mnemonic'), row.get('operands')
+    if (type(row.get('word')) is not int or row['word'] != word
+            or not isinstance(mnemonic, str) or not mnemonic or mnemonic.startswith('<')
+            or mnemonic in ('.word', '.inst') or not isinstance(operands, str)
+            or row.get('assembly') != mnemonic + (' ' + operands if operands else '')):
+        raise ValueError('Independent following-word decoding framing differs')
+    return mnemonic, row['assembly'], 'apple_llvm21_objdump'
+
+
 def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None,
                 execution_profiles=None, canonical_catalog=None, arm_archive=None):
     profiles = validate_scalable_profiles(profile or {}, execution_profiles) if mode == 'scalable' else {}
@@ -638,6 +680,8 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                           svcr=configuration['svcr'], **scalable_declaration(declaration))
             if 'cpu_target' in configuration:
                 result['cpu_target'] = configuration['cpu_target']
+            if 'following_words' in configuration:
+                result['following_words'] = configuration['following_words']
         return result
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
     fingerprint = None
@@ -663,8 +707,10 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
             for sample in row['smoke_samples']:
                 word = validate_sample(forms[identity], sample)
-                if next(decoder.disasm(struct.pack('<I', word), 0), None) is None:
-                    declined.setdefault(attrs, set()).add(word)
+                following = validate_following_words(sample['following_words']) if 'following_words' in sample else []
+                for source_word in (word, *following):
+                    if next(decoder.disasm(struct.pack('<I', source_word), 0), None) is None:
+                        declined.setdefault(attrs, set()).add(source_word)
         for index, (attrs, words) in enumerate(sorted(declined.items())):
             independent_receipts[attrs] = a64_disassembly.decode_words(
                 sorted(words), directory / f'llvm-decoding-{index}', mattrs=attrs)
@@ -709,12 +755,27 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             probe_options = options(sample, row)
             if 'consumed_source_bytes' in sample:
                 probe_options['expected_source_bytes'] = sample['consumed_source_bytes']
+            following = validate_following_words(sample['following_words']) if 'following_words' in sample else []
+            decoded_following = [decode_following_word(decoder, item, independent_rows) for item in following]
             probe = compile_probe(cli, word, location, **probe_options)
+            following_evidence = []
+            if following:
+                source_map = probe['source_map']
+                for offset, (item, decoded) in enumerate(zip(following, decoded_following), 1):
+                    following_evidence.append({'word': f'0x{item:08x}', 'source_index': offset,
+                        'assembly': decoded[1], 'independent_decode_basis': decoded[2],
+                        'native_span': {'start': source_map[offset][1], 'end': source_map[offset + 1][1]},
+                        'canonical_form_credit': False,
+                        **({'independent_decode_receipt': independent_receipt}
+                           if decoded[2] == 'apple_llvm21_objdump' else {})})
             if fingerprint is not None and fingerprint != probe['compiler_source_sha256']:
                 raise ValueError('Compiler changed during ISA progress probes')
             fingerprint = probe['compiler_source_sha256']
             results.append({'id': identity, 'sample': index, 'assembly': assembly,
                             'independent_decode_basis': basis, **probe,
+                            **({'following_source': following_evidence, 'assessed_native_span': {
+                                'start': probe['source_map'][0][1], 'end': probe['source_map'][1][1]}}
+                               if following else {}),
                             **({'independent_decode_receipt': independent_receipt}
                                if basis == 'apple_llvm21_objdump' else {}),
                             **({'independent_preferred_alias_facts': preferred_aliases.evidence()}

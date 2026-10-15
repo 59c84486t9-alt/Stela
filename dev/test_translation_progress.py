@@ -2043,5 +2043,154 @@ class SystemServiceProfileTests(unittest.TestCase):
 
 
 
+class FollowingWordProbeTests(unittest.TestCase):
+    PREFIX = 0x0420bc20
+    FOLLOWING = '0x041a0040'
+
+    def fake_compiler(self, mutation=None):
+        def fake(command, **kwargs):
+            source = Path(command[2]); data = source.read_bytes()
+            self.assertEqual(data, bytes.fromhex('20bc200440001a04c0035fd6'))
+            output = Path(command[command.index('--output-dir') + 1]); output.mkdir()
+            native = bytes(13) + b'\x90' * 6 + b'\xc3'; (output / 'native.bin').write_bytes(native)
+            manifest = {'schema_version': 2, 'kind': 'raw_arm64_leaf_aot', 'abi': progress.CONTEXT_LEAF_ABI,
+                'target_cpu': 'x86_64-baseline', 'guest_base': progress.SCALABLE_GUEST_BASE,
+                'guest_instructions': 3, 'native_bytes': len(native), 'entry_prefix_bytes': 13,
+                'execution_profile': {'id': progress.SCALABLE_PROFILE, 'svl_bytes': 16, 'svcr': 3},
+                'source_map': [[progress.SCALABLE_GUEST_BASE, 13], [progress.SCALABLE_GUEST_BASE + 4, 16],
+                               [progress.SCALABLE_GUEST_BASE + 8, 19]],
+                'source_sha256': hashlib.sha256(data).hexdigest(), 'native_sha256': progress.sha256(output / 'native.bin'),
+                'compiler_source_sha256': COMPILER}
+            if mutation: mutation(manifest)
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return fake
+
+    def probe(self, directory, **kwargs):
+        return progress.compile_probe('cli', self.PREFIX, directory, mode='scalable',
+            guest_profile=progress.SCALABLE_PROFILE, svl_bytes=16, svcr=3, **kwargs)
+
+    def registry(self):
+        registry = fixtures(); registry['profile'] = ScalableProgressTests().profile()
+        facts = progress.a64_checklist.validate(json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text()))
+        fact = facts['movprfx_z_z_']; row = copy.deepcopy(registry['forms'][0])
+        row.update({key: fact[key] for key in ('id', 'source_file', 'encoding_mask', 'encoding_value')})
+        row.update(profile=progress.SCALABLE_PROFILE, smoke_samples=[{
+            'word': f'0x{self.PREFIX:08x}', 'expected_mnemonics': ['movprfx'],
+            'following_words': [self.FOLLOWING], 'svl_bytes': 16, 'svcr': 3}])
+        registry['forms'] = [row]
+        return registry, facts
+
+    def test_absent_following_words_preserves_existing_input_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            location = Path(directory)
+            result = SampleHostTargetTests().probe(location, run=SampleHostTargetTests().fake_compiler())
+            self.assertEqual((location / 'source.arm64').read_bytes(), bytes.fromhex('c0035fd6c0035fd6'))
+            self.assertNotIn('probe_source_words', result)
+
+    def test_declared_following_word_binds_full_source_hash_instruction_count_and_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.probe(Path(directory), following_words=[self.FOLLOWING], run=self.fake_compiler())
+        self.assertEqual(result['probe_source_words'], [f'0x{self.PREFIX:08x}', self.FOLLOWING, '0xd65f03c0'])
+        self.assertEqual(result['source_sha256'], hashlib.sha256(bytes.fromhex('20bc200440001a04c0035fd6')).hexdigest())
+        self.assertEqual(len(result['source_map']), 3)
+
+    def test_malformed_bundle_declines_before_source_or_compiler(self):
+        for value in ([], [self.FOLLOWING, self.FOLLOWING], self.FOLLOWING, [0x041a0040],
+                      [True], [None], ['041a0040'], ['0x041a004000'], ['0xgggggggg']):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                with patch.object(progress.subprocess, 'run') as run:
+                    with self.assertRaises(ValueError):
+                        self.probe(Path(directory), following_words=value, run=run)
+                    run.assert_not_called(); self.assertEqual(list(Path(directory).iterdir()), [])
+        with self.assertRaises(ValueError):
+            progress.validate_scalable_sample({'following_words': None}, ScalableProgressTests().profile())
+
+    def test_compiler_cannot_change_declared_source_and_rehash_the_substitute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = self.fake_compiler()
+            def substituted(command, **kwargs):
+                result = fake(command, **kwargs)
+                source = Path(command[2]); source.write_bytes(bytes.fromhex('c0035fd6c0035fd6c0035fd6'))
+                manifest = json.loads(result.stdout); manifest['source_sha256'] = progress.sha256(source)
+                return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+            with self.assertRaisesRegex(ValueError, 'input changed'):
+                self.probe(Path(directory), following_words=[self.FOLLOWING], run=substituted)
+
+    def test_expected_pair_rejection_cannot_rebind_changed_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def substituted(command, **kwargs):
+                Path(command[2]).write_bytes(bytes.fromhex('c0035fd6c0035fd6c0035fd6'))
+                return subprocess.CompletedProcess(command, 1, '', 'invalid prefix/follower pair')
+            with self.assertRaisesRegex(ValueError, 'input changed'):
+                self.probe(Path(directory), following_words=[self.FOLLOWING],
+                           expect_failure='invalid prefix/follower pair', run=substituted)
+
+    def test_capstone_following_decode_is_retained_without_canonical_assessment(self):
+        instruction = type('Instruction', (), {'mnemonic': 'and', 'op_str': 'z0.b, p0/m, z0.b, z2.b'})()
+        decoder = type('Available', (), {'disasm': lambda self, data, address: iter([instruction])})()
+        self.assertEqual(progress.decode_following_word(decoder, int(self.FOLLOWING,16), {}),
+                         ('and', 'and z0.b, p0/m, z0.b, z2.b', 'capstone'))
+
+    def test_bundle_rejects_partial_hash_and_missing_or_wrong_source_map(self):
+        changes = [{'source_sha256': hashlib.sha256(bytes.fromhex('20bc2004')).hexdigest()},
+                   {'guest_instructions': 2}, {'source_map': [[progress.SCALABLE_GUEST_BASE, 13],
+                                                            [progress.SCALABLE_GUEST_BASE + 4, 16]]},
+                   {'source_map': [[progress.SCALABLE_GUEST_BASE, 13], [progress.SCALABLE_GUEST_BASE + 8, 16],
+                                   [progress.SCALABLE_GUEST_BASE + 4, 19]]}]
+        for changed in changes:
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                self.probe(Path(directory), following_words=[self.FOLLOWING],
+                           run=self.fake_compiler(lambda m: m.update(changed)))
+
+    def test_actual_compiler_pair_rejection_is_not_replaced_by_tool_workaround(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def rejected(command, **kwargs):
+                self.assertEqual(Path(command[2]).read_bytes(), bytes.fromhex('20bc2004c0035fd6c0035fd6'))
+                return subprocess.CompletedProcess(command, 1, '', 'invalid prefix/follower pair')
+            result = self.probe(Path(directory), following_words=['0xd65f03c0'],
+                                expect_failure='invalid prefix/follower pair', run=rejected)
+        self.assertTrue(result['rejected'])
+
+    def test_follower_is_independently_decoded_and_retained_without_canonical_credit(self):
+        registry, facts = self.registry(); rows = progress.validate_registry(registry)
+        decoder = type('Unavailable', (), {'disasm': lambda self, data, address: iter(())})()
+        receipt = {'rows': [
+            {'word': self.PREFIX, 'offset': 0, 'mnemonic': 'movprfx', 'operands': 'z0, z1', 'assembly': 'movprfx z0, z1'},
+            {'word': int(self.FOLLOWING, 16), 'offset': 4, 'mnemonic': 'and', 'operands': 'z0.b, p0/m, z0.b, z2.b',
+             'assembly': 'and z0.b, p0/m, z0.b, z2.b'}]}
+        with tempfile.TemporaryDirectory() as directory, patch.object(progress, 'Cs', return_value=decoder), \
+             patch.object(disassembly, 'decode_words', return_value=receipt) as decode, \
+             patch.object(progress, 'compile_probe', return_value={'compiler_source_sha256': COMPILER,
+                 'source_map': [[progress.SCALABLE_GUEST_BASE,13], [progress.SCALABLE_GUEST_BASE+4,16],
+                                [progress.SCALABLE_GUEST_BASE+8,19]], 'native_bytes': 20}) as probe:
+            _, results = progress.smoke_forms('cli', rows, rows, Path(directory), mode='scalable',
+                profile=registry['profile'], canonical_facts=facts)
+        self.assertEqual(decode.call_args.args[0], sorted([self.PREFIX, int(self.FOLLOWING,16)]))
+        self.assertEqual(probe.call_args.kwargs['following_words'], [self.FOLLOWING])
+        self.assertEqual(len(results), 1); self.assertEqual(results[0]['id'], 'movprfx_z_z_')
+        follower = results[0]['following_source'][0]
+        self.assertFalse(follower['canonical_form_credit'])
+        self.assertEqual(follower['native_span'], {'start':16,'end':19})
+        self.assertEqual(results[0]['assessed_native_span'], {'start':13,'end':16})
+        self.assertEqual(follower['independent_decode_basis'], 'apple_llvm21_objdump')
+        self.assertEqual(progress.summarize(rows)['reviewed']['implemented'], 1)
+
+    def test_unknown_or_misframed_follower_never_gets_decoder_credit(self):
+        decoder = type('Unavailable', (), {'disasm': lambda self, data, address: iter(())})()
+        word = int(self.FOLLOWING, 16)
+        for row in (None, {'word':word,'mnemonic':'<unknown>','operands':'','assembly':'<unknown>'},
+                    {'word':word,'mnemonic':'and','operands':'z0.b','assembly':'wrong'},
+                    {'word':word+1,'mnemonic':'and','operands':'z0.b','assembly':'and z0.b'}):
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                progress.decode_following_word(decoder, word, {} if row is None else {word:row})
+
+    def test_non_context_samples_cannot_silently_ignore_source_bundle(self):
+        registry = fixtures(); registry['forms'][0]['smoke_samples'][0]['following_words'] = [self.FOLLOWING]
+        with self.assertRaisesRegex(ValueError, 'context compiler lane'):
+            progress.validate_registry(registry)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'context compiler lane'):
+            progress.compile_probe('cli', self.PREFIX, Path(directory), following_words=[self.FOLLOWING])
+
+
 if __name__ == '__main__':
     unittest.main()
