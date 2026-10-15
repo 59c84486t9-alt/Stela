@@ -3,11 +3,13 @@
 //! Platform adapters normalize guest pages and parse guest flags. This leaf
 //! owns native placement, unpublished initialization and atomic metadata commit.
 
+use super::storage::{NativeMapping, NativeStorage};
 use super::{
     Allocation, DIRECT_RAM_USER_END, MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, MemoryRegion,
     OwnedMemory, host_protection,
 };
 use serde::Serialize;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DataPermissions {
@@ -164,8 +166,11 @@ impl OwnedMemory {
             .try_reserve(1)
             .map_err(|_| E::MetadataAllocation)?;
         let mapping = map_anonymous(request.placement, mapped_bytes, alignment, self.page_bytes)?;
+        // Create the retained owner before final protection/publication. Failure
+        // or rejection drops only this unpublished native allocation.
+        let storage = mapping.into_storage();
         let allocation = DataAllocation {
-            guest_address: mapping.base,
+            guest_address: storage.primary_base().as_ptr() as usize as u64,
             virtual_bytes: request.bytes,
             mapped_bytes,
             maximum: request.maximum,
@@ -174,7 +179,7 @@ impl OwnedMemory {
         };
         Ok(PendingDataAllocation {
             owner: self,
-            mapping: Some(mapping),
+            storage: Some(storage),
             allocation,
             current: request.current,
             initialized_bytes: 0,
@@ -192,7 +197,7 @@ impl OwnedMemory {
             .map(|allocation| DataAllocation {
                 guest_address: allocation.base,
                 virtual_bytes: allocation.logical_bytes,
-                mapped_bytes: allocation.bytes,
+                mapped_bytes: allocation.storage.bytes() as u64,
                 maximum: DataPermissions {
                     readable: allocation.maximum_readable,
                     writable: allocation.maximum_writable,
@@ -208,7 +213,7 @@ impl OwnedMemory {
 /// Initialization is private and serialized; it never grants host execute rights.
 pub struct PendingDataAllocation<'a> {
     owner: &'a mut OwnedMemory,
-    mapping: Option<NewMapping>,
+    storage: Option<Arc<NativeStorage>>,
     allocation: DataAllocation,
     current: DataPermissions,
     initialized_bytes: usize,
@@ -317,7 +322,12 @@ impl PendingDataAllocation<'_> {
             writable: self.current.writable,
             executable: false,
         };
+        let storage = self
+            .storage
+            .take()
+            .expect("unpublished storage retains ownership");
         let allocation = Allocation {
+            storage,
             base: self.allocation.guest_address,
             bytes: self.allocation.mapped_bytes,
             logical_bytes: self.allocation.virtual_bytes,
@@ -340,11 +350,6 @@ impl PendingDataAllocation<'_> {
             .partition_point(|old| old.guest_address < region.guest_address);
         self.owner.allocations.insert(allocation_index, allocation);
         self.owner.regions.insert(region_index, region);
-        let mapping = self
-            .mapping
-            .take()
-            .expect("unpublished mapping retains ownership");
-        std::mem::forget(mapping);
         Ok(self.allocation)
     }
 }
@@ -352,6 +357,23 @@ impl PendingDataAllocation<'_> {
 struct NewMapping {
     base: u64,
     bytes: u64,
+}
+
+impl NewMapping {
+    fn into_storage(self) -> Arc<NativeStorage> {
+        // SAFETY: native placement/trim checked this complete fresh RW extent;
+        // initialization is serialized and exposes no Rust guest references.
+        let mapping = unsafe {
+            NativeMapping::adopt(
+                std::ptr::NonNull::new(self.base as usize as *mut u8)
+                    .expect("native placement rejects zero"),
+                self.bytes as usize,
+            )
+        };
+        // The single unmap obligation moved into NativeMapping above.
+        std::mem::forget(self);
+        NativeStorage::anonymous(mapping)
+    }
 }
 
 impl Drop for NewMapping {

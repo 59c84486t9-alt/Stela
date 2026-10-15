@@ -12,6 +12,7 @@ pub mod backing;
 pub mod domain;
 pub mod monitor;
 pub mod policy;
+mod storage;
 pub mod tag_store;
 pub mod tags;
 
@@ -22,6 +23,8 @@ use std::fs::File;
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
+use std::sync::Arc;
+use storage::{NativeMapping, NativeStorage};
 
 pub use allocation::{
     AllocateDataError, AllocateDataRequest, AllocationOperation, DataAllocation, DataInheritance,
@@ -51,7 +54,7 @@ pub struct MemoryRegionSpec {
 /// host-page rounding may include the file's final partial page, whose padding
 /// is never exposed through the safe guest-memory API.
 ///
-/// OwnedMemory retains the file descriptor. MAP_PRIVATE prevents our writes
+/// Retained allocation storage keeps the file descriptor. MAP_PRIVATE prevents our writes
 /// from modifying the file; it does not freeze unrelated writes/truncation to
 /// that inode. Source identity, provenance and stability for the entire mapping
 /// lifetime are the caller's responsibility. Truncation can cause native faults.
@@ -140,6 +143,7 @@ pub struct DataProtectionLimit {
 }
 #[derive(Debug)]
 struct Allocation {
+    storage: Arc<NativeStorage>,
     base: u64,
     bytes: u64,
     logical_bytes: u64,
@@ -171,15 +175,16 @@ impl std::fmt::Display for ProtectionError {
 }
 impl std::error::Error for ProtectionError {}
 
-/// Private, non-shareable mappings, released together on failure or drop.
+/// Private, non-shareable mappings with retained native storage lifetimes.
 ///
 /// Safe operations copy bytes; they never lend Rust references into memory that
 /// native guest code may mutate. Callers executing native code remain responsible
 /// for its unsafe execution contract and must keep this owner alive throughout.
+/// Internal retained storage can outlive this logical owner; retention alone does
+/// not pin host rights or admit concurrent/shared execution.
 #[derive(Debug)]
 pub struct OwnedMemory {
     regions: Vec<MemoryRegion>,
-    backing_files: Vec<File>,
     allocations: Vec<Allocation>,
     page_bytes: u64,
     usable: bool,
@@ -352,7 +357,6 @@ impl OwnedMemory {
 
         let mut memory = Self {
             regions: Vec::new(),
-            backing_files: Vec::new(),
             allocations: Vec::new(),
             page_bytes: page,
             usable: true,
@@ -405,10 +409,24 @@ impl OwnedMemory {
                     spec.guest_address
                 );
             }
-            // Register ownership before anything else may fail, so Drop rolls
-            // back both this range and all previously successful mappings.
+            // SAFETY: exact newly owned complete pages, checked address/extent,
+            // coherent Normal-WB storage and no escaping guest references.
+            let native = unsafe {
+                NativeMapping::adopt(
+                    std::ptr::NonNull::new(mapped.cast()).expect("nonzero exact mapping"),
+                    length,
+                )
+            };
+            let (storage, initial) = match spec.initial {
+                InitialMemory::Anonymous(bytes) => (NativeStorage::anonymous(native), Some(bytes)),
+                InitialMemory::File { file, .. } => {
+                    (NativeStorage::private_file(native, file), None)
+                }
+            };
+            // Register retained ownership before any later operation can fail.
             let limit = limits.get(&spec.guest_address);
             memory.allocations.push(Allocation {
+                storage,
                 base: spec.guest_address,
                 bytes: mapped_bytes,
                 logical_bytes: spec.virtual_bytes,
@@ -428,20 +446,13 @@ impl OwnedMemory {
                 writable: spec.writable,
                 executable: spec.executable,
             });
-            match spec.initial {
-                InitialMemory::Anonymous(bytes) => {
-                    // SAFETY: this exact anonymous allocation is RW, bytes fit,
-                    // and the independent source Vec cannot overlap it.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            mapped.cast::<u8>(),
-                            bytes.len(),
-                        );
-                    }
-                    // Anonymous mmap supplies zeros for the virtual tail.
+            if let Some(bytes) = initial {
+                // SAFETY: this exact anonymous allocation is RW, bytes fit,
+                // and the independent source Vec cannot overlap it.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
                 }
-                InitialMemory::File { file, .. } => memory.backing_files.push(file),
+                // Anonymous mmap supplies zeros for the virtual tail.
             }
             let protection = if spec.readable {
                 libc::PROT_READ
@@ -726,29 +737,12 @@ fn host_protection(readable: bool, writable: bool) -> i32 {
         libc::PROT_NONE
     }) | (if writable { libc::PROT_WRITE } else { 0 })
 }
-impl Drop for OwnedMemory {
-    fn drop(&mut self) {
-        for allocation in &self.allocations {
-            // SAFETY: original allocation ownership survives view splitting and
-            // quarantine; no method transfers or partially releases this memory.
-            unsafe {
-                libc::munmap(
-                    allocation.base as usize as *mut libc::c_void,
-                    allocation.bytes as usize,
-                )
-            };
-        }
-    }
-}
-
 /// Runtime-published data with a permanently read-only, non-executable guest
 /// view and an unexposed writable alias. Publication and translated accesses
 /// must be serialized by the caller; this is not a concurrent kernel seqlock.
 pub struct PublishedReadOnlyRegion {
     region: MemoryRegion,
-    guest_mapping: Option<std::ptr::NonNull<libc::c_void>>,
-    publisher_mapping: std::ptr::NonNull<libc::c_void>,
-    _backing: File,
+    storage: Arc<NativeStorage>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
@@ -815,6 +809,14 @@ impl PublishedReadOnlyRegion {
             unsafe { libc::munmap(guest, bytes as usize) };
             bail!("published guest address {guest_base:#x} is unavailable");
         }
+        // SAFETY: exact newly owned RO pages with checked complete extent;
+        // native accesses remain serialized and no guest references escape.
+        let guest_mapping = unsafe {
+            NativeMapping::adopt(
+                std::ptr::NonNull::new(guest.cast()).expect("nonzero exact mapping"),
+                bytes as usize,
+            )
+        };
         // SAFETY: the kernel chooses a separate new mapping of the owned backing.
         let publisher = unsafe {
             libc::mmap(
@@ -828,18 +830,24 @@ impl PublishedReadOnlyRegion {
         };
         if publisher == libc::MAP_FAILED {
             let error = std::io::Error::last_os_error();
-            // SAFETY: rollback only the guest view created above.
-            unsafe { libc::munmap(guest, bytes as usize) };
+            // The retained guest-mapping guard rolls back this failed pair.
             return Err(error).context("cannot map runtime publication alias");
         }
         let Some(publisher_mapping) = std::ptr::NonNull::new(publisher) else {
-            // SAFETY: rollback both allocations created above.
-            unsafe {
-                libc::munmap(publisher, bytes as usize);
-                libc::munmap(guest, bytes as usize);
-            }
+            // SAFETY: release only this newly created null publisher alias;
+            // the retained guest guard rolls back the other mapping.
+            unsafe { libc::munmap(publisher, bytes as usize) };
             bail!("null publication mapping is unsupported");
         };
+        // SAFETY: the second complete mapping aliases this same private file at
+        // the same offset; both aliases and the file now share one retained owner.
+        let storage = unsafe {
+            NativeStorage::published_aliases(
+                guest_mapping,
+                NativeMapping::adopt(publisher_mapping.cast(), bytes as usize),
+                backing,
+            )
+        }?;
         Ok(Self {
             region: MemoryRegion {
                 guest_address: guest_base,
@@ -850,9 +858,7 @@ impl PublishedReadOnlyRegion {
                 writable: false,
                 executable: false,
             },
-            guest_mapping: std::ptr::NonNull::new(guest),
-            publisher_mapping,
-            _backing: backing,
+            storage,
             _not_send_sync: PhantomData,
         })
     }
@@ -893,26 +899,15 @@ impl PublishedReadOnlyRegion {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
-                self.publisher_mapping.as_ptr().cast::<u8>().add(offset),
+                self.storage
+                    .publisher_base()
+                    .expect("publication alias")
+                    .as_ptr()
+                    .add(offset),
                 bytes.len(),
             )
         };
         Ok(())
-    }
-}
-
-impl Drop for PublishedReadOnlyRegion {
-    fn drop(&mut self) {
-        // SAFETY: both allocations were created and retained exclusively here.
-        unsafe {
-            if let Some(guest) = self.guest_mapping {
-                libc::munmap(guest.as_ptr(), self.region.mapped_bytes as usize);
-            }
-            libc::munmap(
-                self.publisher_mapping.as_ptr(),
-                self.region.mapped_bytes as usize,
-            );
-        }
     }
 }
 
@@ -1234,7 +1229,7 @@ mod tests {
             .find_map(|_| PublishedReadOnlyRegion::map(candidate(page), &[7; 13]).ok())
             .unwrap();
         let address = published.region().guest_address;
-        let alias = published.publisher_mapping.as_ptr() as usize as u64;
+        let alias = published.storage.publisher_base().unwrap().as_ptr() as usize as u64;
         assert_eq!(os_protection(address), libc::PROT_READ);
         assert_eq!(os_protection(alias), libc::PROT_READ | libc::PROT_WRITE);
         published.publish(4, &[1, 2, 3]).unwrap();
@@ -1268,7 +1263,10 @@ mod tests {
         );
         let address = memory.regions()[0].guest_address;
         assert_eq!(memory.regions()[0].initial_bytes, page);
-        assert_eq!(memory.backing_files.len(), 1);
+        assert_eq!(
+            memory.allocations[0].storage.kind(),
+            storage::StorageKind::PrivateFile
+        );
         assert_eq!(memory.read_snapshot(address, 4).unwrap(), [1, 2, 3, 0xa5]);
         memory.write(address + 1, &[8, 9]).unwrap();
         assert_eq!(memory.read_snapshot(address, 4).unwrap(), [1, 8, 9, 0xa5]);
@@ -1353,7 +1351,7 @@ mod tests {
         );
         // SAFETY: an empty mapping set has no backing-inode lifetime obligation.
         let empty = unsafe { OwnedMemory::map_files(vec![]) }.unwrap();
-        assert!(empty.regions().is_empty() && empty.backing_files.is_empty());
+        assert!(empty.regions().is_empty() && empty.allocations.is_empty());
     }
 
     #[test]
