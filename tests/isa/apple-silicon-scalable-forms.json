@@ -845,6 +845,27 @@
         "fresh_semantic_comparisons": 0,
         "fresh_original_executions": 0
       }
+    },
+    "sme_integer_vector": {
+      "harness": ".stela/research/coverage-race/sme/integer_vector/transfer-production.py",
+      "report": ".stela/research/coverage-race/sme/integer_vector/publication-final-1/publication-proof.json",
+      "kind": "sme58-exact-production-entry-map-transfer-v1",
+      "comparison_field": "original_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/simd_fixtures/sme/integer_vector.py",
+        "dev/differential.py"
+      ],
+      "required_positive_counts": [
+        "canonical_forms",
+        "body_maps",
+        "unique_standalone_body_keys",
+        "actual_cli_checks",
+        "original_native_comparisons"
+      ]
     }
   },
   "forms": [
@@ -41652,6 +41673,4440 @@
           "reason": "streaming mode required"
         }
       ]
+    },
+    {
+      "id": "add_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "add_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a300",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "ADD",
+      "source_sha256": "ae27ccd01ec789407b51fad7242f2c6a24bfdc3557984d4cd5d58bec974a4e09",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca304",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "add_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "add_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120ab00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "ADD",
+      "source_sha256": "ae27ccd01ec789407b51fad7242f2c6a24bfdc3557984d4cd5d58bec974a4e09",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124ab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164ab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4ab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4ab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecab04",
+          "expected_mnemonics": [
+            "add"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sclamp_mz_zz_2",
+      "category": "sme",
+      "source_file": "sclamp_mz_zz.xml",
+      "encoding_mask": "0xff20fc01",
+      "encoding_value": "0xc120c400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SCLAMP",
+      "source_sha256": "ea675a6de7363083006ea9b87d246a68414570a3cb301a3ee304e520e008363d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124c4a4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cc684",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164c4a4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cc684",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4c4a4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acc684",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4c4a4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecc684",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sclamp_mz_zz_4",
+      "category": "sme",
+      "source_file": "sclamp_mz_zz.xml",
+      "encoding_mask": "0xff20fc03",
+      "encoding_value": "0xc120cc00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SCLAMP",
+      "source_sha256": "ea675a6de7363083006ea9b87d246a68414570a3cb301a3ee304e520e008363d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124cce4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cce84",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164cce4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cce84",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4cce4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acce84",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4cce4",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecce84",
+          "expected_mnemonics": [
+            "sclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smax_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "smax_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMAX",
+      "source_sha256": "0e4572d549572b228d93d0c7fbdff019b245b17445ea880870f71c81046239e1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smax_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "smax_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120a800",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMAX",
+      "source_sha256": "0e4572d549572b228d93d0c7fbdff019b245b17445ea880870f71c81046239e1",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smax_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "smax_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMAX",
+      "source_sha256": "40809fb68d8753e0d5c4ccf2c60cbb07ac6701b6af6db48c1de301d9fcbd136f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb004",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smax_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "smax_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120b800",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMAX",
+      "source_sha256": "40809fb68d8753e0d5c4ccf2c60cbb07ac6701b6af6db48c1de301d9fcbd136f",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb804",
+          "expected_mnemonics": [
+            "smax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smin_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "smin_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMIN",
+      "source_sha256": "0c9cf8ba958db5f38ac36a485d4cf92348b96967febf96aa1c4fe4ed8375d74c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smin_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "smin_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120a820",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMIN",
+      "source_sha256": "0c9cf8ba958db5f38ac36a485d4cf92348b96967febf96aa1c4fe4ed8375d74c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smin_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "smin_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMIN",
+      "source_sha256": "adda2427ec33b9dcb5e99b52b3dfce30c916566b235da9f40ee50f8a582ccd15",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb024",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "smin_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "smin_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120b820",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SMIN",
+      "source_sha256": "adda2427ec33b9dcb5e99b52b3dfce30c916566b235da9f40ee50f8a582ccd15",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb824",
+          "expected_mnemonics": [
+            "smin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvt_z_mz2_",
+      "category": "sme",
+      "source_file": "sqcvt_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0xc123e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVT",
+      "source_sha256": "4fd511efaea562831ce10dd8826aae4f210343b369170447fb358c431b98fe7d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc123e000",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc123e3df",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvt_z_mz4_",
+      "category": "sme",
+      "source_file": "sqcvt_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc133e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVT",
+      "source_sha256": "0953bd5ce938c01c0694a4232d0edbb8a28f6e6325596568104d60dc77a25eed",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc133e000",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc133e39f",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e000",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e39f",
+          "expected_mnemonics": [
+            "sqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtn_z_mz4_",
+      "category": "sme",
+      "source_file": "sqcvtn_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc133e040",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVTN",
+      "source_sha256": "6bd0f52db7f7922250f0570eb1c80e7022c8bd436eac46401a316c46811f9c44",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc133e040",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc133e3df",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e040",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e3df",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtu_z_mz2_",
+      "category": "sme",
+      "source_file": "sqcvtu_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0xc163e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVTU",
+      "source_sha256": "acdb05041cdfedb6f539fccc177a850a1c1923dd49559f671e88bab40a80387d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc163e000",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc163e3df",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtu_z_mz4_",
+      "category": "sme",
+      "source_file": "sqcvtu_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc173e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVTU",
+      "source_sha256": "32fdaa1a85546527eab94962bc37cc75f351da24665832378069a6921ab2dc10",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc173e000",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc173e39f",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1f3e000",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1f3e39f",
+          "expected_mnemonics": [
+            "sqcvtu"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtun_z_mz4_",
+      "category": "sme",
+      "source_file": "sqcvtun_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc173e040",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQCVTUN",
+      "source_sha256": "7af626d37c7c086b8085f9f20d816a323e7eef8c8bb773cf88ab6fb447f98043",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc173e040",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc173e3df",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1f3e040",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1f3e3df",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqdmulh_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "sqdmulh_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQDMULH",
+      "source_sha256": "d7ba9652cfc6ee9a1a145ab4cb8308d180be41efda1ca619e17218164e545d32",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqdmulh_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "sqdmulh_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120ac00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQDMULH",
+      "source_sha256": "d7ba9652cfc6ee9a1a145ab4cb8308d180be41efda1ca619e17218164e545d32",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124ac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164ac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4ac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4ac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecac04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqdmulh_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "sqdmulh_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQDMULH",
+      "source_sha256": "6a87710751ab29d9380895d0811033626053030d40ba5b89041df045d54cf04e",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb404",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqdmulh_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "sqdmulh_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120bc00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQDMULH",
+      "source_sha256": "6a87710751ab29d9380895d0811033626053030d40ba5b89041df045d54cf04e",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124bc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cbc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164bc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cbc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4bc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acbc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4bc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecbc04",
+          "expected_mnemonics": [
+            "sqdmulh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshr_z_mz2_",
+      "category": "sme",
+      "source_file": "sqrshr_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0xc1e0d400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHR",
+      "source_sha256": "c71e3c54e5352a97d41dc01a6dbcc8d31c2f580fc9dd8720e3d548597c8504c9",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1efd400",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e0d7df",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshr_z_mz4_",
+      "category": "sme",
+      "source_file": "sqrshr_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120d800",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHR",
+      "source_sha256": "ffd3a5649fba0a72a17ec10db68c3e6a37e012f23e9026e27572d1a975b64f66",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fd800",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160db9f",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffd800",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0db9f",
+          "expected_mnemonics": [
+            "sqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshrn_z_mz4_",
+      "category": "sme",
+      "source_file": "sqrshrn_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120dc00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHRN",
+      "source_sha256": "a62d75a8d37f60f44f271f81c4de4239be955a2c1d65977aa0e104210c51c6a2",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fdc00",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160df9f",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffdc00",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0df9f",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshru_z_mz2_",
+      "category": "sme",
+      "source_file": "sqrshru_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0xc1f0d400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHRU",
+      "source_sha256": "3a48e3f125609073aa416fc799ff764d29ba936cfb5e09ad335cd998c048685c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1ffd400",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1f0d7df",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshru_z_mz4_",
+      "category": "sme",
+      "source_file": "sqrshru_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120d840",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHRU",
+      "source_sha256": "30b7ae059940f2983652afcdf4136cf2f7937de43f1897a1af68d4d34fcc21d3",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fd840",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160dbdf",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffd840",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0dbdf",
+          "expected_mnemonics": [
+            "sqrshru"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshrun_z_mz4_",
+      "category": "sme",
+      "source_file": "sqrshrun_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120dc40",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SQRSHRUN",
+      "source_sha256": "f2fdf9f770cf5fb1e86235b5b6f2d89ba8e08b81d57ea72569a6aa1fb6a8e172",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fdc40",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160dfdf",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffdc40",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0dfdf",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "srshl_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "srshl_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a220",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SRSHL",
+      "source_sha256": "cb2b7cf1b9007a85d1d1381b1e4ca2103deef1784612742f3d09c00192137784",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "srshl_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "srshl_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120aa20",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SRSHL",
+      "source_sha256": "cb2b7cf1b9007a85d1d1381b1e4ca2103deef1784612742f3d09c00192137784",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124aa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12caa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164aa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16caa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4aa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acaa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4aa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecaa24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "srshl_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "srshl_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b220",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SRSHL",
+      "source_sha256": "8e84dee0d88dc7a9da6ab00e444dcd75e9ac9b2cf886237877247fc272ebf780",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb224",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "srshl_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "srshl_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120ba20",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "SRSHL",
+      "source_sha256": "8e84dee0d88dc7a9da6ab00e444dcd75e9ac9b2cf886237877247fc272ebf780",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124ba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164ba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4ba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4ba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecba24",
+          "expected_mnemonics": [
+            "srshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uclamp_mz_zz_2",
+      "category": "sme",
+      "source_file": "uclamp_mz_zz.xml",
+      "encoding_mask": "0xff20fc01",
+      "encoding_value": "0xc120c401",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UCLAMP",
+      "source_sha256": "5dcea265ea7d43797ab5f528f620ea2ba4c191f67c5bb5192b6a13b5c84e44f3",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124c4a5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cc685",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164c4a5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cc685",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4c4a5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acc685",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4c4a5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecc685",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uclamp_mz_zz_4",
+      "category": "sme",
+      "source_file": "uclamp_mz_zz.xml",
+      "encoding_mask": "0xff20fc03",
+      "encoding_value": "0xc120cc01",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UCLAMP",
+      "source_sha256": "5dcea265ea7d43797ab5f528f620ea2ba4c191f67c5bb5192b6a13b5c84e44f3",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124cce5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cce85",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164cce5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cce85",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4cce5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acce85",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4cce5",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecce85",
+          "expected_mnemonics": [
+            "uclamp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umax_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "umax_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMAX",
+      "source_sha256": "0a782dba7fcd929e139f53ed3cbccea9016772be6d134b083f5a7e6f18295035",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umax_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "umax_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120a801",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMAX",
+      "source_sha256": "0a782dba7fcd929e139f53ed3cbccea9016772be6d134b083f5a7e6f18295035",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umax_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "umax_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMAX",
+      "source_sha256": "88c3bf0a4b397788beaf8a79db916e95fe42a2ae05d821eaa7d6c45522841434",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb005",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umax_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "umax_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120b801",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMAX",
+      "source_sha256": "88c3bf0a4b397788beaf8a79db916e95fe42a2ae05d821eaa7d6c45522841434",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb805",
+          "expected_mnemonics": [
+            "umax"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umin_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "umin_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a021",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMIN",
+      "source_sha256": "a3abc724f7e0c2b2c457f4e73ab438d2b08994e1a5c66fef007974e0d1bf856c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umin_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "umin_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120a821",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMIN",
+      "source_sha256": "a3abc724f7e0c2b2c457f4e73ab438d2b08994e1a5c66fef007974e0d1bf856c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umin_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "umin_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b021",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMIN",
+      "source_sha256": "44ae4e393e9fcef2c050147884306d6be0ddbd1eeead886e2378e0e13663dc03",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb025",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "umin_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "umin_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120b821",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UMIN",
+      "source_sha256": "44ae4e393e9fcef2c050147884306d6be0ddbd1eeead886e2378e0e13663dc03",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb825",
+          "expected_mnemonics": [
+            "umin"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqcvt_z_mz2_",
+      "category": "sme",
+      "source_file": "uqcvt_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0xc123e020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQCVT",
+      "source_sha256": "30f5ba42da45a9d346760d7c2d3de41f8a9a70dca73a189fe6bead798b315e54",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc123e020",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc123e3ff",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqcvt_z_mz4_",
+      "category": "sme",
+      "source_file": "uqcvt_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc133e020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQCVT",
+      "source_sha256": "0eb9aab4f407babfa00a5a01841265a981b12c893dbfcdbebbb2b4168cb8c31a",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc133e020",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc133e3bf",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e020",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e3bf",
+          "expected_mnemonics": [
+            "uqcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqcvtn_z_mz4_",
+      "category": "sme",
+      "source_file": "uqcvtn_z_mz4.xml",
+      "encoding_mask": "0xff7ffc60",
+      "encoding_value": "0xc133e060",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQCVTN",
+      "source_sha256": "3a01815dd66a79571a2d51a76c8ce3de2fda9ba2510afa22eb9a159aacb25b2b",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc133e060",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc133e3ff",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e060",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1b3e3ff",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqrshr_z_mz2_",
+      "category": "sme",
+      "source_file": "uqrshr_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0xc1e0d420",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQRSHR",
+      "source_sha256": "c726deb44c13fb80649ab1c978c8364dfa078c7de97f5796e349889520ddc00c",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1efd420",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e0d7ff",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqrshr_z_mz4_",
+      "category": "sme",
+      "source_file": "uqrshr_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120d820",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQRSHR",
+      "source_sha256": "b0e0b4e4fc31126a90c159b098d80d23988e13be7757576c5a2aa9cb2fea28c6",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fd820",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160dbbf",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffd820",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0dbbf",
+          "expected_mnemonics": [
+            "uqrshr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqrshrn_z_mz4_",
+      "category": "sme",
+      "source_file": "uqrshrn_z_mz4.xml",
+      "encoding_mask": "0xff20fc60",
+      "encoding_value": "0xc120dc20",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "UQRSHRN",
+      "source_sha256": "cff38cc1dbf9829e6c7f1ac9a370ce240a30cf864b49800612ed259015935180",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc17fdc20",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc160dfbf",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ffdc20",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a0dfbf",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "urshl_mz_zzv_2x1",
+      "category": "sme",
+      "source_file": "urshl_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe1",
+      "encoding_value": "0xc120a221",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "URSHL",
+      "source_sha256": "909e8391a889304e1213976362ed2980cd21507656fb89bb35309dd9066c0eba",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124a225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12ca225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164a225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16ca225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4a225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1aca225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4a225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1eca225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "urshl_mz_zzv_4x1",
+      "category": "sme",
+      "source_file": "urshl_mz_zzv.xml",
+      "encoding_mask": "0xff30ffe3",
+      "encoding_value": "0xc120aa21",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "URSHL",
+      "source_sha256": "909e8391a889304e1213976362ed2980cd21507656fb89bb35309dd9066c0eba",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124aa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12caa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164aa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16caa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4aa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acaa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4aa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecaa25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "urshl_mz_zzw_2x2",
+      "category": "sme",
+      "source_file": "urshl_mz_zzw.xml",
+      "encoding_mask": "0xff21ffe1",
+      "encoding_value": "0xc120b221",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "URSHL",
+      "source_sha256": "a8997cfa833ef15651ed3dcd510dc6d5191c3d2191d4c7591f0c340ecb359639",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124b225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cb225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164b225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cb225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4b225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acb225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4b225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecb225",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "urshl_mz_zzw_4x4",
+      "category": "sme",
+      "source_file": "urshl_mz_zzw.xml",
+      "encoding_mask": "0xff23ffe3",
+      "encoding_value": "0xc120ba21",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "mnemonic": "URSHL",
+      "source_sha256": "a8997cfa833ef15651ed3dcd510dc6d5191c3d2191d4c7591f0c340ecb359639",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124ba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc12cba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164ba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc16cba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1a4ba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1acba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1e4ba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1ecba25",
+          "expected_mnemonics": [
+            "urshl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtn_z_mz2_",
+      "category": "sve",
+      "source_file": "sqcvtn_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x45314000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "SQCVTN",
+      "source_sha256": "26bd06db9323710d917e03521b650a117d0340b5ff3a1e0916bd5214c2717b0b",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45314000",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x453143df",
+          "expected_mnemonics": [
+            "sqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqcvtun_z_mz2_",
+      "category": "sve",
+      "source_file": "sqcvtun_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x45315000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "SQCVTUN",
+      "source_sha256": "07d60dac70f10fc08794b6a3d01c8e7e48a07d0646d96807cb69fe1babdbd835",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45315000",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x453153df",
+          "expected_mnemonics": [
+            "sqcvtun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshrn_z_mz2_",
+      "category": "sve",
+      "source_file": "sqrshrn_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0x45b02800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "SQRSHRN",
+      "source_sha256": "3580692739fbd9cf098609f929f69246d0599e292a130b0a7869dd847e2577ac",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45bf2800",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45b02bdf",
+          "expected_mnemonics": [
+            "sqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "sqrshrun_z_mz2_",
+      "category": "sve",
+      "source_file": "sqrshrun_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0x45b00800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "SQRSHRUN",
+      "source_sha256": "96bb033139df07dcdf8aa5cabc49d6a79ed29be2537392218c334bab378f9b1d",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45bf0800",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45b00bdf",
+          "expected_mnemonics": [
+            "sqrshrun"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqcvtn_z_mz2_",
+      "category": "sve",
+      "source_file": "uqcvtn_z_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0x45314800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "UQCVTN",
+      "source_sha256": "7b265e05fbe185774a2039546567d2b9b5d2ecebfcfbbd2e2599a12147b03b42",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45314800",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45314bdf",
+          "expected_mnemonics": [
+            "uqcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "uqrshrn_z_mz2_",
+      "category": "sve",
+      "source_file": "uqrshrn_z_mz2.xml",
+      "encoding_mask": "0xfff0fc20",
+      "encoding_value": "0x45b03800",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "mnemonic": "UQRSHRN",
+      "source_sha256": "ee1cc44f83e5de55b46be0c86e724d2d7920879c40f37374d80f9f1c22472563",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_vector.rs"
+      ],
+      "evidence_groups": [
+        "sme_integer_vector"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x45bf3800",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45b03bdf",
+          "expected_mnemonics": [
+            "uqrshrn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
+      "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
     }
   ],
   "execution_profiles": {
