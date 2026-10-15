@@ -48190,6 +48190,7 @@
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/block/system.rs",
     "crates/stela-compiler/src/block/thread.rs",
+    "crates/stela-compiler/src/block/pauth_memory.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
     "crates/stela-compiler/src/aarch64/bitfield.rs",
     "crates/stela-compiler/src/x86_64/bitfield.rs",

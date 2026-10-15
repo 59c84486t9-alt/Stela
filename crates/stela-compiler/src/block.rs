@@ -16,6 +16,7 @@ use serde::Serialize;
 
 pub mod system;
 pub use system::{SystemInstruction, decode_system_instruction};
+pub mod pauth_memory;
 mod thread;
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 
@@ -23,6 +24,8 @@ pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
 /// Same state/return layout, with an explicitly enabled runtime PAC boundary.
 /// This identifies software-profile helper requests, not Apple signature identity.
+/// Runtime Context selects the versioned authentication policy; cached helper
+/// bodies contain neither process keys nor a PAuth-version assumption.
 pub const PAUTH_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1";
 pub const CLOCK_BLOCK_ABI: &str =
@@ -221,6 +224,7 @@ pub enum PointerAuthenticationOperation {
         destination: u8,
     },
     ReturnIaSp,
+    GenericCode(pauth_memory::GenericCode),
     Branch {
         key: PointerAuthenticationKey,
         target: u8,
@@ -247,7 +251,7 @@ impl PointerAuthenticationOperation {
             Self::Sign { key, .. } | Self::Authenticate { key, .. } | Self::Branch { key, .. } => {
                 Some(key)
             }
-            Self::Strip { .. } => None,
+            Self::Strip { .. } | Self::GenericCode(_) => None,
         }
     }
 }
@@ -261,9 +265,9 @@ pub struct PointerAuthentication {
     pub next_pc: GuestAddress,
 }
 
-/// June2026 basic PAC/AUT integer and HINT forms, XPAC and authenticated transfers.
-/// The explicit software profile disables PAuth_LR/PACM, FPAC and GCS. Other
-/// PAC operations (including PACGA) and system controls remain unsupported.
+/// June2026 PAC/AUT integer and HINT forms, XPAC, PACGA and authenticated
+/// transfers. Process keys and PAuth1/PAuth2/FPAC policy belong to the
+/// explicit runtime context; PAuth_LR/PACM, GCS and dynamic controls decline.
 /// Runtime consumers revalidate this descriptor against immutable source bytes.
 pub fn decode_pointer_authentication(
     pc: GuestAddress,
@@ -393,7 +397,12 @@ pub fn decode_pointer_authentication(
                 link: word & (1 << 21) != 0,
             }
         }
-        _ => return Ok(None),
+        _ => match pauth_memory::decode(word) {
+            Some(pauth_memory::Instruction::GenericCode(code)) => {
+                PointerAuthenticationOperation::GenericCode(code)
+            }
+            Some(pauth_memory::Instruction::Load(_)) | None => return Ok(None),
+        },
     };
     Ok(Some(PointerAuthentication {
         operation,
@@ -647,6 +656,20 @@ pub fn analyze_with_profile(
                     kind: DynamicEdgeKind::Return,
                     register: 30,
                 });
+            } else if let PointerAuthenticationOperation::Branch { target, link, .. } =
+                value.operation
+            {
+                dynamic_edge = Some(DynamicEdge {
+                    kind: if link {
+                        DynamicEdgeKind::Call
+                    } else {
+                        DynamicEdgeKind::Branch
+                    },
+                    register: target,
+                });
+                if link {
+                    add(SuccessorKind::CallContinuation, value.next_pc);
+                }
             } else {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }
@@ -1296,8 +1319,8 @@ mod tests {
             assert!(decode_pointer_authentication(GuestAddress(pc.0 + 1), word).is_err());
             assert!(decode_pointer_authentication(GuestAddress(u64::MAX - 3), word).is_err());
         }
-        // PACGA and reserved zero-modifier encodings remain outside this boundary.
-        for word in [0xd61f0800, 0xd63f0800, 0x9ac03000, 0xdac12000, 0xdac15000] {
+        // Reserved zero-modifier encodings remain outside this boundary.
+        for word in [0xd61f0800, 0xd63f0800, 0xdac12000, 0xdac15000] {
             assert_eq!(decode_pointer_authentication(pc, word).unwrap(), None);
         }
     }
@@ -1365,10 +1388,78 @@ mod tests {
             );
         }
         for word in [
-            0x5ac10000, 0xfac10000, 0xdac00000, 0xdac18000, 0xdac12000, 0xdac15000, 0x9ac03000,
-            0xd61f0800, 0xd63f0c00,
+            0x5ac10000, 0xfac10000, 0xdac00000, 0xdac18000, 0xdac12000, 0xdac15000, 0xd61f0800,
+            0xd63f0c00,
         ] {
             assert!(decode_pointer_authentication(pc, word).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn generic_code_requires_explicit_profile_and_retains_helper_source_boundary() {
+        const PACGA_X1_X2_X3: u32 = 0x9ac3_3041;
+        let pc = GuestAddress(0x1000);
+        let source = bytes(&[PACGA_X1_X2_X3]);
+        assert!(compile(&source, pc).is_err());
+        let instruction = decode_pointer_authentication(pc, PACGA_X1_X2_X3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instruction.operation,
+            PointerAuthenticationOperation::GenericCode(pauth_memory::GenericCode {
+                destination: 1,
+                source: 2,
+                modifier: 3,
+            })
+        );
+        let analysis =
+            analyze_with_profile(&source, pc, BlockProfile::AppleArm64eSoftwarePauthV1).unwrap();
+        assert_eq!(analysis.pointer_authentication, Some(instruction));
+        assert_eq!(analysis.terminator_pc, Some(pc));
+        assert_eq!(
+            analysis.static_successors,
+            vec![StaticSuccessor {
+                kind: SuccessorKind::Fallthrough,
+                target: GuestAddress(pc.0 + 4),
+            }]
+        );
+        assert!(analysis.dynamic_edge.is_none());
+    }
+
+    #[test]
+    fn authenticated_branch_discovery_preserves_dynamic_target_and_call_continuation() {
+        const BRAA_X1_SP: u32 = 0xd71f_083f;
+        const BLRAA_X1_SP: u32 = 0xd73f_083f;
+        let pc = GuestAddress(0x1000);
+        for (word, link) in [(BRAA_X1_SP, false), (BLRAA_X1_SP, true)] {
+            let analysis = analyze_with_profile(
+                &bytes(&[word]),
+                pc,
+                BlockProfile::AppleArm64eSoftwarePauthV1,
+            )
+            .unwrap();
+            assert_eq!(
+                analysis.dynamic_edge,
+                Some(DynamicEdge {
+                    kind: if link {
+                        DynamicEdgeKind::Call
+                    } else {
+                        DynamicEdgeKind::Branch
+                    },
+                    register: 1,
+                })
+            );
+            assert_eq!(
+                analysis.static_successors,
+                if link {
+                    vec![StaticSuccessor {
+                        kind: SuccessorKind::CallContinuation,
+                        target: GuestAddress(pc.0 + 4),
+                    }]
+                } else {
+                    vec![]
+                }
+            );
         }
     }
 

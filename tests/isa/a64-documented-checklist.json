@@ -2138,15 +2138,15 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 2198,
+    "implemented": 2199,
     "partial": 5,
-    "unsupported": 2129,
+    "unsupported": 2128,
     "total": 4332,
-    "implementation_percentage": 50.73868882733149,
+    "implementation_percentage": 50.7617728531856,
     "categories": {
       "base_integer_system": {
-        "implemented": 530,
-        "unsupported": 419,
+        "implemented": 531,
+        "unsupported": 418,
         "partial": 5
       },
       "fp_simd": {
@@ -2163,7 +2163,7 @@
       }
     }
   },
-  "compiler_source_sha256": "ed719ac4cdd1f6e187a373f133a958a79302a54fb063a96b9acbb2742a6ab06f",
+  "compiler_source_sha256": "6379aabb768b08b88ef5930bc0959cdb265d0eb45b7453fa133b7099c0f3b357",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -3584,7 +3584,7 @@
     {"id":"PACDB_64P_dp_1src","instruction_id":"PACDB","mnemonic":"PACDB","category":"base_integer_system","source_file":"pacdb.xml","encoding_mask":"0xfffffc00","encoding_value":"0xdac10c00","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"PACDZA_64Z_dp_1src","instruction_id":"PACDA","mnemonic":"PACDZA","category":"base_integer_system","source_file":"pacda.xml","encoding_mask":"0xffffffe0","encoding_value":"0xdac12be0","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"PACDZB_64Z_dp_1src","instruction_id":"PACDB","mnemonic":"PACDZB","category":"base_integer_system","source_file":"pacdb.xml","encoding_mask":"0xffffffe0","encoding_value":"0xdac12fe0","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
-    {"id":"PACGA_64P_dp_2src","instruction_id":"PACGA","mnemonic":"PACGA","category":"base_integer_system","source_file":"pacga.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac03000","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"unsupported","profiles":[]},
+    {"id":"PACGA_64P_dp_2src","instruction_id":"PACGA","mnemonic":"PACGA","category":"base_integer_system","source_file":"pacga.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x9ac03000","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete PACGA form in explicit QARMA5 Context profile stela-classic-arm64e-qarma5-va47-itbi0-dtbi1-explicit-keys-ga-v1 with an independently supplied APGA key; Rn31 is ZR, Rm31 is SP, Rd31 discards only after key/service validation; lower32 result bits zero; original flags/FP/SIMD preserved. No Apple hardware key identity or architectural exception delivery claim."}]},
     {"id":"PACIA171615_64LR_dp_1src","instruction_id":"PACIA171615","mnemonic":"PACIA171615","category":"base_integer_system","source_file":"pacia171615.xml","encoding_mask":"0xffffffff","encoding_value":"0xdac18bfe","features":[{"feature":"FEAT_PAuth_LR","name":"v9Ap5"}],"status":"unsupported","profiles":[]},
     {"id":"PACIA1716_HI_hints","instruction_id":"PACIA","mnemonic":"PACIA1716","category":"base_integer_system","source_file":"pacia.xml","encoding_mask":"0xffffffff","encoding_value":"0xd503211f","features":[{"feature":"FEAT_PAuth","name":"v8Ap3"}],"status":"implemented","profiles":[{"profile":"apple-arm64e-software-pauth-clock-v1","status":"implemented","scope":"Complete form in explicit classic software PAuth1 execution profile; GCS/BTI and PAuth_LR/FPAC disabled, exact immutable-source helper boundary."}]},
     {"id":"PACIASPPC_64LR_dp_1src","instruction_id":"PACIASPPC","mnemonic":"PACIASPPC","category":"base_integer_system","source_file":"paciasppc.xml","encoding_mask":"0xffffffff","encoding_value":"0xdac1a3fe","features":[{"feature":"FEAT_PAuth_LR","name":"v9Ap5"}],"status":"unsupported","profiles":[]},

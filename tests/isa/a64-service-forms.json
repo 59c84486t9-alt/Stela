@@ -118,6 +118,7 @@
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/block/system.rs",
     "crates/stela-compiler/src/block/thread.rs",
+    "crates/stela-compiler/src/block/pauth_memory.rs",
     "crates/stela-compiler/src/x86_64/block.rs",
     "crates/stela-compiler/src/aarch64/bitfield.rs",
     "crates/stela-compiler/src/x86_64/bitfield.rs",
@@ -278,6 +279,31 @@
         "generic_pauth.canonical_forms": 33,
         "authenticated_branches.canonical_forms": 8,
         "clock_register_full_state_comparisons": 512
+      }
+    },
+    "generic_pauth_code": {
+      "harness": "dev/pauth-differential.py",
+      "report": ".stela/pacga-differential-report.json",
+      "kind": "original_arm_generic_pac_vs_native_runtime",
+      "comparison_field": "state_comparisons",
+      "require_current_executable": false,
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1",
+      "runtime_profile": "stela-classic-arm64e-qarma5-va47-itbi0-dtbi1-explicit-keys-ga-v1",
+      "key_domain": "Independent APGA key; no reuse of IA/IB/DA/DB key slots.",
+      "required_shared_sources": [
+        "dev/pauth-differential.py",
+        "dev/differential.py",
+        "dev/simd_original.py",
+        "crates/stela-runtime/tests/pointer_authentication/corpus.rs"
+      ],
+      "required_measurements": {
+        "canonical_forms": 1,
+        "raw_original_frames": 1128,
+        "state_comparisons": 4512,
+        "actual_emitted_bodies": 188,
+        "baseline_checked_byte_bridges": 188,
+        "body_bytes_including_ret": 16,
+        "body_instructions_including_ret": 3
       }
     }
   },
@@ -1580,6 +1606,37 @@
           "word": "0xd50320ff",
           "expected_mnemonics": [
             "xpaclri"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "PACGA_64P_dp_2src",
+      "category": "base_integer_system",
+      "source_file": "pacga.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac03000",
+      "alias": false,
+      "source_sha256": "467c94e1b10d94f79ce6e4c129e3532525ff1fb2344897067aa2f3e2212459da",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 operand semantics and QARMA5 GA reviewed; genuine original ARM/full-State native comparison through actual baseline and checked blocks, cold/hot/disk/AOT cache paths and source maps.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_memory.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/pauth/generic.rs"
+      ],
+      "evidence_groups": [
+        "generic_pauth_code"
+      ],
+      "scope": "Complete PACGA form in explicit QARMA5 Context profile stela-classic-arm64e-qarma5-va47-itbi0-dtbi1-explicit-keys-ga-v1 with an independently supplied APGA key; Rn31 is ZR, Rm31 is SP, Rd31 discards only after key/service validation; lower32 result bits zero; original flags/FP/SIMD preserved. No Apple hardware key identity or architectural exception delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0x9ac03000",
+          "expected_mnemonics": [
+            "pacga"
           ]
         }
       ]

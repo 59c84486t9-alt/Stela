@@ -9,6 +9,7 @@ import ctypes
 import hashlib
 import json
 import importlib
+import os
 from pathlib import Path
 import random
 import struct
@@ -1182,14 +1183,222 @@ def fixup_plan_cohort(cli, folder, keys_path, image, dyld_path):
             'limits': ['Raw original descriptors and unchanged signPointer verify plans; no memory patching, binds, complete original fixup-loop or process claim.']}
 
 
+GENERIC_CODE_WORD_MASK = 0xffe0fc00
+GENERIC_CODE_OPCODE = 0x9ac03000
+GENERIC_CODE_EXIT_BYTES = 16
+GENERIC_CODE_EXIT_INSTRUCTIONS = 3
+PAUTH_EXIT_KIND = 6
+A64_INSTRUCTION_BYTES = 4
+A64_SVC_MASK = 0xffe0001f
+A64_SVC_OPCODE = 0xd4000001
+A64_SVC_IMMEDIATE_SHIFT = 5
+A64_SVC_IMMEDIATE_MASK = 0xffff
+A64_SVC_EXCEPTION_CLASS = 0x15
+A64_ESR_CLASS_SHIFT = 26
+A64_ESR_INSTRUCTION_LENGTH = 1 << 25
+A64_MODE_MASK = 31
+ELF_AARCH64_MACHINE = 183
+ELF_LOAD_SEGMENT = 1
+ELF_PROGRAM_OFFSET = 32
+ELF_PROGRAM_SIZE_OFFSET = 54
+ELF_PROGRAM_COUNT_OFFSET = 56
+ORIGINAL_INPUT_PREFIX_BYTES = 8
+PAUTH_FEATURE_FIELDS = {
+    'APA': ('ID_AA64ISAR1_EL1', 4), 'API': ('ID_AA64ISAR1_EL1', 8),
+    'GPA': ('ID_AA64ISAR1_EL1', 24), 'GPI': ('ID_AA64ISAR1_EL1', 28),
+    'APA3': ('ID_AA64ISAR2_EL1', 12), 'GPA3': ('ID_AA64ISAR2_EL1', 8),
+}
+PAUTH_FEATURE_MASK = 15
+
+
+def generic_code_audit(corpus, native_run):
+    """Audit raw original frames and actual public-runtime blocks, without a producer model."""
+    import simd_original as observer
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+    from capstone.x86_const import X86_OP_IMM, X86_OP_REG, X86_REG_RAX, X86_REG_EDX
+
+    corpus, native_run = Path(corpus).resolve(), Path(native_run).resolve()
+    cases = json.loads((corpus / 'cases.json').read_bytes())
+    functions = json.loads((corpus / 'functions.json').read_bytes())
+    subjects = json.loads((corpus / 'subjects.json').read_bytes())
+    profile = json.loads((corpus / 'profile.json').read_bytes())
+    build = json.loads((corpus / 'build-receipt.json').read_bytes())
+    receipt = json.loads((corpus / 'validation-receipt.json').read_bytes())
+    report = json.loads((native_run / 'report.json').read_bytes())
+    assert receipt['passed'] and report['passed'] and profile['kind'] == 'pacga'
+    inputs, originals, ram, elf = [(corpus / name).read_bytes()
+                                    for name in ('inputs.bin', 'results.bin', 'memory.bin', 'guest.elf')]
+    assert digest((corpus / 'build-receipt.json').read_bytes()) == receipt['build_receipt_sha256']
+    assert digest(elf) == build['elf_sha256'] and digest(originals) == receipt['results_sha256']
+    assert digest(Path(build['qemu_binary']).read_bytes()) == build['qemu_binary_sha256']
+    assert elf[:6] == b'\x7fELF\x02\x01' and struct.unpack_from('<H', elf, 18)[0] == ELF_AARCH64_MACHINE
+    phoff, phsize, phcount = struct.unpack_from('<Q', elf, ELF_PROGRAM_OFFSET)[0], struct.unpack_from('<H', elf, ELF_PROGRAM_SIZE_OFFSET)[0], struct.unpack_from('<H', elf, ELF_PROGRAM_COUNT_OFFSET)[0]
+    segments = [struct.unpack_from('<II6Q', elf, phoff + i * phsize) for i in range(phcount)]
+    for index, subject in enumerate(subjects):
+        operation = functions[index]['operations'][0]
+        word = operation['word']
+        assert word & GENERIC_CODE_WORD_MASK == GENERIC_CODE_OPCODE
+        pc = subject['instruction_pc']
+        matching = [segment for segment in segments if segment[0] == ELF_LOAD_SEGMENT and segment[3] <= pc and pc + 8 <= segment[3] + segment[5]]
+        assert len(matching) == 1
+        segment = matching[0]
+        offset = segment[2] + pc - segment[3]
+        assert offset == subject['elf_offset']
+        actual = elf[offset:offset + 8]
+        assert actual.hex() == subject['executed_source_hex'] and digest(actual) == subject['executed_source_sha256']
+        canonical = struct.pack('<2I', word, observer.RET_WORD)
+        assert canonical.hex() == functions[index]['source_hex'] == subject['canonical_source_hex']
+        assert digest(canonical) == subject['canonical_source_sha256']
+        assert struct.unpack_from('<I', actual)[0] == word
+        svc = struct.unpack_from('<I', actual, 4)[0]
+        assert svc & A64_SVC_MASK == A64_SVC_OPCODE
+    controls = dict(zip(observer.MEMORY_CONTROLS, struct.unpack_from('<4Q', originals, observer.MEMORY_CONTROL_HEADER_OFFSET)))
+    assert controls == profile['controls'] == receipt['controls']
+    key_names = [f'APD{side}Key{half}_EL1' for side in ('A', 'B') for half in ('Lo', 'Hi')]
+    key_names += ['APGAKeyLo_EL1', 'APGAKeyHi_EL1']
+    assert struct.unpack_from('<6Q', originals, profile['key_header_offset']) == tuple(profile['keys'][name] for name in key_names)
+    ids = dict(zip(observer.CPU_REGISTERS, struct.unpack_from('<9Q', originals)))
+    features = {name: (ids[register] >> shift) & PAUTH_FEATURE_MASK
+                for name, (register, shift) in PAUTH_FEATURE_FIELDS.items()}
+    assert features == profile['feature_requirement'] == receipt['features'] and features['GPA'] == 1
+    stride = observer.RECORD_BYTES + len(ram)
+    assert len(originals) == observer.HEADER_BYTES + len(cases) * stride
+    assert len(inputs) == len(cases) * observer.INPUT_STRIDE
+    states = []
+    for index, case in enumerate(cases):
+        assert struct.unpack_from('<Q', inputs, index * observer.INPUT_STRIDE)[0] == case['function_index']
+        begin = index * observer.INPUT_STRIDE + ORIGINAL_INPUT_PREFIX_BYTES
+        before = State.from_buffer_copy(inputs[begin:begin + ctypes.sizeof(State)])
+        assert digest(bytes(before)) == case['initial_state_sha256']
+        start = observer.HEADER_BYTES + index * stride
+        frame = originals[start:start + observer.RECORD_BYTES]
+        observed = State.from_buffer_copy(before)
+        observed.x[:] = struct.unpack_from('<31Q', frame)
+        observed.sp = struct.unpack_from('<Q', frame, observer.LAYOUT['sp'])[0]
+        spsr = struct.unpack_from('<Q', frame, observer.LAYOUT['spsr'])[0]
+        assert spsr & A64_MODE_MASK == 0
+        observed.nzcv = spsr & observer.NZCV_MASK
+        for register in range(32):
+            observed.v[register][:] = struct.unpack_from('<2Q', frame, observer.LAYOUT['v'] + register * 16)
+        observed.fpcr = struct.unpack_from('<Q', frame, observer.LAYOUT['fpcr'])[0]
+        observed.fpsr = struct.unpack_from('<Q', frame, observer.LAYOUT['fpsr'])[0]
+        assert (before.fpcr, before.fpsr) == struct.unpack_from('<2Q', frame, observer.LAYOUT['pre_fpcr'])
+        subject = subjects[case['function_index']]
+        esr, elr = struct.unpack_from('<2Q', frame, observer.LAYOUT['esr'])
+        svc = struct.unpack_from('<I', elf, subject['elf_offset'] + 4)[0]
+        assert esr == (A64_SVC_EXCEPTION_CLASS << A64_ESR_CLASS_SHIFT) | A64_ESR_INSTRUCTION_LENGTH | ((svc >> A64_SVC_IMMEDIATE_SHIFT) & A64_SVC_IMMEDIATE_MASK)
+        assert elr == subject['instruction_pc'] + 8 == subject['expected_elr']
+        assert receipt['cases'][index]['classification'] == 'direct_original'
+        assert digest(bytes(observed)) == receipt['cases'][index]['state_sha256']
+        assert originals[start + observer.RECORD_BYTES:start + stride] == ram
+        states.append(bytes(observed))
+    inventory = json.loads((native_run / 'emission-inventory.json').read_bytes())
+    assert len(inventory) == len(functions)
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    for index, row in inventory.items():
+        index = int(index)
+        manifest = row['manifest']
+        identity = manifest['identity']
+        code = bytes.fromhex(row['native_hex'])
+        directory = Path(row['directory'])
+        raw_manifest = (directory / 'manifest.json').read_bytes()
+        assert digest(raw_manifest) == row['manifest_sha256'] == json.loads((directory / 'manifest.sha256.json').read_bytes())
+        assert json.loads(raw_manifest) == manifest and (directory / 'native.bin').read_bytes() == code
+        assert not manifest['verified'] and identity['abi'] == ABI and identity['target_cpu'] == 'x86_64-baseline'
+        assert identity['compiler_source_sha256'] == report['compiler_sha256']
+        assert identity['source_sha256'] == digest(struct.pack('<I', functions[index]['operations'][0]['word']))
+        assert manifest['native_sha256'] == digest(code) and manifest['native_bytes'] == len(code) == GENERIC_CODE_EXIT_BYTES
+        assert manifest['source_map'] == [[identity['guest_base'], 0]]
+        assert row['checked_manifest']['native_sha256'] == digest(code)
+        assert row['checked_manifest']['source_map'] == manifest['source_map']
+        instructions = list(decoder.disasm(code, 0))
+        assert len(instructions) == GENERIC_CODE_EXIT_INSTRUCTIONS and sum(i.size for i in instructions) == len(code)
+        assert [i.mnemonic for i in instructions] == ['movabs', 'mov', 'ret']
+        first, second, last = instructions
+        assert first.operands[0].type == X86_OP_REG and first.operands[0].reg == X86_REG_RAX
+        assert first.operands[1].type == X86_OP_IMM and first.operands[1].imm == identity['guest_base']
+        assert second.operands[0].type == X86_OP_REG and second.operands[0].reg == X86_REG_EDX
+        assert second.operands[1].type == X86_OP_IMM and second.operands[1].imm == PAUTH_EXIT_KIND and not last.operands
+    expected_cache = {'cold': (len(functions), 0, len(cases) - len(functions)), 'hot': (0, 0, len(cases)),
+                      'disk': (0, len(functions), len(cases) - len(functions)), 'aot': (0, len(functions), len(cases) - len(functions))}
+    total = 0
+    assert {phase['phase'] for phase in report['phases']} == set(expected_cache)
+    for phase in report['phases']:
+        native = (native_run / (phase['phase'] + '-states.bin')).read_bytes()
+        assert native == b''.join(states) and digest(native) == phase['native_states_sha256']
+        outcomes = json.loads((native_run / (phase['phase'] + '-outcomes.json')).read_bytes())
+        assert len(outcomes) == len(cases)
+        for index, row in enumerate(outcomes):
+            operation = functions[cases[index]['function_index']]['operations'][0]
+            body = inventory[str(cases[index]['function_index'])]['manifest']
+            pc = body['identity']['guest_base']
+            outcome = row['outcome']
+            assert row['case'] == index and row['pc'] == pc + A64_INSTRUCTION_BYTES and row['state_sha256'] == digest(states[index])
+            assert outcome['reason'] == {'kind': 'stop_address'} and outcome['last_exit'] == [pc, PAUTH_EXIT_KIND]
+            assert outcome['blocks_executed'] == 1 and outcome['floating_point_helpers'] == 0
+            assert outcome['pointer_authentication_events'] == [{'authenticated': None, 'instruction': {
+                'instruction_pc': pc, 'next_pc': pc + A64_INSTRUCTION_BYTES, 'operation': {'generic_code': {
+                    'destination': operation['d'], 'source': operation['n'], 'modifier': operation['m']}}}, 'next_pc': pc + A64_INSTRUCTION_BYTES}]
+        counts = tuple(sum(row['outcome'][key] for row in outcomes) for key in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits'))
+        assert counts == expected_cache[phase['phase']]
+        assert counts == tuple(phase[key] for key in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits'))
+        total += len(states)
+    sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'dev/simd_original.py',
+               ROOT / 'crates/stela-runtime/tests/pointer_authentication/corpus.rs']
+    return {'kind': 'original_arm_generic_pac_vs_native_runtime', 'passed': True, 'abi': ABI,
+            'compiler_source_sha256': report['compiler_sha256'], 'profile': report['profile'],
+            'harness_source_sha256': digest(Path(__file__).read_bytes()),
+            'sources_sha256': {str(p.relative_to(ROOT)): digest(p.read_bytes()) for p in sources},
+            'canonical_forms': 1, 'raw_original_frames': len(cases), 'state_comparisons': total,
+            'actual_emitted_bodies': len(inventory), 'baseline_checked_byte_bridges': len(inventory),
+            'body_bytes_including_ret': GENERIC_CODE_EXIT_BYTES, 'body_instructions_including_ret': GENERIC_CODE_EXIT_INSTRUCTIONS,
+            'phases': report['phases'], 'original_controls': controls, 'original_features': features,
+            'external_input_sha256': {str(corpus / name): digest((corpus / name).read_bytes()) for name in
+                                      ('cases.json', 'functions.json', 'inputs.bin', 'results.bin', 'guest.elf',
+                                       'profile.json', 'build-receipt.json', 'validation-receipt.json')},
+            'runtime_report_sha256': digest((native_run / 'report.json').read_bytes()),
+            'limits': ['Original QEMU EL0 QARMA5 GA execution, not Apple hardware key identity.',
+                       f'PACGA is memory-free; original {len(ram)}-byte RAM snapshots stay unchanged.',
+                       'Full State includes raw X30, NZCV, FP/SIMD and requested control readbacks.',
+                       'No complete process, application, exception delivery or performance claim.']}
+
+
+def generic_code_cohort(args, parser):
+    if args.generic_code_originals is None or args.generic_code_run is None:
+        parser.error('--generic-code requires --generic-code-originals and a fresh/existing --generic-code-run')
+    if args.generic_code_test_executable is not None:
+        if args.generic_code_run.exists():
+            parser.error('--generic-code-test-executable requires a fresh --generic-code-run')
+        environment = os.environ.copy()
+        environment['STELA_PAUTH_ORIGINALS'] = str(args.generic_code_originals.resolve())
+        environment['STELA_PAUTH_NATIVE_OUTPUT'] = str(args.generic_code_run.resolve())
+        subprocess.run([str(args.generic_code_test_executable.resolve()), '--ignored', '--exact',
+                        'corpus::generic_code_original_corpus', '--nocapture'], env=environment, check=True)
+    result = generic_code_audit(args.generic_code_originals, args.generic_code_run)
+    output = args.output or ROOT / '.stela/pacga-differential-report.json'
+    snapshot = write_evidence(output, result)
+    print(json.dumps({'passed': True, 'state_comparisons': result['state_comparisons'],
+                      'report': str(output), 'snapshot': str(snapshot)}, indent=2))
+
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
+    parser.add_argument('--generic-code', action='store_true', help='verify the separate batched PACGA original/runtime cohort')
+    parser.add_argument('--generic-code-originals', type=Path, help='independently captured full-State PACGA corpus')
+    parser.add_argument('--generic-code-run', type=Path, help='native cohort output directory (fresh when executing)')
+    parser.add_argument('--generic-code-test-executable', type=Path, help='built consolidated pointer_authentication test binary; omit to audit an existing run')
     parser.add_argument('--generic-pauth', action='store_true', help='also verify all33 basic PAC forms, original dyld signer and authenticated fixup plans')
     parser.add_argument('--executable', type=Path, action='append', default=[])
     parser.add_argument('--bootstrap-clock', action='store_true', help='also verify the complete original mach_continuous_time startup call')
-    parser.add_argument('--output', type=Path, default=ROOT / '.stela/pauth-differential-report.json')
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    if args.generic_code:
+        generic_code_cohort(args, parser)
+        return
+    args.output = args.output or ROOT / '.stela/pauth-differential-report.json'
     if args.bootstrap_clock and len(args.executable) != 2:
         parser.error('--bootstrap-clock requires two explicit --executable inputs for cold/disk coverage')
     if not args.no_build:
@@ -1356,7 +1565,7 @@ def main():
                          'Native executes original scalar prefix then explicit PAC runtime boundary; cryptography is a software helper, not inline native PAC.',
                          'Authentication failures poison pointers; RETAB typed stop records pending instruction-fetch exception delivery.',
                          'Noncanonical signing: June2026 ASL corrupts bit62, older Unicorn2.1.4 corrupts bit63;64 exact classified observations are not counted as three-way equality.',
-                         'Optional generic cohort covers33 basic IA/IB/DA/DB PAC/AUT/XPAC/RET forms and eight authenticated branch/call forms; PACGA and unreviewed system controls remain unsupported. Data signing invalid-extension differences classify exact bit54 versus older Unicorn bit55 insertion behavior, not equality.',
+                         'Optional generic cohort covers33 basic IA/IB/DA/DB PAC/AUT/XPAC/RET forms and eight authenticated branch/call forms; PACGA is verified by the separate --generic-code cohort; unreviewed system controls remain unsupported. Data signing invalid-extension differences classify exact bit54 versus older Unicorn bit55 insertion behavior, not equality.',
                          'MRS Rt31 discardedvalue is unobservable; the unchangedinstruction executes and fullstate preservation is checked, while native event replays a separatelyrecorded postinstruction counter sample. Other31Rt replay actualMRSdestination results.',
                          'Optional clock bootstrap executes44 originalinstructions, twoPACsigns+RETAB, actualISB/CNTVCT, allnine stores and restoredframe. Counterreplay provesopaque input effects; original62500000Hz and nativevirtual1GHz rates are not equated. Nativehost samples are separatelybounded by publicmach_continuous_time.',
                          'PAC-only vectors do not access guest RAM; complete clock probes compare every stack byte and all readable image/clock views. Full784B state is checked throughout; no full OS process, Apple hardware or performance claim.']}

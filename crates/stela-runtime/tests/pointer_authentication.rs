@@ -256,3 +256,9 @@ fn poisoned_return_cannot_fetch_registered_code_or_be_accepted_as_a_resumption_s
     assert_eq!(no_fetch.blocks_executed, 0);
     Ok(())
 }
+
+#[path = "pointer_authentication/modern.rs"]
+mod modern;
+
+#[path = "pointer_authentication/corpus.rs"]
+mod corpus;

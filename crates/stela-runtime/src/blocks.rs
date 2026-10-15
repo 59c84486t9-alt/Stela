@@ -70,13 +70,22 @@ pub enum StopReason {
         instruction: PointerAuthentication,
         key: PointerAuthenticationKey,
     },
-    /// Classic PAuth poisoned a return target. No target instruction executed;
+    PointerAuthenticationGenericKeyUnavailable {
+        instruction: PointerAuthentication,
+    },
+    /// FPAC/FPACCOMBINE raised an authentication failure before committing
+    /// destinations or the link register. Exception delivery belongs to the CPU owner.
+    PointerAuthenticationFailure {
+        instruction: PointerAuthentication,
+        code: u8,
+    },
+    /// A nonfaulting PAuth check produced an invalid return target. No target instruction executed;
     /// guest instruction-fetch exception delivery remains the caller's work.
     PointerAuthenticationPoisonedReturn {
         instruction: PointerAuthentication,
         poisoned_target: GuestAddress,
     },
-    /// Classic PAuth poisoned an indirect branch/call target before any fetch.
+    /// A nonfaulting PAuth check produced an invalid branch/call target before fetch.
     PointerAuthenticationPoisonedBranch {
         instruction: PointerAuthentication,
         poisoned_target: GuestAddress,
@@ -1055,13 +1064,30 @@ impl BlockRuntime {
                         StopReason::PointerAuthenticationKeyUnavailable { instruction, key };
                     break;
                 }
+                if matches!(
+                    instruction.operation,
+                    PointerAuthenticationOperation::GenericCode(_)
+                ) && !context.has_generic_key()
+                {
+                    outcome.reason =
+                        StopReason::PointerAuthenticationGenericKeyUnavailable { instruction };
+                    break;
+                }
                 let result = complete_pauth(context, &instruction, &mut state.registers);
                 let (next, authenticated) = match result {
                     Ok(value) => value,
                     Err(error) => {
-                        outcome.reason = StopReason::PointerAuthenticationUnsupported {
-                            instruction,
-                            detail: error.to_string(),
+                        outcome.reason = match error.downcast_ref::<pauth::AuthenticationError>() {
+                            Some(pauth::AuthenticationError::Failure { code }) => {
+                                StopReason::PointerAuthenticationFailure {
+                                    instruction,
+                                    code: *code,
+                                }
+                            }
+                            _ => StopReason::PointerAuthenticationUnsupported {
+                                instruction,
+                                detail: error.to_string(),
+                            },
                         };
                         break;
                     }
@@ -1194,7 +1220,12 @@ fn complete_pauth(
             Ok((instruction.next_pc, None))
         }
         PointerAuthenticationOperation::AuthenticateIbSp => {
-            let result = context.authenticate_ib(registers.x[30], registers.sp)?;
+            let result = context.authenticate_operation(
+                pauth::Key::Ib,
+                registers.x[30],
+                registers.sp,
+                false,
+            )?;
             registers.x[30] = result.pointer;
             Ok((instruction.next_pc, Some(result.authenticated)))
         }
@@ -1204,7 +1235,8 @@ fn complete_pauth(
             } else {
                 pauth::Key::Ia
             };
-            let result = context.authenticate(key, registers.x[30], registers.sp)?;
+            let result =
+                context.authenticate_operation(key, registers.x[30], registers.sp, true)?;
             // Authenticated RET uses a temporary target. The signed LR stays in X30.
             Ok((GuestAddress(result.pointer), Some(result.authenticated)))
         }
@@ -1225,10 +1257,12 @@ fn complete_pauth(
             };
             // Both operands may alias X30. Authentication uses their old values.
             let modifier = pauth_modifier(registers, modifier)?;
-            let result = context.authenticate(runtime_pauth_key(key), pointer, modifier)?;
+            let result =
+                context.authenticate_operation(runtime_pauth_key(key), pointer, modifier, true)?;
             if link {
-                // PAuth1 poisons on failure and still performs this architectural
-                // write before instruction fetch faults at the poisoned target.
+                // Nonfaulting authentication still performs the architectural
+                // link write before instruction fetch checks its resulting target.
+                // FPACCOMBINE failure has already returned above.
                 registers.x[30] = instruction.next_pc.0;
             }
             Ok((GuestAddress(result.pointer), Some(result.authenticated)))
@@ -1260,7 +1294,12 @@ fn complete_pauth(
                     None,
                 )
             } else {
-                let result = context.authenticate(runtime_pauth_key(key), pointer, modifier)?;
+                let result = context.authenticate_operation(
+                    runtime_pauth_key(key),
+                    pointer,
+                    modifier,
+                    false,
+                )?;
                 (result.pointer, Some(result.authenticated))
             };
             // XZR is discarded only after the operation/service has succeeded.
@@ -1268,6 +1307,16 @@ fn complete_pauth(
                 registers.x[usize::from(destination)] = value;
             }
             Ok((instruction.next_pc, authenticated))
+        }
+        PointerAuthenticationOperation::GenericCode(code) => {
+            pauth::generic::complete(code, registers, |data, modifier| {
+                context.generic_code(data, modifier)
+            })
+            .map_err(|fault| match fault {
+                pauth::generic::Fault::InvalidOperands => anyhow::anyhow!("invalid PACGA operands"),
+                pauth::generic::Fault::Compute(error) => error,
+            })?;
+            Ok((instruction.next_pc, None))
         }
         Strip { data, destination } => {
             ensure!(
