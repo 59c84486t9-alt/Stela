@@ -82,6 +82,7 @@ pub enum AllocateDataError {
     MaximumProtection,
     AddressUnavailable,
     AddressSpaceUnusable,
+    SharedDomainBound,
     ResourceLimit,
     MetadataAllocation,
     HostFailure {
@@ -117,6 +118,9 @@ impl OwnedMemory {
         request: AllocateDataRequest,
     ) -> Result<PendingDataAllocation<'_>, AllocateDataError> {
         use AllocateDataError as E;
+        if self.shared.is_some() {
+            return Err(E::SharedDomainBound);
+        }
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -327,6 +331,7 @@ impl PendingDataAllocation<'_> {
             .take()
             .expect("unpublished storage retains ownership");
         let allocation = Allocation {
+            shared_backing: None,
             storage,
             base: self.allocation.guest_address,
             bytes: self.allocation.mapped_bytes,

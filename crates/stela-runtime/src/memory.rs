@@ -8,6 +8,9 @@
 
 mod access;
 mod allocation;
+mod binding;
+use binding::SharedBinding;
+pub use binding::{SharedBindingError, SharedMemoryConfig};
 pub mod backing;
 pub mod domain;
 pub mod monitor;
@@ -143,6 +146,7 @@ pub struct DataProtectionLimit {
 }
 #[derive(Debug)]
 struct Allocation {
+    shared_backing: Option<Arc<backing::MemoryBacking>>,
     storage: Arc<NativeStorage>,
     base: u64,
     bytes: u64,
@@ -162,6 +166,7 @@ pub enum ProtectionError {
     ExecutableRegion,
     WriteWithoutRead,
     AddressSpaceUnusable,
+    SharedDomainBound,
     AllocationFailure,
     HostFailure {
         errno: Option<i32>,
@@ -184,6 +189,7 @@ impl std::error::Error for ProtectionError {}
 /// not pin host rights or admit concurrent/shared execution.
 #[derive(Debug)]
 pub struct OwnedMemory {
+    shared: Option<Arc<SharedBinding>>,
     regions: Vec<MemoryRegion>,
     allocations: Vec<Allocation>,
     page_bytes: u64,
@@ -356,6 +362,7 @@ impl OwnedMemory {
         }
 
         let mut memory = Self {
+            shared: None,
             regions: Vec::new(),
             allocations: Vec::new(),
             page_bytes: page,
@@ -426,6 +433,7 @@ impl OwnedMemory {
             // Register retained ownership before any later operation can fail.
             let limit = limits.get(&spec.guest_address);
             memory.allocations.push(Allocation {
+                shared_backing: None,
                 storage,
                 base: spec.guest_address,
                 bytes: mapped_bytes,
@@ -522,6 +530,9 @@ impl OwnedMemory {
         mut protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
     ) -> std::result::Result<(), ProtectionError> {
         use ProtectionError as E;
+        if self.shared.is_some() {
+            return Err(E::SharedDomainBound);
+        }
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -680,6 +691,9 @@ impl OwnedMemory {
     }
 
     pub fn read_snapshot(&self, address: u64, length: usize) -> Result<Vec<u8>> {
+        if self.shared.is_some() {
+            return Err(SharedBindingError::SharedDomainBound.into());
+        }
         self.validate_access(address, length, false)?;
         let mut bytes = vec![0; length];
         for (start, count, offset) in self.access_spans(address, length) {
@@ -700,6 +714,9 @@ impl OwnedMemory {
     /// Validate the entire write first, including crossings of adjacent regions.
     pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
         self.validate_access(address, bytes.len(), true)?;
+        if self.shared.is_some() {
+            return self.write_shared(address, bytes);
+        }
         for (start, count, offset) in self.access_spans(address, bytes.len()) {
             // SAFETY: the exclusive owner validated every byte as writable;
             // callers cannot obtain references into these allocations safely.
@@ -741,6 +758,8 @@ fn host_protection(readable: bool, writable: bool) -> i32 {
 /// view and an unexposed writable alias. Publication and translated accesses
 /// must be serialized by the caller; this is not a concurrent kernel seqlock.
 pub struct PublishedReadOnlyRegion {
+    shared: Option<Arc<SharedBinding>>,
+    shared_backing: Option<Arc<backing::MemoryBacking>>,
     region: MemoryRegion,
     storage: Arc<NativeStorage>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -849,6 +868,8 @@ impl PublishedReadOnlyRegion {
             )
         }?;
         Ok(Self {
+            shared: None,
+            shared_backing: None,
             region: MemoryRegion {
                 guest_address: guest_base,
                 virtual_bytes: initial.len() as u64,
@@ -878,6 +899,9 @@ impl PublishedReadOnlyRegion {
     }
 
     pub fn read_snapshot(&self, offset: usize, bytes: usize) -> Result<Vec<u8>> {
+        if self.shared.is_some() {
+            return Err(SharedBindingError::SharedDomainBound.into());
+        }
         self.extent(offset, bytes)?;
         let mut result = vec![0; bytes];
         // SAFETY: live RO mapping, bounded copy, independent owned destination;
@@ -894,6 +918,20 @@ impl PublishedReadOnlyRegion {
 
     pub fn publish(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.extent(offset, bytes.len())?;
+        if let Some(shared) = &self.shared {
+            shared.check().map_err(|status| domain::PublicationFault {
+                status,
+                completed: 0,
+            })?;
+            shared.publish(
+                self.shared_backing
+                    .as_ref()
+                    .expect("canonical publisher backing"),
+                offset,
+                bytes,
+            )?;
+            return Ok(());
+        }
         // SAFETY: private live RW alias and fully checked extent. No guest code
         // may execute concurrently, and safe APIs expose no mapping references.
         unsafe {
