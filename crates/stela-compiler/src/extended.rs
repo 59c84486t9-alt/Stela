@@ -15,7 +15,7 @@ use crate::{
             features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
             profile::ScalableControls,
         },
-        sme::{integer_dots, integer_vector, length, movement, tables},
+        sme::{integer_dots, integer_matrix, integer_vector, length, movement, tables},
         sve::{
             address, dot, floating_copy, integer_arithmetic, integer_bits, integer_comparison,
             integer_logic::{self, CopySource, Kind},
@@ -242,6 +242,7 @@ enum Decoded {
     SmeMovement(movement::Operand),
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
+    SmeIntegerMatrix(integer_matrix::Operand),
 }
 
 pub(crate) fn ordinary_permitted(operation: &Operation) -> bool {
@@ -842,6 +843,23 @@ fn decode(
         }
         return Ok(Decoded::SmeTables(operand));
     }
+    if let Some(operand) = integer_matrix::decode(word) {
+        let mut required = ScalableFeatures::of(ScalableFeature::Sme);
+        if operand.requires_sme2() {
+            required = required.with(ScalableFeature::Sme2);
+        }
+        if operand.requires_i16i64() {
+            required = required.with(ScalableFeature::SmeI16I64);
+        }
+        profile.require_features(FeatureRequirement::all(required), pc)?;
+        if !profile.mode().streaming() || !profile.mode().za_enabled() {
+            return Err(CompileError(format!(
+                "streaming mode and ZA required for integer matrix operation at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::SmeIntegerMatrix(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -960,6 +978,9 @@ fn emit_decoded(
         }
         Decoded::SmeTables(operand) => {
             x86_64::sme::tables::emit(code, &operand, profile.length, target);
+        }
+        Decoded::SmeIntegerMatrix(operand) => {
+            x86_64::sme::integer_matrix::emit(code, &operand, profile.vector_length(), target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -1506,6 +1527,90 @@ mod tests {
     const MOVPRFX_Z0_Z1: u32 = 0x0420_bc20;
     const RDSVL_X0_ONE: u32 = 0x04bf_5820;
 
+    #[test]
+    fn integer_matrix_admission_checks_features_mode_and_source_maps() {
+        const MATRIX_WORDS: [u32; 6] = [
+            0xc1a0_1c10, // ADD ZA.S pair.
+            0xc100_0000, // SMLALL ZA.S indexed byte products.
+            0xc180_0000, // SMLALL ZA.D indexed halfword products.
+            0xa080_0000, // SMOPA ZA.S byte outer products.
+            0xa0c0_0000, // SMOPA ZA.D halfword outer products.
+            0x8080_0008, // BMOPA ZA.S XNOR outer products.
+        ];
+        for word in MATRIX_WORDS {
+            let operand = integer_matrix::decode(word).unwrap();
+            let source = words(&[word, RET_X30]);
+            assert!(crate::compile(&source, GuestAddress(0)).is_err());
+            let legacy = ScalableProfile::new(
+                VectorLength::from_bytes(16).unwrap(),
+                ScalableMode::new(true, true),
+            );
+            let legacy_result =
+                compile_for_profile(&source, GuestAddress(0), legacy, TargetCpu::Baseline);
+            assert_eq!(legacy_result.is_ok(), !operand.requires_i16i64());
+            if operand.requires_i16i64() {
+                assert!(legacy_result.unwrap_err().0.contains("FEAT_SME_I16I64"));
+            }
+            for bytes in [16, 32, 64, 128, 256] {
+                let length = VectorLength::from_bytes(bytes).unwrap();
+                for sme2 in [false, true] {
+                    for i16i64 in [false, true] {
+                        let mut features = ScalableFeatures::of(ScalableFeature::Sme);
+                        if sme2 {
+                            features = features.with(ScalableFeature::Sme2);
+                        }
+                        if i16i64 {
+                            features = features.with(ScalableFeature::SmeI16I64);
+                        }
+                        for streaming in [false, true] {
+                            for za in [false, true] {
+                                let profile = ScalableProfile::new_with_features(
+                                    length,
+                                    ScalableMode::new(streaming, za),
+                                    features,
+                                    ScalableControls::new(length, false),
+                                )
+                                .unwrap();
+                                let result = compile_for_profile(
+                                    &source,
+                                    GuestAddress(0),
+                                    profile,
+                                    TargetCpu::Baseline,
+                                );
+                                let permitted = streaming
+                                    && za
+                                    && (!operand.requires_sme2() || sme2)
+                                    && (!operand.requires_i16i64() || i16i64);
+                                assert_eq!(
+                                    result.is_ok(),
+                                    permitted,
+                                    "word={word:#x} bytes={bytes} sme2={sme2} i16i64={i16i64} sm={streaming} za={za}"
+                                );
+                                if let Ok(native) = result {
+                                    let mut body = Vec::new();
+                                    x86_64::sme::integer_matrix::emit(
+                                        &mut body,
+                                        &operand,
+                                        length,
+                                        TargetCpu::Baseline,
+                                    );
+                                    let map = &native.source_map;
+                                    assert_eq!(map.len(), 2);
+                                    assert_eq!(map[0], (GuestAddress(0), CONTEXT_WRAPPER_BYTES));
+                                    assert_eq!(
+                                        map[1],
+                                        (GuestAddress(4), CONTEXT_WRAPPER_BYTES + body.len())
+                                    );
+                                    assert_eq!(&native.x86_64_code[map[0].1..map[1].1], body);
+                                    assert_eq!(&native.x86_64_code[map[1].1..], &[RET]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     fn profile(bytes: usize, streaming: bool) -> ScalableProfile {
         ScalableProfile::new(
             VectorLength::from_bytes(bytes).unwrap(),

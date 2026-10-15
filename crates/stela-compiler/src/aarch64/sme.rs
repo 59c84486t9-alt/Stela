@@ -1,6 +1,7 @@
 //! Scalable-matrix operands. Mode and feature checks are execution contracts.
 
 pub mod integer_dots;
+pub mod integer_matrix;
 pub mod integer_vector;
 pub mod length;
 pub mod movement;
@@ -9,6 +10,7 @@ pub mod tables;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     IntegerDots(integer_dots::Operand),
+    IntegerMatrix(integer_matrix::Operand),
     IntegerVector(integer_vector::Operand),
     Length(length::Operand),
     Movement(movement::Operand),
@@ -28,5 +30,6 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     }
     integer_dots::decode(word)
         .map(|operand| Ok(Operand::IntegerDots(operand)))
+        .or_else(|| integer_matrix::decode(word).map(|operand| Ok(Operand::IntegerMatrix(operand))))
         .or_else(|| length::decode(word).map(|operand| Ok(Operand::Length(operand))))
 }
