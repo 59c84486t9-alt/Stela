@@ -4,6 +4,7 @@ pub mod bfloat16;
 pub mod comparison;
 pub mod complex;
 pub mod estimate;
+pub mod features;
 pub mod fused;
 pub mod integer;
 pub mod minmax;
@@ -29,6 +30,7 @@ pub const EXCEPTIONS: u32 =
 pub const FPCR_EXCEPTION_ENABLE_SHIFT: u32 = 8;
 pub const FPCR_FIZ: u32 = 1 << 0;
 pub const FPCR_AH: u32 = 1 << 1;
+pub const FPCR_EBF: u32 = 1 << 13;
 pub const FPCR_NEP: u32 = 1 << 2;
 pub const FPCR_FZ16: u32 = 1 << 19;
 pub const FPCR_ROUNDING_SHIFT: u32 = 22;

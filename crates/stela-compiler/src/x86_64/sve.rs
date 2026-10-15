@@ -2,6 +2,7 @@
 
 pub(crate) mod address;
 pub(crate) mod dot;
+pub(crate) mod floating;
 pub(crate) mod floating_copy;
 pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_bits;

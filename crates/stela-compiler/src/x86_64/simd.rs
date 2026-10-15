@@ -19,7 +19,7 @@ mod immediates;
 mod integer_conversion;
 pub(super) mod memory;
 mod minmax;
-mod numerical;
+pub(in crate::x86_64) mod numerical;
 mod precision;
 mod products;
 mod rearrange;

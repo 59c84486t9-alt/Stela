@@ -1,6 +1,8 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
+pub(crate) mod scalable;
+
 use crate::{
     Prepared, clock, execution::platform, floating, memory, pauth, prepare_block_for_target,
     system, thread,
@@ -990,6 +992,10 @@ impl BlockRuntime {
                 unsafe { block.mapping.call_block(&mut state.registers)? };
             let exit_kind = ExitKind::try_from(kind)
                 .map_err(|_| anyhow::anyhow!("invalid native block exit kind"))?;
+            ensure!(
+                exit_kind != ExitKind::ScalableNumerical,
+                "context-block numerical exit requires owned scalable entry"
+            );
             let trap = if exit_kind == ExitKind::Trap {
                 Some(validate_trap_exit(
                     pc,
@@ -1568,6 +1574,25 @@ fn validate_numerical_exit(
     stela_compiler::aarch64::FloatingPointOperation,
     GuestAddress,
 )> {
+    let word = validate_interior_word(entry, exit, source_bytes, region_base, source)?;
+    let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
+        .context("numerical exit does not identify arithmetic")?
+        .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
+    let next = GuestAddress(
+        exit.0
+            .checked_add(INSTRUCTION_BYTES as u64)
+            .context("numerical continuation address overflow")?,
+    );
+    Ok((operand, next))
+}
+
+fn validate_interior_word(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<u32> {
     ensure!(
         entry.0.is_multiple_of(INSTRUCTION_BYTES as u64)
             && exit.0.is_multiple_of(INSTRUCTION_BYTES as u64)
@@ -1604,16 +1629,9 @@ fn validate_numerical_exit(
     let offset = prefix
         .checked_add(relative)
         .context("numerical source offset overflow")?;
-    let word = u32::from_le_bytes(source[offset..offset + INSTRUCTION_BYTES].try_into()?);
-    let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
-        .context("numerical exit does not identify arithmetic")?
-        .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
-    let next = GuestAddress(
-        exit.0
-            .checked_add(INSTRUCTION_BYTES as u64)
-            .context("numerical continuation address overflow")?,
-    );
-    Ok((operand, next))
+    Ok(u32::from_le_bytes(
+        source[offset..offset + INSTRUCTION_BYTES].try_into()?,
+    ))
 }
 
 /// Native exit metadata must identify the final immutable source instruction;

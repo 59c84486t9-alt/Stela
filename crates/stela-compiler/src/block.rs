@@ -17,6 +17,7 @@ use serde::Serialize;
 pub mod pauth_memory;
 pub mod system;
 pub use system::{SystemInstruction, decode_system_instruction};
+pub mod scalable;
 mod thread;
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 
@@ -114,6 +115,7 @@ pub enum ExitKind {
     Clock = 7,
     ThreadRegister = 8,
     FloatingPoint = 9,
+    ScalableNumerical = 10,
     System = 11,
 }
 
@@ -132,6 +134,7 @@ impl TryFrom<u64> for ExitKind {
             7 => Ok(Self::Clock),
             8 => Ok(Self::ThreadRegister),
             9 => Ok(Self::FloatingPoint),
+            10 => Ok(Self::ScalableNumerical),
             11 => Ok(Self::System),
             _ => Err(()),
         }

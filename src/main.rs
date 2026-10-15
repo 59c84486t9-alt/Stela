@@ -124,6 +124,33 @@ enum Command {
         cpu_target: stela_compiler::TargetCpu,
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
+        /// Compile for an explicit guest execution profile.
+        #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
+        guest_profile: Option<String>,
+        /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
+        svl_bytes: Option<stela_compiler::aarch64::scalable::VectorLength>,
+        /// Explicit initial SVCR bits: streaming mode is bit0, ZA enable is bit1.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_mode)]
+        svcr: Option<stela_compiler::aarch64::scalable::ScalableMode>,
+        /// Explicit architectural feature declaration; repeat for each V2 feature.
+        #[arg(long, requires = "guest_profile")]
+        guest_feature: Vec<String>,
+        /// Explicit maximum streaming vector length for the V2 guest profile.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
+        max_svl_bytes: Option<stela_compiler::aarch64::scalable::VectorLength>,
+        /// Explicit V2 ZT0 permission: true or false.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        zt0_enabled: Option<bool>,
+        /// Explicit effective FullA64 availability for contextual blocks.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        full_a64: Option<bool>,
+        /// Explicit extended BF16 availability for contextual blocks.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        ebf16: Option<bool>,
+        /// Explicit reciprocal precision availability for contextual blocks.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        rpres: Option<bool>,
         #[arg(long)]
         output_dir: PathBuf,
         /// Emit explicit software PAuth helper boundaries; preparation needs no keys.
@@ -503,7 +530,7 @@ fn parse_scalable_mode(
 }
 
 /// Validate declared guest specialization before reading or compiling input.
-fn compile_leaf_profile(
+fn compile_scalable_profile(
     id: Option<&str>,
     length: Option<stela_compiler::aarch64::scalable::VectorLength>,
     mode: Option<stela_compiler::aarch64::scalable::ScalableMode>,
@@ -552,6 +579,60 @@ fn compile_leaf_profile(
         _ => anyhow::bail!("unknown guest profile {id:?}"),
     };
     Ok(Some(profile))
+}
+
+fn compile_context_block_profile(
+    scalable: Option<stela_compiler::extended::ScalableProfile>,
+    services: stela_compiler::block::BlockProfile,
+    full_a64: Option<bool>,
+    ebf16: Option<bool>,
+    rpres: Option<bool>,
+) -> Result<Option<stela_compiler::extended::block::ExtendedBlockProfile>> {
+    use stela_compiler::{
+        aarch64::floating::features::NumericalFeatures, block::BlockProfile,
+        extended::block::ExtendedBlockProfile,
+    };
+    let Some(scalable) = scalable else {
+        ensure!(
+            full_a64.is_none() && ebf16.is_none() && rpres.is_none(),
+            "numerical declarations require an explicit contextual guest profile"
+        );
+        return Ok(None);
+    };
+    ensure!(
+        services == BlockProfile::Ordinary,
+        "context block services are not integrated"
+    );
+    let numerical = NumericalFeatures::new(
+        full_a64.context("context block requires explicit FullA64 availability")?,
+        ebf16.context("context block requires explicit extended BF16 availability")?,
+        rpres.context("context block requires explicit reciprocal precision availability")?,
+    );
+    Ok(Some(ExtendedBlockProfile::new(
+        scalable, services, numerical,
+    )))
+}
+
+fn scalable_execution_manifest(
+    profile: stela_compiler::extended::ScalableProfile,
+) -> Result<serde_json::Value> {
+    let mut execution = serde_json::json!({
+        "id": profile.id(),
+        "svl_bytes": profile.vector_length().bytes(),
+        "svcr": profile.mode().svcr(),
+    });
+    if let Some(features) = profile.declared_features() {
+        let controls = profile.controls();
+        execution["features"] = serde_json::json!(features.names());
+        execution["max_svl_bytes"] = serde_json::json!(controls.max_vector_length().bytes());
+        execution["zt0_enabled"] = serde_json::json!(controls.zt0_enabled());
+        execution["dit"] = serde_json::json!(
+            profile
+                .required_dit()
+                .context("V2 profile requires a DIT declaration")?
+        );
+    }
+    Ok(execution)
 }
 
 fn parse_address(value: &str) -> Result<u64, String> {
@@ -1356,40 +1437,80 @@ fn run() -> Result<()> {
             input,
             cpu_target,
             guest_base,
+            guest_profile,
+            svl_bytes,
+            svcr,
+            guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
+            full_a64,
+            ebf16,
+            rpres,
             output_dir,
             software_pauth,
             software_clock,
             thread_registers,
             system_boundaries,
         } => {
-            let source = std::fs::read(&input)?;
-            let window = &source[..source
-                .len()
-                .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
             let profile = if system_boundaries {
                 stela_compiler::block::BlockProfile::SystemV1
             } else {
                 block_profile(software_pauth, software_clock, thread_registers)
             };
-            let compiled = stela_compiler::block::compile_for_target(
-                window,
-                stela_compiler::GuestAddress(guest_base),
-                profile,
-                cpu_target,
+            let scalable = compile_scalable_profile(
+                guest_profile.as_deref(),
+                svl_bytes,
+                svcr,
+                &guest_feature,
+                max_svl_bytes,
+                zt0_enabled,
             )?;
+            let context_profile =
+                compile_context_block_profile(scalable, profile, full_a64, ebf16, rpres)?;
+            let source = std::fs::read(&input)?;
+            let window = &source[..source
+                .len()
+                .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
+            let compiled = if let Some(context_profile) = context_profile {
+                stela_compiler::extended::block::compile_for_profile(
+                    window,
+                    stela_compiler::GuestAddress(guest_base),
+                    context_profile,
+                    cpu_target,
+                )?
+            } else {
+                stela_compiler::block::compile_for_target(
+                    window,
+                    stela_compiler::GuestAddress(guest_base),
+                    profile,
+                    cpu_target,
+                )?
+            };
             ensure!(
                 !output_dir.exists(),
                 "output directory exists; choose a new one"
             );
             std::fs::create_dir_all(&output_dir)?;
             std::fs::write(output_dir.join("native.bin"), &compiled.native.x86_64_code)?;
-            let manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
+            let mut manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
                 "source_bytes":compiled.source_bytes,"source_sha256":stela_core::sha256(&source[..compiled.source_bytes]),
                 "guest_base":guest_base,"abi":profile.abi(),
                 "native_sha256":stela_core::sha256(&compiled.native.x86_64_code),
                 "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "verified":false});
+            if let Some(context_profile) = context_profile {
+                manifest["schema_version"] = serde_json::json!(2);
+                manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_BLOCK_ABI);
+                manifest["execution_profile"] =
+                    scalable_execution_manifest(context_profile.scalable())?;
+                manifest["numerical_features"] =
+                    serde_json::to_value(context_profile.numerical_features())?;
+                manifest["guest_instructions"] =
+                    serde_json::json!(compiled.source_bytes / size_of::<u32>());
+                manifest["entry_prefix_bytes"] =
+                    serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+            }
             write_json(&output_dir.join("manifest.json"), &manifest)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
@@ -2197,7 +2318,7 @@ fn run() -> Result<()> {
             zt0_enabled,
             output_dir,
         } => {
-            let profile = compile_leaf_profile(
+            let profile = compile_scalable_profile(
                 guest_profile.as_deref(),
                 svl_bytes,
                 svcr,
@@ -2246,24 +2367,7 @@ fn run() -> Result<()> {
             if let Some(profile) = profile {
                 manifest["schema_version"] = serde_json::json!(2);
                 manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_LEAF_ABI);
-                manifest["execution_profile"] = serde_json::json!({
-                    "id": profile.id(),
-                    "svl_bytes": profile.vector_length().bytes(),
-                    "svcr": profile.mode().svcr(),
-                });
-                if let Some(features) = profile.declared_features() {
-                    let controls = profile.controls();
-                    let execution = &mut manifest["execution_profile"];
-                    execution["features"] = serde_json::json!(features.names());
-                    execution["max_svl_bytes"] =
-                        serde_json::json!(controls.max_vector_length().bytes());
-                    execution["zt0_enabled"] = serde_json::json!(controls.zt0_enabled());
-                    execution["dit"] = serde_json::json!(
-                        profile
-                            .required_dit()
-                            .context("V2 profile requires a DIT declaration")?
-                    );
-                }
+                manifest["execution_profile"] = scalable_execution_manifest(profile)?;
                 manifest["entry_prefix_bytes"] =
                     serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
             }
@@ -2853,7 +2957,7 @@ mod scalable_profile_cli_tests {
         else {
             anyhow::bail!("expected compile-leaf");
         };
-        compile_leaf_profile(
+        compile_scalable_profile(
             guest_profile.as_deref(),
             svl_bytes,
             svcr,
@@ -2926,6 +3030,128 @@ mod scalable_profile_cli_tests {
         assert_eq!(profile.required_dit(), Some(false));
         assert!(!profile.mode().streaming());
         assert!(profile.mode().za_enabled());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod context_block_cli_tests {
+    use super::*;
+    use stela_compiler::{aarch64::floating::features::NumericalFeatures, block::BlockProfile};
+
+    fn resolve(
+        extra: &[&str],
+    ) -> Result<Option<stela_compiler::extended::block::ExtendedBlockProfile>> {
+        let mut args = vec!["stela", "compile-block", "input.bin", "--output-dir", "out"];
+        args.extend_from_slice(extra);
+        let Command::CompileBlock {
+            guest_profile,
+            svl_bytes,
+            svcr,
+            guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
+            full_a64,
+            ebf16,
+            rpres,
+            software_pauth,
+            software_clock,
+            thread_registers,
+            system_boundaries,
+            ..
+        } = Cli::try_parse_from(args)?.command
+        else {
+            anyhow::bail!("expected compile-block");
+        };
+        let scalable = compile_scalable_profile(
+            guest_profile.as_deref(),
+            svl_bytes,
+            svcr,
+            &guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
+        )?;
+        compile_context_block_profile(
+            scalable,
+            if system_boundaries {
+                BlockProfile::SystemV1
+            } else {
+                block_profile(software_pauth, software_clock, thread_registers)
+            },
+            full_a64,
+            ebf16,
+            rpres,
+        )
+    }
+
+    #[test]
+    fn contextual_numerical_declarations_are_explicit_and_separate() -> Result<()> {
+        let guest = [
+            "--guest-profile",
+            "sme-streaming-v2",
+            "--svl-bytes",
+            "32",
+            "--svcr",
+            "3",
+            "--guest-feature",
+            "FEAT_SME",
+            "--max-svl-bytes",
+            "256",
+            "--zt0-enabled",
+            "false",
+        ];
+        let numerical = [
+            "--full-a64",
+            "false",
+            "--ebf16",
+            "false",
+            "--rpres",
+            "false",
+        ];
+        for omitted in 0..3 {
+            let mut args = guest.to_vec();
+            for (index, pair) in numerical.as_chunks::<2>().0.iter().enumerate() {
+                if index != omitted {
+                    args.extend_from_slice(pair);
+                }
+            }
+            assert!(resolve(&args).is_err());
+        }
+        let mut args = guest.to_vec();
+        args.extend(numerical);
+        let profile = resolve(&args)?.unwrap();
+        assert_eq!(profile.services(), BlockProfile::Ordinary);
+        assert_eq!(
+            profile.numerical_features(),
+            NumericalFeatures::new(false, false, false)
+        );
+        assert_eq!(
+            scalable_execution_manifest(profile.scalable())?,
+            serde_json::json!({
+                "id":"sme-streaming-v2", "svl_bytes":32, "svcr":3, "features":["FEAT_SME"],
+                "max_svl_bytes":256, "zt0_enabled":false, "dit":false
+            })
+        );
+        for service in [
+            "--software-pauth",
+            "--thread-registers",
+            "--system-boundaries",
+        ] {
+            let mut invalid = args.clone();
+            invalid.push(service);
+            assert!(resolve(&invalid).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_blocks_keep_their_profile_and_reject_numerical_options() -> Result<()> {
+        assert_eq!(resolve(&[])?, None);
+        assert_eq!(resolve(&["--system-boundaries"])?, None);
+        assert_eq!(resolve(&["--software-pauth", "--software-clock"])?, None);
+        for flag in ["--full-a64", "--ebf16", "--rpres"] {
+            assert!(resolve(&[flag, "false"]).is_err());
+        }
         Ok(())
     }
 }

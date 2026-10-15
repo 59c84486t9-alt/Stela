@@ -4,6 +4,8 @@
 //! admitted after guest feature and execution-mode checks. Unsupported
 //! effects remain explicit declines.
 
+pub mod block;
+
 mod prefix;
 
 use std::collections::BTreeMap;
@@ -248,6 +250,37 @@ enum Decoded {
 }
 
 impl Decoded {
+    fn memory_requirements(&self) -> crate::context::memory::MemoryRequirements {
+        match self {
+            Self::Ordinary(_) => Default::default(),
+            Self::Address(_) => Default::default(),
+            Self::IntegerDot(_) => Default::default(),
+            Self::IntegerBits(_) => Default::default(),
+            Self::IntegerLogic(_) => Default::default(),
+            Self::IntegerPredicateMove(_) => Default::default(),
+            Self::IntegerProducts(_) => Default::default(),
+            Self::IntegerSaturation(_) => Default::default(),
+            Self::Rearrange(_) => Default::default(),
+            Self::RearrangeExtract(_) => Default::default(),
+            Self::RearrangeWiden(_) => Default::default(),
+            Self::Reductions(_) => Default::default(),
+            Self::Shifts(_) => Default::default(),
+            Self::ShiftsNarrow(_) => Default::default(),
+            Self::Sign(_) => Default::default(),
+            Self::FloatingCopy(_) => Default::default(),
+            Self::IntegerArithmetic(_) => Default::default(),
+            Self::IntegerComparison(_) => Default::default(),
+            Self::PredicateGeneration(_) => Default::default(),
+            Self::PredicateLogic(_) => Default::default(),
+            Self::Length(_) => Default::default(),
+            Self::SmeTables(_) => Default::default(),
+            Self::SmeMovement(_) => Default::default(),
+            Self::SmeIntegerVector(_) => Default::default(),
+            Self::SmeIntegerDots(_) => Default::default(),
+            Self::SmeIntegerMatrix(_) => Default::default(),
+        }
+    }
+
     /// Original canonical word is rechecked by each frozen family adapter.
     /// None remains unaudited; no unreviewed effect class receives a default permit.
     fn prefix_requirement(

@@ -31,6 +31,23 @@
   ],
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/aarch64/floating/features.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/control.rs",
+    "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+    "crates/stela-compiler/src/x86_64/scalable/numerical.rs",
+    "crates/stela-compiler/src/x86_64/simd/numerical/control.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/classify.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+    "crates/stela-compiler/src/x86_64/sve/floating/conversion/widening.rs",
+    "crates/stela-compiler/src/block/scalable.rs",
+    "crates/stela-compiler/src/extended/block.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
@@ -1000,6 +1017,35 @@
         "fresh_source_map_matches": 430,
         "fresh_semantic_replays": 0,
         "canonical_prefix_forms": 2
+      }
+    },
+    "streaming_numerical22": {
+      "harness": ".stela/research/coverage-race/sve-floating/common-integration/numerical22-coherent-1/bridge.py",
+      "report": ".stela/research/coverage-race/sve-floating/common-integration/selected22-publication-current-1/evidence/streaming-numerical22.json",
+      "kind": "scalable_numerical_historical_semantics_current_context_block_transfer",
+      "comparison_field": "historical_native_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        ".stela/research/coverage-race/sve-floating/common-integration/numerical22-coherent-1/bridge.py",
+        ".stela/research/coverage-race/sve-floating/common-integration/selected22-currentfloor-1/gate.py",
+        ".stela/research/coverage-race/sve-floating/common-integration/selected22-current-matrix-mte-1/check-body-transfer.py",
+        ".stela/research/coverage-race/sve-floating/common-integration/selected22-current-matrix-mte-1/check-public-cli.py",
+        ".stela/research/coverage-race/sve-floating/common-integration/selected22-currentfloor-1/call-program-bytebuilder.rs"
+      ],
+      "required_measurements": {
+        "historical_native_state_comparisons": 480,
+        "historical_completion_state_comparisons": 350,
+        "fresh_complete_body_matches": 180,
+        "fresh_complete_call_program_matches": 180,
+        "actual_current_source_maps": 180,
+        "retained_6f_focused_tests": 41,
+        "actual_modified_cli_tests": 2,
+        "actual_prefix_boundary_tests": 1,
+        "actual_current_public_cli_positive_manifests": 3,
+        "actual_current_public_cli_negative_requests": 6,
+        "python_source_mock_contract_tests": 136,
+        "broad_semantic_replays": 0
       }
     }
   },
@@ -56006,6 +56052,939 @@
         }
       ],
       "alias": false
+    },
+    {
+      "id": "facge_p_p_zz_",
+      "instruction_id": "facge_p_p_zz",
+      "mnemonic": "FACGE",
+      "category": "sve",
+      "source_file": "facge_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x6500c010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "7aa9593980f14a1074947efce4ff276b3faf3e85f612651d5db5199a494edcde",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6580c010",
+          "expected_mnemonics": [
+            "facge"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "facgt_p_p_zz_",
+      "instruction_id": "facge_p_p_zz",
+      "mnemonic": "FACGT",
+      "category": "sve",
+      "source_file": "facge_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x6500e010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "7aa9593980f14a1074947efce4ff276b3faf3e85f612651d5db5199a494edcde",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6580e010",
+          "expected_mnemonics": [
+            "facgt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fadd_z_p_zz_",
+      "instruction_id": "fadd_z_p_zz",
+      "mnemonic": "FADD",
+      "category": "sve",
+      "source_file": "fadd_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x65008000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "ff3314df6823befe3f8b335eebc1c107178f441cf5dfa99901a2955951674566",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65408040",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fadd_z_zz_",
+      "instruction_id": "fadd_z_zz",
+      "mnemonic": "FADD",
+      "category": "sve",
+      "source_file": "fadd_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x65000000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "412ba678627a84baf3d8964cb3aae74b4117e34caeb73651e7355b43fb16bc36",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65420020",
+          "expected_mnemonics": [
+            "fadd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmeq_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMEQ",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65122000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65922000",
+          "expected_mnemonics": [
+            "fcmeq"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmeq_p_p_zz_",
+      "instruction_id": "fcmeq_p_p_zz",
+      "mnemonic": "FCMEQ",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x65006000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "aedce7fcc4536ee60f6039b7ac1ddf8b7e274c0c0e173b8a6e52180ed393f6c6",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65806000",
+          "expected_mnemonics": [
+            "fcmeq"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmge_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMGE",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65102000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65902000",
+          "expected_mnemonics": [
+            "fcmge"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmge_p_p_zz_",
+      "instruction_id": "fcmeq_p_p_zz",
+      "mnemonic": "FCMGE",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x65004000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "aedce7fcc4536ee60f6039b7ac1ddf8b7e274c0c0e173b8a6e52180ed393f6c6",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65804000",
+          "expected_mnemonics": [
+            "fcmge"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmgt_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMGT",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65102010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65902010",
+          "expected_mnemonics": [
+            "fcmgt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmgt_p_p_zz_",
+      "instruction_id": "fcmeq_p_p_zz",
+      "mnemonic": "FCMGT",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x65004010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "aedce7fcc4536ee60f6039b7ac1ddf8b7e274c0c0e173b8a6e52180ed393f6c6",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65804010",
+          "expected_mnemonics": [
+            "fcmgt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmle_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMLE",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65112010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65912010",
+          "expected_mnemonics": [
+            "fcmle"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmlt_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMLT",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65112000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65912000",
+          "expected_mnemonics": [
+            "fcmlt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmne_p_p_z0_",
+      "instruction_id": "fcmeq_p_p_z0",
+      "mnemonic": "FCMNE",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_z0.xml",
+      "encoding_mask": "0xff3fe010",
+      "encoding_value": "0x65132000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "3d0dfac5a85c532a27a3d86dc2093298bdfc4636cf1f5e181c588efce25d26b1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65932000",
+          "expected_mnemonics": [
+            "fcmne"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmne_p_p_zz_",
+      "instruction_id": "fcmeq_p_p_zz",
+      "mnemonic": "FCMNE",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x65006010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "aedce7fcc4536ee60f6039b7ac1ddf8b7e274c0c0e173b8a6e52180ed393f6c6",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65806010",
+          "expected_mnemonics": [
+            "fcmne"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcmuo_p_p_zz_",
+      "instruction_id": "fcmeq_p_p_zz",
+      "mnemonic": "FCMUO",
+      "category": "sve",
+      "source_file": "fcmeq_p_p_zz.xml",
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x6500c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "aedce7fcc4536ee60f6039b7ac1ddf8b7e274c0c0e173b8a6e52180ed393f6c6",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming comparison form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/comparison.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x6580c000",
+          "expected_mnemonics": [
+            "fcmuo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcvt_z_p_z_s2d",
+      "instruction_id": "fcvt_z_p_z",
+      "mnemonic": "FCVT",
+      "category": "sve",
+      "source_file": "fcvt_z_p_z.xml",
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x65cba000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "91e70b5c7ebe5e324e533b2a720aa1400d4341f602cc05c46e3710469274a4a1",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming conversion form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/widening.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65cba000",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fcvtlt_z_p_z_s2d",
+      "instruction_id": "fcvtlt_z_p_z",
+      "mnemonic": "FCVTLT",
+      "category": "sve",
+      "source_file": "fcvtlt_z_p_z.xml",
+      "encoding_mask": "0xffffe000",
+      "encoding_value": "0x64cba000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "dab9e68388acae490e3b67e38d6bf914ec1fdeb98813d418e4ded2350bb72aaa",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming conversion form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/conversion/widening.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x64cba000",
+          "expected_mnemonics": [
+            "fcvtlt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fdiv_z_p_zz_",
+      "instruction_id": "fdiv_z_p_zz",
+      "mnemonic": "FDIV",
+      "category": "sve",
+      "source_file": "fdiv_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x650d8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "c4e18f876261ffc6d68ba0f8143ca0bd6ae6f79ec678f64725382d5e78154afd",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x654d8040",
+          "expected_mnemonics": [
+            "fdiv"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fmul_z_p_zz_",
+      "instruction_id": "fmul_z_p_zz",
+      "mnemonic": "FMUL",
+      "category": "sve",
+      "source_file": "fmul_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x65028000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "d9d0dd6bf08d982414090ef794346dbf45989c69f708011d0714577e9bf07fc8",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65428040",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fmul_z_zz_",
+      "instruction_id": "fmul_z_zz",
+      "mnemonic": "FMUL",
+      "category": "sve",
+      "source_file": "fmul_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x65000800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "9562fdab02aee183e8bdfddf55a187a6713cb954c0ddfc77197b2067551952a4",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65420820",
+          "expected_mnemonics": [
+            "fmul"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fsub_z_p_zz_",
+      "instruction_id": "fsub_z_p_zz",
+      "mnemonic": "FSUB",
+      "category": "sve",
+      "source_file": "fsub_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x65018000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "1945b7bccd682c0ab115a704064c8bd374ac073e5e68103a85d11bb2936569e5",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65418040",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "fsub_z_zz_",
+      "instruction_id": "fsub_z_zz",
+      "mnemonic": "FSUB",
+      "category": "sve",
+      "source_file": "fsub_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x65000400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "21c2edd42c6e0051c4d83e9a563c518ca145e6d1c5d1f7204562f08abfbb7a62",
+      "profile": "sme-streaming-v2-numerical22",
+      "scope": "Complete allocated standalone streaming arithmetic form under the explicit numerical context-block profile and fixed supported SVL. Canonical source is validated before alias normalization; inactive lanes merge and sources snapshot before commit. Checked S/D mappings stage outputs/status; Half or exceptional lanes use exact whole-instruction completion. Unsupported controls stop at the original PC. Memory, MOVPRFX, nonordinary services and cache/image/thread ABI integration are excluded. FFR/FPMR original observation and enabled exception delivery remain outside scope.",
+      "review": "Pinned Arm2026-06 operands/control semantics, retained original/model/native family evidence, actual current owned entry/recovery/refusal tests and complete body/program transfer; current public source maps checked independently.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/sve/floating/arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs"
+      ],
+      "evidence_groups": [
+        "streaming_numerical22"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x65420420",
+          "expected_mnemonics": [
+            "fsub"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "alias": false
     }
   ],
   "execution_profiles": {
@@ -56186,6 +57165,34 @@
         "Production block/cache entry and guest exception delivery",
         "Halted-debug MOVT execution",
         "Apple hardware conformance,application/macOS acceptance or application performance"
+      ]
+    },
+    "sme-streaming-v2-numerical22": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-block",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "svl_bytes": 16,
+      "svcr": 1,
+      "features": [
+        "FEAT_SME"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "dit": false,
+      "numerical_features": {
+        "full_a64": false,
+        "ebf16": true,
+        "rpres": true
+      },
+      "decoder_mattrs": [
+        "+sme"
+      ],
+      "description": "Explicit SME streaming numerical context-block profile. Each sample selects SVL/SM; ZA is not required. Numerical availability is caller-established and separate from host target selection.",
+      "outside_scope": [
+        "General nonstreaming SVE and undeclared guest features or controls.",
+        "Memory, atomic, MOVPRFX, legacy FP/AdvSIMD and nonordinary service prefixes.",
+        "Persistent cache/image entry and normal translated-thread dispatch for this ABI.",
+        "Enabled numerical exception delivery, Apple hardware conformance, complete applications and macOS boot."
       ]
     }
   }

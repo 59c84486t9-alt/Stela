@@ -3,6 +3,7 @@
 
 pub mod address;
 pub mod dot;
+pub mod floating;
 pub mod floating_copy;
 pub mod integer_arithmetic;
 pub mod integer_bits;

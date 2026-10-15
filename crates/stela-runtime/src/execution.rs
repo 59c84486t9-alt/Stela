@@ -15,7 +15,7 @@ use stela_core::sha256;
 
 // Deliberately bounded research entry point; an oversized cache artifact cannot
 // force an unbounded file allocation or executable mapping.
-const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 
 /// An owned RX copy of one registered leaf's current generated artifact.
 ///
@@ -217,6 +217,21 @@ pub(crate) mod platform {
             Ok(())
         }
 
+        pub unsafe fn call_context_block(
+            &self,
+            state: &mut GuestState,
+            context: &mut stela_compiler::context::ExecutionContext,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            // SAFETY: The owned block checks source/profile/ABI and pins its
+            // borrowed context views for this entire synchronous invocation.
+            let function: unsafe extern "C" fn(
+                *mut GuestState,
+                *mut stela_compiler::context::ExecutionContext,
+            ) -> stela_compiler::block::BlockExit =
+                unsafe { std::mem::transmute(self.pointer.as_ptr()) };
+            Ok(unsafe { function(state, context) })
+        }
+
         pub unsafe fn call_block(
             &self,
             state: &mut GuestState,
@@ -265,6 +280,15 @@ pub(crate) mod platform {
 
         pub unsafe fn call(&self, _state: &mut GuestState) -> Result<()> {
             ensure_supported()
+        }
+
+        pub unsafe fn call_context_block(
+            &self,
+            _state: &mut GuestState,
+            _context: &mut stela_compiler::context::ExecutionContext,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            ensure_supported()?;
+            unreachable!()
         }
 
         pub unsafe fn call_block(

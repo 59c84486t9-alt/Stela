@@ -1,10 +1,13 @@
 //! Shared numerical block emission: integer lane classification and private MXCSR.
+mod control;
+
 use super::super::isa::ShiftOpcode;
 use super::{Host, packed, read_vector, vector_offset};
 use crate::{
     GuestState,
     aarch64::{floating::Format, simd::arithmetic::Shape},
 };
+pub(in crate::x86_64) use control::rounding_control;
 
 const MXCSR_EXCEPTION_MASKS: u32 = 0x3f << 7;
 pub(super) const MXCSR_INEXACT: u32 = 1 << 5;
@@ -90,7 +93,7 @@ pub(super) enum Condition {
 }
 
 #[repr(u8)]
-pub(super) enum ArithmeticOpcode {
+pub(in crate::x86_64) enum ArithmeticOpcode {
     Add = 0x58,
     Subtract = 0x5c,
     Multiply = 0x59,
@@ -342,7 +345,12 @@ pub(super) fn commit_inexact(code: &mut Vec<u8>) {
 /// Extract exponent magnitudes into words/dwords and compare an open range.
 /// Double exponents occupy the low dword of each qword; their high dwords and
 /// inactive S lanes are excluded from the dword sign mask. No numerical FP runs here.
-pub(super) fn vector_exponent_range(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+pub(in crate::x86_64) fn vector_exponent_range(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+) {
     vector_exponent_range_impl(code, format, shape, source, false);
 }
 
@@ -520,7 +528,7 @@ pub(super) fn read_numerical_right(
     }
 }
 
-pub(super) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
+pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
     packed(
         code,
         Host::EqualDword,
@@ -569,7 +577,7 @@ pub(super) fn prepare_vector_input_range_below(code: &mut Vec<u8>, format: Forma
     );
 }
 
-pub(super) fn prepare_vector_result_range(code: &mut Vec<u8>) {
+pub(in crate::x86_64) fn prepare_vector_result_range(code: &mut Vec<u8>) {
     packed(
         code,
         Host::EqualDword,
@@ -589,7 +597,7 @@ pub(super) fn emit_opcode(
 }
 
 /// Shared arithmetic encoding with an explicitly allocated destination.
-pub(super) fn emit_opcode_to(
+pub(in crate::x86_64) fn emit_opcode_to(
     code: &mut Vec<u8>,
     format: Format,
     shape: Shape,

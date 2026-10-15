@@ -7,6 +7,7 @@ mod estimate;
 mod minmax;
 mod refinement;
 mod rounding;
+pub(crate) mod scalable;
 mod sqrt;
 mod widening;
 
