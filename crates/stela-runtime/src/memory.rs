@@ -3,8 +3,17 @@
 //! Original Arm instructions are data to the x86 host: a guest executable
 //! region never receives host execute permission. Mapping must succeed at the
 //! requested address without replacing any existing allocation.
+//! The child modules provide a separate context-backed physical memory domain;
+//! OwnedMemory retains its existing serialized direct-RAM execution contract.
 
+mod access;
 mod allocation;
+pub mod backing;
+pub mod domain;
+pub mod monitor;
+pub mod policy;
+pub mod tag_store;
+pub mod tags;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;

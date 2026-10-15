@@ -3,6 +3,7 @@
 //! Ordinary one-argument native entries retain their existing layout and bytes.
 //! These borrowed views grant no ownership or permission to access guest RAM.
 
+pub mod memory;
 use std::ffi::c_void;
 
 pub const EXECUTION_CONTEXT_VERSION: u32 = 1;

@@ -32,6 +32,7 @@
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
     "crates/stela-compiler/src/context.rs",
+    "crates/stela-compiler/src/context/memory.rs",
     "crates/stela-compiler/src/extended.rs",
     "crates/stela-compiler/src/aarch64/scalable.rs",
     "crates/stela-compiler/src/aarch64/scalable/features.rs",

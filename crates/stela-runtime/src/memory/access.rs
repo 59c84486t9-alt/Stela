@@ -1,0 +1,322 @@
+//! Raw single-copy-atomic parts for the coherent Normal-WB memory profile.
+//!
+//! The caller owns address translation, permission checks, mapping lifetime and
+//! reservation tracking. These helpers never create Rust references into guest
+//! RAM. They implement one part inside an aligned 16-byte SCA quantity; ordinary
+//! accesses split across quantities belong to the caller.
+
+use stela_compiler::TargetCpu;
+
+const BYTE_BYTES: usize = 1;
+const HALFWORD_BYTES: usize = 2;
+const WORD_BYTES: usize = 4;
+const DOUBLEWORD_BYTES: usize = 8;
+const QUADWORD_BYTES: usize = 16;
+const BITS_PER_BYTE: usize = 8;
+const DOUBLEWORD_BITS: usize = DOUBLEWORD_BYTES * BITS_PER_BYTE;
+const SCA_BYTES: usize = QUADWORD_BYTES;
+const SCA_OFFSET_MASK: usize = SCA_BYTES - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccessError {
+    UnsupportedHost,
+    InvalidWidth,
+    CrossesScaQuantity,
+    MissingAtomicLoad16,
+    MissingCx16,
+}
+
+fn validate_part(address: usize, bytes: usize) -> Result<(), AccessError> {
+    if !cfg!(target_arch = "x86_64") {
+        return Err(AccessError::UnsupportedHost);
+    }
+    if !matches!(
+        bytes,
+        BYTE_BYTES | HALFWORD_BYTES | WORD_BYTES | DOUBLEWORD_BYTES | QUADWORD_BYTES
+    ) {
+        return Err(AccessError::InvalidWidth);
+    }
+    if (address & SCA_OFFSET_MASK) + bytes > SCA_BYTES {
+        return Err(AccessError::CrossesScaQuantity);
+    }
+    Ok(())
+}
+
+/// Actual host read footprint, for permission and lifetime preflight.
+///
+/// The coherent WB profile allows reading the enclosing aligned quantity. It
+/// excludes byte-granular permissions, device registers and debug watchpoints.
+pub(super) fn read_footprint(
+    address: usize,
+    bytes: usize,
+    target: TargetCpu,
+) -> Result<(usize, usize), AccessError> {
+    validate_part(address, bytes)?;
+    if (address & (DOUBLEWORD_BYTES - 1)) + bytes <= DOUBLEWORD_BYTES {
+        return Ok((address, bytes));
+    }
+    if !target.supports(TargetCpu::AtomicLoad16) {
+        return Err(AccessError::MissingAtomicLoad16);
+    }
+    Ok((address & !SCA_OFFSET_MASK, SCA_BYTES))
+}
+
+/// Read one atomic part, returning its zero-extended little-endian value.
+///
+/// # Safety
+/// The complete `read_footprint` must be live, readable coherent Normal-WB RAM
+/// throughout this call. No Rust reference may alias concurrently mutated RAM.
+/// The selected target's capabilities must have been checked against the actual
+/// host. The caller must provide any guest ordering and reservation protocol.
+/// Host faults are not resumable through this function without a separate adapter.
+pub(super) unsafe fn read_part(
+    pointer: *const u8,
+    bytes: usize,
+    target: TargetCpu,
+) -> Result<u128, AccessError> {
+    let (address, footprint_bytes) = read_footprint(pointer as usize, bytes, target)?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        if footprint_bytes == SCA_BYTES {
+            // SAFETY: the caller prevalidates the entire aligned snapshot and
+            // actual host AtomicLoad16 capability. No write permission is used.
+            let snapshot = unsafe { read_quadword(address as *const u8) };
+            let shifted = snapshot >> ((pointer as usize & SCA_OFFSET_MASK) * BITS_PER_BYTE);
+            let mask = u128::MAX >> ((QUADWORD_BYTES - bytes) * BITS_PER_BYTE);
+            return Ok(shifted & mask);
+        }
+        let value: u64;
+        // SAFETY: validated exact-width part fits inside eight aligned bytes.
+        // Both Intel and AMD guarantee these cached Normal-WB reads atomically.
+        unsafe {
+            match bytes {
+                BYTE_BYTES => std::arch::asm!(
+                    "movzx {value:e}, byte ptr [{pointer}]",
+                    value = out(reg) value,
+                    pointer = in(reg) pointer,
+                    options(nostack, preserves_flags),
+                ),
+                HALFWORD_BYTES => std::arch::asm!(
+                    "movzx {value:e}, word ptr [{pointer}]",
+                    value = out(reg) value,
+                    pointer = in(reg) pointer,
+                    options(nostack, preserves_flags),
+                ),
+                WORD_BYTES => std::arch::asm!(
+                    "mov {value:e}, dword ptr [{pointer}]",
+                    value = out(reg) value,
+                    pointer = in(reg) pointer,
+                    options(nostack, preserves_flags),
+                ),
+                DOUBLEWORD_BYTES => std::arch::asm!(
+                    "mov {value}, qword ptr [{pointer}]",
+                    value = out(reg) value,
+                    pointer = in(reg) pointer,
+                    options(nostack, preserves_flags),
+                ),
+                _ => unreachable!("validated scalar read width"),
+            }
+        }
+        Ok(u128::from(value))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (address, footprint_bytes);
+        Err(AccessError::UnsupportedHost)
+    }
+}
+
+/// Write the low `bytes` of `value` as one atomic little-endian part.
+///
+/// # Safety
+/// The exact part must remain live, readable and writable coherent Normal-WB RAM
+/// throughout this call, without aliasing Rust references. The selected target's
+/// capabilities must have been checked against the actual host. The caller owns
+/// guest ordering, reservation invalidation and preflight before acquiring gates.
+/// Host faults need a separate resumable adapter. The 16-byte retry loop can retry
+/// under competing writers; it does not provide a wait-free progress guarantee.
+pub(super) unsafe fn write_part(
+    pointer: *mut u8,
+    bytes: usize,
+    value: u128,
+    target: TargetCpu,
+) -> Result<(), AccessError> {
+    validate_part(pointer as usize, bytes)?;
+    if bytes == QUADWORD_BYTES && !target.supports(TargetCpu::Cx16) {
+        return Err(AccessError::MissingCx16);
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: caller supplies stable prevalidated coherent RAM and actual host
+    // capabilities. Memory XCHG is implicitly locked at every scalar width.
+    unsafe {
+        match bytes {
+            BYTE_BYTES => std::arch::asm!(
+                "xchg byte ptr [{pointer}], {value}",
+                pointer = in(reg) pointer,
+                value = inout(reg_byte) value as u8 => _,
+                options(nostack, preserves_flags),
+            ),
+            HALFWORD_BYTES => std::arch::asm!(
+                "xchg word ptr [{pointer}], {value:x}",
+                pointer = in(reg) pointer,
+                value = inout(reg) value as u64 => _,
+                options(nostack, preserves_flags),
+            ),
+            WORD_BYTES => std::arch::asm!(
+                "xchg dword ptr [{pointer}], {value:e}",
+                pointer = in(reg) pointer,
+                value = inout(reg) value as u64 => _,
+                options(nostack, preserves_flags),
+            ),
+            DOUBLEWORD_BYTES => std::arch::asm!(
+                "xchg qword ptr [{pointer}], {value}",
+                pointer = in(reg) pointer,
+                value = inout(reg) value as u64 => _,
+                options(nostack, preserves_flags),
+            ),
+            QUADWORD_BYTES => write_quadword(pointer, value),
+            _ => unreachable!("validated write width"),
+        }
+        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = value;
+        Err(AccessError::UnsupportedHost)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn read_quadword(pointer: *const u8) -> u128 {
+    let low: u64;
+    let high: u64;
+    // SAFETY: caller guarantees an aligned readable quantity and AtomicLoad16.
+    // Legacy SSE2 MOVDQA needs no OS AVX state; the checked AVX hardware bit
+    // establishes this load's atomicity independently of usable AVX arithmetic.
+    unsafe {
+        std::arch::asm!(
+            "movdqa xmm0, xmmword ptr [{pointer}]",
+            "movq {low}, xmm0",
+            "psrldq xmm0, {half_bytes}",
+            "movq {high}, xmm0",
+            pointer = in(reg) pointer,
+            low = out(reg) low,
+            high = out(reg) high,
+            half_bytes = const DOUBLEWORD_BYTES,
+            out("xmm0") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    u128::from(low) | (u128::from(high) << DOUBLEWORD_BITS)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn write_quadword(pointer: *mut u8, value: u128) {
+    // SAFETY: caller guarantees a live aligned readable/writable quantity and
+    // Cx16. Each iteration is one actual atomic 16-byte update. A failed first
+    // compare acquires the next expected value; no torn initial read is needed.
+    // LLVM reserves RBX, so save and restore it inside the assembly statement.
+    unsafe {
+        std::arch::asm!(
+            "mov r9, rbx",
+            "mov rbx, r8",
+            "2:",
+            "lock cmpxchg16b xmmword ptr [rsi]",
+            "jnz 2b",
+            "mov rbx, r9",
+            in("rsi") pointer,
+            in("r8") value as u64,
+            in("rcx") (value >> DOUBLEWORD_BITS) as u64,
+            inout("rax") 0u64 => _,
+            inout("rdx") 0u64 => _,
+            out("r9") _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[repr(align(16))]
+    struct Quantity([u8; SCA_BYTES]);
+
+    #[test]
+    fn footprints_decline_unsupported_widths_crossings_and_capabilities() {
+        for bytes in [0, 3, 5, 9, 17, usize::MAX] {
+            assert_eq!(
+                read_footprint(0, bytes, TargetCpu::Baseline),
+                Err(AccessError::InvalidWidth)
+            );
+        }
+        assert_eq!(
+            read_footprint(SCA_BYTES - 1, HALFWORD_BYTES, TargetCpu::AtomicLoad16),
+            Err(AccessError::CrossesScaQuantity)
+        );
+        assert_eq!(
+            read_footprint(DOUBLEWORD_BYTES - 1, HALFWORD_BYTES, TargetCpu::Cx16),
+            Err(AccessError::MissingAtomicLoad16)
+        );
+        assert_eq!(
+            read_footprint(0, QUADWORD_BYTES, TargetCpu::AtomicLoad16),
+            Ok((0, SCA_BYTES))
+        );
+        // Declines occur before touching a deliberately inaccessible pointer.
+        assert_eq!(
+            unsafe {
+                write_part(
+                    std::ptr::null_mut(),
+                    QUADWORD_BYTES,
+                    0,
+                    TargetCpu::AtomicLoad16,
+                )
+            },
+            Err(AccessError::MissingCx16)
+        );
+    }
+
+    #[test]
+    fn all_valid_offsets_preserve_neighbors_and_zero_extend_reads() {
+        let target = TargetCpu::detect();
+        let original = std::array::from_fn(|index| index as u8 * 13);
+        let value = 0xfedc_ba98_7654_3210_1234_5678_9abc_def0u128;
+        for bytes in [
+            BYTE_BYTES,
+            HALFWORD_BYTES,
+            WORD_BYTES,
+            DOUBLEWORD_BYTES,
+            QUADWORD_BYTES,
+        ] {
+            for offset in 0..=SCA_BYTES - bytes {
+                let mut memory = Quantity(original);
+                let pointer = memory.0.as_mut_ptr().wrapping_add(offset);
+                let footprint = read_footprint(pointer as usize, bytes, target);
+                if footprint.is_ok() {
+                    let mut expected = [0u8; QUADWORD_BYTES];
+                    expected[..bytes].copy_from_slice(&original[offset..offset + bytes]);
+                    assert_eq!(
+                        unsafe { read_part(pointer, bytes, target) }.unwrap(),
+                        u128::from_le_bytes(expected)
+                    );
+                } else {
+                    assert_eq!(footprint, Err(AccessError::MissingAtomicLoad16));
+                }
+                if bytes == QUADWORD_BYTES && !target.supports(TargetCpu::Cx16) {
+                    continue;
+                }
+                unsafe { write_part(pointer, bytes, value, target) }.unwrap();
+                let mut expected = original;
+                expected[offset..offset + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
+                assert_eq!(memory.0, expected, "width={bytes} offset={offset}");
+                if footprint.is_ok() {
+                    let mask = u128::MAX >> ((QUADWORD_BYTES - bytes) * BITS_PER_BYTE);
+                    assert_eq!(
+                        unsafe { read_part(pointer, bytes, target) }.unwrap(),
+                        value & mask
+                    );
+                }
+            }
+        }
+    }
+}

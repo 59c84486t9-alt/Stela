@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("lib.rs"),
     include_str!("context.rs"),
+    include_str!("context/memory.rs"),
     include_str!("extended.rs"),
     include_str!("aarch64/scalable.rs"),
     include_str!("aarch64/scalable/features.rs"),
