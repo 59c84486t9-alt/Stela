@@ -1,11 +1,13 @@
 //! Streaming-vector mappings using the shared extended execution context.
 
+pub(crate) mod address;
 pub(crate) mod dot;
 pub(crate) mod floating_copy;
 pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_logic;
 pub(crate) mod integer_products;
 pub(crate) mod integer_saturation;
+pub(crate) mod predicate;
 pub(crate) mod rearrange_extract;
 pub(crate) mod rearrange_widen;
 pub(crate) mod sign;

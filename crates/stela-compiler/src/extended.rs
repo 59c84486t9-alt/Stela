@@ -17,7 +17,7 @@ use crate::{
         },
         sme::{integer_dots, length},
         sve::{
-            dot, floating_copy, integer_arithmetic,
+            address, dot, floating_copy, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
             integer_products, integer_saturation, rearrange_extract, rearrange_widen, sign,
         },
@@ -216,6 +216,7 @@ impl ScalableProfile {
 
 enum Decoded {
     Ordinary(Instruction),
+    Address(address::Operand),
     IntegerDot(dot::Operand),
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
@@ -264,6 +265,29 @@ fn decode(
     profile: ScalableProfile,
     target: TargetCpu,
 ) -> Result<Decoded, CompileError> {
+    if let Some(decoded) = address::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming length/count encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        let mut features = ScalableFeatures::of(ScalableFeature::Sme);
+        if matches!(
+            operand.kind,
+            address::Kind::Count(address::Count::Counter { .. })
+        ) {
+            features = features.with(ScalableFeature::Sme2);
+        }
+        profile.require_features(FeatureRequirement::all(features), pc)?;
+        return Ok(Decoded::Address(operand));
+    }
     if let Some(decoded) = dot::decode_integer(word) {
         let operand = decoded.map_err(|()| {
             CompileError(format!(
@@ -518,6 +542,9 @@ fn emit_decoded(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) -> Result<(), CompileError> {
     match instruction {
+        Decoded::Address(operand) => {
+            x86_64::sve::address::emit(code, &operand, profile.length, target);
+        }
         Decoded::Ordinary(instruction) => {
             x86_64::emit_instruction(code, &instruction, fixups, target);
         }
@@ -1711,6 +1738,133 @@ mod tests {
             .unwrap_err()
             .0
             .contains("reserved streaming floating copy")
+        );
+    }
+    #[test]
+    fn address_counts_require_streaming_but_sme_length_does_not() {
+        const ADDVL_X0_ONE: u32 = 0x0420_5020;
+        const RDVL_X0_ONE: u32 = 0x04bf_5020;
+        const CNTP_X0_P0: u32 = 0x2520_8000;
+        const CNTP_X0_PN0: u32 = 0x2520_8200;
+        const SQINCW_X0_W0: u32 = 0x04a0_f000;
+        const UQDECW_Z0: u32 = 0x04a0_cc00;
+        for bytes in [16, 32, 64, 128, 256] {
+            for word in [
+                ADDVL_X0_ONE,
+                RDVL_X0_ONE,
+                CNTP_X0_P0,
+                CNTP_X0_PN0,
+                SQINCW_X0_W0,
+                UQDECW_Z0,
+            ] {
+                for za in [false, true] {
+                    let selected = ScalableProfile::new(
+                        VectorLength::from_bytes(bytes).unwrap(),
+                        ScalableMode::new(true, za),
+                    );
+                    assert!(
+                        compile_for_profile(
+                            &words(&[word, RET_X30]),
+                            GuestAddress(0),
+                            selected,
+                            TargetCpu::Baseline
+                        )
+                        .is_ok()
+                    );
+                    let inactive = ScalableProfile::new(
+                        VectorLength::from_bytes(bytes).unwrap(),
+                        ScalableMode::new(false, za),
+                    );
+                    assert!(
+                        compile_for_profile(
+                            &words(&[word, RET_X30]),
+                            GuestAddress(0),
+                            inactive,
+                            TargetCpu::Baseline
+                        )
+                        .unwrap_err()
+                        .0
+                        .contains("streaming mode required")
+                    );
+                }
+                assert!(crate::compile(&words(&[word, RET_X30]), GuestAddress(0)).is_err());
+            }
+            assert!(
+                compile_for_profile(
+                    &words(&[RDSVL_X0_ONE, RET_X30]),
+                    GuestAddress(0),
+                    profile(bytes, false),
+                    TargetCpu::Baseline
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn address_vector_reserved_width_declines_before_mode_checks() {
+        const RESERVED_BYTE_VECTOR_WORDS: [u32; 12] = [
+            0x0430_c000,
+            0x0430_c400,
+            0x0420_c000,
+            0x0420_c400,
+            0x0420_c800,
+            0x0420_cc00,
+            0x252c_8000,
+            0x252d_8000,
+            0x2528_8000,
+            0x2529_8000,
+            0x252a_8000,
+            0x252b_8000,
+        ];
+        for word in RESERVED_BYTE_VECTOR_WORDS {
+            for streaming in [false, true] {
+                assert!(
+                    compile_for_profile(
+                        &words(&[word, RET_X30]),
+                        GuestAddress(0),
+                        profile(16, streaming),
+                        TargetCpu::Baseline
+                    )
+                    .unwrap_err()
+                    .0
+                    .contains("reserved")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn address_counter_requires_declared_sme2() {
+        const ADDVL_X0_ONE: u32 = 0x0420_5020;
+        const CNTP_X0_PN0: u32 = 0x2520_8200;
+        let length = VectorLength::from_bytes(16).unwrap();
+        let selected = ScalableProfile::new_with_features(
+            length,
+            ScalableMode::new(true, false),
+            ScalableFeatures::of(ScalableFeature::Sme),
+            ScalableControls::new(length, false),
+        )
+        .unwrap();
+        assert!(
+            compile_for_profile(
+                &words(&[ADDVL_X0_ONE, RET_X30]),
+                GuestAddress(0),
+                selected,
+                TargetCpu::Baseline
+            )
+            .is_ok()
+        );
+        assert!(
+            compile_for_profile(
+                &words(&[CNTP_X0_PN0, RET_X30]),
+                GuestAddress(0),
+                selected,
+                TargetCpu::Baseline
+            )
+            .unwrap_err()
+            .0
+            .contains("FEAT_SME2")
         );
     }
 }

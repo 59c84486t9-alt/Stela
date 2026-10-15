@@ -38,6 +38,7 @@
     "crates/stela-compiler/src/aarch64/scalable/features.rs",
     "crates/stela-compiler/src/aarch64/scalable/profile.rs",
     "crates/stela-compiler/src/aarch64/sve.rs",
+    "crates/stela-compiler/src/aarch64/sve/address.rs",
     "crates/stela-compiler/src/aarch64/sve/dot.rs",
     "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
@@ -54,6 +55,9 @@
     "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
     "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
+    "crates/stela-compiler/src/x86_64/sve/address.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
@@ -479,6 +483,31 @@
         "selected_timing_program_body_bridges": 48,
         "actual_caller_mxcsr_comparisons": 600
       }
+    }
+  ,
+    "sve_address_count": {
+      "harness": ".stela/research/coverage-race/sve-memory-predicate/vl-scalar/integration/bridge_cli_v3.py",
+      "report": ".stela/research/coverage-race/sve-memory-predicate/vl-scalar/integration/successor-immediate-1/counter-eof-1/production-admission.json",
+      "kind": "arm64_scalable_address_count_original_native_transfer",
+      "comparison_field": "retained_original_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_memory/address.py",
+        "dev/simd_fixtures/sve_memory/counter.py"
+      ],
+      "required_measurements": {
+        "canonical_forms": 83,
+        "genuine_original_inputs": 14105,
+        "retained_original_native_comparisons": 28210,
+        "retained_complete_cli_entry_cases": 830,
+        "current_instruction_body_source_map_transfers": 16400,
+        "current_timed_program_transfers": 16,
+        "fresh_semantic_replays": 0
+      },
+      "require_current_executable": true
     }
   },
   "forms": [
@@ -19469,6 +19498,3576 @@
         }
       ]
     }
+  ,
+    {
+      "id": "addpl_r_ri_",
+      "mnemonic": "ADDPL",
+      "category": "sve",
+      "source_file": "addpl_r_ri.xml",
+      "encoding_mask": "0xffe0f800",
+      "encoding_value": "0x04605000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "71bf38165b0f257947cc5c3780f5cd7872816c09cf4298cbf28c0d236dc11c75",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04605020",
+          "expected_mnemonics": [
+            "addpl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "addvl_r_ri_",
+      "mnemonic": "ADDVL",
+      "category": "sve",
+      "source_file": "addvl_r_ri.xml",
+      "encoding_mask": "0xffe0f800",
+      "encoding_value": "0x04205000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "a2955098b3d0a1a862a7e9943320d1c99d0b44e771e3d88899ec270e86634aae",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04205020",
+          "expected_mnemonics": [
+            "addvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cntb_r_s_",
+      "mnemonic": "CNTB",
+      "category": "sve",
+      "source_file": "cntb_r_s.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0420e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "10d99bd8ad31b971c6777d7536000ad68090f13b2869d3c239c272d5eebaeb71",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420e3e0",
+          "expected_mnemonics": [
+            "cntb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cntd_r_s_",
+      "mnemonic": "CNTD",
+      "category": "sve",
+      "source_file": "cntb_r_s.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "10d99bd8ad31b971c6777d7536000ad68090f13b2869d3c239c272d5eebaeb71",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0e3e0",
+          "expected_mnemonics": [
+            "cntd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cnth_r_s_",
+      "mnemonic": "CNTH",
+      "category": "sve",
+      "source_file": "cntb_r_s.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "10d99bd8ad31b971c6777d7536000ad68090f13b2869d3c239c272d5eebaeb71",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460e3e0",
+          "expected_mnemonics": [
+            "cnth"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cntp_r_p_p_",
+      "mnemonic": "CNTP",
+      "category": "sve",
+      "source_file": "cntp_r_p_p.xml",
+      "encoding_mask": "0xff3fc200",
+      "encoding_value": "0x25208000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "40b0d8cd9403e2f0612b3b8d1b434e0128de8cef9e707eb993fdd938f85bfdc3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25208000",
+          "expected_mnemonics": [
+            "cntp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cntp_r_pn_",
+      "mnemonic": "CNTP",
+      "category": "sve",
+      "source_file": "cntp_r_pn.xml",
+      "encoding_mask": "0xff3ffa00",
+      "encoding_value": "0x25208200",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "144ed2f1420b05a4349b5f6d39032ff84b3fdeb6bb4c7b67cd9b00a85e82a71b",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25208200",
+          "expected_mnemonics": [
+            "cntp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "cntw_r_s_",
+      "mnemonic": "CNTW",
+      "category": "sve",
+      "source_file": "cntb_r_s.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "10d99bd8ad31b971c6777d7536000ad68090f13b2869d3c239c272d5eebaeb71",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0e3e0",
+          "expected_mnemonics": [
+            "cntw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decb_r_rs_",
+      "mnemonic": "DECB",
+      "category": "sve",
+      "source_file": "decb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "727498b42bf4ba0ea8c6288f354c57c0ef2087840f626535d43686a38d373cbf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430e400",
+          "expected_mnemonics": [
+            "decb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decd_r_rs_",
+      "mnemonic": "DECD",
+      "category": "sve",
+      "source_file": "decb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "727498b42bf4ba0ea8c6288f354c57c0ef2087840f626535d43686a38d373cbf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0e400",
+          "expected_mnemonics": [
+            "decd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decd_z_zs_",
+      "mnemonic": "DECD",
+      "category": "sve",
+      "source_file": "decd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f2ed7ffe0c1540ecab58a91646bc3c7206ba8b02f1ec2f4fefde9cdfbabf2960",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0c400",
+          "expected_mnemonics": [
+            "decd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "dech_r_rs_",
+      "mnemonic": "DECH",
+      "category": "sve",
+      "source_file": "decb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "727498b42bf4ba0ea8c6288f354c57c0ef2087840f626535d43686a38d373cbf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470e400",
+          "expected_mnemonics": [
+            "dech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "dech_z_zs_",
+      "mnemonic": "DECH",
+      "category": "sve",
+      "source_file": "decd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f2ed7ffe0c1540ecab58a91646bc3c7206ba8b02f1ec2f4fefde9cdfbabf2960",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470c400",
+          "expected_mnemonics": [
+            "dech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decp_r_p_r_",
+      "mnemonic": "DECP",
+      "category": "sve",
+      "source_file": "decp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252d8800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6eb24e391584e57f625d2ef17b383a32f2be8df8e3599faf1b9ba690c66d08fe",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252d8800",
+          "expected_mnemonics": [
+            "decp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decp_z_p_z_",
+      "mnemonic": "DECP",
+      "category": "sve",
+      "source_file": "decp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252d8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f754b971a363e2f258ffde46cdaf177420b6402ee936484256bfcd54e786e766",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x256d8000",
+          "expected_mnemonics": [
+            "decp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decw_r_rs_",
+      "mnemonic": "DECW",
+      "category": "sve",
+      "source_file": "decb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "727498b42bf4ba0ea8c6288f354c57c0ef2087840f626535d43686a38d373cbf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0e400",
+          "expected_mnemonics": [
+            "decw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "decw_z_zs_",
+      "mnemonic": "DECW",
+      "category": "sve",
+      "source_file": "decd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f2ed7ffe0c1540ecab58a91646bc3c7206ba8b02f1ec2f4fefde9cdfbabf2960",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0c400",
+          "expected_mnemonics": [
+            "decw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incb_r_rs_",
+      "mnemonic": "INCB",
+      "category": "sve",
+      "source_file": "incb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9fa6982b7bc84cb518c8326553906f2993e0c7f07ca63a5af4df429cc81f61ff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430e000",
+          "expected_mnemonics": [
+            "incb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incd_r_rs_",
+      "mnemonic": "INCD",
+      "category": "sve",
+      "source_file": "incb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9fa6982b7bc84cb518c8326553906f2993e0c7f07ca63a5af4df429cc81f61ff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0e000",
+          "expected_mnemonics": [
+            "incd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incd_z_zs_",
+      "mnemonic": "INCD",
+      "category": "sve",
+      "source_file": "incd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "00058c42173ea63c774e70e0e09606654502fa4966c185145b46ee5ae4b7d34c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0c000",
+          "expected_mnemonics": [
+            "incd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "inch_r_rs_",
+      "mnemonic": "INCH",
+      "category": "sve",
+      "source_file": "incb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9fa6982b7bc84cb518c8326553906f2993e0c7f07ca63a5af4df429cc81f61ff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470e000",
+          "expected_mnemonics": [
+            "inch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "inch_z_zs_",
+      "mnemonic": "INCH",
+      "category": "sve",
+      "source_file": "incd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "00058c42173ea63c774e70e0e09606654502fa4966c185145b46ee5ae4b7d34c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470c000",
+          "expected_mnemonics": [
+            "inch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incp_r_p_r_",
+      "mnemonic": "INCP",
+      "category": "sve",
+      "source_file": "incp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252c8800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "4854fbf2722ed8dc7cea1a9eb0819572dd9fd27cafef31b4ee9e1448c5c1651d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252c8800",
+          "expected_mnemonics": [
+            "incp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incp_z_p_z_",
+      "mnemonic": "INCP",
+      "category": "sve",
+      "source_file": "incp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252c8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "dbf7a48cbd84af3c021e4c3eb7691f20ad8ef4252165028b7ffc74bc9097e0cd",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x256c8000",
+          "expected_mnemonics": [
+            "incp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incw_r_rs_",
+      "mnemonic": "INCW",
+      "category": "sve",
+      "source_file": "incb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9fa6982b7bc84cb518c8326553906f2993e0c7f07ca63a5af4df429cc81f61ff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0e000",
+          "expected_mnemonics": [
+            "incw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "incw_z_zs_",
+      "mnemonic": "INCW",
+      "category": "sve",
+      "source_file": "incd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "00058c42173ea63c774e70e0e09606654502fa4966c185145b46ee5ae4b7d34c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0c000",
+          "expected_mnemonics": [
+            "incw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "rdvl_r_i_",
+      "mnemonic": "RDVL",
+      "category": "sve",
+      "source_file": "rdvl_r_i.xml",
+      "encoding_mask": "0xfffff800",
+      "encoding_value": "0x04bf5000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "3ea005dcc4691275580461b387da01d43a48a601da4dc0ecd4ed296493fd7e3a",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04bf5020",
+          "expected_mnemonics": [
+            "rdvl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecb_r_rs_sx",
+      "mnemonic": "SQDECB",
+      "category": "sve",
+      "source_file": "sqdecb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0420f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "bd28d866595516699751b860a41a7c3c40e6df212efc75da1301c0a2fe4e5dff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420f800",
+          "expected_mnemonics": [
+            "sqdecb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecb_r_rs_x",
+      "mnemonic": "SQDECB",
+      "category": "sve",
+      "source_file": "sqdecb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "bd28d866595516699751b860a41a7c3c40e6df212efc75da1301c0a2fe4e5dff",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430f800",
+          "expected_mnemonics": [
+            "sqdecb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecd_r_rs_sx",
+      "mnemonic": "SQDECD",
+      "category": "sve",
+      "source_file": "sqdecd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "453227ad85e7033de32c22c8bde9a5be90c7cc59748f700e064e9049c873b613",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0f800",
+          "expected_mnemonics": [
+            "sqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecd_r_rs_x",
+      "mnemonic": "SQDECD",
+      "category": "sve",
+      "source_file": "sqdecd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "453227ad85e7033de32c22c8bde9a5be90c7cc59748f700e064e9049c873b613",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0f800",
+          "expected_mnemonics": [
+            "sqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecd_z_zs_",
+      "mnemonic": "SQDECD",
+      "category": "sve",
+      "source_file": "sqdecd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0c800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0e847be04b25f3c30ff5fc111cfa3f4ee719bcebb5c1a56dc8fb7f20d1c39d54",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0c800",
+          "expected_mnemonics": [
+            "sqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdech_r_rs_sx",
+      "mnemonic": "SQDECH",
+      "category": "sve",
+      "source_file": "sqdech_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "93f536420cbe9a4cec1d252fb0847c40e09314fac783d2a0c600387549292767",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460f800",
+          "expected_mnemonics": [
+            "sqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdech_r_rs_x",
+      "mnemonic": "SQDECH",
+      "category": "sve",
+      "source_file": "sqdech_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "93f536420cbe9a4cec1d252fb0847c40e09314fac783d2a0c600387549292767",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470f800",
+          "expected_mnemonics": [
+            "sqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdech_z_zs_",
+      "mnemonic": "SQDECH",
+      "category": "sve",
+      "source_file": "sqdech_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460c800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ba11c34b881330c835afae3e20e67ac21388e18f58e5536948927bbf715af474",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460c800",
+          "expected_mnemonics": [
+            "sqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecp_r_p_r_sx",
+      "mnemonic": "SQDECP",
+      "category": "sve",
+      "source_file": "sqdecp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252a8800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "8c8853f1a5c35fc66a816ee83825ec28b76124a2a2827a3b081b5ea8148019c5",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252a8800",
+          "expected_mnemonics": [
+            "sqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecp_r_p_r_x",
+      "mnemonic": "SQDECP",
+      "category": "sve",
+      "source_file": "sqdecp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252a8c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "8c8853f1a5c35fc66a816ee83825ec28b76124a2a2827a3b081b5ea8148019c5",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252a8c00",
+          "expected_mnemonics": [
+            "sqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecp_z_p_z_",
+      "mnemonic": "SQDECP",
+      "category": "sve",
+      "source_file": "sqdecp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252a8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "557080e677ae71a96179f1db8dcaa6f67bdcbd5837349e9f7f0e47d5725d0f68",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x256a8000",
+          "expected_mnemonics": [
+            "sqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecw_r_rs_sx",
+      "mnemonic": "SQDECW",
+      "category": "sve",
+      "source_file": "sqdecw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c11860f801bc3a9d858d1c5162ca167cab784aa49430be2fe0c2b7e57e81e9f3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0f800",
+          "expected_mnemonics": [
+            "sqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecw_r_rs_x",
+      "mnemonic": "SQDECW",
+      "category": "sve",
+      "source_file": "sqdecw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0f800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c11860f801bc3a9d858d1c5162ca167cab784aa49430be2fe0c2b7e57e81e9f3",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0f800",
+          "expected_mnemonics": [
+            "sqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqdecw_z_zs_",
+      "mnemonic": "SQDECW",
+      "category": "sve",
+      "source_file": "sqdecw_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0c800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "8cfef618800e568757ee7b71b7c5e0907b09381735f2091ab5100a8c7abda955",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0c800",
+          "expected_mnemonics": [
+            "sqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincb_r_rs_sx",
+      "mnemonic": "SQINCB",
+      "category": "sve",
+      "source_file": "sqincb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0420f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "52dee71a7d36056ebc2f183147fd32ee6f6cbd24be03c4dd44f252a9da58cacb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420f000",
+          "expected_mnemonics": [
+            "sqincb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincb_r_rs_x",
+      "mnemonic": "SQINCB",
+      "category": "sve",
+      "source_file": "sqincb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "52dee71a7d36056ebc2f183147fd32ee6f6cbd24be03c4dd44f252a9da58cacb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430f000",
+          "expected_mnemonics": [
+            "sqincb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincd_r_rs_sx",
+      "mnemonic": "SQINCD",
+      "category": "sve",
+      "source_file": "sqincd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0dc9c62936ae4a31a4d28052ff66c209895f3ce85d9226081d8f75b673ec5951",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0f000",
+          "expected_mnemonics": [
+            "sqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincd_r_rs_x",
+      "mnemonic": "SQINCD",
+      "category": "sve",
+      "source_file": "sqincd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0dc9c62936ae4a31a4d28052ff66c209895f3ce85d9226081d8f75b673ec5951",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0f000",
+          "expected_mnemonics": [
+            "sqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincd_z_zs_",
+      "mnemonic": "SQINCD",
+      "category": "sve",
+      "source_file": "sqincd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5808a0a9c54ba5b5d7b101f5da2e2c1db8346e3aa19a9451faff1a24543d9a6e",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0c000",
+          "expected_mnemonics": [
+            "sqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqinch_r_rs_sx",
+      "mnemonic": "SQINCH",
+      "category": "sve",
+      "source_file": "sqinch_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2a3eb3aa7b7068ad1ec997441b4d71a57efa84d736378cc9c3d084c018742c36",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460f000",
+          "expected_mnemonics": [
+            "sqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqinch_r_rs_x",
+      "mnemonic": "SQINCH",
+      "category": "sve",
+      "source_file": "sqinch_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2a3eb3aa7b7068ad1ec997441b4d71a57efa84d736378cc9c3d084c018742c36",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470f000",
+          "expected_mnemonics": [
+            "sqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqinch_z_zs_",
+      "mnemonic": "SQINCH",
+      "category": "sve",
+      "source_file": "sqinch_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "2bbeb93f5cbad500e865daa400f564afc4ae5afeac82a172aeec7e279689cf5c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460c000",
+          "expected_mnemonics": [
+            "sqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincp_r_p_r_sx",
+      "mnemonic": "SQINCP",
+      "category": "sve",
+      "source_file": "sqincp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25288800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "342132557eae0e44ab03d8826795492d748c2b2ac092630b9536830776701654",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25288800",
+          "expected_mnemonics": [
+            "sqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincp_r_p_r_x",
+      "mnemonic": "SQINCP",
+      "category": "sve",
+      "source_file": "sqincp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25288c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "342132557eae0e44ab03d8826795492d748c2b2ac092630b9536830776701654",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25288c00",
+          "expected_mnemonics": [
+            "sqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincp_z_p_z_",
+      "mnemonic": "SQINCP",
+      "category": "sve",
+      "source_file": "sqincp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25288000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "06d30ce36559d7271a89c5f0055529e60efe60a2398897ec822e8c6b77b16eb0",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25688000",
+          "expected_mnemonics": [
+            "sqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincw_r_rs_sx",
+      "mnemonic": "SQINCW",
+      "category": "sve",
+      "source_file": "sqincw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f43719bc8a69579c73e0af827d74fc96aaab57aacf08fed30e31c5ac9d0038d1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0f000",
+          "expected_mnemonics": [
+            "sqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincw_r_rs_x",
+      "mnemonic": "SQINCW",
+      "category": "sve",
+      "source_file": "sqincw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0f000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f43719bc8a69579c73e0af827d74fc96aaab57aacf08fed30e31c5ac9d0038d1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0f000",
+          "expected_mnemonics": [
+            "sqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "sqincw_z_zs_",
+      "mnemonic": "SQINCW",
+      "category": "sve",
+      "source_file": "sqincw_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "dbbc8fd809028a304e1e89772daee7dd46ef9550a0eddbcfe8e80680493ec73e",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0c000",
+          "expected_mnemonics": [
+            "sqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecb_r_rs_uw",
+      "mnemonic": "UQDECB",
+      "category": "sve",
+      "source_file": "uqdecb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0420fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "3f6ffef3d6f0187a3b4684b9e22efac9a547288a03a602c4c4e150cf0620a878",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420fc00",
+          "expected_mnemonics": [
+            "uqdecb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecb_r_rs_x",
+      "mnemonic": "UQDECB",
+      "category": "sve",
+      "source_file": "uqdecb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "3f6ffef3d6f0187a3b4684b9e22efac9a547288a03a602c4c4e150cf0620a878",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430fc00",
+          "expected_mnemonics": [
+            "uqdecb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecd_r_rs_uw",
+      "mnemonic": "UQDECD",
+      "category": "sve",
+      "source_file": "uqdecd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "1ed300edc0466a6d1464d6a70b769a9c9fab47c5e23cbfa5059ff47731d61217",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0fc00",
+          "expected_mnemonics": [
+            "uqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecd_r_rs_x",
+      "mnemonic": "UQDECD",
+      "category": "sve",
+      "source_file": "uqdecd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "1ed300edc0466a6d1464d6a70b769a9c9fab47c5e23cbfa5059ff47731d61217",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0fc00",
+          "expected_mnemonics": [
+            "uqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecd_z_zs_",
+      "mnemonic": "UQDECD",
+      "category": "sve",
+      "source_file": "uqdecd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0cc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "8878761e540e48480cdc35420806b2329098318f8bd65887e1fd0ae39e4c3656",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0cc00",
+          "expected_mnemonics": [
+            "uqdecd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdech_r_rs_uw",
+      "mnemonic": "UQDECH",
+      "category": "sve",
+      "source_file": "uqdech_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d496cf09546871005013eee7b6258fbb59ae8aa557e3e9c98214235d0fe2c0c2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460fc00",
+          "expected_mnemonics": [
+            "uqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdech_r_rs_x",
+      "mnemonic": "UQDECH",
+      "category": "sve",
+      "source_file": "uqdech_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d496cf09546871005013eee7b6258fbb59ae8aa557e3e9c98214235d0fe2c0c2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470fc00",
+          "expected_mnemonics": [
+            "uqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdech_z_zs_",
+      "mnemonic": "UQDECH",
+      "category": "sve",
+      "source_file": "uqdech_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460cc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "84798faa32470b4ba0a8e10f061cabc6e1bf10d78e9886bee0ee0c3287c13f24",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460cc00",
+          "expected_mnemonics": [
+            "uqdech"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecp_r_p_r_uw",
+      "mnemonic": "UQDECP",
+      "category": "sve",
+      "source_file": "uqdecp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252b8800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "7671697cfdafa8e7892303ba80a651bc176a6f863b2295dd4b274338da207f47",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252b8800",
+          "expected_mnemonics": [
+            "uqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecp_r_p_r_x",
+      "mnemonic": "UQDECP",
+      "category": "sve",
+      "source_file": "uqdecp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252b8c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "7671697cfdafa8e7892303ba80a651bc176a6f863b2295dd4b274338da207f47",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x252b8c00",
+          "expected_mnemonics": [
+            "uqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecp_z_p_z_",
+      "mnemonic": "UQDECP",
+      "category": "sve",
+      "source_file": "uqdecp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x252b8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f0588bdc76857678f469cb8de09b3fcaaf078aee6a1ddbf98797868525efb2d0",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x256b8000",
+          "expected_mnemonics": [
+            "uqdecp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecw_r_rs_uw",
+      "mnemonic": "UQDECW",
+      "category": "sve",
+      "source_file": "uqdecw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "773aa68a592cfa12a504eb07a45b4f41f5123a05ce5c9d24cf5f291e25a6aed9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0fc00",
+          "expected_mnemonics": [
+            "uqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecw_r_rs_x",
+      "mnemonic": "UQDECW",
+      "category": "sve",
+      "source_file": "uqdecw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0fc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "773aa68a592cfa12a504eb07a45b4f41f5123a05ce5c9d24cf5f291e25a6aed9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0fc00",
+          "expected_mnemonics": [
+            "uqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqdecw_z_zs_",
+      "mnemonic": "UQDECW",
+      "category": "sve",
+      "source_file": "uqdecw_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0cc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f0e35698a933daadc76a7b6f821d1b36479e272731fdd14b20df2b2baa42af09",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0cc00",
+          "expected_mnemonics": [
+            "uqdecw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincb_r_rs_uw",
+      "mnemonic": "UQINCB",
+      "category": "sve",
+      "source_file": "uqincb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0420f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "16327c3108c95ba52eb84792d00ebeabf14606f8ba595804c9ea377b7ffc4cdf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420f400",
+          "expected_mnemonics": [
+            "uqincb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincb_r_rs_x",
+      "mnemonic": "UQINCB",
+      "category": "sve",
+      "source_file": "uqincb_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0430f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "16327c3108c95ba52eb84792d00ebeabf14606f8ba595804c9ea377b7ffc4cdf",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0430f400",
+          "expected_mnemonics": [
+            "uqincb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincd_r_rs_uw",
+      "mnemonic": "UQINCD",
+      "category": "sve",
+      "source_file": "uqincd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "78006a444f91082b3691856a59aa3c9f78c89713b745c4c009d6e8e5cb66bd76",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0f400",
+          "expected_mnemonics": [
+            "uqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincd_r_rs_x",
+      "mnemonic": "UQINCD",
+      "category": "sve",
+      "source_file": "uqincd_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04f0f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "78006a444f91082b3691856a59aa3c9f78c89713b745c4c009d6e8e5cb66bd76",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04f0f400",
+          "expected_mnemonics": [
+            "uqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincd_z_zs_",
+      "mnemonic": "UQINCD",
+      "category": "sve",
+      "source_file": "uqincd_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04e0c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6bb7161fd4d773ca69be75b9f31757250b539799004aedf72e7e2d7510bcc7f1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04e0c400",
+          "expected_mnemonics": [
+            "uqincd"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqinch_r_rs_uw",
+      "mnemonic": "UQINCH",
+      "category": "sve",
+      "source_file": "uqinch_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "caa49ddb1e7805a1e516d8bc5bb110851082f0b08be98096c5026fb78d2cb5fc",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460f400",
+          "expected_mnemonics": [
+            "uqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqinch_r_rs_x",
+      "mnemonic": "UQINCH",
+      "category": "sve",
+      "source_file": "uqinch_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0470f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "caa49ddb1e7805a1e516d8bc5bb110851082f0b08be98096c5026fb78d2cb5fc",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0470f400",
+          "expected_mnemonics": [
+            "uqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqinch_z_zs_",
+      "mnemonic": "UQINCH",
+      "category": "sve",
+      "source_file": "uqinch_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x0460c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "36b959a08e1576617db2cb07b3bfa50bd5cb162e5f66ed4ad7815ad9b087b045",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0460c400",
+          "expected_mnemonics": [
+            "uqinch"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincp_r_p_r_uw",
+      "mnemonic": "UQINCP",
+      "category": "sve",
+      "source_file": "uqincp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25298800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9f856897003c56019c16d5e5375ae75cb9152c529d946931ed6d1878707c87bb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25298800",
+          "expected_mnemonics": [
+            "uqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincp_r_p_r_x",
+      "mnemonic": "UQINCP",
+      "category": "sve",
+      "source_file": "uqincp_r_p_r.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25298c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9f856897003c56019c16d5e5375ae75cb9152c529d946931ed6d1878707c87bb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25298c00",
+          "expected_mnemonics": [
+            "uqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincp_z_p_z_",
+      "mnemonic": "UQINCP",
+      "category": "sve",
+      "source_file": "uqincp_z_p_z.xml",
+      "encoding_mask": "0xff3ffe00",
+      "encoding_value": "0x25298000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "fc39a4be01e71f1466134cebf385d334e8831c76c9230ef98cb834cb56d0fdc9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25698000",
+          "expected_mnemonics": [
+            "uqincp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincw_r_rs_uw",
+      "mnemonic": "UQINCW",
+      "category": "sve",
+      "source_file": "uqincw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9cda6b461bfeaa84a5a77c90ec76375662836998df984f9d9991cc3e70472fad",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0f400",
+          "expected_mnemonics": [
+            "uqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincw_r_rs_x",
+      "mnemonic": "UQINCW",
+      "category": "sve",
+      "source_file": "uqincw_r_rs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04b0f400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9cda6b461bfeaa84a5a77c90ec76375662836998df984f9d9991cc3e70472fad",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04b0f400",
+          "expected_mnemonics": [
+            "uqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    },
+    {
+      "id": "uqincw_z_zs_",
+      "mnemonic": "UQINCW",
+      "category": "sve",
+      "source_file": "uqincw_z_zs.xml",
+      "encoding_mask": "0xfff0fc00",
+      "encoding_value": "0x04a0c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "1acf61ff20c0e7d0a0bedb65b01714af22c9e088bfdbd698548cd952927f7360",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "evidence_groups": [
+        "sve_address_count"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/address.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/address.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04a0c400",
+          "expected_mnemonics": [
+            "uqincw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
+      "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    }
   ],
   "execution_profiles": {
     "sme-streaming-v2-sme-i8mm": {
@@ -19516,6 +23115,34 @@
       "decoder_mattrs": [
         "+sme2",
         "+sme-i16i64"
+      ]
+    }
+  ,
+    "sme-streaming-v2-sme2": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 16,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": true,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme2",
+        "+sve2p1"
+      ],
+      "description": "Explicit SME/SME2 streaming leaf profile; each sample selects current SVL and SM/ZA state.",
+      "outside_scope": [
+        "general non-streaming SVE",
+        "implicit later guest ISA features",
+        "DIT=1",
+        "production block/cache context entry",
+        "full guest exception delivery",
+        "Apple hardware conformance, applications and macOS boot"
       ]
     }
   }
