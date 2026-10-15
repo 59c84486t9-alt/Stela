@@ -4,6 +4,10 @@
 //! owner resolves each actually reached atomic part, checks tags and publishes
 //! writes through the shared reservation domain. It does not interpret opcodes.
 
+#[path = "domain/scalar.rs"]
+mod scalar;
+pub use scalar::{MemoryFault, MemoryReader};
+
 #[path = "domain/publication.rs"]
 mod publication;
 pub use publication::PublicationFault;

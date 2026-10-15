@@ -305,6 +305,35 @@
         "body_bytes_including_ret": 16,
         "body_instructions_including_ret": 3
       }
+    },
+    "authenticated_pauth_load": {
+      "harness": "dev/pauth-differential.py",
+      "report": ".stela/ldra-differential-report.json",
+      "kind": "original_arm_authenticated_load_vs_checked_native_runtime",
+      "comparison_field": "state_and_memory_comparisons",
+      "require_current_executable": false,
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1",
+      "runtime_profile": "stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1",
+      "required_shared_sources": [
+        "dev/pauth-differential.py",
+        "dev/differential.py",
+        "dev/simd_original.py",
+        "dev/evidence.py",
+        "crates/stela-runtime/tests/pointer_authentication/corpus.rs",
+        "crates/stela-runtime/tests/pointer_authentication/corpus/ldra.rs"
+      ],
+      "required_measurements": {
+        "canonical_forms": 4,
+        "raw_original_frames": 4456,
+        "state_and_memory_comparisons": 17392,
+        "actual_emitted_bodies": 2040,
+        "baseline_checked_byte_bridges": 2040,
+        "cache_phases": 4,
+        "body_bytes_including_ret": 16,
+        "body_instructions_including_ret": 3,
+        "policy_counts.constrained_unpredictable_original_choice": 48,
+        "policy_counts.qemu_sp_alignment_check_omission": 384
+      }
     }
   },
   "forms": [
@@ -1637,6 +1666,146 @@
           "word": "0x9ac03000",
           "expected_mnemonics": [
             "pacga"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LDRAA_64W_ldst_pac",
+      "category": "base_integer_system",
+      "source_file": "ldra.xml",
+      "encoding_mask": "0xffa00c00",
+      "encoding_value": "0xf8200c00",
+      "alias": false,
+      "source_sha256": "1e0008355b786b81106f7aa1925981898de7541db8f8b4e3cd9279e4098be909",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Exact pinned June2026 load form, operand/authentication/alignment/read/commit order and checked MemoryThread reader reviewed; original/native complete State/RAM and fault policy through cold/hot/disk/AOT paths with actual baseline/checked body and source-map bridges.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_memory.rs",
+        "crates/stela-compiler/src/context/memory.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/pauth/policy.rs",
+        "crates/stela-runtime/src/pauth/memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/domain/scalar.rs"
+      ],
+      "evidence_groups": [
+        "authenticated_pauth_load"
+      ],
+      "scope": "Complete selected form under explicit FPACCOMBINE/QARMA5 Context stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1, VA47/iTBI0/dTBI1, EL0, A=0 and DA/DB authentication enabled, with SA0 off/on. Rn31 is original SP and Rt31 discards only after service/read validation. Validate descriptor, select UNDEF for pre-index Rn=Rt!=31, authenticate with zero modifier, check original SP, add signed scaled8 offset, perform checked 64-bit read, then commit destination/writeback. Reader privilege comes from authoritative EL; tagchecked=writeback||Rn!=31 and nontemporal=false. Faults preserve pending destination/base. QEMU SP-check omission and permitted overlap choices remain separate source-policy evidence; A1, disabled-key execution, Apple hardware key identity and architectural exception delivery are uncredited.",
+      "smoke_samples": [
+        {
+          "word": "0xf8200c20",
+          "expected_mnemonics": [
+            "ldraa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LDRAA_64_ldst_pac",
+      "category": "base_integer_system",
+      "source_file": "ldra.xml",
+      "encoding_mask": "0xffa00c00",
+      "encoding_value": "0xf8200400",
+      "alias": false,
+      "source_sha256": "1e0008355b786b81106f7aa1925981898de7541db8f8b4e3cd9279e4098be909",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Exact pinned June2026 load form, operand/authentication/alignment/read/commit order and checked MemoryThread reader reviewed; original/native complete State/RAM and fault policy through cold/hot/disk/AOT paths with actual baseline/checked body and source-map bridges.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_memory.rs",
+        "crates/stela-compiler/src/context/memory.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/pauth/policy.rs",
+        "crates/stela-runtime/src/pauth/memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/domain/scalar.rs"
+      ],
+      "evidence_groups": [
+        "authenticated_pauth_load"
+      ],
+      "scope": "Complete selected form under explicit FPACCOMBINE/QARMA5 Context stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1, VA47/iTBI0/dTBI1, EL0, A=0 and DA/DB authentication enabled, with SA0 off/on. Rn31 is original SP and Rt31 discards only after service/read validation. Validate descriptor, select UNDEF for pre-index Rn=Rt!=31, authenticate with zero modifier, check original SP, add signed scaled8 offset, perform checked 64-bit read, then commit destination/writeback. Reader privilege comes from authoritative EL; tagchecked=writeback||Rn!=31 and nontemporal=false. Faults preserve pending destination/base. QEMU SP-check omission and permitted overlap choices remain separate source-policy evidence; A1, disabled-key execution, Apple hardware key identity and architectural exception delivery are uncredited.",
+      "smoke_samples": [
+        {
+          "word": "0xf8200420",
+          "expected_mnemonics": [
+            "ldraa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LDRAB_64W_ldst_pac",
+      "category": "base_integer_system",
+      "source_file": "ldra.xml",
+      "encoding_mask": "0xffa00c00",
+      "encoding_value": "0xf8a00c00",
+      "alias": false,
+      "source_sha256": "1e0008355b786b81106f7aa1925981898de7541db8f8b4e3cd9279e4098be909",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Exact pinned June2026 load form, operand/authentication/alignment/read/commit order and checked MemoryThread reader reviewed; original/native complete State/RAM and fault policy through cold/hot/disk/AOT paths with actual baseline/checked body and source-map bridges.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_memory.rs",
+        "crates/stela-compiler/src/context/memory.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/pauth/policy.rs",
+        "crates/stela-runtime/src/pauth/memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/domain/scalar.rs"
+      ],
+      "evidence_groups": [
+        "authenticated_pauth_load"
+      ],
+      "scope": "Complete selected form under explicit FPACCOMBINE/QARMA5 Context stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1, VA47/iTBI0/dTBI1, EL0, A=0 and DA/DB authentication enabled, with SA0 off/on. Rn31 is original SP and Rt31 discards only after service/read validation. Validate descriptor, select UNDEF for pre-index Rn=Rt!=31, authenticate with zero modifier, check original SP, add signed scaled8 offset, perform checked 64-bit read, then commit destination/writeback. Reader privilege comes from authoritative EL; tagchecked=writeback||Rn!=31 and nontemporal=false. Faults preserve pending destination/base. QEMU SP-check omission and permitted overlap choices remain separate source-policy evidence; A1, disabled-key execution, Apple hardware key identity and architectural exception delivery are uncredited.",
+      "smoke_samples": [
+        {
+          "word": "0xf8a00c20",
+          "expected_mnemonics": [
+            "ldrab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LDRAB_64_ldst_pac",
+      "category": "base_integer_system",
+      "source_file": "ldra.xml",
+      "encoding_mask": "0xffa00c00",
+      "encoding_value": "0xf8a00400",
+      "alias": false,
+      "source_sha256": "1e0008355b786b81106f7aa1925981898de7541db8f8b4e3cd9279e4098be909",
+      "profile": "apple-arm64e-software-pauth-clock-v1",
+      "status": "implemented",
+      "review": "Exact pinned June2026 load form, operand/authentication/alignment/read/commit order and checked MemoryThread reader reviewed; original/native complete State/RAM and fault policy through cold/hot/disk/AOT paths with actual baseline/checked body and source-map bridges.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/pauth_memory.rs",
+        "crates/stela-compiler/src/context/memory.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/pauth.rs",
+        "crates/stela-runtime/src/pauth/policy.rs",
+        "crates/stela-runtime/src/pauth/memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/domain/scalar.rs"
+      ],
+      "evidence_groups": [
+        "authenticated_pauth_load"
+      ],
+      "scope": "Complete selected form under explicit FPACCOMBINE/QARMA5 Context stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1, VA47/iTBI0/dTBI1, EL0, A=0 and DA/DB authentication enabled, with SA0 off/on. Rn31 is original SP and Rt31 discards only after service/read validation. Validate descriptor, select UNDEF for pre-index Rn=Rt!=31, authenticate with zero modifier, check original SP, add signed scaled8 offset, perform checked 64-bit read, then commit destination/writeback. Reader privilege comes from authoritative EL; tagchecked=writeback||Rn!=31 and nontemporal=false. Faults preserve pending destination/base. QEMU SP-check omission and permitted overlap choices remain separate source-policy evidence; A1, disabled-key execution, Apple hardware key identity and architectural exception delivery are uncredited.",
+      "smoke_samples": [
+        {
+          "word": "0xf8a00420",
+          "expected_mnemonics": [
+            "ldrab"
           ]
         }
       ]

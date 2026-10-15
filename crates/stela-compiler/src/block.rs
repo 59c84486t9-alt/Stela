@@ -14,9 +14,9 @@ use crate::{
 };
 use serde::Serialize;
 
+pub mod pauth_memory;
 pub mod system;
 pub use system::{SystemInstruction, decode_system_instruction};
-pub mod pauth_memory;
 mod thread;
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 
@@ -225,6 +225,7 @@ pub enum PointerAuthenticationOperation {
     },
     ReturnIaSp,
     GenericCode(pauth_memory::GenericCode),
+    Load(pauth_memory::Load),
     Branch {
         key: PointerAuthenticationKey,
         target: u8,
@@ -251,6 +252,10 @@ impl PointerAuthenticationOperation {
             Self::Sign { key, .. } | Self::Authenticate { key, .. } | Self::Branch { key, .. } => {
                 Some(key)
             }
+            Self::Load(load) => Some(match load.key {
+                pauth_memory::DataKey::A => PointerAuthenticationKey::Da,
+                pauth_memory::DataKey::B => PointerAuthenticationKey::Db,
+            }),
             Self::Strip { .. } | Self::GenericCode(_) => None,
         }
     }
@@ -401,7 +406,10 @@ pub fn decode_pointer_authentication(
             Some(pauth_memory::Instruction::GenericCode(code)) => {
                 PointerAuthenticationOperation::GenericCode(code)
             }
-            Some(pauth_memory::Instruction::Load(_)) | None => return Ok(None),
+            Some(pauth_memory::Instruction::Load(load)) => {
+                PointerAuthenticationOperation::Load(load)
+            }
+            None => return Ok(None),
         },
     };
     Ok(Some(PointerAuthentication {

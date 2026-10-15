@@ -2,7 +2,8 @@
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
 use crate::{
-    Prepared, clock, execution::platform, floating, pauth, prepare_block_for_target, system, thread,
+    Prepared, clock, execution::platform, floating, memory, pauth, prepare_block_for_target,
+    system, thread,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -78,6 +79,20 @@ pub enum StopReason {
     PointerAuthenticationFailure {
         instruction: PointerAuthentication,
         code: u8,
+    },
+    PointerAuthenticationLoadUndefined {
+        instruction: PointerAuthentication,
+    },
+    PointerAuthenticationStackAlignment {
+        instruction: PointerAuthentication,
+        stack_pointer: u64,
+    },
+    PointerAuthenticationMemoryRequired {
+        instruction: PointerAuthentication,
+    },
+    PointerAuthenticationMemoryFault {
+        instruction: PointerAuthentication,
+        fault: memory::domain::MemoryFault,
     },
     /// A nonfaulting PAuth check produced an invalid return target. No target instruction executed;
     /// guest instruction-fetch exception delivery remains the caller's work.
@@ -172,8 +187,27 @@ struct LoadedBlock {
 }
 
 /// Services borrowed for one serialized run; absent owners remain explicit stops.
+struct AuthenticatedMemory<'a> {
+    reader: &'a mut dyn memory::domain::MemoryReader,
+    controls: pauth::memory::Controls,
+}
+
+struct PauthExecution<'a> {
+    context: &'a pauth::Context,
+    memory: Option<AuthenticatedMemory<'a>>,
+}
+
+impl<'a> PauthExecution<'a> {
+    fn keys_only(context: &'a pauth::Context) -> Self {
+        Self {
+            context,
+            memory: None,
+        }
+    }
+}
+
 struct RuntimeServices<'a> {
-    pointer_authentication: Option<&'a pauth::Context>,
+    pointer_authentication: Option<PauthExecution<'a>>,
     clock: Option<&'a mut clock::Context>,
     thread: Option<&'a thread::Context>,
     system: Option<&'a mut dyn system::execution::Dispatcher>,
@@ -186,9 +220,25 @@ impl<'a> RuntimeServices<'a> {
         thread: Option<&'a thread::Context>,
     ) -> Self {
         Self {
-            pointer_authentication,
+            pointer_authentication: pointer_authentication.map(PauthExecution::keys_only),
             clock,
             thread,
+            system: None,
+        }
+    }
+
+    fn pauth_memory(
+        context: &'a pauth::Context,
+        reader: &'a mut dyn memory::domain::MemoryReader,
+        controls: pauth::memory::Controls,
+    ) -> Self {
+        Self {
+            pointer_authentication: Some(PauthExecution {
+                context,
+                memory: Some(AuthenticatedMemory { reader, controls }),
+            }),
+            clock: None,
+            thread: None,
             system: None,
         }
     }
@@ -647,6 +697,52 @@ impl BlockRuntime {
         }
     }
 
+    /// Execute PAC helpers with the address-space owner's checked data reader.
+    /// Authenticated loads retain tags through the reader's translation policy;
+    /// their base and destination commit only after the complete eight-byte read.
+    ///
+    /// # Safety
+    /// Ordinary native prefixes retain the trusted-code/direct-RAM contract of
+    /// [`Self::run`]. The reader is the actual owner of this guest address space,
+    /// and its mappings, policy and backing remain valid throughout this call.
+    /// `controls` is the effective SP-alignment policy from that same CPU owner;
+    /// no SA0/SA/exception-level policy is inferred from RAM or process keys.
+    pub unsafe fn run_with_pauth_memory(
+        &mut self,
+        state: &mut ThreadState,
+        stop_pc: Option<GuestAddress>,
+        block_budget: usize,
+        context: &pauth::Context,
+        reader: &mut dyn memory::domain::MemoryReader,
+        controls: pauth::memory::Controls,
+    ) -> Result<RunOutcome> {
+        ensure!(
+            self.profile.supports_pointer_authentication(),
+            "PAuth execution requires the explicit software PAuth block profile"
+        );
+        ensure!(
+            context.address_space() == self.address_space,
+            "PAuth context belongs to another guest address space"
+        );
+        ensure!(
+            reader.address_space() == Some(self.address_space),
+            "memory reader belongs to another guest address space"
+        );
+        reader
+            .validate_privilege(controls.privileged)
+            .map_err(|status| {
+                anyhow::anyhow!("LDRA memory privilege profile unavailable: {status:?}")
+            })?;
+        unsafe {
+            self.run_inner(
+                state,
+                stop_pc,
+                block_budget,
+                RuntimeServices::pauth_memory(context, reader, controls),
+            )
+        }
+    }
+
     /// Execute explicit PAC/clock helpers using caller-owned address-space services.
     /// The clock owns its read-only commpage and publishes only at helper boundaries.
     ///
@@ -779,7 +875,7 @@ impl BlockRuntime {
         services: RuntimeServices<'_>,
     ) -> Result<RunOutcome> {
         let RuntimeServices {
-            pointer_authentication: context,
+            pointer_authentication: mut pauth_execution,
             clock: mut clock_context,
             thread: thread_context,
             system: mut system_dispatcher,
@@ -1053,10 +1149,19 @@ impl BlockRuntime {
                 });
             }
             if let Some(instruction) = pointer_authentication {
-                let Some(context) = context else {
+                // The implementation's permitted UNDEF constraint precedes key
+                // availability checks and cannot invoke data translation.
+                if let PointerAuthenticationOperation::Load(load) = instruction.operation
+                    && load.undefined_overlap()
+                {
+                    outcome.reason = StopReason::PointerAuthenticationLoadUndefined { instruction };
+                    break;
+                }
+                let Some(execution) = pauth_execution.as_mut() else {
                     outcome.reason = StopReason::PointerAuthenticationRequired { instruction };
                     break;
                 };
+                let context = execution.context;
                 if let Some(key) = instruction.operation.required_key()
                     && !context.has_key(runtime_pauth_key(key))
                 {
@@ -1073,7 +1178,12 @@ impl BlockRuntime {
                         StopReason::PointerAuthenticationGenericKeyUnavailable { instruction };
                     break;
                 }
-                let result = complete_pauth(context, &instruction, &mut state.registers);
+                let result = complete_pauth_with_memory(
+                    context,
+                    &instruction,
+                    &mut state.registers,
+                    execution.memory.as_mut(),
+                );
                 let (next, authenticated) = match result {
                     Ok(value) => value,
                     Err(error) => {
@@ -1084,9 +1194,29 @@ impl BlockRuntime {
                                     code: *code,
                                 }
                             }
-                            _ => StopReason::PointerAuthenticationUnsupported {
-                                instruction,
-                                detail: error.to_string(),
+                            _ => match error.downcast_ref::<AuthenticatedLoadError>() {
+                                Some(AuthenticatedLoadError::UndefinedOverlap) => {
+                                    StopReason::PointerAuthenticationLoadUndefined { instruction }
+                                }
+                                Some(AuthenticatedLoadError::StackAlignment { stack_pointer }) => {
+                                    StopReason::PointerAuthenticationStackAlignment {
+                                        instruction,
+                                        stack_pointer: *stack_pointer,
+                                    }
+                                }
+                                Some(AuthenticatedLoadError::MemoryRequired) => {
+                                    StopReason::PointerAuthenticationMemoryRequired { instruction }
+                                }
+                                Some(AuthenticatedLoadError::Read(fault)) => {
+                                    StopReason::PointerAuthenticationMemoryFault {
+                                        instruction,
+                                        fault: *fault,
+                                    }
+                                }
+                                None => StopReason::PointerAuthenticationUnsupported {
+                                    instruction,
+                                    detail: error.to_string(),
+                                },
                             },
                         };
                         break;
@@ -1207,10 +1337,36 @@ fn pauth_modifier(registers: &GuestState, modifier: PointerAuthenticationModifie
     }
 }
 
+#[derive(Debug)]
+enum AuthenticatedLoadError {
+    UndefinedOverlap,
+    StackAlignment { stack_pointer: u64 },
+    MemoryRequired,
+    Read(memory::domain::MemoryFault),
+}
+
+impl std::fmt::Display for AuthenticatedLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "authenticated load failed: {self:?}")
+    }
+}
+
+impl std::error::Error for AuthenticatedLoadError {}
+
+#[cfg(test)]
 fn complete_pauth(
     context: &pauth::Context,
     instruction: &PointerAuthentication,
     registers: &mut GuestState,
+) -> Result<(GuestAddress, Option<bool>)> {
+    complete_pauth_with_memory(context, instruction, registers, None)
+}
+
+fn complete_pauth_with_memory(
+    context: &pauth::Context,
+    instruction: &PointerAuthentication,
+    registers: &mut GuestState,
+    memory: Option<&mut AuthenticatedMemory<'_>>,
 ) -> Result<(GuestAddress, Option<bool>)> {
     use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
     match instruction.operation {
@@ -1307,6 +1463,53 @@ fn complete_pauth(
                 registers.x[usize::from(destination)] = value;
             }
             Ok((instruction.next_pc, authenticated))
+        }
+        PointerAuthenticationOperation::Load(load) => {
+            let memory = memory.ok_or(AuthenticatedLoadError::MemoryRequired)?;
+            let mut authenticated = false;
+            let read_flags = if load.writeback || load.base != ZERO_REGISTER_INDEX {
+                stela_compiler::context::memory::flags::TAG_CHECKED
+            } else {
+                0
+            };
+            pauth::memory::complete(
+                load,
+                memory.controls,
+                registers,
+                |key, pointer| -> std::result::Result<u64, pauth::AuthenticationError> {
+                    let key = match key {
+                        stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
+                        stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
+                    };
+                    let result = context.authenticate_operation(key, pointer, 0, true)?;
+                    authenticated = result.authenticated;
+                    Ok(result.pointer)
+                },
+                |address| {
+                    memory
+                        .reader
+                        .read_scalar(
+                            address,
+                            size_of::<u64>() as u8,
+                            read_flags,
+                            instruction.instruction_pc.0,
+                        )
+                        .map(|value| value as u64)
+                        .map_err(AuthenticatedLoadError::Read)
+                },
+            )
+            .map_err(|fault| match fault {
+                pauth::memory::Fault::InvalidOperands => anyhow::anyhow!("invalid LDRA operands"),
+                pauth::memory::Fault::UndefinedOverlap => {
+                    AuthenticatedLoadError::UndefinedOverlap.into()
+                }
+                pauth::memory::Fault::Authentication(error) => anyhow::Error::new(error),
+                pauth::memory::Fault::StackAlignment { stack_pointer } => {
+                    AuthenticatedLoadError::StackAlignment { stack_pointer }.into()
+                }
+                pauth::memory::Fault::Read { error, .. } => error.into(),
+            })?;
+            Ok((instruction.next_pc, Some(authenticated)))
         }
         PointerAuthenticationOperation::GenericCode(code) => {
             pauth::generic::complete(code, registers, |data, modifier| {

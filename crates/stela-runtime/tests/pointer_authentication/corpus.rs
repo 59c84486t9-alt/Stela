@@ -316,3 +316,6 @@ fn generic_code_original_corpus() -> Result<()> {
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
+
+#[path = "corpus/ldra.rs"]
+mod ldra;

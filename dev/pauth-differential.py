@@ -1364,6 +1364,325 @@ def generic_code_audit(corpus, native_run):
                        'No complete process, application, exception delivery or performance claim.']}
 
 
+AUTHENTICATED_LOAD_COHORTS = ('ldra', 'ldra-sa0')
+AUTHENTICATED_LOAD_MASK = 0xff200400
+AUTHENTICATED_LOAD_OPCODE = 0xf8200400
+AUTHENTICATED_LOAD_KEY_B = 1 << 23
+AUTHENTICATED_LOAD_SIGN = 1 << 22
+AUTHENTICATED_LOAD_WRITEBACK = 1 << 11
+AUTHENTICATED_LOAD_IMMEDIATE_SHIFT = 12
+AUTHENTICATED_LOAD_IMMEDIATE_MASK = 0x1ff
+AUTHENTICATED_LOAD_SIGN_VALUE = 1 << 9
+AUTHENTICATED_LOAD_SCALE = 8
+A64_REGISTER_MASK = 31
+A64_SOURCE_SHIFT = 5
+SCTLR_ALIGNMENT_CHECK = 1 << 1
+SCTLR_SP_ALIGNMENT_EL0 = 1 << 4
+SCTLR_DATA_AUTHENTICATION_A = 1 << 27
+SCTLR_DATA_AUTHENTICATION_B = 1 << 13
+TCR_ADDRESS_SIZE_MASK = 63
+TCR_VA47_SIZE = 17
+TCR_DATA_TBI0 = 1 << 37
+TCR_INSTRUCTION_TBID0 = 1 << 51
+AUTHENTICATED_LOAD_CODE_STRIDE = 16
+A64_DATA_ABORT_EXCEPTION_CLASS = 0x24
+MEMORY_TRANSLATION_FAULT = 1
+PAC_FAILURE_CODE_MASK = 3
+DATA_ABORT_STATUS_MASK = 63
+AUTHENTICATED_LOAD_POLICY_CLASSES = frozenset((
+    'constrained_unpredictable_original_choice', 'qemu_sp_alignment_check_omission'))
+AUTHENTICATED_LOAD_CONTEXT_PROFILE = 'stela-fpaccombine-qarma5-va47-itbi0-dtbi1-explicit-keys-v1'
+
+
+def read_utf8_json(path):
+    """External JSON has one explicit encoding; UTF16/BOM input must not pass."""
+    return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
+def authenticated_load_descriptor(operation, pc):
+    word = operation['word']
+    assert word & AUTHENTICATED_LOAD_MASK == AUTHENTICATED_LOAD_OPCODE
+    displacement = (word >> AUTHENTICATED_LOAD_IMMEDIATE_SHIFT) & AUTHENTICATED_LOAD_IMMEDIATE_MASK
+    if word & AUTHENTICATED_LOAD_SIGN:
+        displacement -= AUTHENTICATED_LOAD_SIGN_VALUE
+    load = {'key': 'b' if word & AUTHENTICATED_LOAD_KEY_B else 'a',
+            'base': (word >> A64_SOURCE_SHIFT) & A64_REGISTER_MASK,
+            'destination': word & A64_REGISTER_MASK,
+            'displacement': displacement * AUTHENTICATED_LOAD_SCALE,
+            'writeback': bool(word & AUTHENTICATED_LOAD_WRITEBACK)}
+    assert (load['key'], load['base'], load['destination'], load['displacement'], load['writeback']) == (
+        operation['key'][1], operation['rn'], operation['rt'], operation['offset'], operation['writeback'])
+    return {'instruction_pc': pc, 'next_pc': pc + A64_INSTRUCTION_BYTES, 'operation': {'load': load}}
+
+
+def authenticated_load_original_audit(corpus, report):
+    """Reconstruct raw ARM State independently; policy failures retain initial State."""
+    import simd_original as observer
+    names = ('cases.json', 'functions.json', 'subjects.json', 'profile.json',
+             'build-receipt.json', 'validation-receipt.json')
+    cases, functions, subjects, profile, build, receipt = [read_utf8_json(corpus / name) for name in names]
+    inputs, original, ram, elf = [(corpus / name).read_bytes()
+                                 for name in ('inputs.bin', 'results.bin', 'memory.bin', 'guest.elf')]
+    assert receipt['passed'] and report['passed'] and profile['kind'] == 'ldra'
+    assert digest((corpus / 'build-receipt.json').read_bytes()) == receipt['build_receipt_sha256']
+    assert digest(original) == receipt['results_sha256'] and digest(elf) == build['elf_sha256']
+    assert digest((corpus / 'guest.S').read_bytes()) == build['assembly_sha256']
+    assert digest(Path(build['qemu_binary']).read_bytes()) == build['qemu_binary_sha256']
+    assert profile['sources'] == build['sources']
+    for module in (observer, importlib.import_module('differential')):
+        path = Path(module.__file__).resolve()
+        assert digest(path.read_bytes()) == profile['sources'][str(path.relative_to(ROOT))]
+    controls = dict(zip(observer.MEMORY_CONTROLS, struct.unpack_from('<4Q', original, observer.MEMORY_CONTROL_HEADER_OFFSET)))
+    assert controls == profile['controls'] == receipt['controls']
+    assert controls['SCTLR_EL1'] == profile['sctlr'] == report['controls']['sctlr']
+    assert report['controls']['privileged'] is False
+    assert report['context_profile'] == AUTHENTICATED_LOAD_CONTEXT_PROFILE
+    assert profile['name'] in AUTHENTICATED_LOAD_COHORTS
+    assert bool(controls['SCTLR_EL1'] & SCTLR_SP_ALIGNMENT_EL0) == (profile['name'] == 'ldra-sa0')
+    enabled = SCTLR_DATA_AUTHENTICATION_A | SCTLR_DATA_AUTHENTICATION_B
+    assert controls['SCTLR_EL1'] & enabled == enabled and not controls['SCTLR_EL1'] & SCTLR_ALIGNMENT_CHECK
+    assert controls['TCR_EL1'] & TCR_ADDRESS_SIZE_MASK == TCR_VA47_SIZE
+    assert controls['TCR_EL1'] & TCR_DATA_TBI0 and controls['TCR_EL1'] & TCR_INSTRUCTION_TBID0
+    key_names = [f'APD{side}Key{half}_EL1' for side in ('A', 'B') for half in ('Lo', 'Hi')]
+    key_names += ['APGAKeyLo_EL1', 'APGAKeyHi_EL1']
+    assert struct.unpack_from('<6Q', original, profile['key_header_offset']) == tuple(profile['keys'][name] for name in key_names)
+    ids = dict(zip(observer.CPU_REGISTERS, struct.unpack_from('<9Q', original)))
+    features = {name: (ids[register] >> shift) & PAUTH_FEATURE_MASK
+                for name, (register, shift) in PAUTH_FEATURE_FIELDS.items()}
+    assert features == profile['feature_requirement'] == receipt['features']
+    assert features == {'APA': 5, 'API': 0, 'GPA': 1, 'GPI': 0, 'APA3': 0, 'GPA3': 0}
+    assert elf[:6] == b'\x7fELF\x02\x01' and struct.unpack_from('<H', elf, 18)[0] == ELF_AARCH64_MACHINE
+    phoff = struct.unpack_from('<Q', elf, ELF_PROGRAM_OFFSET)[0]
+    phsize = struct.unpack_from('<H', elf, ELF_PROGRAM_SIZE_OFFSET)[0]
+    phcount = struct.unpack_from('<H', elf, ELF_PROGRAM_COUNT_OFFSET)[0]
+    segments = [struct.unpack_from('<II6Q', elf, phoff + index * phsize) for index in range(phcount)]
+    assert len(functions) == len(subjects)
+    for index, subject in enumerate(subjects):
+        operation = functions[index]['operations'][0]
+        authenticated_load_descriptor(operation, BASE)
+        pc = subject['instruction_pc']
+        matching = [s for s in segments if s[0] == ELF_LOAD_SEGMENT and s[3] <= pc and pc + 8 <= s[3] + s[5]]
+        assert len(matching) == 1
+        offset = matching[0][2] + pc - matching[0][3]
+        executed = elf[offset:offset + 8]
+        assert offset == subject['elf_offset'] and executed.hex() == subject['executed_source_hex']
+        assert digest(executed) == subject['executed_source_sha256']
+        canonical = struct.pack('<2I', operation['word'], observer.RET_WORD)
+        assert canonical.hex() == functions[index]['source_hex'] == subject['canonical_source_hex']
+        assert digest(canonical) == subject['canonical_source_sha256']
+        svc = struct.unpack_from('<I', executed, A64_INSTRUCTION_BYTES)[0]
+        assert struct.unpack_from('<I', executed)[0] == operation['word']
+        assert svc & A64_SVC_MASK == A64_SVC_OPCODE
+        assert (svc >> A64_SVC_IMMEDIATE_SHIFT) & A64_SVC_IMMEDIATE_MASK == observer.SVC_IMMEDIATE
+    stride = observer.RECORD_BYTES + len(ram)
+    assert len(original) == observer.HEADER_BYTES + len(cases) * stride
+    assert len(inputs) == len(cases) * observer.INPUT_STRIDE
+    expected, classifications = [], []
+    for index, case in enumerate(cases):
+        function = case['function_index']
+        assert struct.unpack_from('<Q', inputs, index * observer.INPUT_STRIDE)[0] == function
+        begin = index * observer.INPUT_STRIDE + ORIGINAL_INPUT_PREFIX_BYTES
+        before = State.from_buffer_copy(inputs[begin:begin + ctypes.sizeof(State)])
+        start = observer.HEADER_BYTES + index * stride
+        frame = original[start:start + observer.RECORD_BYTES]
+        observed = State.from_buffer_copy(before)
+        observed.x[:] = struct.unpack_from('<31Q', frame)
+        observed.sp = struct.unpack_from('<Q', frame, observer.LAYOUT['sp'])[0]
+        spsr = struct.unpack_from('<Q', frame, observer.LAYOUT['spsr'])[0]
+        assert spsr == (before.nzcv & observer.NZCV_MASK) | observer.PSTATE_EL0T_MASKED
+        observed.nzcv = spsr & observer.NZCV_MASK
+        for register in range(32):
+            observed.v[register][:] = struct.unpack_from('<2Q', frame, observer.LAYOUT['v'] + register * 16)
+        observed.fpcr = struct.unpack_from('<Q', frame, observer.LAYOUT['fpcr'])[0]
+        observed.fpsr = struct.unpack_from('<Q', frame, observer.LAYOUT['fpsr'])[0]
+        assert (before.fpcr, before.fpsr) == struct.unpack_from('<2Q', frame, observer.LAYOUT['pre_fpcr'])
+        for name, value in [('marker', observer.COMPLETED_MARKER), ('current_el', 4), ('cpacr', observer.FP_ACCESS_ENABLED)]:
+            assert struct.unpack_from('<Q', frame, observer.LAYOUT[name])[0] == value
+        row = receipt['cases'][index]
+        assert row['case'] == index and digest(frame) == row['frame_sha256']
+        assert digest(bytes(before)) == row['initial_state_sha256'] == case['initial_state_sha256']
+        assert digest(bytes(observed)) == row['state_sha256']
+        assert original[start + observer.RECORD_BYTES:start + stride] == ram and digest(ram) == row['ram_sha256']
+        esr, elr = struct.unpack_from('<2Q', frame, observer.LAYOUT['esr'])
+        assert (esr, elr) == (row['esr'], row['elr'])
+        classification = row['classification']
+        assert classification == 'direct_original' or classification in AUTHENTICATED_LOAD_POLICY_CLASSES
+        fault, observed_fault = case['expected_fault'], case['qemu_expected_fault']
+        subject = subjects[function]
+        if classification == 'constrained_unpredictable_original_choice':
+            operation = functions[function]['operations'][0]
+            assert fault['kind'] == 'constrained_unpredictable' and fault['source_choice'] == 'UNDEF'
+            assert operation['writeback'] and operation['rn'] == operation['rt'] != A64_REGISTER_MASK
+            assert (esr >> A64_ESR_CLASS_SHIFT == A64_SVC_EXCEPTION_CLASS and elr == subject['expected_elr']) or (
+                esr == A64_ESR_INSTRUCTION_LENGTH and elr == subject['instruction_pc'])
+        else:
+            if observed_fault is None:
+                assert esr == (A64_SVC_EXCEPTION_CLASS << A64_ESR_CLASS_SHIFT) | A64_ESR_INSTRUCTION_LENGTH | observer.SVC_IMMEDIATE
+                assert elr == subject['expected_elr']
+            else:
+                assert esr >> A64_ESR_CLASS_SHIFT == observed_fault['ec'] and elr == subject['instruction_pc']
+                if observed_fault['kind'] == 'pac_failure':
+                    assert esr & PAC_FAILURE_CODE_MASK == observed_fault['iss']
+                if 'dfsc' in observed_fault:
+                    assert esr & DATA_ABORT_STATUS_MASK == observed_fault['dfsc']
+                if observed_fault.get('far_valid'):
+                    far = struct.unpack_from('<Q', frame, profile['far_frame_offset'])[0]
+                    assert observed_fault['far_range'][0] <= far <= observed_fault['far_range'][1]
+            if classification == 'qemu_sp_alignment_check_omission':
+                assert fault['kind'] == 'sp_alignment' and controls['SCTLR_EL1'] & SCTLR_SP_ALIGNMENT_EL0
+                assert functions[function]['operations'][0]['rn'] == A64_REGISTER_MASK and before.sp % 16
+                assert observed_fault is None or (observed_fault['kind'] == 'data_abort'
+                                                  and observed_fault['ec'] == A64_DATA_ABORT_EXCEPTION_CLASS)
+        value = bytes(observed) if classification == 'direct_original' else bytes(before)
+        assert digest(value) == case['expected_state_sha256']
+        expected.append(value)
+        classifications.append(classification)
+    assert b''.join(expected) == (corpus / 'expected-states.bin').read_bytes()
+    return cases, functions, expected, classifications, ram, controls, features
+
+
+def authenticated_load_audit(corpus, native_run):
+    """Audit existing real-reader output; current-source emission bridges remain separate."""
+    from collections import Counter
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+    corpus, native_run = Path(corpus).resolve(), Path(native_run).resolve()
+    report = read_utf8_json(native_run / 'report.json')
+    cases, functions, states, classifications, ram, controls, features = authenticated_load_original_audit(corpus, report)
+    inventory = read_utf8_json(native_run / 'emission-inventory.json')
+    assert len(inventory) == len(functions)
+    checked = {json.dumps(read_utf8_json(path), sort_keys=True): path
+               for path in (native_run / 'checked-artifacts').glob('*/manifest.json')}
+    assert len(checked) == len(inventory)
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    for index, entry in inventory.items():
+        pc = BASE + int(index) * AUTHENTICATED_LOAD_CODE_STRIDE
+        operation = functions[int(index)]['operations'][0]
+        assert entry['word'] == operation['word']
+        code = bytes.fromhex(entry['native_hex'])
+        directory = Path(entry['directory'])
+        assert directory.resolve().parent == (native_run / 'cache').resolve()
+        for manifest, path in [(entry['manifest'], directory / 'manifest.json'),
+                               (entry['checked_manifest'], checked[json.dumps(entry['checked_manifest'], sort_keys=True)])]:
+            raw = path.read_bytes()
+            assert read_utf8_json(path) == manifest
+            assert read_utf8_json(path.with_name('manifest.sha256.json')) == digest(raw)
+            assert path.with_name('native.bin').read_bytes() == code
+            identity = manifest['identity']
+            assert identity['guest_base'] == pc and identity['abi'] == ABI
+            assert identity['compiler_source_sha256'] == report['compiler_sha256']
+            assert identity['source_sha256'] == digest(struct.pack('<I', operation['word']))
+            assert manifest['native_sha256'] == digest(code) and manifest['native_bytes'] == len(code) == GENERIC_CODE_EXIT_BYTES
+            assert manifest['source_map'] == [[pc, 0]] and manifest['verified'] is False
+        assert digest((directory / 'manifest.json').read_bytes()) == entry['manifest_sha256']
+        assert entry['manifest']['identity']['target_cpu'] == 'x86_64-baseline'
+        assert entry['checked_manifest']['identity']['target_cpu'] == report['memory_target']
+        instructions = list(decoder.disasm(code, 0))
+        assert len(instructions) == GENERIC_CODE_EXIT_INSTRUCTIONS and sum(i.size for i in instructions) == len(code)
+        assert [(i.mnemonic, i.op_str) for i in instructions] == [
+            ('movabs', f'rax, {hex(pc)}'), ('mov', f'edx, {PAUTH_EXIT_KIND}'), ('ret', '')]
+    count = Counter()
+    assert [phase['phase'] for phase in report['phases']] == ['cold', 'hot', 'disk', 'aot']
+    for phase in report['phases']:
+        native = (native_run / (phase['phase'] + '-states.bin')).read_bytes()
+        assert native == b''.join(states) and digest(native) == phase['native_states_sha256']
+        rows = read_utf8_json(native_run / (phase['phase'] + '-outcomes.json'))
+        assert len(rows) == len(cases)
+        seen, caches = set(), [0, 0, 0]
+        for index, row in enumerate(rows):
+            case, classification = cases[index], classifications[index]
+            function = case['function_index']
+            pc = BASE + function * AUTHENTICATED_LOAD_CODE_STRIDE
+            descriptor = authenticated_load_descriptor(functions[function]['operations'][0], pc)
+            outcome, fault = row['outcome'], case['expected_fault']
+            assert row['case'] == index and row['function'] == function and row['classification'] == classification
+            assert row['state_sha256'] == digest(states[index]) and row['ram_sha256'] == digest(ram)
+            assert outcome['blocks_executed'] == 1 and outcome['last_exit'] == [pc, PAUTH_EXIT_KIND]
+            assert outcome['floating_point_helpers'] == 0
+            if fault is None:
+                assert row['pc'] == pc + A64_INSTRUCTION_BYTES and outcome['reason'] == {'kind': 'stop_address'}
+                assert outcome['pointer_authentication_events'] == [{'authenticated': True, 'instruction': descriptor, 'next_pc': pc + A64_INSTRUCTION_BYTES}]
+            else:
+                assert row['pc'] == pc and not outcome.get('pointer_authentication_events')
+                reason = {'instruction': descriptor}
+                if fault['kind'] == 'constrained_unpredictable':
+                    reason.update(kind='pointer_authentication_load_undefined')
+                elif fault['kind'] == 'sp_alignment':
+                    reason.update(kind='pointer_authentication_stack_alignment', stack_pointer=State.from_buffer_copy(states[index]).sp)
+                elif fault['kind'] == 'pac_failure':
+                    reason.update(kind='pointer_authentication_failure', code=fault['iss'])
+                else:
+                    assert fault['kind'] == 'data_abort'
+                    reason.update(kind='pointer_authentication_memory_fault', fault={
+                        'status': MEMORY_TRANSLATION_FAULT, 'address': fault['far_range'][1], 'pc': pc,
+                        'completed_bytes': fault['far_range'][1] - fault['far_range'][0]})
+                assert outcome['reason'] == reason
+            first = function not in seen
+            expected_cache = (1, 0, 0) if first and phase['phase'] == 'cold' else (
+                (0, 1, 0) if first and phase['phase'] in ('disk', 'aot') else (0, 0, 1))
+            actual_cache = tuple(outcome[key] for key in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits'))
+            assert actual_cache == expected_cache
+            caches = [a + b for a, b in zip(caches, actual_cache)]
+            seen.add(function)
+            count[classification] += 1
+        assert tuple(caches) == tuple(phase[key] for key in ('compiled_blocks', 'disk_cache_hits', 'memory_cache_hits'))
+    inputs = ('cases.json', 'functions.json', 'subjects.json', 'profile.json', 'build-receipt.json',
+              'validation-receipt.json', 'inputs.bin', 'results.bin', 'memory.bin', 'guest.elf', 'guest.S', 'expected-states.bin')
+    return {'profile': corpus.name, 'compiler_source_sha256': report['compiler_sha256'],
+            'raw_original_frames': len(cases), 'counts': dict(count), 'actual_emitted_bodies': len(inventory),
+            'original_controls': controls, 'original_features': features,
+            'external_input_sha256': {str(corpus / name): digest((corpus / name).read_bytes()) for name in inputs},
+            'runtime_report_sha256': digest((native_run / 'report.json').read_bytes()),
+            'emission_inventory_sha256': digest((native_run / 'emission-inventory.json').read_bytes())}
+
+
+def authenticated_load_cohort(args, parser):
+    if args.authenticated_load_originals is None or args.authenticated_load_run is None:
+        parser.error('--authenticated-load requires --authenticated-load-originals and --authenticated-load-run roots')
+    executable = args.authenticated_load_test_executable
+    if executable is not None and args.authenticated_load_run.exists():
+        parser.error('--authenticated-load-test-executable requires a fresh --authenticated-load-run')
+    executable_hash = digest(executable.read_bytes()) if executable is not None else None
+    cohorts = []
+    for name in AUTHENTICATED_LOAD_COHORTS:
+        original, output = args.authenticated_load_originals / name, args.authenticated_load_run / name
+        if executable is not None:
+            environment = os.environ.copy()
+            environment['STELA_PAUTH_ORIGINALS'] = str(original.resolve())
+            environment['STELA_PAUTH_NATIVE_OUTPUT'] = str(output.resolve())
+            subprocess.run([str(executable.resolve()), '--ignored', '--exact',
+                            'corpus::ldra::authenticated_load_original_corpus', '--nocapture'], env=environment, check=True)
+        cohorts.append(authenticated_load_audit(original, output))
+    compilers = {cohort['compiler_source_sha256'] for cohort in cohorts}
+    assert len(compilers) == 1
+    if executable is not None:
+        assert digest(executable.read_bytes()) == executable_hash
+    sources = [Path(__file__), ROOT / 'dev/differential.py', ROOT / 'dev/simd_original.py',
+               ROOT / 'dev/evidence.py', ROOT / 'crates/stela-runtime/tests/pointer_authentication/corpus.rs',
+               ROOT / 'crates/stela-runtime/tests/pointer_authentication/corpus/ldra.rs']
+    bodies = sum(cohort['actual_emitted_bodies'] for cohort in cohorts)
+    result = {'kind': 'original_arm_authenticated_load_vs_checked_native_runtime', 'passed': True, 'abi': ABI,
+              'canonical_forms': 4, 'cohorts': cohorts, 'harness_source_sha256': digest(Path(__file__).read_bytes()),
+              'compiler_source_sha256': compilers.pop(), 'test_executable_sha256': executable_hash,
+              'shared_sources_sha256': {str(path.relative_to(ROOT)): digest(path.read_bytes()) for path in sources},
+              'raw_original_frames': sum(cohort['raw_original_frames'] for cohort in cohorts),
+              'state_and_memory_comparisons': sum(cohort['counts']['direct_original'] for cohort in cohorts),
+              'policy_counts': {name: sum(cohort['counts'].get(name, 0) for cohort in cohorts)
+                                for name in sorted(AUTHENTICATED_LOAD_POLICY_CLASSES)},
+              'actual_emitted_bodies': bodies, 'baseline_checked_byte_bridges': bodies, 'cache_phases': 4,
+              'body_bytes_including_ret': GENERIC_CODE_EXIT_BYTES,
+              'body_instructions_including_ret': GENERIC_CODE_EXIT_INSTRUCTIONS,
+              'execution': 'public_corpus_reproduction' if executable is not None else 'retained_run_audit',
+              'limits': ['EL0, A0, enabled data authentication and effective instruction TBI off; no A1/key-disabled claim.',
+                         'Only exact constrained-overlap and QEMU SP-check-omission classes are policy evidence.',
+                         'Read-fault prefixes describe private staging, while destination/base remain uncommitted.',
+                         'No application, architectural exception delivery, or performance claim.']}
+    output = args.output or ROOT / '.stela/ldra-differential-report.json'
+    snapshot = write_evidence(output, result)
+    print(json.dumps({'passed': True, 'canonical_forms': 4, 'report': str(output), 'snapshot': str(snapshot)}, indent=2))
+
+
+
 def generic_code_cohort(args, parser):
     if args.generic_code_originals is None or args.generic_code_run is None:
         parser.error('--generic-code requires --generic-code-originals and a fresh/existing --generic-code-run')
@@ -1386,7 +1705,12 @@ def generic_code_cohort(args, parser):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
-    parser.add_argument('--generic-code', action='store_true', help='verify the separate batched PACGA original/runtime cohort')
+    corpus_mode = parser.add_mutually_exclusive_group()
+    corpus_mode.add_argument('--generic-code', action='store_true', help='verify the separate batched PACGA original/runtime cohort')
+    corpus_mode.add_argument('--authenticated-load', action='store_true', help='audit or reproduce both declared LDRA original/checked-reader cohorts')
+    parser.add_argument('--authenticated-load-originals', type=Path, help='root containing ldra and ldra-sa0 original captures')
+    parser.add_argument('--authenticated-load-run', type=Path, help='root containing ldra and ldra-sa0 native outputs')
+    parser.add_argument('--authenticated-load-test-executable', type=Path, help='built consolidated pointer_authentication test binary; omit to audit saved runs')
     parser.add_argument('--generic-code-originals', type=Path, help='independently captured full-State PACGA corpus')
     parser.add_argument('--generic-code-run', type=Path, help='native cohort output directory (fresh when executing)')
     parser.add_argument('--generic-code-test-executable', type=Path, help='built consolidated pointer_authentication test binary; omit to audit an existing run')
@@ -1395,6 +1719,9 @@ def main():
     parser.add_argument('--bootstrap-clock', action='store_true', help='also verify the complete original mach_continuous_time startup call')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    if args.authenticated_load:
+        authenticated_load_cohort(args, parser)
+        return
     if args.generic_code:
         generic_code_cohort(args, parser)
         return

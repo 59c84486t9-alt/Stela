@@ -11,16 +11,18 @@ use stela_compiler::{
 const ZERO_REGISTER_INDEX: u8 = 31;
 const STACK_ALIGNMENT: u64 = 16;
 
-/// Effective EL0 stack-alignment policy from the selected guest controls.
+/// Effective stack-alignment and access privilege from the selected CPU controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Controls {
     pub check_sp_alignment: bool,
+    pub privileged: bool,
 }
 
 impl Default for Controls {
     fn default() -> Self {
         Self {
             check_sp_alignment: true,
+            privileged: false,
         }
     }
 }
@@ -292,6 +294,7 @@ mod tests {
             load(ZERO_REGISTER_INDEX, 0, true),
             Controls {
                 check_sp_alignment: false,
+                privileged: false,
             },
             &mut state,
             |_, pointer| {

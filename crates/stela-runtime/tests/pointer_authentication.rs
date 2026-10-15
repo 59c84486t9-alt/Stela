@@ -262,3 +262,6 @@ mod modern;
 
 #[path = "pointer_authentication/corpus.rs"]
 mod corpus;
+
+#[path = "pointer_authentication/memory.rs"]
+mod memory;
