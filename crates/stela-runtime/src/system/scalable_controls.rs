@@ -5,6 +5,9 @@
 //! requirements while borrowing this owner through the synchronous callback.
 //! This module neither delivers exceptions nor certifies native memory safety.
 mod features;
+pub mod fp;
+
+use fp::FpControlOwner;
 
 use super::{
     access::{Encoding, ExceptionLevel},
@@ -203,8 +206,8 @@ impl EffectiveContext {
 }
 
 pub struct ScalableControlOwner<'id> {
-    ids: &'id Snapshot,
-    readbacks: Readbacks,
+    fp: FpControlOwner<'id>,
+    smcr_el1: u64,
     implementation: Implementation,
     generation: u64,
 }
@@ -214,10 +217,7 @@ impl<'id> ScalableControlOwner<'id> {
         readbacks: Readbacks,
         implementation: Implementation,
     ) -> Result<Self, Error> {
-        if ids.provenance().origin() != Origin::DeclaredGuest {
-            return Err(Error::CapturedImplementationUnavailable);
-        }
-        features::check_control_subset(ids)?;
+        let fp = FpControlOwner::new_declared_scalable_el10(ids, readbacks.cpacr_el1)?;
         if features::sme(ids)? == 0 {
             return Err(Error::MissingSme);
         }
@@ -226,23 +226,30 @@ impl<'id> ScalableControlOwner<'id> {
             return Err(Error::InitialRazReadback);
         }
         Ok(Self {
-            ids,
-            readbacks,
+            fp,
+            smcr_el1: readbacks.smcr_el1,
             implementation,
             generation: 0,
         })
     }
     pub const fn identification_snapshot(&self) -> &Snapshot {
-        self.ids
+        self.fp.identification_snapshot()
+    }
+    /// Borrow the same sole CPACR bank for ordinary FP/AdvSIMD consumers.
+    pub const fn fp_controls(&self) -> &FpControlOwner<'id> {
+        &self.fp
     }
     pub const fn generation(&self) -> u64 {
         self.generation
     }
     pub const fn readbacks(&self) -> Readbacks {
-        self.readbacks
+        Readbacks {
+            cpacr_el1: self.fp.cpacr_el1(),
+            smcr_el1: self.smcr_el1,
+        }
     }
     pub fn current_svl(&self) -> VectorLength {
-        self.implementation.select(self.readbacks.smcr_el1)
+        self.implementation.select(self.smcr_el1)
     }
 
     pub fn read(
@@ -253,8 +260,8 @@ impl<'id> ScalableControlOwner<'id> {
     ) -> Result<u64, Error> {
         self.register_access(register, state, pc)?;
         Ok(match register {
-            Register::CpacrEl1 => self.readbacks.cpacr_el1,
-            Register::SmcrEl1 => self.readbacks.smcr_el1,
+            Register::CpacrEl1 => self.fp.cpacr_el1(),
+            Register::SmcrEl1 => self.smcr_el1,
         })
     }
 
@@ -286,11 +293,17 @@ impl<'id> ScalableControlOwner<'id> {
             .generation
             .checked_add(1)
             .ok_or(Error::GenerationExhausted)?;
+        let next_fp = if register == Register::CpacrEl1 {
+            self.fp.next_generation()?
+        } else {
+            self.fp.generation()
+        };
         Ok(PreparedWrite {
             owner: self,
             register,
             value,
             next,
+            next_fp,
             _state: state,
             _scalable: scalable,
         })
@@ -307,7 +320,7 @@ impl<'id> ScalableControlOwner<'id> {
             return Err(Error::Undefined);
         }
         if register == Register::SmcrEl1
-            && disabled(self.readbacks.cpacr_el1, SMEN_SHIFT, state.current_el())
+            && disabled(self.fp.cpacr_el1(), SMEN_SHIFT, state.current_el())
         {
             return Err(trap(pc, SME_EC, 0));
         }
@@ -340,7 +353,7 @@ impl<'id> ScalableControlOwner<'id> {
         if state.pstate_misc() & PSTATE_SS_MASK != 0 {
             return Err(Error::SingleStepUnavailable);
         }
-        let available = features::derive(self.ids)?;
+        let available = features::derive(self.fp.identification_snapshot())?;
         // Source-specialization prerequisites are admission conditions, not an
         // architectural CheckStreamingSVEEnabled trap on an unproven branch.
         // Check every prerequisite before evaluating any helper sequence.
@@ -386,7 +399,8 @@ impl<'id> ScalableControlOwner<'id> {
         if scalable.vector_length() != length {
             return Err(Error::StateLengthMismatch);
         }
-        let zt0 = features::sme(self.ids)? == 2 && self.readbacks.smcr_el1 & SMCR_EZT0_MASK != 0;
+        let zt0 = features::sme(self.fp.identification_snapshot())? == 2
+            && self.smcr_el1 & SMCR_EZT0_MASK != 0;
         // CPU availability and EZT0 do not prove this actual state has storage.
         if zt0 && scalable.mode().za_enabled() && !scalable.has_zt0_storage() {
             return Err(Error::StateFeatureMismatch);
@@ -447,10 +461,10 @@ impl<'id> ScalableControlOwner<'id> {
                 if !mode.za_enabled() {
                     return Err(trap(pc, SME_EC, 3));
                 }
-                if features::sme(self.ids)? != 2 {
+                if features::sme(self.fp.identification_snapshot())? != 2 {
                     return Err(Error::StateFeatureMismatch);
                 }
-                if self.readbacks.smcr_el1 & SMCR_EZT0_MASK == 0 {
+                if self.smcr_el1 & SMCR_EZT0_MASK == 0 {
                     return Err(trap(pc, SME_EC, 4));
                 }
                 Ok(())
@@ -459,10 +473,10 @@ impl<'id> ScalableControlOwner<'id> {
                 if mode.streaming() {
                     return self.check_sme(el, pc);
                 }
-                if !features::sve(self.ids)? {
+                if !features::sve(self.fp.identification_snapshot())? {
                     return self.check_helper(Check::StreamingSveEnabled, state, mode, pc);
                 }
-                if disabled(self.readbacks.cpacr_el1, ZEN_SHIFT, el) {
+                if disabled(self.fp.cpacr_el1(), ZEN_SHIFT, el) {
                     return Err(trap(pc, SVE_EC, 0));
                 }
                 self.check_fp(el, pc)?;
@@ -471,8 +485,9 @@ impl<'id> ScalableControlOwner<'id> {
             Check::NonStreamingSveEnabled => {
                 self.check_helper(Check::SveEnabled, state, mode, pc)?;
                 if mode.streaming()
-                    && !(features::derive(self.ids)?.contains(ScalableFeature::SmeFa64)
-                        && self.readbacks.smcr_el1 & SMCR_FA64_MASK != 0)
+                    && !(features::derive(self.fp.identification_snapshot())?
+                        .contains(ScalableFeature::SmeFa64)
+                        && self.smcr_el1 & SMCR_FA64_MASK != 0)
                 {
                     return Err(trap(pc, SME_EC, 1));
                 }
@@ -481,16 +496,13 @@ impl<'id> ScalableControlOwner<'id> {
         }
     }
     fn check_sme(&self, el: ExceptionLevel, pc: GuestAddress) -> Result<(), Error> {
-        if disabled(self.readbacks.cpacr_el1, SMEN_SHIFT, el) {
+        if disabled(self.fp.cpacr_el1(), SMEN_SHIFT, el) {
             return Err(trap(pc, SME_EC, 0));
         }
         self.check_fp(el, pc)
     }
     fn check_fp(&self, el: ExceptionLevel, pc: GuestAddress) -> Result<(), Error> {
-        if disabled(self.readbacks.cpacr_el1, FPEN_SHIFT, el) {
-            return Err(trap(pc, FP_EC, A64_FP_ISS));
-        }
-        Ok(())
+        self.fp.check_fp_at_el(el, pc)
     }
 }
 
@@ -499,6 +511,7 @@ pub struct PreparedWrite<'a, 'id> {
     register: Register,
     value: u64,
     next: u64,
+    next_fp: u64,
     _state: &'a SystemState,
     _scalable: &'a ScalableState,
 }
@@ -509,8 +522,8 @@ pub struct RequalificationRequired {
 impl PreparedWrite<'_, '_> {
     pub fn commit(self) -> RequalificationRequired {
         match self.register {
-            Register::CpacrEl1 => self.owner.readbacks.cpacr_el1 = self.value,
-            Register::SmcrEl1 => self.owner.readbacks.smcr_el1 = self.value,
+            Register::CpacrEl1 => self.owner.fp.commit_prepared(self.value, self.next_fp),
+            Register::SmcrEl1 => self.owner.smcr_el1 = self.value,
         }
         self.owner.generation = self.next;
         RequalificationRequired {

@@ -30,6 +30,10 @@ use stela_compiler::{
 #[path = "process_memory/source.rs"]
 mod source;
 pub use source::SourceNormalWbDomain;
+#[path = "process_memory/low128.rs"]
+mod low128;
+pub(crate) use low128::Low128ProcessMemoryAuthorization;
+pub use low128::PreparedLow128ProcessMemory;
 #[path = "process_memory/scalable.rs"]
 mod scalable;
 pub use scalable::ScalableExecutionError;
@@ -93,6 +97,7 @@ pub enum ProcessMemoryError {
     WrongMemoryDomain,
     MissingEventEndpoint,
     Memory(MemoryStatus),
+    Low128(super::fp_access::Error),
 }
 
 /// Checked facts for this bounded data contract, not a complete CPU inventory.
@@ -297,6 +302,24 @@ impl FixedProcessMemoryControls {
         thread: &'run mut MemoryThread<MemoryControls>,
         endpoint: Option<&'run EventEndpoint>,
     ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
+        let execution_loan = self.acquire_source_loan(boundary, system, registers, thread)?;
+        // ASIMD/structure/scalable and the other typed memory categories require
+        // their own reviewed CPU contracts. Exclusive is not an Atomic alias.
+        let unsupported_classes =
+            flags::ATOMIC | flags::ORDERED | flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
+        if requirements.required_flags & unsupported_classes != 0 {
+            return Err(ProcessMemoryError::Memory(MemoryStatus::Unsupported));
+        }
+        self.finish_prepare(requirements, system, thread, endpoint, execution_loan)
+    }
+
+    fn acquire_source_loan(
+        &self,
+        boundary: &EntryBoundary,
+        system: &SystemState,
+        registers: &GuestState,
+        thread: &MemoryThread<MemoryControls>,
+    ) -> Result<MemoryExecutionLoan, ProcessMemoryError> {
         self.validate_source_state(system, registers)?;
         // Capture the actual provider loan before validating source generation.
         // It owns the same domain Arc without borrowing/extracting the policy;
@@ -310,13 +333,17 @@ impl FixedProcessMemoryControls {
         if thread.address_space() != Some(boundary.address_space()) {
             return Err(ProcessMemoryError::WrongAddressSpace);
         }
-        // ASIMD/structure/scalable and the other typed memory categories require
-        // their own reviewed CPU contracts. Exclusive is not an Atomic alias.
-        let unsupported_classes =
-            flags::ATOMIC | flags::ORDERED | flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
-        if requirements.required_flags & unsupported_classes != 0 {
-            return Err(ProcessMemoryError::Memory(MemoryStatus::Unsupported));
-        }
+        Ok(execution_loan)
+    }
+
+    fn finish_prepare<'run>(
+        &'run self,
+        requirements: MemoryRequirements,
+        system: &'run SystemState,
+        thread: &'run mut MemoryThread<MemoryControls>,
+        endpoint: Option<&'run EventEndpoint>,
+        execution_loan: MemoryExecutionLoan,
+    ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
         thread
             .validate_execution(0)
             .map_err(ProcessMemoryError::Memory)?;
@@ -465,12 +492,24 @@ impl PreparedProcessMemory<'_> {
         self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
+        let policy = self.authority.temporary_policy();
+        // SAFETY: this base route retains its original checked source/body contract.
+        unsafe { self.with_policy(policy, callback) }
+    }
+
+    /// Shared invocation mechanics. Only the private typed factories supply a
+    /// temporary policy; caller flags cannot select an operation scope.
+    unsafe fn with_policy<R>(
+        self,
+        policy: MemoryControls,
+        callback: impl FnOnce(&mut MemoryContextView) -> R,
+    ) -> Result<R, MemoryStatus> {
         // This inner guard closes prepare->invoke, body and checked finalization.
         // The actual v2.5 invocation provider must additionally retain an outer
         // same-domain execution loan through once-only PC settlement, then drop
         // that outer guard before entering a Darwin mapping service transaction.
         let _execution_loan = self.execution_loan;
-        let loan = PolicyLoan::new(self.thread, self.authority.temporary_policy());
+        let loan = PolicyLoan::new(self.thread, policy);
         if let Some(endpoint) = self.endpoint {
             // Actual retained same-PE identity, rechecked immediately before
             // native entry; no bind/rebind can be performed by this path.

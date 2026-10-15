@@ -434,3 +434,19 @@ impl PublishedReadOnlyRegion {
         Ok(())
     }
 }
+
+impl OwnedMemory {
+    pub(crate) fn check_execution_thread<P: super::domain::DataPolicy>(
+        &self,
+        thread: &super::domain::MemoryThread<P>,
+    ) -> Result<(), MemoryStatus> {
+        let shared = self.shared.as_ref().ok_or(MemoryStatus::Unsupported)?;
+        shared.check()?;
+        if !thread.has_domain(&shared.domain)
+            || self.allocations.iter().any(|a| a.shared_backing.is_none())
+        {
+            return Err(MemoryStatus::Domain);
+        }
+        Ok(())
+    }
+}

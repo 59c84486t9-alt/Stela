@@ -11,6 +11,8 @@ use stela_runtime::{
     process::{ProcessArguments, plan_kernel_args},
 };
 
+mod protected;
+
 pub struct Options {
     pub dyld_slide: u64,
     pub image_base: u64,
@@ -169,7 +171,17 @@ pub fn probe(
     let context = options
         .software_pauth_ib_key
         .as_deref()
-        .map(|path| crate::pauth_context(path, 0x534f524544594c44))
+        .map(|path| {
+            if options.bootstrap_clock {
+                crate::pauth_context(path, 0x534f524544594c44)
+            } else {
+                crate::pauth_context_version(
+                    path,
+                    0x534f524544594c44,
+                    stela_runtime::pauth::Version::FaultingCombined,
+                )
+            }
+        })
         .transpose()?;
     ensure!(
         !options.bootstrap_clock || context.is_some(),
@@ -304,8 +316,12 @@ pub fn probe(
         options.cache_dir,
         if options.bootstrap_clock {
             stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+        } else if context.is_some() {
+            stela_compiler::block::BlockProfile::CheckedMemoryPauthClockThread(
+                stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
+            )
         } else {
-            crate::block_profile(context.is_some(), false, false)
+            crate::block_profile(false, false, false)
         },
     );
     if let Some(windows) = bootstrap_code {
@@ -341,7 +357,15 @@ pub fn probe(
                 clock,
             )?
         } else if let Some(context) = &context {
-            runtime.run_with_pauth(&mut thread, Some(GuestAddress(stop)), 3, context)?
+            // All resources below are created once for this bounded fresh
+            // software process. Its checked route cannot resume via raw entry.
+            protected::run(
+                &mut runtime,
+                &mut thread,
+                GuestAddress(stop),
+                &mut memory,
+                context,
+            )?
         } else {
             runtime.run(&mut thread, Some(GuestAddress(stop)), 2)?
         }

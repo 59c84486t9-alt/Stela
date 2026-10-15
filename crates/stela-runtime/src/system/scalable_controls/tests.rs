@@ -56,10 +56,10 @@ fn profile(owner: &ScalableControlOwner<'_>, mode: ScalableMode) -> ScalableProf
     ScalableProfile::new_with_features(
         owner.current_svl(),
         mode,
-        features::derive(owner.ids).unwrap(),
+        features::derive(owner.identification_snapshot()).unwrap(),
         ScalableControls::new(
             owner.implementation.maximum(),
-            owner.readbacks.smcr_el1 & SMCR_EZT0_MASK != 0,
+            owner.readbacks().smcr_el1 & SMCR_EZT0_MASK != 0,
         ),
     )
     .unwrap()
@@ -243,6 +243,44 @@ fn smcr_writes_ignore_only_raz_fields_and_decline_actual_length_changes() {
     ));
     assert_eq!(owner.readbacks(), before);
     assert_eq!(owner.generation(), 1);
+}
+
+#[test]
+fn sole_cpacr_bank_is_shared_with_fp_and_smcr_keeps_its_generation() {
+    let ids = ids(false);
+    let mut owner = make_owner(&ids, FP_ENABLED | SME_ENABLED, 0);
+    assert!(std::ptr::eq(
+        owner.identification_snapshot(),
+        owner.fp_controls().identification_snapshot()
+    ));
+    let el1 = state(false, 0);
+    let el0 = state(true, 0);
+    let scalable = ScalableState::new(length(16), true);
+    assert_eq!(owner.fp_controls().check_fp_enabled(&el0, PC), Ok(()));
+    let value = (1 << FPEN_SHIFT) | SME_ENABLED;
+    owner
+        .prepare_write(Register::CpacrEl1, value, &el1, &scalable, PC)
+        .unwrap()
+        .commit();
+    assert_eq!(owner.readbacks().cpacr_el1, value);
+    assert_eq!(owner.fp_controls().cpacr_el1(), value);
+    assert_eq!(
+        owner.fp_controls().check_fp_enabled(&el0, PC),
+        Err(trap(PC, FP_EC, A64_FP_ISS))
+    );
+    assert_eq!(
+        owner.check_fp(el0.current_el(), PC),
+        Err(trap(PC, FP_EC, A64_FP_ISS))
+    );
+    assert_eq!(owner.generation(), 1);
+    assert_eq!(owner.fp_controls().generation(), 1);
+    owner
+        .prepare_write(Register::SmcrEl1, 0, &el1, &scalable, PC)
+        .unwrap()
+        .commit();
+    assert_eq!(owner.generation(), 2);
+    assert_eq!(owner.fp_controls().generation(), 1);
+    assert_eq!(owner.readbacks().cpacr_el1, value);
 }
 
 #[test]

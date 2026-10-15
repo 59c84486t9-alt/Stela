@@ -23,6 +23,8 @@ BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
 SERVICE_PROFILE = 'apple-arm64e-software-pauth-clock-v1'
 SYSTEM_PROFILE = 'system-v1'
+CHECKED_MEMORY_PROFILE = 'checked-gpr-memory-sa0-off-normal-wb-v3'
+CHECKED_MEMORY_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3'
 BASELINE_CPU_TARGET = 'x86_64-baseline'
 SYSTEM_ABI = 'x86_64-sysv-guest-state-v2-block-exit-system-v1'
 SYSTEM_EXIT_KIND = 11
@@ -36,6 +38,7 @@ SYSTEM_GUEST_BASE = 0x10000000
 SERVICE_BINDINGS = {
     SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
     SYSTEM_PROFILE: (SYSTEM_ABI, ('--system-boundaries', '--cpu-target', BASELINE_CPU_TARGET)),
+    CHECKED_MEMORY_PROFILE: (CHECKED_MEMORY_ABI, ('--checked-memory-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
 }
 SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
 DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'

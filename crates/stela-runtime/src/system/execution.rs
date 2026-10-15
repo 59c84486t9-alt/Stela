@@ -3,6 +3,9 @@
 //! These Rust services are called after native return. They introduce neither a
 //! native callback ABI nor a second architectural register/control bank.
 
+pub(crate) mod authority;
+pub(crate) mod owner;
+
 use super::{
     access::{ExceptionLevel, Profile, SecurityState},
     events::{DomainError, SendAttachment},

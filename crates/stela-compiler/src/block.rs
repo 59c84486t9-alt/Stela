@@ -53,6 +53,9 @@ pub enum BlockProfile {
     #[default]
     Ordinary,
     CheckedMemory(CheckedMemoryProfile),
+    /// Checked memory plus the existing serialized PAC/clock/thread helpers.
+    /// The immutable ABI keeps every cache entry distinct from direct RAM.
+    CheckedMemoryPauthClockThread(CheckedMemoryProfile),
     SystemV1,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
@@ -66,6 +69,7 @@ impl BlockProfile {
         match self {
             Self::Ordinary => BLOCK_ABI,
             Self::CheckedMemory(profile) => profile.abi(),
+            Self::CheckedMemoryPauthClockThread(profile) => profile.process_helpers_abi(),
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
@@ -77,9 +81,15 @@ impl BlockProfile {
 
     pub const fn checked_memory(self) -> Option<CheckedMemoryProfile> {
         match self {
-            Self::CheckedMemory(profile) => Some(profile),
+            Self::CheckedMemory(profile) | Self::CheckedMemoryPauthClockThread(profile) => {
+                Some(profile)
+            }
             _ => None,
         }
+    }
+
+    pub const fn supports_checked_process_helpers(self) -> bool {
+        matches!(self, Self::CheckedMemoryPauthClockThread(_))
     }
 
     pub const fn supports_system(self) -> bool {
@@ -93,13 +103,16 @@ impl BlockProfile {
                 | Self::AppleArm64eSoftwarePauthClockV1
                 | Self::AppleArm64eSoftwarePauthThreadV1
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
+                | Self::CheckedMemoryPauthClockThread(_)
         )
     }
 
     pub const fn supports_clock(self) -> bool {
         matches!(
             self,
-            Self::AppleArm64eSoftwarePauthClockV1 | Self::AppleArm64eSoftwarePauthClockThreadV1
+            Self::AppleArm64eSoftwarePauthClockV1
+                | Self::AppleArm64eSoftwarePauthClockThreadV1
+                | Self::CheckedMemoryPauthClockThread(_)
         )
     }
 
@@ -109,6 +122,7 @@ impl BlockProfile {
             Self::DarwinArm64ThreadV1
                 | Self::AppleArm64eSoftwarePauthThreadV1
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
+                | Self::CheckedMemoryPauthClockThread(_)
         )
     }
 }
@@ -866,7 +880,12 @@ pub fn source_bytes_with_profile(
 ) -> Result<usize, CompileError> {
     let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
     if let Some(selected) = profile.checked_memory() {
-        memory::CheckedPlan::new(&parsed.instructions, parsed.terminal.as_ref(), selected)?;
+        memory::CheckedPlan::new(
+            &parsed.instructions,
+            parsed.terminal.as_ref(),
+            selected,
+            profile.supports_checked_process_helpers(),
+        )?;
     }
     Ok(parsed.source_bytes)
 }
@@ -922,7 +941,12 @@ impl CompilationPlan {
         let checked = profile
             .checked_memory()
             .map(|selected| {
-                memory::CheckedPlan::new(&parsed.instructions, parsed.terminal.as_ref(), selected)
+                memory::CheckedPlan::new(
+                    &parsed.instructions,
+                    parsed.terminal.as_ref(),
+                    selected,
+                    profile.supports_checked_process_helpers(),
+                )
             })
             .transpose()?;
         Ok(Self {

@@ -291,6 +291,9 @@ pub struct BsdServiceEvent {
 }
 #[derive(Debug, Serialize)]
 pub struct ServiceRunOutcome {
+    /// Descriptive retained-owner diagnostics; these confer no entry authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protected_observation: Option<serde_json::Value>,
     pub execution: crate::blocks::RunOutcome,
     pub services: Vec<BsdServiceEvent>,
     pub mach_services: Vec<crate::mach::Event>,
@@ -308,6 +311,7 @@ impl ServiceRunOutcome {
     pub fn unserviced(execution: crate::blocks::RunOutcome) -> Self {
         Self {
             execution,
+            protected_observation: None,
             services: Vec::new(),
             mach_services: Vec::new(),
             thread_services: Vec::new(),
@@ -323,6 +327,14 @@ impl ServiceRunOutcome {
 }
 #[derive(Default)]
 pub struct ExecutionServices<'a> {
+    pub protected_system: Option<&'a mut crate::system::state::SystemState>,
+    pub protected_controls:
+        Option<&'a mut crate::system::process_memory::FixedProcessMemoryControls>,
+    pub protected_memory:
+        Option<&'a mut crate::memory::domain::MemoryThread<crate::memory::policy::MemoryControls>>,
+    pub protected_context: Option<&'a mut stela_compiler::context::ExecutionContext>,
+    pub protected_event: Option<&'a crate::system::events::EventEndpoint>,
+    pub protected_fp: Option<&'a crate::system::scalable_controls::fp::FpControlOwner<'a>>,
     pub mach_ports: Option<&'a mut crate::mach::HostPorts>,
     pub thread: Option<&'a mut crate::thread::Context>,
     pub data_vm: bool,
@@ -452,6 +464,12 @@ pub fn service_data_mprotect(
 /// allowed. Executable transitions are declined rather than invalidated here.
 /// Selecting `absent_shared_region` requires actual process ownership without a
 /// guest shared-region attachment; file and anonymous RAM alone do not attach one.
+/// For a checked profile this is the complete bounded executable lifetime of
+/// one genuinely fresh declared software PE. All protected resources and the
+/// complete asynchronous producer universe are original and uniquely borrowed.
+/// No raw entry, copied state, producer alias or later constructor may resume
+/// this PE after this call. Unsupported services remain stopped; no legacy
+/// execution fallback is available for this route.
 pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
@@ -461,6 +479,24 @@ pub unsafe fn run_services(
     mut services: ExecutionServices<'_>,
 ) -> anyhow::Result<ServiceRunOutcome> {
     use crate::blocks::{RunOutcome, StopReason};
+    if runtime.profile().checked_memory().is_some() {
+        // SAFETY: this route inherits the fresh, uniquely retained software-PE
+        // contract below and never falls back to an unowned entry.
+        return unsafe {
+            crate::blocks::retirement::run_protected_services(
+                runtime, state, stop, budget, memory, services,
+            )
+        };
+    }
+    anyhow::ensure!(
+        services.protected_system.is_none()
+            && services.protected_controls.is_none()
+            && services.protected_memory.is_none()
+            && services.protected_context.is_none()
+            && services.protected_event.is_none()
+            && services.protected_fp.is_none(),
+        "protected owners require a checked block profile"
+    );
     let mut aggregate: Option<RunOutcome> = None;
     let mut events = Vec::new();
     let mut mach_events = Vec::new();
@@ -650,6 +686,7 @@ pub unsafe fn run_services(
     }
     Ok(ServiceRunOutcome {
         execution: aggregate.expect("one native dispatch outcome"),
+        protected_observation: None,
         services: events,
         mach_services: mach_events,
         thread_services: thread_events,

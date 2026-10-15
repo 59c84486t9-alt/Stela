@@ -1,6 +1,7 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
+pub(crate) mod retirement;
 pub(crate) mod scalable;
 
 use crate::{
@@ -1146,6 +1147,7 @@ impl BlockRuntime {
                         original_fault,
                         completed_bytes,
                         observed_exit,
+                        ..
                     } => {
                         let instruction_pc = original_fault.map_or(pc, |fault| fault.pc);
                         state.pc = instruction_pc;
@@ -1160,6 +1162,9 @@ impl BlockRuntime {
                             retry_safe: false,
                         };
                         break;
+                    }
+                    failed @ checked_memory::CheckedReturn::InvocationFailed { .. } => {
+                        anyhow::bail!("checked native invocation unresolved: {failed:?}");
                     }
                     checked_memory::CheckedReturn::MemoryFault(fault) => {
                         state.pc = fault.pc;

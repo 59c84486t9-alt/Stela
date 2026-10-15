@@ -72,6 +72,7 @@ pub enum TagCheckFaultMode {
 enum OperationScope {
     Unbound,
     FixedEl0ProcessExclusive,
+    FixedEl0ProcessLow128,
 }
 
 /// A per-thread snapshot of effective controls, supplied by the common CPU owner.
@@ -121,6 +122,17 @@ impl MemoryControls {
     ) -> Self {
         let mut controls = authority.memory_controls();
         controls.operation_scope = OperationScope::FixedEl0ProcessExclusive;
+        controls
+    }
+
+    /// Admit ordinary ASIMD only while the same installed FP context and process
+    /// memory owners remain borrowed by the opaque prepared invocation token.
+    /// This snapshot has no raw flag/boolean constructor for the Low128 scope.
+    pub(crate) fn for_low128_authority(
+        authority: &crate::system::process_memory::Low128ProcessMemoryAuthorization<'_, '_, '_>,
+    ) -> Self {
+        let mut controls = authority.memory_controls();
+        controls.operation_scope = OperationScope::FixedEl0ProcessLow128;
         controls
     }
 
@@ -237,6 +249,24 @@ impl DataPolicy for MemoryControls {
     fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus> {
         if required_flags & !flags::KNOWN != 0 {
             return Err(MemoryStatus::InvalidRequest);
+        }
+        // The ASIMD requirement also applies to register-only SIMD bodies that
+        // request no native RAM access. Preserve it through every admission gate.
+        if required_flags & flags::ASIMD != 0
+            && self.operation_scope != OperationScope::FixedEl0ProcessLow128
+        {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if self.operation_scope == OperationScope::FixedEl0ProcessLow128
+            && required_flags
+                & (flags::ATOMIC
+                    | flags::ORDERED
+                    | flags::EXCLUSIVE
+                    | flags::SME
+                    | flags::SVE_PREDICATED)
+                != 0
+        {
+            return Err(MemoryStatus::Unsupported);
         }
         if required_flags & flags::TAG_CHECKED != 0
             && self.allocation_tags_enabled

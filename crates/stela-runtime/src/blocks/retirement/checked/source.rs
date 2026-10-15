@@ -1,0 +1,383 @@
+//! Exact admitted source, compiler plan and carrier validation; no public mint.
+mod conditional;
+use super::super::super::{
+    validate_clock_exit, validate_pauth_exit, validate_source_map, validate_thread_register_exit,
+    validate_trap_exit,
+};
+use crate::blocks::{BlockRuntime, LoadedBlock};
+use crate::system::execution::EntryBoundary;
+use stela_compiler::{
+    GuestAddress, GuestState, Lifter,
+    aarch64::{Decoder, Operation},
+    block::{
+        BlockAnalysis, BlockExit, ClockInstruction, CompilationPlan, DynamicEdgeKind, ExitKind,
+        PointerAuthentication, SynchronousTrap, ThreadRegisterInstruction, analyze_with_profile,
+    },
+    context::memory::{MemoryRequirements, MemoryStatus},
+};
+
+pub(crate) struct BoundSource<'code> {
+    pub(super) runtime: &'code BlockRuntime,
+    pub(super) block: &'code LoadedBlock,
+    pub(super) entry: EntryBoundary,
+    pub(super) source: &'code [u8],
+    pub(super) requirements: MemoryRequirements,
+    analysis: BlockAnalysis,
+}
+
+pub(crate) enum Helper {
+    Pauth(PointerAuthentication),
+    Clock(ClockInstruction),
+    Thread(ThreadRegisterInstruction),
+}
+impl Helper {
+    pub(super) fn pc(&self) -> GuestAddress {
+        match self {
+            Self::Pauth(value) => value.instruction_pc,
+            Self::Clock(value) => value.instruction_pc,
+            Self::Thread(value) => value.instruction_pc,
+        }
+    }
+    pub(super) fn needs_publication(&self) -> bool {
+        matches!(self, Self::Clock(_))
+    }
+}
+
+pub(super) enum ReturnedTerminal {
+    Ordinary(GuestAddress),
+    Helper(Helper),
+    Trap(SynchronousTrap),
+}
+
+impl<'code> BoundSource<'code> {
+    pub(super) fn pauth(&self) -> Option<PointerAuthentication> {
+        self.analysis.pointer_authentication
+    }
+
+    /// Descriptors are borrowed from the actual prepared token, never accepted
+    /// from the run request. Every association field still matches this exact
+    /// retained source/plan/map/RX owner immediately before native invocation.
+    pub(super) fn check_descriptor(&self, boundary: &EntryBoundary) -> anyhow::Result<()> {
+        self.recheck()?;
+        anyhow::ensure!(
+            boundary.address_space() == self.entry.address_space()
+                && boundary.entry() == self.entry.entry()
+                && boundary.region_base() == self.entry.region_base()
+                && boundary.source_bytes() == self.entry.source_bytes()
+                && boundary.word() == self.entry.word()
+                && boundary.generation() == self.entry.generation(),
+            "prepared descriptor differs from actual source/RX association"
+        );
+        Ok(())
+    }
+    pub(super) fn prefix(
+        &self,
+        stopped_before: Option<GuestAddress>,
+        completed_memory_bytes: u64,
+    ) -> anyhow::Result<super::SettledPrefix> {
+        let source_prefix_bytes = match stopped_before {
+            Some(pc) => usize::try_from(
+                pc.0.checked_sub(self.entry.entry().0)
+                    .ok_or_else(|| anyhow::anyhow!("prefix source underflow"))?,
+            )?,
+            None => self.block.source_bytes,
+        };
+        anyhow::ensure!(
+            source_prefix_bytes <= self.block.source_bytes,
+            "prefix exceeds exact source"
+        );
+        Ok(super::SettledPrefix {
+            entry: self.entry.entry(),
+            generation: self.entry.generation(),
+            source_sha256: self.block.prepared.manifest.identity.source_sha256.clone(),
+            consumed_source_bytes: self.block.source_bytes,
+            source_prefix_bytes,
+            source_map: self.block.prepared.manifest.source_map.clone(),
+            stopped_before,
+            completed_memory_bytes,
+        })
+    }
+    pub(super) fn new(runtime: &'code BlockRuntime, pc: GuestAddress) -> anyhow::Result<Self> {
+        let (base, region) = runtime
+            .region(pc)
+            .ok_or_else(|| anyhow::anyhow!("actual source absent"))?;
+        let block = runtime
+            .loaded
+            .get(&pc.0)
+            .ok_or_else(|| anyhow::anyhow!("actual loaded block absent"))?;
+        anyhow::ensure!(
+            block.region_base == base
+                && block.generation == region.generation
+                && block.source_bytes > 0,
+            "actual loaded source association changed"
+        );
+        let offset = usize::try_from(
+            pc.0.checked_sub(base)
+                .ok_or_else(|| anyhow::anyhow!("source underflow"))?,
+        )?;
+        let end = offset
+            .checked_add(block.source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("source overflow"))?;
+        let source = region
+            .source
+            .get(offset..end)
+            .ok_or_else(|| anyhow::anyhow!("consumed source extent changed"))?;
+        let word = u32::from_le_bytes(
+            *source
+                .first_chunk::<4>()
+                .ok_or_else(|| anyhow::anyhow!("entry word absent"))?,
+        );
+        let entry = EntryBoundary::new(
+            runtime.address_space(),
+            region.generation,
+            pc,
+            GuestAddress(base),
+            region.source.len(),
+            word,
+        );
+        let manifest = &block.prepared.manifest;
+        let identity = &manifest.identity;
+        anyhow::ensure!(
+            identity.guest_base == pc.0
+                && identity.abi == runtime.profile.abi()
+                && identity.target_cpu == runtime.target_cpu().id()
+                && identity.source_sha256 == stela_core::sha256(source)
+                && identity.compiler_source_sha256 == crate::compiler_source_sha256(),
+            "actual source/compiler/profile/target differs"
+        );
+        validate_source_map(&block.prepared, pc, block.source_bytes)?;
+        // Parse-only canonical producer: no emission, fallback plan or copied
+        // requirements. Compare the actual original plan with the loaded token.
+        let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
+        let requirements = plan
+            .memory_requirements()
+            .ok_or_else(|| anyhow::anyhow!("checked plan requirements absent"))?;
+        anyhow::ensure!(
+            plan.source_bytes() == block.source_bytes
+                && manifest.memory_requirements == Some(requirements),
+            "loaded requirements differ from exact original plan"
+        );
+        let analysis = analyze_with_profile(source, pc, runtime.profile)?;
+        anyhow::ensure!(
+            analysis.source_bytes == source.len(),
+            "analysis does not consume exact original source"
+        );
+        Ok(Self {
+            runtime,
+            block,
+            entry,
+            source,
+            requirements,
+            analysis,
+        })
+    }
+
+    pub(super) fn recheck(&self) -> anyhow::Result<()> {
+        let actual = Self::new(self.runtime, self.entry.entry())?;
+        anyhow::ensure!(
+            std::ptr::eq(actual.block, self.block)
+                && actual.source == self.source
+                && actual.entry.generation() == self.entry.generation()
+                && actual.requirements == self.requirements,
+            "retained source association changed"
+        );
+        Ok(())
+    }
+
+    pub(super) fn validate_return(
+        &self,
+        exit: &BlockExit,
+        registers: &GuestState,
+    ) -> anyhow::Result<ReturnedTerminal> {
+        self.recheck()?;
+        let kind = ExitKind::try_from(exit.kind)
+            .map_err(|()| anyhow::anyhow!("unknown native exit carrier"))?;
+        let next = GuestAddress(exit.next_pc);
+        let region = &self
+            .runtime
+            .region(self.entry.entry())
+            .ok_or_else(|| anyhow::anyhow!("source absent after call"))?
+            .1
+            .source;
+        let args = (
+            self.entry.entry(),
+            next,
+            self.block.source_bytes,
+            self.block.region_base,
+            &**region,
+        );
+        let terminal = match kind {
+            ExitKind::PointerAuthentication if self.analysis.pointer_authentication.is_some() => {
+                ReturnedTerminal::Helper(Helper::Pauth(validate_pauth_exit(
+                    args.0, args.1, args.2, args.3, args.4,
+                )?))
+            }
+            ExitKind::Clock if self.analysis.clock_instruction.is_some() => {
+                ReturnedTerminal::Helper(Helper::Clock(validate_clock_exit(
+                    args.0, args.1, args.2, args.3, args.4,
+                )?))
+            }
+            ExitKind::ThreadRegister if self.analysis.thread_register_instruction.is_some() => {
+                ReturnedTerminal::Helper(Helper::Thread(validate_thread_register_exit(
+                    args.0, args.1, args.2, args.3, args.4,
+                )?))
+            }
+            ExitKind::Trap if self.analysis.trap.is_some() => {
+                ReturnedTerminal::Trap(validate_trap_exit(args.0, args.1, args.2, args.3, args.4)?)
+            }
+            ExitKind::Fallthrough
+            | ExitKind::Direct
+            | ExitKind::Call
+            | ExitKind::Indirect
+            | ExitKind::Return => {
+                anyhow::ensure!(
+                    self.analysis.pointer_authentication.is_none()
+                        && self.analysis.clock_instruction.is_none()
+                        && self.analysis.thread_register_instruction.is_none()
+                        && self.analysis.system_instruction.is_none()
+                        && self.analysis.trap.is_none(),
+                    "ordinary carrier claims helper source"
+                );
+                if let Some(edge) = &self.analysis.dynamic_edge {
+                    let expected = match edge.kind {
+                        DynamicEdgeKind::Branch => ExitKind::Indirect,
+                        DynamicEdgeKind::Call => ExitKind::Call,
+                        DynamicEdgeKind::Return => ExitKind::Return,
+                    };
+                    anyhow::ensure!(kind == expected, "dynamic source/carrier kind differs");
+                    // Target originates from this exact admitted native mapping.
+                    // BLR may have overwritten X30, so post-body X30 is not an
+                    // independent old-target oracle. Fetch validation is next.
+                } else if conditional::validate(
+                    &self.analysis,
+                    self.source,
+                    self.entry.entry(),
+                    registers,
+                    kind,
+                    next,
+                )?
+                .is_some()
+                {
+                    // The exact terminal leaves its predicate GPR/NZCV intact.
+                    // Actual post-prefix state selected this precise edge/kind.
+                } else {
+                    use stela_compiler::block::SuccessorKind;
+                    let matching = self.analysis.static_successors.iter().any(|edge| {
+                        edge.target == next
+                            && match kind {
+                                ExitKind::Fallthrough => edge.kind == SuccessorKind::Fallthrough,
+                                ExitKind::Direct => edge.kind == SuccessorKind::Direct,
+                                ExitKind::Call => edge.kind == SuccessorKind::CallTarget,
+                                _ => false,
+                            }
+                    });
+                    anyhow::ensure!(matching, "ordinary continuation differs from exact source");
+                }
+                ReturnedTerminal::Ordinary(next)
+            }
+            _ => anyhow::bail!("exit/source/profile mismatch"),
+        };
+        if let ReturnedTerminal::Helper(helper) = &terminal {
+            anyhow::ensure!(
+                self.analysis.terminator_pc == Some(helper.pc()),
+                "helper carrier is not original terminal"
+            );
+        }
+        if let ReturnedTerminal::Trap(trap) = &terminal {
+            anyhow::ensure!(
+                self.analysis.terminator_pc == Some(trap.instruction_pc),
+                "trap carrier is not original terminal"
+            );
+        }
+        Ok(terminal)
+    }
+
+    pub(super) fn validate_fault(&self, fault: &super::OwnedMemoryFault) -> anyhow::Result<()> {
+        self.recheck()?;
+        anyhow::ensure!(
+            self.block
+                .prepared
+                .manifest
+                .source_map
+                .iter()
+                .any(|(pc, _)| *pc == fault.pc),
+            "fault PC outside exact source map"
+        );
+        anyhow::ensure!(
+            matches!(
+                fault.status,
+                MemoryStatus::Translation
+                    | MemoryStatus::Permission
+                    | MemoryStatus::Alignment
+                    | MemoryStatus::StackAlignment
+            ),
+            "nonarchitectural status cannot settle as a fault"
+        );
+        // The exact original word must identify an admitted reached memory
+        // instruction. Helper/branch/arithmetic source locations cannot forge it.
+        let offset = usize::try_from(
+            fault
+                .pc
+                .0
+                .checked_sub(self.entry.entry().0)
+                .ok_or_else(|| anyhow::anyhow!("fault source underflow"))?,
+        )?;
+        let word = u32::from_le_bytes(
+            self.source
+                .get(offset..offset + 4)
+                .ok_or_else(|| anyhow::anyhow!("fault word absent"))?
+                .try_into()?,
+        );
+        let instruction = Decoder.lift(fault.pc, word).map_err(|reason| {
+            anyhow::anyhow!(
+                "fault source decode at {:?} ({word:#010x}): {reason:?}",
+                fault.pc
+            )
+        })?;
+        let maximum = match instruction.operation {
+            Operation::Memory { bytes, .. } => u64::from(bytes),
+            Operation::MemoryRegisterOffset(operand) => u64::from(operand.bytes),
+            Operation::MemoryUnprivileged(operand) => u64::from(operand.bytes),
+            Operation::MemoryPair { bytes, .. } => 2 * u64::from(bytes),
+            Operation::Simd(stela_compiler::aarch64::simd::Operand::Memory { bytes, .. }) => {
+                u64::from(bytes)
+            }
+            Operation::Simd(stela_compiler::aarch64::simd::Operand::MemoryPair {
+                bytes, ..
+            }) => 2 * u64::from(bytes),
+            Operation::Simd(stela_compiler::aarch64::simd::Operand::MemoryRegisterOffset(
+                operand,
+            )) => u64::from(operand.bytes),
+            Operation::MemoryNonTemporal(operand)
+                if matches!(
+                    operand.data,
+                    stela_compiler::aarch64::non_temporal::Data::Vector(_)
+                ) =>
+            {
+                2 * u64::from(operand.bytes)
+            }
+            // This first native recipe admits scalar32 exclusive only. CLREX
+            // cannot raise a reached memory fault and therefore is excluded.
+            Operation::Exclusive(stela_compiler::aarch64::exclusive::Operand::Transfer {
+                element_bytes: 4,
+                data: stela_compiler::aarch64::exclusive::Data::Scalar(_),
+                ..
+            }) => 4,
+            _ => anyhow::bail!("fault source is not a bounded checked memory operation"),
+        };
+        anyhow::ensure!(
+            fault.completed_bytes < maximum,
+            "fault reports completed whole instruction"
+        );
+        if matches!(
+            fault.status,
+            MemoryStatus::Alignment | MemoryStatus::StackAlignment
+        ) {
+            anyhow::ensure!(
+                fault.completed_bytes == 0,
+                "alignment fault reports memory effects"
+            );
+        }
+        Ok(())
+    }
+}

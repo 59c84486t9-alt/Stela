@@ -168,6 +168,9 @@ enum Command {
         /// Prepare source-bound System exits without supplying a CPU/service backend.
         #[arg(long, conflicts_with_all = ["software_pauth", "software_clock", "thread_registers"])]
         system_boundaries: bool,
+        /// Prepare checked GPR memory with SA0 disabled; no CPU/native entry is supplied.
+        #[arg(long, conflicts_with_all = ["system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
+        checked_memory_sa0_off: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
@@ -805,6 +808,14 @@ fn pauth_context(
     path: &std::path::Path,
     address_space: u64,
 ) -> Result<stela_runtime::pauth::Context> {
+    pauth_context_version(path, address_space, stela_runtime::pauth::Version::Classic)
+}
+
+fn pauth_context_version(
+    path: &std::path::Path,
+    address_space: u64,
+    version: stela_runtime::pauth::Version,
+) -> Result<stela_runtime::pauth::Context> {
     use std::io::Read;
     let mut bytes = Vec::new();
     File::open(path)?.take(4097).read_to_end(&mut bytes)?;
@@ -813,9 +824,10 @@ fn pauth_context(
         "software PAuth key input exceeds 4096 bytes"
     );
     let keys: PauthKeyInput = serde_json::from_slice(&bytes)?;
-    Ok(stela_runtime::pauth::Context::new(
+    Ok(stela_runtime::pauth::Context::new_with_version(
         address_space,
         stela_runtime::pauth::Keys::from_ib_words(keys.low, keys.high),
+        version,
     ))
 }
 
@@ -1503,8 +1515,13 @@ fn run() -> Result<()> {
             software_clock,
             thread_registers,
             system_boundaries,
+            checked_memory_sa0_off,
         } => {
-            let profile = if system_boundaries {
+            let profile = if checked_memory_sa0_off {
+                stela_compiler::block::BlockProfile::CheckedMemory(
+                    stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
+                )
+            } else if system_boundaries {
                 stela_compiler::block::BlockProfile::SystemV1
             } else {
                 block_profile(software_pauth, software_clock, thread_registers)
@@ -1524,6 +1541,19 @@ fn run() -> Result<()> {
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
+            let checked_plan = if checked_memory_sa0_off {
+                Some(stela_compiler::block::CompilationPlan::new(
+                    window,
+                    stela_compiler::GuestAddress(guest_base),
+                    profile,
+                    cpu_target,
+                )?)
+            } else {
+                None
+            };
+            let checked_requirements = checked_plan
+                .as_ref()
+                .and_then(|plan| plan.memory_requirements());
             let compiled = if let Some(context_profile) = context_profile {
                 stela_compiler::extended::block::compile_for_profile(
                     window,
@@ -1531,6 +1561,8 @@ fn run() -> Result<()> {
                     context_profile,
                     cpu_target,
                 )?
+            } else if let Some(plan) = checked_plan {
+                plan.compile()?
             } else {
                 stela_compiler::block::compile_for_target(
                     window,
@@ -1552,6 +1584,9 @@ fn run() -> Result<()> {
                 "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
                 "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
                 "verified":false});
+            if let Some(requirements) = checked_requirements {
+                manifest["memory_requirements"] = serde_json::to_value(requirements)?;
+            }
             if let Some(context_profile) = context_profile {
                 manifest["schema_version"] = serde_json::json!(2);
                 manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_BLOCK_ABI);
@@ -1737,6 +1772,7 @@ fn run() -> Result<()> {
                             entropy: entropy_services,
                             mach_ports: mach_ports.as_mut(),
                             thread: thread_context.as_mut(),
+                            ..Default::default()
                         },
                     )?
                 } else {
@@ -3344,3 +3380,6 @@ mod fileset_root_thread_cli_tests {
 
 #[cfg(test)]
 mod fpmr_cli_tests;
+
+#[cfg(test)]
+mod checked_memory_cli_tests;

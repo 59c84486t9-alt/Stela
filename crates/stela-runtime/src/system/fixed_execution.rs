@@ -166,7 +166,7 @@ impl<P: DataPolicy> Dispatcher for FixedEl1Dispatcher<'_, P> {
     }
 }
 
-fn validate_source(boundary: &EntryBoundary, source: &[u8]) -> Result<(), Failure> {
+pub(crate) fn validate_source(boundary: &EntryBoundary, source: &[u8]) -> Result<(), Failure> {
     if source
         .first_chunk::<INSTRUCTION_BYTES>()
         .map(|bytes| u32::from_le_bytes(*bytes))

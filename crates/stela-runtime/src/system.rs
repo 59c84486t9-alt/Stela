@@ -7,6 +7,7 @@ pub mod exception;
 pub mod execution;
 pub mod fixed_controls;
 pub mod fixed_execution;
+pub mod fp_access;
 pub mod identification;
 pub mod identification_snapshot;
 pub mod interrupt;

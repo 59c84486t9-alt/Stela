@@ -23,6 +23,15 @@ pub(super) struct MemoryFault {
     pub pc: GuestAddress,
     pub completed_bytes: u64,
 }
+/// Raw same-call diagnostics. These fields are never an entry or retirement grant.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RawMemoryObservation {
+    pub status_code: u32,
+    pub address: u64,
+    pub pc: u64,
+    pub completed_bytes: u64,
+}
+
 #[derive(Debug)]
 pub(super) enum CheckedReturn {
     CpuDeclined(Failure),
@@ -35,6 +44,20 @@ pub(super) enum CheckedReturn {
         original_fault: Option<MemoryFault>,
         completed_bytes: u64,
         observed_exit: Option<(u64, u64)>,
+        native_invoked: bool,
+        callback_failure: Option<String>,
+        raw_memory: Option<RawMemoryObservation>,
+        raw_returned_carrier: Option<(u64, u64)>,
+    },
+    InvocationFailed {
+        detail: String,
+        native_invoked: bool,
+        native_executed: bool,
+        original_fault: Option<MemoryFault>,
+        raw_memory: Option<RawMemoryObservation>,
+        completed_bytes: u64,
+        observed_exit: Option<(u64, u64)>,
+        raw_returned_carrier: Option<(u64, u64)>,
     },
 }
 
@@ -84,52 +107,96 @@ pub(super) unsafe fn call(
         process_memory.requirements() == requirements,
         "checked body/token requirements mismatch"
     );
+    let mut callback_started = false;
+    let mut native_invoked = false;
     let mut native_executed = false;
     let mut observed_fault = None;
     let mut completed_bytes = 0;
     let mut observed_exit = None;
+    let mut raw_returned_carrier = None;
+    let mut raw_memory = None;
+    let mut callback_failure = None;
     // SAFETY: source/target/CPU/policy/storage preflight is complete. Both guards
     // restore their scoped view before owner loans expire, including errors.
-    unsafe {
-        match process_memory.with_view(|view| {
-            let mut loan = ContextLoan::memory(context, view);
-            let native_return = mapping.call_context_block(registers, loan.context())?;
-            native_executed = true;
-            completed_bytes = view.completed_bytes;
-            let status = MemoryStatus::from_code(view.fault_kind).ok_or_else(|| {
-                anyhow::anyhow!("unknown checked memory status {}", view.fault_kind)
-            })?;
-            // Fault service state takes precedence: a failed inner body intentionally
-            // does not produce a valid RAX/RDX block exit and must not be decoded.
-            if status == MemoryStatus::Success {
-                observed_exit = Some((native_return.next_pc, native_return.kind));
-                return Ok(CheckedReturn::Returned(native_return));
+    let finalized = unsafe {
+        process_memory.with_view(|view| {
+            callback_started = true;
+            let invoked = (|| -> Result<CheckedReturn> {
+                let mut loan = ContextLoan::memory(context, view);
+                native_invoked = true;
+                let returned = mapping.call_context_block(registers, loan.context());
+                native_executed = returned.is_ok();
+                // Capture every reached observation before a fallible check.
+                // Raw carrier bits are unqualified and fault state dominates.
+                raw_returned_carrier = returned.as_ref().ok().map(|exit| (exit.next_pc, exit.kind));
+                completed_bytes = view.completed_bytes;
+                raw_memory = Some(RawMemoryObservation {
+                    status_code: view.fault_kind,
+                    address: view.fault_address,
+                    pc: view.fault_pc,
+                    completed_bytes: view.completed_bytes,
+                });
+                let native_return = returned?;
+                ensure!(
+                    loan.context().has_supported_header()
+                        && loan.context().memory == std::ptr::from_mut(view).cast(),
+                    "actual checked context association changed after native call"
+                );
+                let status = MemoryStatus::from_code(view.fault_kind).ok_or_else(|| {
+                    anyhow::anyhow!("unknown checked memory status {}", view.fault_kind)
+                })?;
+                if status == MemoryStatus::Success {
+                    observed_exit = Some((native_return.next_pc, native_return.kind));
+                    return Ok(CheckedReturn::Returned(native_return));
+                }
+                let pc = GuestAddress(view.fault_pc);
+                let fault = MemoryFault {
+                    status,
+                    address: GuestAddress(view.fault_address),
+                    pc,
+                    completed_bytes: view.completed_bytes,
+                };
+                observed_fault = Some(fault);
+                ensure!(
+                    source_map.iter().any(|(address, _)| *address == pc),
+                    "checked fault PC is outside consumed source"
+                );
+                Ok(CheckedReturn::MemoryFault(fault))
+            })();
+            if let Err(error) = &invoked {
+                callback_failure = Some(error.to_string());
             }
-            let pc = GuestAddress(view.fault_pc);
-            let fault = MemoryFault {
-                status,
-                address: GuestAddress(view.fault_address),
-                pc,
-                completed_bytes: view.completed_bytes,
-            };
-            observed_fault = Some(fault);
-            ensure!(
-                source_map.iter().any(|(address, _)| *address == pc),
-                "checked fault PC is outside consumed source"
-            );
-            Ok(CheckedReturn::MemoryFault(fault))
-        }) {
-            Ok(result) => result,
-            Err(status) if !native_executed => Ok(CheckedReturn::EntryDeclined(status)),
-            Err(status) => Ok(CheckedReturn::FinalizationFailed {
-                status,
-                native_executed,
-                original_fault: observed_fault,
-                completed_bytes,
-                observed_exit,
-            }),
-        }
-    }
+            invoked
+        })
+    };
+    Ok(match finalized {
+        Ok(Ok(returned)) => returned,
+        Ok(Err(error)) => CheckedReturn::InvocationFailed {
+            detail: error.to_string(),
+            native_invoked,
+            native_executed,
+            original_fault: observed_fault,
+            raw_memory,
+            completed_bytes,
+            observed_exit,
+            raw_returned_carrier,
+        },
+        // Only a refusal before the callback is a component entry decline.
+        // After the callback starts, finalizer errors preserve all observations
+        // and the canonical consumer poisons the unresolved actual attempt.
+        Err(status) if !callback_started => CheckedReturn::EntryDeclined(status),
+        Err(status) => CheckedReturn::FinalizationFailed {
+            status,
+            native_executed,
+            original_fault: observed_fault,
+            completed_bytes,
+            observed_exit,
+            native_invoked,
+            callback_failure,
+            raw_memory,
+            raw_returned_carrier,
+        },
+    })
 }
 
 #[cfg(test)]
