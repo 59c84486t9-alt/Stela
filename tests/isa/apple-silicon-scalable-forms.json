@@ -45,8 +45,10 @@
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
     "crates/stela-compiler/src/aarch64/sme.rs",
+    "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
+    "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
@@ -60,6 +62,8 @@
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
     "crates/stela-compiler/src/x86_64/sme.rs",
+    "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+    "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
     "crates/stela-compiler/src/x86_64/sme/length.rs",
     "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
@@ -370,6 +374,28 @@
         "complete_body_matches",
         "source_map_matches"
       ]
+    },
+    "sme_integer_dots": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sme/integer_dots/production-integration-1/final-publication-3/body-profile-bridge-1/receipt.json",
+      "kind": "production-sme-integer-dot-final-body-map-profile-transfer-v1",
+      "comparison_field": "preserved_full_snapshot_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sme/integer_dots.py"
+      ],
+      "required_measurements": {
+        "preserved_full_snapshot_native_comparisons": 1620,
+        "preserved_original_cases": 810,
+        "actual_production_bodies_byte_identical": 2170,
+        "actual_cli_checks": 6,
+        "new_native_semantic_comparisons": 0,
+        "original_replays": 0
+      },
+      "require_current_executable": true
     }
   },
   "forms": [
@@ -13586,6 +13612,1846 @@
       ],
       "review": "Exact June Arm semantics, allocated widths and aliases reviewed; final mappings selected using the pinned x86 catalog, emitted binaries, original ARM frames and controlled paired candidate measurements.",
       "scope": "Enabled streaming SME-compatible integer products at all declared power-of-two SVLs 16..256. Allocated widths, per-128-bit indexed selection, rotations, source/destination aliases and predication preserve NZCV, FPCR, FPSR including QC, other register banks and RAM. MOVPRFX pairs remain rejected. General non-streaming SVE, disabled-feature traps, Apple hardware, full exception delivery and application/OS execution remain outside this profile."
+    },
+    {
+      "id": "sdot_za32_zzi_2xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzi.xml",
+      "source_sha256": "2c8831c8b58c0f0c58401b9677021e3050cc7221d94ed11b54d118d7830f6d8b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501000",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za32_zzi_4xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzi.xml",
+      "source_sha256": "2c8831c8b58c0f0c58401b9677021e3050cc7221d94ed11b54d118d7830f6d8b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509000",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za32_zzv_2x1",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1601408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzv.xml",
+      "source_sha256": "030df2896017710c0fca19bebbe684582cd8abd008269691ee66c524dc8889f1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1601408",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za32_zzv_4x1",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1701408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzv.xml",
+      "source_sha256": "030df2896017710c0fca19bebbe684582cd8abd008269691ee66c524dc8889f1",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1701408",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za32_zzw_2x2",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzw.xml",
+      "encoding_mask": "0xffe19c38",
+      "encoding_value": "0xc1e01408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzw.xml",
+      "source_sha256": "c9a894ac7ce091d2ab8d16e5844b0059a649ac5dae35e70efbcf83ac073b69eb",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e01408",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za32_zzw_4x4",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za32_zzw.xml",
+      "encoding_mask": "0xffe39c78",
+      "encoding_value": "0xc1e11408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za32_zzw.xml",
+      "source_sha256": "c9a894ac7ce091d2ab8d16e5844b0059a649ac5dae35e70efbcf83ac073b69eb",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e11408",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzi_s2xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzi.xml",
+      "source_sha256": "ca9ef95c8cdc9c5e988eb44888592c2631e434e58ccd8bc3d83da1c9f374841a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501020",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzi_d2xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzi.xml",
+      "encoding_mask": "0xfff09838",
+      "encoding_value": "0xc1d00008",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzi.xml",
+      "source_sha256": "ca9ef95c8cdc9c5e988eb44888592c2631e434e58ccd8bc3d83da1c9f374841a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d00008",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzi_s4xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzi.xml",
+      "source_sha256": "ca9ef95c8cdc9c5e988eb44888592c2631e434e58ccd8bc3d83da1c9f374841a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509020",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzi_d4xi",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzi.xml",
+      "encoding_mask": "0xfff09878",
+      "encoding_value": "0xc1d08008",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzi.xml",
+      "source_sha256": "ca9ef95c8cdc9c5e988eb44888592c2631e434e58ccd8bc3d83da1c9f374841a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d08008",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzv_2x1",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzv.xml",
+      "encoding_mask": "0xffb09c18",
+      "encoding_value": "0xc1201400",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzv.xml",
+      "source_sha256": "a479652aa6684a3deb45399bcf860840d005899722264a3611028527e9f286d4",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1201400",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzv_4x1",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzv.xml",
+      "encoding_mask": "0xffb09c18",
+      "encoding_value": "0xc1301400",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzv.xml",
+      "source_sha256": "a479652aa6684a3deb45399bcf860840d005899722264a3611028527e9f286d4",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1301400",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzw_2x2",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzw.xml",
+      "encoding_mask": "0xffa19c38",
+      "encoding_value": "0xc1a01400",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzw.xml",
+      "source_sha256": "08f4eb24d8171a6b37eb1f81423fb464af76048ada06e3536f1795ac4cd0439b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a01400",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sdot_za_zzw_4x4",
+      "mnemonic": "SDOT",
+      "category": "sme",
+      "source_file": "sdot_za_zzw.xml",
+      "encoding_mask": "0xffa39c78",
+      "encoding_value": "0xc1a11400",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sdot_za_zzw.xml",
+      "source_sha256": "08f4eb24d8171a6b37eb1f81423fb464af76048ada06e3536f1795ac4cd0439b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a11400",
+          "expected_mnemonics": [
+            "sdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sudot_za_zzi_s2xi",
+      "mnemonic": "SUDOT",
+      "category": "sme",
+      "source_file": "sudot_za_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501038",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_za_zzi.xml",
+      "source_sha256": "b5ba69328df1c104f37c2233406a339d9d2aceb95b95d2aef17dcb6a4f73c59a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501038",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sudot_za_zzi_s4xi",
+      "mnemonic": "SUDOT",
+      "category": "sme",
+      "source_file": "sudot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509038",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_za_zzi.xml",
+      "source_sha256": "b5ba69328df1c104f37c2233406a339d9d2aceb95b95d2aef17dcb6a4f73c59a",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509038",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sudot_za_zzv_s2x1",
+      "mnemonic": "SUDOT",
+      "category": "sme",
+      "source_file": "sudot_za_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1201418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_za_zzv.xml",
+      "source_sha256": "7aacb4f11f17a3256f14f11451e990a5d132f8ef65290e0fe04328922779ebb3",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1201418",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "sudot_za_zzv_s4x1",
+      "mnemonic": "SUDOT",
+      "category": "sme",
+      "source_file": "sudot_za_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1301418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_za_zzv.xml",
+      "source_sha256": "7aacb4f11f17a3256f14f11451e990a5d132f8ef65290e0fe04328922779ebb3",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1301418",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "suvdot_za_zzi_s4xi",
+      "mnemonic": "SUVDOT",
+      "category": "sme",
+      "source_file": "suvdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1508038",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/suvdot_za_zzi.xml",
+      "source_sha256": "97fd7409a80650a16dbe3a4fc9e799c802b36b7da211f1a9ada6856ba803b09d",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1508038",
+          "expected_mnemonics": [
+            "suvdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "svdot_za32_zzi_2xi",
+      "mnemonic": "SVDOT",
+      "category": "sme",
+      "source_file": "svdot_za32_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1500020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/svdot_za32_zzi.xml",
+      "source_sha256": "8841bd710bee509d313c5de86574754ff5d1768ca68a5196ab84d21d1b0522bf",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1500020",
+          "expected_mnemonics": [
+            "svdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "svdot_za_zzi_s4xi",
+      "mnemonic": "SVDOT",
+      "category": "sme",
+      "source_file": "svdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1508020",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/svdot_za_zzi.xml",
+      "source_sha256": "bfe10efb429897f7f085392a25e6b1ee0e0f3998f04f1419733668caaa06790d",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1508020",
+          "expected_mnemonics": [
+            "svdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "svdot_za_zzi_d4xi",
+      "mnemonic": "SVDOT",
+      "category": "sme",
+      "source_file": "svdot_za_zzi.xml",
+      "encoding_mask": "0xfff09878",
+      "encoding_value": "0xc1d08808",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/svdot_za_zzi.xml",
+      "source_sha256": "bfe10efb429897f7f085392a25e6b1ee0e0f3998f04f1419733668caaa06790d",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d08808",
+          "expected_mnemonics": [
+            "svdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzi_2xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501010",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzi.xml",
+      "source_sha256": "f6499f9882ab9a7003d3a054fd6693d47cb51598bf5da47eb0ff3329b7c0a754",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501010",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzi_4xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509010",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzi.xml",
+      "source_sha256": "f6499f9882ab9a7003d3a054fd6693d47cb51598bf5da47eb0ff3329b7c0a754",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509010",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzv_2x1",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1601418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzv.xml",
+      "source_sha256": "0c12b37d7e74b883533c861d1a2f67270fb4c2080142ae4eb0c6fc32d77f4b56",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1601418",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzv_4x1",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1701418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzv.xml",
+      "source_sha256": "0c12b37d7e74b883533c861d1a2f67270fb4c2080142ae4eb0c6fc32d77f4b56",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1701418",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzw_2x2",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzw.xml",
+      "encoding_mask": "0xffe19c38",
+      "encoding_value": "0xc1e01418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzw.xml",
+      "source_sha256": "41601a304b116a2e7cf861c69efc3416cf5cf22394a4b1edbaa08b408235dd50",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e01418",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za32_zzw_4x4",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za32_zzw.xml",
+      "encoding_mask": "0xffe39c78",
+      "encoding_value": "0xc1e11418",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za32_zzw.xml",
+      "source_sha256": "41601a304b116a2e7cf861c69efc3416cf5cf22394a4b1edbaa08b408235dd50",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e11418",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzi_s2xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501030",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzi.xml",
+      "source_sha256": "dd443b33cd5dac7d57b775c31aaee035dac40a99da7b9dd049c50a0c2e323fb0",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501030",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzi_d2xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzi.xml",
+      "encoding_mask": "0xfff09838",
+      "encoding_value": "0xc1d00018",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzi.xml",
+      "source_sha256": "dd443b33cd5dac7d57b775c31aaee035dac40a99da7b9dd049c50a0c2e323fb0",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d00018",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzi_s4xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509030",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzi.xml",
+      "source_sha256": "dd443b33cd5dac7d57b775c31aaee035dac40a99da7b9dd049c50a0c2e323fb0",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509030",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzi_d4xi",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzi.xml",
+      "encoding_mask": "0xfff09878",
+      "encoding_value": "0xc1d08018",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzi.xml",
+      "source_sha256": "dd443b33cd5dac7d57b775c31aaee035dac40a99da7b9dd049c50a0c2e323fb0",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d08018",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzv_2x1",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzv.xml",
+      "encoding_mask": "0xffb09c18",
+      "encoding_value": "0xc1201410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzv.xml",
+      "source_sha256": "7c0876cd22d28169b3373b438ad32b968d3de45d72bd205cf277ce5baa9f44d9",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1201410",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzv_4x1",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzv.xml",
+      "encoding_mask": "0xffb09c18",
+      "encoding_value": "0xc1301410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzv.xml",
+      "source_sha256": "7c0876cd22d28169b3373b438ad32b968d3de45d72bd205cf277ce5baa9f44d9",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1301410",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzw_2x2",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzw.xml",
+      "encoding_mask": "0xffa19c38",
+      "encoding_value": "0xc1a01410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzw.xml",
+      "source_sha256": "7bf1beaffab5ebe593ea54f63da049174f7b323748b6164d5306e828e607acb4",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a01410",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "udot_za_zzw_4x4",
+      "mnemonic": "UDOT",
+      "category": "sme",
+      "source_file": "udot_za_zzw.xml",
+      "encoding_mask": "0xffa39c78",
+      "encoding_value": "0xc1a11410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && (sz == '0' || FEAT_SME_I16I64)",
+          "name": "v9Ap3 && (sz == '0' || v9Ap2)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/udot_za_zzw.xml",
+      "source_sha256": "7bf1beaffab5ebe593ea54f63da049174f7b323748b6164d5306e828e607acb4",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a11410",
+          "expected_mnemonics": [
+            "udot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzi_s2xi",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1501028",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzi.xml",
+      "source_sha256": "b4fd7fe05428b8d2fb807b9aa50a1ee0b8c1bedae4470ba90500d15017a2f78b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1501028",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzi_s4xi",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1509028",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzi.xml",
+      "source_sha256": "b4fd7fe05428b8d2fb807b9aa50a1ee0b8c1bedae4470ba90500d15017a2f78b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1509028",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzv_s2x1",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1201408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzv.xml",
+      "source_sha256": "2f5de4fee6039fd79085d2a817743287cd570376e89547504835af67ecbdc90e",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1201408",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzv_s4x1",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzv.xml",
+      "encoding_mask": "0xfff09c18",
+      "encoding_value": "0xc1301408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzv.xml",
+      "source_sha256": "2f5de4fee6039fd79085d2a817743287cd570376e89547504835af67ecbdc90e",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1301408",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzw_s2x2",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzw.xml",
+      "encoding_mask": "0xffe19c38",
+      "encoding_value": "0xc1a01408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzw.xml",
+      "source_sha256": "0c82f2b17a71368614e70e8c4344ba5ff5d74c895b633be76a9d303c3b9fd2ea",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a01408",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usdot_za_zzw_s4x4",
+      "mnemonic": "USDOT",
+      "category": "sme",
+      "source_file": "usdot_za_zzw.xml",
+      "encoding_mask": "0xffe39c78",
+      "encoding_value": "0xc1a11408",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_za_zzw.xml",
+      "source_sha256": "0c82f2b17a71368614e70e8c4344ba5ff5d74c895b633be76a9d303c3b9fd2ea",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a11408",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "usvdot_za_zzi_s4xi",
+      "mnemonic": "USVDOT",
+      "category": "sme",
+      "source_file": "usvdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1508028",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usvdot_za_zzi.xml",
+      "source_sha256": "e43b3ad0bb7ba5cb7a929f30750fab2ed567618f127b0c53413642339f64c711",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1508028",
+          "expected_mnemonics": [
+            "usvdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "uvdot_za32_zzi_2xi",
+      "mnemonic": "UVDOT",
+      "category": "sme",
+      "source_file": "uvdot_za32_zzi.xml",
+      "encoding_mask": "0xfff09038",
+      "encoding_value": "0xc1500030",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uvdot_za32_zzi.xml",
+      "source_sha256": "64117ddc00d48d323c275166f6b75a0ecef7d6427733a4983dc9721fe61e899b",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1500030",
+          "expected_mnemonics": [
+            "uvdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "uvdot_za_zzi_s4xi",
+      "mnemonic": "UVDOT",
+      "category": "sme",
+      "source_file": "uvdot_za_zzi.xml",
+      "encoding_mask": "0xfff09078",
+      "encoding_value": "0xc1508030",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uvdot_za_zzi.xml",
+      "source_sha256": "183cde6f40ce9e0023f19ad6a24f02e91a41be6aca41447513975ac6580fe13c",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1508030",
+          "expected_mnemonics": [
+            "uvdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
+    },
+    {
+      "id": "uvdot_za_zzi_d4xi",
+      "mnemonic": "UVDOT",
+      "category": "sme",
+      "source_file": "uvdot_za_zzi.xml",
+      "encoding_mask": "0xfff09878",
+      "encoding_value": "0xc1d08818",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_SME_I16I64",
+          "name": "v9Ap3 && v9Ap2"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uvdot_za_zzi.xml",
+      "source_sha256": "183cde6f40ce9e0023f19ad6a24f02e91a41be6aca41447513975ac6580fe13c",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
+        "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1d08818",
+          "expected_mnemonics": [
+            "uvdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "review": "Exact June semantics and selected baseline/checked SSSE3 mappings independently reviewed. All 2,170 production bodies, source maps and profile identities preserve 810 retained originals and 1,620 fullSnapshot comparisons; six real CLI calibrations and explicit feature/mode guards pass.",
+      "scope": "Declared V2 DIT=0 SME2 SM=1 ZA=1 context leaf, all allocated operands and accumulator sizes, SVL 16/32/64/128/256; FEAT_SME_I16I64 additionally required for 64-bit accumulators. FFR invalid in declared FA64-off profile. Caller owns architectural access/provenance and backing bounds; enabled exceptions and production block/cache admission remain separate.",
+      "profile": "sme-i16i64-v2",
+      "status": "implemented",
+      "evidence_groups": [
+        "sme_integer_dots"
+      ]
     }
   ],
   "execution_profiles": {
@@ -13610,6 +15476,30 @@
         "full guest exception delivery",
         "actual PSTATE.DIT readback from original fixtures",
         "Apple hardware conformance, applications and macOS boot"
+      ]
+    },
+    "sme-i16i64-v2": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 16,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME_I16I64"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "dit": false,
+      "outside_scope": [
+        "General non-streaming SVE, FA64 and undeclared optional guest features.",
+        "Production block/cache entry and full guest exception delivery.",
+        "Apple hardware conformance, applications and macOS boot."
+      ],
+      "decoder_mattrs": [
+        "+sme2",
+        "+sme-i16i64"
       ]
     }
   }

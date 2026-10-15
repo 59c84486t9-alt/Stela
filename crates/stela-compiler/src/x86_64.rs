@@ -65,6 +65,7 @@ mod pc_relative;
 mod prefetch;
 mod register_offset;
 mod scalable;
+mod scalable_matrix;
 mod simd;
 pub(crate) mod sme;
 pub(crate) mod sve;

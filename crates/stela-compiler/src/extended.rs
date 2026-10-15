@@ -11,11 +11,11 @@ use crate::{
     aarch64::{
         Decoder, Instruction, Operation,
         scalable::{
-            ScalableMode, VectorLength,
+            ElementSize, ScalableMode, VectorLength,
             features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
             profile::ScalableControls,
         },
-        sme::length,
+        sme::{integer_dots, length},
         sve::{
             dot, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
@@ -223,6 +223,7 @@ enum Decoded {
     Sign(sign::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     Length(length::Operand),
+    SmeIntegerDots(integer_dots::Operand),
 }
 
 fn ordinary_permitted(operation: &Operation) -> bool {
@@ -399,6 +400,23 @@ fn decode(
         })?;
         return Ok(Decoded::IntegerProducts(operand));
     }
+    if let Some(operand) = integer_dots::decode(word) {
+        let mut features = ScalableFeatures::of(ScalableFeature::Sme2);
+        if operand.accumulator == ElementSize::Doubleword {
+            features = features.with(ScalableFeature::SmeI16I64);
+        }
+        profile.require_features(FeatureRequirement::all(features), pc)?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        if !profile.mode.za_enabled() {
+            return Err(CompileError(format!("ZA enable required at {:#x}", pc.0)));
+        }
+        return Ok(Decoded::SmeIntegerDots(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -465,6 +483,9 @@ fn emit_decoded(
         }
         Decoded::IntegerProducts(operand) => {
             x86_64::sve::integer_products::emit(code, operand, profile.length, target);
+        }
+        Decoded::SmeIntegerDots(operand) => {
+            x86_64::sme::integer_dots::emit(code, &operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -544,6 +565,10 @@ pub fn compile_for_profile(
         source_map,
     })
 }
+
+#[cfg(test)]
+#[path = "extended/integer_dots_tests.rs"]
+mod integer_dots_tests;
 
 #[cfg(test)]
 mod tests {

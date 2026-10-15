@@ -1,3 +1,5 @@
 //! Scalable-matrix mappings using immutable streaming-length specialization.
 
+pub(crate) mod integer_dots;
+pub(crate) mod integer_products;
 pub(crate) mod length;
