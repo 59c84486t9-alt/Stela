@@ -45,6 +45,7 @@
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+    "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
@@ -53,11 +54,13 @@
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
     "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
+    "crates/stela-compiler/src/x86_64/scalable/predicate.rs",
     "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/address.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate/counter.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate/flags.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
@@ -69,6 +72,7 @@
     "crates/stela-compiler/src/x86_64/sve/integer_products/saturating.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products/widening.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
@@ -508,6 +512,32 @@
         "fresh_semantic_replays": 0
       },
       "require_current_executable": true
+    }
+  ,
+    "sve-predicate-generation-v2": {
+      "kind": "arm64_scalable_predicate_generation_differential",
+      "report": ".stela/research/coverage-race/sve-memory-predicate/predicate-generation/planned-5/admission-evidence-successor-1.json",
+      "harness": ".stela/research/coverage-race/sve-memory-predicate/predicate-generation/integration-2/check_selected_native.py",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "comparison_field": "three_way_register_state_comparisons",
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs",
+        "dev/simd_fixtures/sve_memory/predicate_generation.py",
+        "dev/scalable_frame.py"
+      ],
+      "required_positive_counts": [
+        "fresh_changed_bmi1_direct_comparisons",
+        "fresh_za0_comparisons_both_targets"
+      ],
+      "required_measurements": {
+        "canonical_forms": 45,
+        "actual_cli_bodies": 17280,
+        "actual_selected_original_body_transfers": 4320,
+        "unique_original_cases_in_lineage": 17505,
+        "current_llvm_decoded_words": 864,
+        "actual_cli13_full_entry_transfers": 4
+      }
     }
   },
   "forms": [
@@ -23067,6 +23097,4957 @@
       ],
       "review": "83 canonical forms, 14,105 genuine QEMU originals, 28,210 retained full-state native/original comparisons and 830 complete production CLI entry checks. Exact final emitted-body/source-map transfer and compiler/executable binding required before admission.",
       "scope": "SME-only streaming execution, SM=1, declared SME+SME2, DIT=0, EZT0=1, power-of-two current SVL16..256B. Allocated scalar W/X and vector H/W/D arrangements; vector B declines. Counts preserve NZCV and FPCR/FPSR including QC. INC/DEC applies one count to every destination Z element. Signed W saturation sign-extends; unsigned W zero-extends. CNTP PN reads low16 of any P0..P15 via shared counter expansion. No guest RAM. Original FFR/FPMR validity, non-streaming SVE, Applehardware, runtime/block/cache, full exception delivery, applications and macOS remain outside this evidence."
+    }
+  ,
+    {
+      "id": "brka_p_p_p_",
+      "instruction_id": "brka_p_p_p",
+      "mnemonic": "BRKA",
+      "category": "sve",
+      "source_file": "brka_p_p_p.xml",
+      "encoding_mask": "0xffffc200",
+      "encoding_value": "0x25104000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "1d66941d39e39babf033208900db7281fab4e9669a95fd7c28b337aaad7c32cd",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25104000",
+          "expected_mnemonics": [
+            "brka"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkas_p_p_p_z",
+      "instruction_id": "brkas_p_p_p",
+      "mnemonic": "BRKAS",
+      "category": "sve",
+      "source_file": "brkas_p_p_p.xml",
+      "encoding_mask": "0xffffc210",
+      "encoding_value": "0x25504000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "68d0c807385bdd40f7baed411ea3a538b5e07575870898e161ce81c4f793618d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25504000",
+          "expected_mnemonics": [
+            "brkas"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkb_p_p_p_",
+      "instruction_id": "brkb_p_p_p",
+      "mnemonic": "BRKB",
+      "category": "sve",
+      "source_file": "brkb_p_p_p.xml",
+      "encoding_mask": "0xffffc200",
+      "encoding_value": "0x25904000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "8e992ccbb4e9cea230f3b5cb5f42c2494f1b56e38c7ddf61f3a377fafe0ae3eb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25904000",
+          "expected_mnemonics": [
+            "brkb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkbs_p_p_p_z",
+      "instruction_id": "brkbs_p_p_p",
+      "mnemonic": "BRKBS",
+      "category": "sve",
+      "source_file": "brkbs_p_p_p.xml",
+      "encoding_mask": "0xffffc210",
+      "encoding_value": "0x25d04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "158c5d582c517a0eb3b406cb5395c987414fd7820130c80367f9715a86ec4654",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25d04000",
+          "expected_mnemonics": [
+            "brkbs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkn_p_p_pp_",
+      "instruction_id": "brkn_p_p_pp",
+      "mnemonic": "BRKN",
+      "category": "sve",
+      "source_file": "brkn_p_p_pp.xml",
+      "encoding_mask": "0xffffc210",
+      "encoding_value": "0x25184000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ae36b9d56ec137632e6f3d0d602964effba2761ff30da0f7c89826d2d67eb9e6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25184000",
+          "expected_mnemonics": [
+            "brkn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkns_p_p_pp_",
+      "instruction_id": "brkns_p_p_pp",
+      "mnemonic": "BRKNS",
+      "category": "sve",
+      "source_file": "brkns_p_p_pp.xml",
+      "encoding_mask": "0xffffc210",
+      "encoding_value": "0x25584000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "188b10033e9193884c1af3c55926ba4a0e70a7dab377eaa16d69640fe0f698bb",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25584000",
+          "expected_mnemonics": [
+            "brkns"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkpa_p_p_pp_",
+      "instruction_id": "brkpa_p_p_pp",
+      "mnemonic": "BRKPA",
+      "category": "sve",
+      "source_file": "brkpa_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x2500c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6f50fcce37874261ef7f8c03432e72e1a1e8bbe481a0f804891977f9cd5d017c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c000",
+          "expected_mnemonics": [
+            "brkpa"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkpas_p_p_pp_",
+      "instruction_id": "brkpas_p_p_pp",
+      "mnemonic": "BRKPAS",
+      "category": "sve",
+      "source_file": "brkpas_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x2540c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9cd882e5f5bc331202b772d9c260fcc07f8b66147183dd68bc9eb8a49c51a7d0",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c000",
+          "expected_mnemonics": [
+            "brkpas"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkpb_p_p_pp_",
+      "instruction_id": "brkpb_p_p_pp",
+      "mnemonic": "BRKPB",
+      "category": "sve",
+      "source_file": "brkpb_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x2500c010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5b7cebca619fb1cc894dd477487dc0329d9190e160bf9906d1a839ab5aeae2de",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2500c010",
+          "expected_mnemonics": [
+            "brkpb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "brkpbs_p_p_pp_",
+      "instruction_id": "brkpbs_p_p_pp",
+      "mnemonic": "BRKPBS",
+      "category": "sve",
+      "source_file": "brkpbs_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x2540c010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "e1cf5728b28364a3d33ace0e492461333c2f7263aafa4b2b19305aeb500d27b1",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2540c010",
+          "expected_mnemonics": [
+            "brkpbs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ctermeq_rr_",
+      "instruction_id": "ctermeq_rr",
+      "mnemonic": "CTERMEQ",
+      "category": "sve",
+      "source_file": "ctermeq_rr.xml",
+      "encoding_mask": "0xffa0fc1f",
+      "encoding_value": "0x25a02000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d5f1c50f4debf0733c02d613a1c82cdb5a2cbf334ed1b8b8305708d2e62113c6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02000",
+          "expected_mnemonics": [
+            "ctermeq"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ctermne_rr_",
+      "instruction_id": "ctermeq_rr",
+      "mnemonic": "CTERMNE",
+      "category": "sve",
+      "source_file": "ctermeq_rr.xml",
+      "encoding_mask": "0xffa0fc1f",
+      "encoding_value": "0x25a02010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d5f1c50f4debf0733c02d613a1c82cdb5a2cbf334ed1b8b8305708d2e62113c6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25a02010",
+          "expected_mnemonics": [
+            "ctermne"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "pfalse_p_",
+      "instruction_id": "pfalse_p",
+      "mnemonic": "PFALSE",
+      "category": "sve",
+      "source_file": "pfalse_p.xml",
+      "encoding_mask": "0xfffffff0",
+      "encoding_value": "0x2518e400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "17bd0d1556142b763ba940343f51651e7b7ffb26dd248372dc05df04477b1d22",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e400",
+          "expected_mnemonics": [
+            "pfalse"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "pfirst_p_p_p_",
+      "instruction_id": "pfirst_p_p_p",
+      "mnemonic": "PFIRST",
+      "category": "sve",
+      "source_file": "pfirst_p_p_p.xml",
+      "encoding_mask": "0xfffffe10",
+      "encoding_value": "0x2558c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "4ace56a05756d1270f67041b7cf5497651b7e99264994fe102200024760c03b2",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2558c000",
+          "expected_mnemonics": [
+            "pfirst"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "pnext_p_p_p_",
+      "instruction_id": "pnext_p_p_p",
+      "mnemonic": "PNEXT",
+      "category": "sve",
+      "source_file": "pnext_p_p_p.xml",
+      "encoding_mask": "0xff3ffe10",
+      "encoding_value": "0x2519c400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "b21c10de582918fbcac8063c54b80d47faa0fb446045035d2e2215428efe72e6",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519c400",
+          "expected_mnemonics": [
+            "pnext"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ptest__p_p_",
+      "instruction_id": "ptest_p_p",
+      "mnemonic": "PTEST",
+      "category": "sve",
+      "source_file": "ptest_p_p.xml",
+      "encoding_mask": "0xffffc21f",
+      "encoding_value": "0x2550c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "97ed296d6196d57f08ef30355fbcfbdc5c60193eed2d285b9dad7a69e2785c4f",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2550c000",
+          "expected_mnemonics": [
+            "ptest"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ptrue_p_s_",
+      "instruction_id": "ptrue_p_s",
+      "mnemonic": "PTRUE",
+      "category": "sve",
+      "source_file": "ptrue_p_s.xml",
+      "encoding_mask": "0xff3ffc10",
+      "encoding_value": "0x2518e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0eee82a106491b008d4c094f3808203e77dd23c285dfd1fccc4b0e2d4bf6dee4",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2518e000",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ptrue_pn_i_",
+      "instruction_id": "ptrue_pn_i",
+      "mnemonic": "PTRUE",
+      "category": "sve",
+      "source_file": "ptrue_pn_i.xml",
+      "encoding_mask": "0xff3ffff8",
+      "encoding_value": "0x25207810",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "524b3811a9a820f464b5d34e680eb4fb8b89e87d329e2c90a9dee1cfdca36fb5",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25207810",
+          "expected_mnemonics": [
+            "ptrue"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "ptrues_p_s_",
+      "instruction_id": "ptrues_p_s",
+      "mnemonic": "PTRUES",
+      "category": "sve",
+      "source_file": "ptrues_p_s.xml",
+      "encoding_mask": "0xff3ffc10",
+      "encoding_value": "0x2519e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "9f1cfa694233ece6cfee3c141f719b603e9cf8c1e84a3bc957f8f7f088dedde9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x2519e000",
+          "expected_mnemonics": [
+            "ptrues"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilege_p_p_rr_",
+      "instruction_id": "whilege_p_p_rr",
+      "mnemonic": "WHILEGE",
+      "category": "sve",
+      "source_file": "whilege_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0e471980a47417aac5c6ee522e088e4ba656bdc2ea6399690d33d5a371ffd792",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200000",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilege_pn_rr_",
+      "instruction_id": "whilege_pn_rr",
+      "mnemonic": "WHILEGE",
+      "category": "sve",
+      "source_file": "whilege_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204010",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "78203f2e69560ddda20ddc49f0faae50b47bd6902a6846974efafabe6f029d97",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilege_pp_rr_",
+      "instruction_id": "whilege_pp_rr",
+      "mnemonic": "WHILEGE",
+      "category": "sve",
+      "source_file": "whilege_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205010",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "8eb0942469064e7a80188487ef1869473a89653bef0adc7c984db832438b3ef4",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205010",
+          "expected_mnemonics": [
+            "whilege"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilegt_p_p_rr_",
+      "instruction_id": "whilegt_p_p_rr",
+      "mnemonic": "WHILEGT",
+      "category": "sve",
+      "source_file": "whilegt_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200010",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "1be8fe805ce9b026cc94ce38c12506786f0309a467e9119804094a7774c5118a",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200010",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilegt_pn_rr_",
+      "instruction_id": "whilegt_pn_rr",
+      "mnemonic": "WHILEGT",
+      "category": "sve",
+      "source_file": "whilegt_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204018",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "4c4b7a4da13765ad0bf1bf6a7616f52c2bd62d3dfb72fa265a7356a5bf95bf26",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204018",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilegt_pp_rr_",
+      "instruction_id": "whilegt_pp_rr",
+      "mnemonic": "WHILEGT",
+      "category": "sve",
+      "source_file": "whilegt_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205011",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "ab89f126528f130367252a2e5689112d536d432d396bf4cd3df5c09d53c55f2d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205011",
+          "expected_mnemonics": [
+            "whilegt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehi_p_p_rr_",
+      "instruction_id": "whilehi_p_p_rr",
+      "mnemonic": "WHILEHI",
+      "category": "sve",
+      "source_file": "whilehi_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200810",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6ec2f4d585654848eb44dcf86d0b0b396dcfc907bf4e03ae7124388258b2c386",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200810",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehi_pn_rr_",
+      "instruction_id": "whilehi_pn_rr",
+      "mnemonic": "WHILEHI",
+      "category": "sve",
+      "source_file": "whilehi_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204818",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "8c429451806da994e5b8c2776ae12c859385c6c3f5af6d76cfa28db9f7fdcc87",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204818",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehi_pp_rr_",
+      "instruction_id": "whilehi_pp_rr",
+      "mnemonic": "WHILEHI",
+      "category": "sve",
+      "source_file": "whilehi_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205811",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "ebb47e08ca6164d8942b5018cfcbbccd75d6ae4265745b00026316b8b999c005",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205811",
+          "expected_mnemonics": [
+            "whilehi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehs_p_p_rr_",
+      "instruction_id": "whilehs_p_p_rr",
+      "mnemonic": "WHILEHS",
+      "category": "sve",
+      "source_file": "whilehs_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "b8b93d3422e5dc46d1574d23942d5e559eb81baeacd939b4bf49838938f6cd7d",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200800",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehs_pn_rr_",
+      "instruction_id": "whilehs_pn_rr",
+      "mnemonic": "WHILEHS",
+      "category": "sve",
+      "source_file": "whilehs_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204810",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "af6fc9b2912660a5df7dc414e41e115549557788655e9d92402ca79379198e02",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilehs_pp_rr_",
+      "instruction_id": "whilehs_pp_rr",
+      "mnemonic": "WHILEHS",
+      "category": "sve",
+      "source_file": "whilehs_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205810",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "97d7d268c7e59a5f98bf50ab13d428890b25fd61d135e07da73f949f55be47e7",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205810",
+          "expected_mnemonics": [
+            "whilehs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilele_p_p_rr_",
+      "instruction_id": "whilele_p_p_rr",
+      "mnemonic": "WHILELE",
+      "category": "sve",
+      "source_file": "whilele_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200410",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d3cfb2224e7a38d41d9f8b9a13a47e890841e907bcdd889ee360768a04d3e285",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200410",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilele_pn_rr_",
+      "instruction_id": "whilele_pn_rr",
+      "mnemonic": "WHILELE",
+      "category": "sve",
+      "source_file": "whilele_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204418",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "3bab8f9561077697a3d82c10ecc12b1213a5ac8f8abce591e96502996fc07fb9",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204418",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilele_pp_rr_",
+      "instruction_id": "whilele_pp_rr",
+      "mnemonic": "WHILELE",
+      "category": "sve",
+      "source_file": "whilele_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205411",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "a79dddf794e392b8b334be22f57a9d723575e3a7d609309ae4ad7182e9094e3e",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205411",
+          "expected_mnemonics": [
+            "whilele"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelo_p_p_rr_",
+      "instruction_id": "whilelo_p_p_rr",
+      "mnemonic": "WHILELO",
+      "category": "sve",
+      "source_file": "whilelo_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "d014bf847ff1a721d3431fbcd1ca43937ff81c1efbeda089a6c938f1f4fb984c",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c00",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelo_pn_rr_",
+      "instruction_id": "whilelo_pn_rr",
+      "mnemonic": "WHILELO",
+      "category": "sve",
+      "source_file": "whilelo_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204c10",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "c16a405f4e441178c35f06405f3b43a22f92f3e930b823e267b4e3f3a14292f8",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelo_pp_rr_",
+      "instruction_id": "whilelo_pp_rr",
+      "mnemonic": "WHILELO",
+      "category": "sve",
+      "source_file": "whilelo_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205c10",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "7bf8d8eb6b3c1f7b940eb5ba11690be7c6b8d04199847f54c9e6646368871802",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c10",
+          "expected_mnemonics": [
+            "whilelo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilels_p_p_rr_",
+      "instruction_id": "whilels_p_p_rr",
+      "mnemonic": "WHILELS",
+      "category": "sve",
+      "source_file": "whilels_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200c10",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "26c732905df8b388118f9c897577a8f74c6c9c9d4c08e0d588bd6891109fb068",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200c10",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilels_pn_rr_",
+      "instruction_id": "whilels_pn_rr",
+      "mnemonic": "WHILELS",
+      "category": "sve",
+      "source_file": "whilels_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204c18",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "d6eb6f7bd1ff1f2b981d4a9c7d926c25474215a5bc0ca3979f8129f3def1a823",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204c18",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilels_pp_rr_",
+      "instruction_id": "whilels_pp_rr",
+      "mnemonic": "WHILELS",
+      "category": "sve",
+      "source_file": "whilels_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205c11",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "68e31ea0d06a397d2468965d6ab95f399dff261fad7f0881a3de8c550a471846",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205c11",
+          "expected_mnemonics": [
+            "whilels"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelt_p_p_rr_",
+      "instruction_id": "whilelt_p_p_rr",
+      "mnemonic": "WHILELT",
+      "category": "sve",
+      "source_file": "whilelt_p_p_rr.xml",
+      "encoding_mask": "0xff20ec10",
+      "encoding_value": "0x25200400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "96d1dfd7925fbf8527f5ac24d587d1846c9327aa402977f3f7a4fc064fd81a9b",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25200400",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelt_pn_rr_",
+      "instruction_id": "whilelt_pn_rr",
+      "mnemonic": "WHILELT",
+      "category": "sve",
+      "source_file": "whilelt_pn_rr.xml",
+      "encoding_mask": "0xff20dc18",
+      "encoding_value": "0x25204410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "9e5e689f9fc2b6c95ef130e58dbf21b866f32b0239aa2f7a203ce8c71af96c34",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25204410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilelt_pp_rr_",
+      "instruction_id": "whilelt_pp_rr",
+      "mnemonic": "WHILELT",
+      "category": "sve",
+      "source_file": "whilelt_pp_rr.xml",
+      "encoding_mask": "0xff20fc11",
+      "encoding_value": "0x25205410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "source_sha256": "6f97796790bdbd60e358d2e160a61b7058a30ae00dbc1dc6a4ec3041fc720660",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25205410",
+          "expected_mnemonics": [
+            "whilelt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilerw_p_rr_",
+      "instruction_id": "whilerw_p_rr",
+      "mnemonic": "WHILERW",
+      "category": "sve",
+      "source_file": "whilerw_p_rr.xml",
+      "encoding_mask": "0xff20fc10",
+      "encoding_value": "0x25203010",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "067130ac0aefb2808acc4e5ba6945cbe4104f22082d29510aa67c7e8d0fb257b",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203010",
+          "expected_mnemonics": [
+            "whilerw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "whilewr_p_rr_",
+      "instruction_id": "whilewr_p_rr",
+      "mnemonic": "WHILEWR",
+      "category": "sve",
+      "source_file": "whilewr_p_rr.xml",
+      "encoding_mask": "0xff20fc10",
+      "encoding_value": "0x25203000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "52641d42ea8e804424564b914876512b891b75837eeb878c32c6db06afa68987",
+      "alias": false,
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2",
+      "scope": "All allocated operands for this canonical form, fixed SVL16/32/64/128/256, SM1 and either ZA state. SME2 required for PN/PP; scalar31 is ZR. Flags use NZCV31:28; no guest RAM access. Oracle/runtime limits are explicit in the profile and evidence.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs"
+      ],
+      "review": "Typed complete decoder and alias-safe packed predicate emitter; compact constants and single-chunk PN stores selected from measured candidates; checked BMI1 BRK for all supported lengths and PFIRST only at SVL256. Exact current CLI bytes and full-state native/original/model lineage bound by the scoped evidence group.",
+      "evidence_groups": [
+        "sve-predicate-generation-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x25203000",
+          "expected_mnemonics": [
+            "whilewr"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
     }
   ],
   "execution_profiles": {

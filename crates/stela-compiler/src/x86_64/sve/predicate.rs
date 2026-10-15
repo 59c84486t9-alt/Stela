@@ -1,7 +1,9 @@
 //! Shared packed-predicate helpers, grouped by architectural responsibility.
 mod counter;
+mod flags;
 
 pub(crate) use counter::emit_counter_chunk;
+pub(crate) use flags::{accumulate_predtest, begin_predtest, finish_predtest, leading_bits};
 
 const CHUNK_BITS: usize = 64;
 const REL32_BYTES: usize = 4;

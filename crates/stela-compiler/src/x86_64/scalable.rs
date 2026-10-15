@@ -8,6 +8,9 @@
 mod legacy;
 pub(crate) use legacy::clear_z_upper;
 
+mod predicate;
+pub(crate) use predicate::{write_predicate_chunk, zero_predicate};
+
 use super::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::{
     GuestState, TargetCpu,

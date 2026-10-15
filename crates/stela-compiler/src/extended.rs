@@ -19,7 +19,8 @@ use crate::{
         sve::{
             address, dot, floating_copy, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, rearrange_extract, rearrange_widen, sign,
+            integer_products, integer_saturation, predicate_generation, rearrange_extract,
+            rearrange_widen, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -226,6 +227,7 @@ enum Decoded {
     Sign(sign::Operand),
     FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
+    PredicateGeneration(predicate_generation::Operand),
     Length(length::Operand),
     SmeIntegerDots(integer_dots::Operand),
 }
@@ -501,6 +503,26 @@ fn decode(
         )?;
         return Ok(Decoded::FloatingCopy(operand));
     }
+    if let Some(decoded) = predicate_generation::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming predicate generation encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        let mut features = ScalableFeatures::of(ScalableFeature::Sme);
+        if operand.requires_sme2() {
+            features = features.with(ScalableFeature::Sme2);
+        }
+        profile.require_features(FeatureRequirement::all(features), pc)?;
+        return Ok(Decoded::PredicateGeneration(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -582,6 +604,9 @@ fn emit_decoded(
         }
         Decoded::FloatingCopy(operand) => {
             x86_64::sve::floating_copy::emit(code, operand, profile.length, target);
+        }
+        Decoded::PredicateGeneration(operand) => {
+            x86_64::sve::predicate_generation::emit(code, &operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -1871,3 +1896,6 @@ mod tests {
 
 #[cfg(test)]
 mod rearrange_extract_tests;
+
+#[cfg(test)]
+mod predicate_generation_tests;
