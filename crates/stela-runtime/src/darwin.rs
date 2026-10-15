@@ -11,7 +11,10 @@
 use crate::blocks::ThreadState;
 use serde::{Serialize, ser::SerializeStruct};
 use std::{error::Error, fmt};
-use stela_compiler::block::{SynchronousTrap, TrapKind};
+use stela_compiler::{
+    GuestAddress, GuestState,
+    block::{SynchronousTrap, TrapKind},
+};
 mod copyout;
 pub mod crossarch;
 pub mod csr;
@@ -133,8 +136,8 @@ pub(crate) fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Resu
 
 /// Validate borrowed actual registers without granting access to the PC owner.
 pub(crate) fn validate_trap_parts(
-    pc: stela_compiler::GuestAddress,
-    registers: &stela_compiler::GuestState,
+    pc: GuestAddress,
+    registers: &GuestState,
     trap: &SynchronousTrap,
 ) -> Result<(), AbiError> {
     if trap.kind != TrapKind::SupervisorCall || trap.immediate != 0x80 {
@@ -168,8 +171,16 @@ pub fn classify_bsd_call(
     state: &ThreadState,
     trap: &SynchronousTrap,
 ) -> Result<BsdSelector, AbiError> {
-    validate_trap(state, trap)?;
-    let raw_x16 = state.registers.x[SYSCALL_SELECTOR_REGISTER];
+    classify_bsd_call_parts(state.pc, &state.registers, trap)
+}
+
+pub(crate) fn classify_bsd_call_parts(
+    pc: GuestAddress,
+    registers: &GuestState,
+    trap: &SynchronousTrap,
+) -> Result<BsdSelector, AbiError> {
+    validate_trap_parts(pc, registers, trap)?;
+    let raw_x16 = registers.x[SYSCALL_SELECTOR_REGISTER];
     let dispatch = raw_x16 as u32 as i32;
     if dispatch == i32::MIN {
         return Err(AbiError::PlatformCall { raw_x16 });
@@ -183,7 +194,7 @@ pub fn classify_bsd_call(
     let indirect = raw_x16 == 0;
     Ok(BsdSelector {
         number: if indirect {
-            state.registers.x[0] as u16
+            registers.x[0] as u16
         } else {
             raw_x16 as u16
         },
@@ -206,7 +217,16 @@ impl PendingBsdCall {
         trap: &SynchronousTrap,
         prototype: BsdPrototype,
     ) -> Result<Self, AbiError> {
-        let selector = classify_bsd_call(state, trap)?;
+        Self::from_registers(state.pc, &state.registers, trap, prototype)
+    }
+
+    pub(crate) fn from_registers(
+        pc: GuestAddress,
+        registers: &GuestState,
+        trap: &SynchronousTrap,
+        prototype: BsdPrototype,
+    ) -> Result<Self, AbiError> {
+        let selector = classify_bsd_call_parts(pc, registers, trap)?;
         if prototype.argument_count > MAX_BSD_ARGUMENTS {
             return Err(AbiError::InvalidPrototype {
                 argument_count: prototype.argument_count,
@@ -217,7 +237,7 @@ impl PendingBsdCall {
         let start = usize::from(selector.indirect);
         let mut arguments = [0; MAX_BSD_ARGUMENTS];
         arguments[..prototype.argument_count]
-            .copy_from_slice(&state.registers.x[start..start + prototype.argument_count]);
+            .copy_from_slice(&registers.x[start..start + prototype.argument_count]);
         Ok(Self {
             request: BsdRequest {
                 number: selector.number,
@@ -225,7 +245,10 @@ impl PendingBsdCall {
                 arguments,
                 prototype,
             },
-            issued: state.clone(),
+            issued: ThreadState {
+                pc,
+                registers: registers.clone(),
+            },
             trap: *trap,
         })
     }
@@ -243,50 +266,63 @@ impl PendingBsdCall {
         state: &mut ThreadState,
         completion: BsdCompletion,
     ) -> Result<(), AbiError> {
-        if state.pc != self.issued.pc || state.registers != self.issued.registers {
+        if state.pc != self.issued.pc {
             return Err(AbiError::StateChanged);
         }
-        if completion == BsdCompletion::JustReturn {
-            return Err(AbiError::UnsupportedJustReturn);
+        state.pc = self.complete_registers(&mut state.registers, completion)?;
+        Ok(())
+    }
+
+    /// Normalize one backend result in the actual bank. The issued clone is
+    /// validation evidence only; the caller retains exclusive actual PC authority.
+    pub(crate) fn complete_registers(
+        self,
+        registers: &mut GuestState,
+        completion: BsdCompletion,
+    ) -> Result<GuestAddress, AbiError> {
+        if *registers != self.issued.registers {
+            return Err(AbiError::StateChanged);
         }
-        let mut next = self.issued;
-        next.registers.nzcv &= !CARRY;
-        next.pc = self.trap.exception_return_pc;
+        match completion {
+            BsdCompletion::JustReturn => return Err(AbiError::UnsupportedJustReturn),
+            BsdCompletion::Error { errno } if errno == 0 || errno > i32::MAX as u32 => {
+                return Err(AbiError::InvalidErrno { errno });
+            }
+            _ => {}
+        }
+        registers.nzcv &= !CARRY;
+        let mut next_pc = self.trap.exception_return_pc;
         match completion {
             BsdCompletion::Success { values } => match self.request.prototype.return_type {
                 BsdReturnType::Int => {
-                    next.registers.x[0] = values[0] as i32 as i64 as u64;
-                    next.registers.x[1] = values[1] as i32 as i64 as u64;
+                    registers.x[0] = values[0] as i32 as i64 as u64;
+                    registers.x[1] = values[1] as i32 as i64 as u64;
                 }
                 BsdReturnType::UnsignedInt => {
-                    next.registers.x[0] = u64::from(values[0]);
-                    next.registers.x[1] = u64::from(values[1]);
+                    registers.x[0] = u64::from(values[0]);
+                    registers.x[1] = u64::from(values[1]);
                 }
                 BsdReturnType::Offset
                 | BsdReturnType::Address
                 | BsdReturnType::Size
                 | BsdReturnType::SignedSize
                 | BsdReturnType::Unsigned64 => {
-                    next.registers.x[0] = u64::from(values[0]) | (u64::from(values[1]) << 32);
-                    next.registers.x[1] = 0;
+                    registers.x[0] = u64::from(values[0]) | (u64::from(values[1]) << u32::BITS);
+                    registers.x[1] = 0;
                 }
                 BsdReturnType::None => {}
             },
             BsdCompletion::Error { errno } => {
-                if errno == 0 || errno > i32::MAX as u32 {
-                    return Err(AbiError::InvalidErrno { errno });
-                }
-                next.registers.x[0] = u64::from(errno);
-                next.registers.x[1] = 0;
-                next.registers.nzcv |= CARRY;
+                registers.x[0] = u64::from(errno);
+                registers.x[1] = 0;
+                registers.nzcv |= CARRY;
             }
-            BsdCompletion::Restart => next.pc = self.trap.instruction_pc,
+            BsdCompletion::Restart => next_pc = self.trap.instruction_pc,
             BsdCompletion::JustReturn => {
-                unreachable!("context restoration was declined before mutation")
+                unreachable!("context restoration declined before mutation")
             }
         }
-        *state = next;
-        Ok(())
+        Ok(next_pc)
     }
 }
 
@@ -482,7 +518,7 @@ pub fn service_data_mprotect(
 pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
-    stop: Option<stela_compiler::GuestAddress>,
+    stop: Option<GuestAddress>,
     budget: usize,
     memory: &mut crate::memory::OwnedMemory,
     mut services: ExecutionServices<'_>,
@@ -716,7 +752,7 @@ pub unsafe fn run_services(
 pub unsafe fn run_data_vm(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
-    stop: Option<stela_compiler::GuestAddress>,
+    stop: Option<GuestAddress>,
     budget: usize,
     memory: &mut crate::memory::OwnedMemory,
     mut services: ExecutionServices<'_>,
@@ -884,6 +920,77 @@ mod tests {
         let mut invalid = input.clone();
         invalid.registers.nzcv |= 1;
         assert!(classify_bsd_call(&invalid, &trap()).is_err());
+    }
+
+    #[test]
+    fn borrowed_completion_retains_actual_pc_and_rejects_stale_or_invalid_replies() {
+        let input = state(4, 15);
+        let mut bank = input.registers.clone();
+        let actual_pc = input.pc;
+        let next = PendingBsdCall::from_registers(
+            actual_pc,
+            &bank,
+            &trap(),
+            prototype(BsdReturnType::Unsigned64, 0),
+        )
+        .unwrap()
+        .complete_registers(
+            &mut bank,
+            BsdCompletion::Success {
+                values: [0x89ab_cdef, 0x0123_4567],
+            },
+        )
+        .unwrap();
+        let mut expected = input.registers.clone();
+        expected.x[0] = 0x0123_4567_89ab_cdef;
+        expected.x[1] = 0;
+        expected.nzcv &= !CARRY;
+        assert_eq!(bank, expected);
+        assert_eq!(actual_pc, trap().instruction_pc);
+        assert_eq!(next, trap().exception_return_pc);
+        for completion in [
+            BsdCompletion::JustReturn,
+            BsdCompletion::Error { errno: 0 },
+            BsdCompletion::Error { errno: u32::MAX },
+        ] {
+            let mut bank = input.registers.clone();
+            let pending = PendingBsdCall::from_registers(
+                actual_pc,
+                &bank,
+                &trap(),
+                prototype(BsdReturnType::Int, 0),
+            )
+            .unwrap();
+            assert!(pending.complete_registers(&mut bank, completion).is_err());
+            assert_eq!(bank, input.registers);
+        }
+        let mut bank = input.registers.clone();
+        let pending = PendingBsdCall::from_registers(
+            actual_pc,
+            &bank,
+            &trap(),
+            prototype(BsdReturnType::Int, 0),
+        )
+        .unwrap();
+        bank.x[5] ^= 1;
+        let changed = bank.clone();
+        assert_eq!(
+            pending.complete_registers(&mut bank, BsdCompletion::Restart),
+            Err(AbiError::StateChanged)
+        );
+        assert_eq!(bank, changed);
+        let mut bank = input.registers.clone();
+        let next = PendingBsdCall::from_registers(
+            actual_pc,
+            &bank,
+            &trap(),
+            prototype(BsdReturnType::Int, 0),
+        )
+        .unwrap()
+        .complete_registers(&mut bank, BsdCompletion::Restart)
+        .unwrap();
+        assert_eq!(next, trap().instruction_pc);
+        assert_eq!(actual_pc, trap().instruction_pc);
     }
 
     #[test]

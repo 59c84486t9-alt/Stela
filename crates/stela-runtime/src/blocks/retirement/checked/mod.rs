@@ -1,6 +1,7 @@
 //! Closed checked-memory execution under the retained PE and source owners.
 //! The canonical retirement module alone constructs ConsumerKey/RetainedResources.
 
+mod darwin_services;
 mod diagnostics;
 mod low128_call;
 mod pauth_policy;
@@ -45,7 +46,7 @@ pub(crate) struct OwnedRunOutcome {
     pub actual_pc: GuestAddress,
     pub last_native_observation: Option<NativeObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
-    pub mach_service_events: Vec<crate::mach::Event>,
+    pub service_events: darwin_services::TrapServiceEvents,
 }
 
 /// Diagnostic metadata only; cannot mint entry/retirement/source authority.
@@ -135,7 +136,7 @@ impl BlockRuntime {
         let mut accounting = empty_accounting();
         let mut last_native_observation = None;
         let mut settled_prefixes = Vec::new();
-        let mut mach_service_events = Vec::new();
+        let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
             if !pe.authority.ready() {
                 break OwnedStop::EntryDeclined("actual PE is not Ready".into());
@@ -191,7 +192,7 @@ impl BlockRuntime {
                 &mut accounting,
                 &mut last_native_observation,
                 &mut settled_prefixes,
-                &mut mach_service_events,
+                &mut service_events,
             ) {
                 Ok(None) => {}
                 Ok(Some(stop)) => break stop,
@@ -227,7 +228,7 @@ impl BlockRuntime {
             actual_pc: pe.thread.pc,
             last_native_observation,
             settled_prefixes,
-            mach_service_events,
+            service_events,
         }
     }
 }
@@ -247,7 +248,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         accounting: &mut RunOutcome,
         observation: &mut Option<NativeObservation>,
         prefixes: &mut Vec<SettledPrefix>,
-        mach_service_events: &mut Vec<crate::mach::Event>,
+        service_events: &mut darwin_services::TrapServiceEvents,
     ) -> anyhow::Result<Option<OwnedStop>> {
         let result =
             match self
@@ -428,14 +429,18 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             .authority
                             .enter_system(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("trap entry authority failed"))?;
-                        // Non-memory bootstrap services retain native mapping
+                        // Non-memory Darwin services retain native mapping
                         // exclusion as well as this same actual SystemActive PE.
-                        let continuation = self.pe.backend.complete_trap(
+                        let continuation = match self.pe.backend.complete_trap(
                             &trap,
                             self.pe.system,
                             &mut self.pe.thread.registers,
-                            mach_service_events,
-                        )?;
+                            service_events,
+                        ) {
+                            darwin_services::Outcome::Complete(pc) => Some(pc),
+                            darwin_services::Outcome::NoEffect => None,
+                            darwin_services::Outcome::Indeterminate(error) => return Err(error),
+                        };
                         self.pe
                             .authority
                             .start_retirement(&ConsumerKey(()), self.attempt)
@@ -443,7 +448,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         if let Some(continuation) = continuation {
                             anyhow::ensure!(
                                 continuation == trap.exception_return_pc,
-                                "Mach service continuation differs"
+                                "Darwin service continuation differs"
                             );
                             self.pe.thread.pc = continuation;
                             self.pe.backend.post_retirement(

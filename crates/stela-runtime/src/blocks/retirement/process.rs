@@ -142,9 +142,11 @@ pub(crate) unsafe fn run_protected_services(
     };
     let diagnostics = serde_json::json!({"stop":format!("{:?}",result.stop),"actual_pc":result.actual_pc,
         "last_native_observation":format!("{:?}",result.last_native_observation),
-        "registers":format!("{:?}",pe.registers()), "settled_prefixes":prefixes,"retained":observation});
+        "registers":format!("{:?}",pe.registers()), "settled_prefixes":prefixes,"retained":observation,"service_refusals":result.service_events.refusals,"mach_resource_effects":result.service_events.mach_effects});
     let mut report = ServiceRunOutcome::unserviced(result.accounting);
     report.protected_observation = Some(diagnostics);
-    report.mach_services = result.mach_service_events;
+    report.mach_services = result.service_events.mach;
+    report.thread_services = result.service_events.thread;
+    report.process_services = result.service_events.process;
     Ok(report)
 }

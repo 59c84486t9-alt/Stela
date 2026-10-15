@@ -12,7 +12,7 @@ use super::{
 use crate::{
     blocks::{BlockRuntime, ThreadState},
     darwin::{SYSCALL_SELECTOR_REGISTER, copyout, validate_trap},
-    mach::{HostPorts, PendingCall, PortKind, Request},
+    mach::{HostPorts, PendingCall, Request},
     memory::{
         AllocateDataError, AllocateDataRequest, DIRECT_RAM_USER_END, DataAllocation,
         DataInheritance, DataPermissions, DataPlacement, OwnedMemory,
@@ -101,10 +101,7 @@ pub fn service(
         ensure!(request.number == MAP_TRAP, "not a Mach VM map trap");
         let arguments: [u64; ARGUMENT_COUNT] = request.arguments.as_slice().try_into()?;
         let [task, ..] = arguments;
-        let owned_task = ports
-            .rights()
-            .iter()
-            .any(|right| right.guest_name == task as u32 && right.kind == PortKind::TaskSend);
+        let owned_task = ports.has_task_send(task as u32);
         let result = if owned_task {
             map_and_copyout(arguments, memory, runtime, &mut event)?
         } else {

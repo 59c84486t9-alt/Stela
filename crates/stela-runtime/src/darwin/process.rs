@@ -5,7 +5,8 @@
 //! service reads the current thread's shared guest process owner, never host PID.
 
 use super::{
-    BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,
+    BsdCompletion, BsdPrototype, BsdRequest, BsdReturnType, BsdServiceEvent, PendingBsdCall,
+    classify_bsd_call,
 };
 use crate::{blocks::ThreadState, process::Context};
 use anyhow::{Result, ensure};
@@ -16,6 +17,17 @@ const PROTOTYPE: BsdPrototype = BsdPrototype {
     argument_count: 0,
     return_type: BsdReturnType::Int,
 };
+
+pub(crate) fn completion(request: &BsdRequest, process: &Context) -> Result<BsdCompletion> {
+    ensure!(
+        request.number == SYSCALL_NUMBER && request.prototype() == PROTOTYPE,
+        "request is not the process identity prototype"
+    );
+    // ARM entry zeros both retval slots; getpid writes only the first.
+    Ok(BsdCompletion::Success {
+        values: [process.pid(), 0],
+    })
+}
 
 pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     classify_bsd_call(state, trap).is_ok_and(|selector| selector.number == SYSCALL_NUMBER)
@@ -43,10 +55,7 @@ pub fn service(
             "BSD service {} is not implemented by the process identity profile",
             request.number
         );
-        // ARM entry zeros both retval slots; getpid writes only the first.
-        let completion = BsdCompletion::Success {
-            values: [process.pid(), 0],
-        };
+        let completion = completion(&request, process)?;
         pending.complete(state, completion)?;
         Ok(completion)
     })();

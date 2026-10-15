@@ -7,7 +7,7 @@
 use crate::{
     blocks::{BlockRuntime, ThreadState},
     darwin::{GUEST_PAGE_BYTES, SYSCALL_SELECTOR_REGISTER, validate_trap},
-    mach::{Event, HostPorts, PendingCall, PortKind},
+    mach::{Event, HostPorts, PendingCall},
     memory::{DIRECT_RAM_USER_END, OwnedMemory, ProtectionError},
 };
 use anyhow::{Result, ensure};
@@ -67,10 +67,7 @@ pub fn service(
         );
         let [task, address, size, set_maximum, protection]: [u64; ARGUMENT_COUNT] =
             request.arguments.as_slice().try_into()?;
-        let owned_task = ports
-            .rights()
-            .iter()
-            .any(|right| right.guest_name == task as u32 && right.kind == PortKind::TaskSend);
+        let owned_task = ports.has_task_send(task as u32);
         let result = protect(
             owned_task,
             address,

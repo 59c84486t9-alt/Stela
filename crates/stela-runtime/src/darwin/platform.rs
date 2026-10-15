@@ -15,11 +15,11 @@
 
 use crate::{
     blocks::ThreadState,
-    darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap},
+    darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap_parts},
 };
 use anyhow::{Result, ensure};
 use serde::Serialize;
-use stela_compiler::block::SynchronousTrap;
+use stela_compiler::{GuestAddress, GuestState, block::SynchronousTrap};
 
 pub const PLATFORM_CALL_SELECTOR: i32 = i32::MIN;
 pub const SET_THREAD_SPECIFIC_DATA: u32 = 2;
@@ -52,23 +52,34 @@ pub struct PendingCall {
 
 impl PendingCall {
     pub fn from_trap(state: &ThreadState, trap: &SynchronousTrap) -> Result<Self> {
-        validate_trap(state, trap)?;
-        let selector = state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
+        Self::from_registers(state.pc, &state.registers, trap)
+    }
+
+    pub(crate) fn from_registers(
+        pc: GuestAddress,
+        registers: &GuestState,
+        trap: &SynchronousTrap,
+    ) -> Result<Self> {
+        validate_trap_parts(pc, registers, trap)?;
+        let selector = registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
         ensure!(
             selector == PLATFORM_CALL_SELECTOR,
             "selector is not an ARM Darwin platform call"
         );
-        let subcode = state.registers.x[SUBCODE_REGISTER] as u32;
+        let subcode = registers.x[SUBCODE_REGISTER] as u32;
         let request = match subcode {
             SET_THREAD_SPECIFIC_DATA => Request::SetThreadSpecificData {
-                address: state.registers.x[ARGUMENT_REGISTER],
+                address: registers.x[ARGUMENT_REGISTER],
             },
             GET_THREAD_SPECIFIC_DATA => Request::GetThreadSpecificData,
             _ => anyhow::bail!("ARM Darwin platform subcode {subcode} is unsupported"),
         };
         Ok(Self {
             request,
-            issued: state.clone(),
+            issued: ThreadState {
+                pc,
+                registers: registers.clone(),
+            },
             trap: *trap,
         })
     }
@@ -81,18 +92,30 @@ impl PendingCall {
     /// call pending. Invalid replies and changed state never mutate saved state.
     pub fn complete(self, state: &mut ThreadState, completion: Completion) -> Result<()> {
         ensure!(
-            state.pc == self.issued.pc && state.registers == self.issued.registers,
+            state.pc == self.issued.pc,
+            "pending ARM Darwin platform PC changed"
+        );
+        state.pc = self.complete_registers(&mut state.registers, completion)?;
+        Ok(())
+    }
+
+    pub(crate) fn complete_registers(
+        self,
+        registers: &mut GuestState,
+        completion: Completion,
+    ) -> Result<GuestAddress> {
+        ensure!(
+            *registers == self.issued.registers,
             "pending ARM Darwin platform state changed"
         );
         match (self.request, completion) {
             (Request::SetThreadSpecificData { .. }, Completion::SetThreadSpecificData) => {}
             (Request::GetThreadSpecificData, Completion::GetThreadSpecificData { address }) => {
-                state.registers.x[ARGUMENT_REGISTER] = address
+                registers.x[ARGUMENT_REGISTER] = address
             }
             _ => anyhow::bail!("ARM Darwin platform completion does not match its request"),
         }
-        state.pc = self.trap.exception_return_pc;
-        Ok(())
+        Ok(self.trap.exception_return_pc)
     }
 }
 
@@ -135,6 +158,32 @@ mod tests {
     fn assert_state(actual: &ThreadState, expected: &ThreadState) {
         assert_eq!(actual.pc, expected.pc);
         assert_eq!(actual.registers, expected.registers);
+    }
+
+    #[test]
+    fn borrowed_platform_completion_preserves_pc_authority_and_validates_before_write() {
+        let input = state(SET_THREAD_SPECIFIC_DATA, 15);
+        let mut bank = input.registers.clone();
+        let actual_pc = input.pc;
+        let pending = PendingCall::from_registers(actual_pc, &bank, &trap()).unwrap();
+        assert_eq!(
+            pending
+                .complete_registers(&mut bank, Completion::SetThreadSpecificData)
+                .unwrap(),
+            trap().exception_return_pc
+        );
+        assert_eq!(bank, input.registers);
+        assert_eq!(actual_pc, trap().instruction_pc);
+        let pending = PendingCall::from_registers(actual_pc, &bank, &trap()).unwrap();
+        assert!(
+            pending
+                .complete_registers(
+                    &mut bank,
+                    Completion::GetThreadSpecificData { address: u64::MAX }
+                )
+                .is_err()
+        );
+        assert_eq!(bank, input.registers);
     }
 
     #[test]

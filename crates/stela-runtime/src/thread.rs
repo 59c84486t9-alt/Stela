@@ -99,12 +99,62 @@ impl Context {
             process: self.process.as_ref().map(|process| process.snapshot()),
         }
     }
+    pub(crate) fn identity_completion(&self, request: &BsdRequest) -> Result<BsdCompletion> {
+        ensure!(
+            request.number == THREAD_SELFID_SYSCALL
+                && request.prototype().argument_count == 0
+                && request.prototype().return_type == BsdReturnType::Unsigned64,
+            "request is not the thread identity prototype"
+        );
+        Ok(BsdCompletion::Success {
+            values: [
+                self.identity as u32,
+                (self.identity >> RETURN_WORD_BITS) as u32,
+            ],
+        })
+    }
+
+    /// Complete only the borrowed ABI bank, then commit actual TSD infallibly.
+    /// No actual PC, host TLS or guest pointer access is available here.
+    pub(crate) fn complete_platform_registers(
+        &mut self,
+        pending: platform::PendingCall,
+        registers: &mut stela_compiler::GuestState,
+    ) -> Result<PlatformResult> {
+        let before = self.thread_specific_data;
+        let (completion, next) = match *pending.request() {
+            platform::Request::SetThreadSpecificData { address } => (
+                platform::Completion::SetThreadSpecificData,
+                self.vm_maximum.sanitize_thread_specific_data(address),
+            ),
+            platform::Request::GetThreadSpecificData => (
+                platform::Completion::GetThreadSpecificData { address: before },
+                before,
+            ),
+        };
+        let next_pc = pending.complete_registers(registers, completion)?;
+        self.thread_specific_data = next;
+        Ok(PlatformResult {
+            next_pc,
+            completion,
+            before,
+            after: next,
+        })
+    }
+
     pub fn ports(&self) -> &HostPorts {
         &self.ports
     }
     pub fn ports_mut(&mut self) -> &mut HostPorts {
         &mut self.ports
     }
+}
+
+pub(crate) struct PlatformResult {
+    pub next_pc: stela_compiler::GuestAddress,
+    pub completion: platform::Completion,
+    pub before: u64,
+    pub after: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,12 +231,7 @@ fn service_identity(
             pending.request().number == THREAD_SELFID_SYSCALL,
             "BSD call is not thread_selfid"
         );
-        let completion = BsdCompletion::Success {
-            values: [
-                context.identity as u32,
-                (context.identity >> RETURN_WORD_BITS) as u32,
-            ],
-        };
+        let completion = context.identity_completion(pending.request())?;
         pending.complete(state, completion)?;
         Ok(completion)
     })();
@@ -215,22 +260,10 @@ fn service_platform(
         let pending = platform::PendingCall::from_trap(state, trap)?;
         let request = *pending.request();
         event.request = Some(request);
-        let (completion, next) = match request {
-            platform::Request::SetThreadSpecificData { address } => (
-                platform::Completion::SetThreadSpecificData,
-                context.vm_maximum.sanitize_thread_specific_data(address),
-            ),
-            platform::Request::GetThreadSpecificData => (
-                platform::Completion::GetThreadSpecificData { address: before },
-                before,
-            ),
-        };
-        pending.complete(state, completion)?;
-        // Pending validation completes before this infallible commit. Neither
-        // action dereferences the guest pointer or changes host thread state.
-        context.thread_specific_data = next;
-        event.thread_specific_data_after = next;
-        Ok(completion)
+        let result = context.complete_platform_registers(pending, &mut state.registers)?;
+        state.pc = result.next_pc;
+        event.thread_specific_data_after = result.after;
+        Ok(result.completion)
     })();
     match result {
         Ok(completion) => event.completion = Some(completion),
