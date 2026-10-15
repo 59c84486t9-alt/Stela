@@ -15,6 +15,8 @@ pub mod backing;
 pub mod domain;
 pub mod monitor;
 pub mod policy;
+mod service;
+pub use service::GuestServiceMemory;
 mod storage;
 pub mod tag_execution;
 pub mod tag_store;
@@ -529,9 +531,29 @@ impl OwnedMemory {
         bytes: u64,
         readable: bool,
         writable: bool,
+        protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
+    ) -> std::result::Result<(), ProtectionError> {
+        self.protect_data_with_service(address, bytes, readable, writable, None, protect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn protect_data_with_service(
+        &mut self,
+        address: u64,
+        bytes: u64,
+        readable: bool,
+        writable: bool,
+        service: Option<&domain::MemoryServiceLoan>,
         mut protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
     ) -> std::result::Result<(), ProtectionError> {
         use ProtectionError as E;
+        if let Some(loan) = service {
+            let shared = self.shared.as_ref().ok_or(E::SharedDomainBound)?;
+            shared.check().map_err(|_| E::AddressSpaceUnusable)?;
+            if !loan.belongs_to(&shared.domain) {
+                return Err(E::SharedDomainBound);
+            }
+        }
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -623,8 +645,9 @@ impl OwnedMemory {
             }
         }
         if self.shared.is_some() {
-            return self
-                .protect_shared(address, bytes, readable, writable, next, rollback, protect);
+            return self.protect_shared(
+                address, bytes, readable, writable, next, rollback, service, protect,
+            );
         }
         if let Err(errno) = protect(address, bytes, host_protection(readable, writable)) {
             // Some host kernels can partially change a failed range. Restore

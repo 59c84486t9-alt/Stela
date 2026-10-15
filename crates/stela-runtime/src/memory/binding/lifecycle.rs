@@ -50,14 +50,25 @@ impl OwnedMemory {
         writable: bool,
         next: Vec<MemoryRegion>,
         rollback: Vec<(u64, u64, i32)>,
+        service: Option<&super::super::domain::MemoryServiceLoan>,
         mut protect: impl FnMut(u64, u64, i32) -> Result<(), Option<i32>>,
     ) -> Result<(), ProtectionError> {
         use ProtectionError as E;
         let shared = self.shared.as_ref().expect("bound lifecycle");
-        let loan = shared
-            .domain
-            .service_loan()
-            .map_err(|_| E::SharedDomainBound)?;
+        shared.check().map_err(|_| E::AddressSpaceUnusable)?;
+        let acquired;
+        let loan = if let Some(service) = service {
+            if !service.belongs_to(&shared.domain) {
+                return Err(E::SharedDomainBound);
+            }
+            service
+        } else {
+            acquired = shared
+                .domain
+                .service_loan()
+                .map_err(|_| E::SharedDomainBound)?;
+            &acquired
+        };
         let old = loan.views().map_err(|_| E::AddressSpaceUnusable)?;
         let end = address + bytes;
         let affected = |view: &MemoryView| {

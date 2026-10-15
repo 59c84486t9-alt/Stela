@@ -9,6 +9,55 @@ use std::sync::Arc;
 use stela_compiler::TargetCpu;
 
 #[test]
+fn actual_service_write_invalidates_the_original_backing_reservation() {
+    use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
+    let (mut owner, base) = owned();
+    let system = MemorySystem::new(16, 8).unwrap();
+    // SAFETY: actual fresh owned anonymous storage and its complete writers.
+    let domain =
+        unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 75), &mut []) }.unwrap();
+    let mapping = &domain.registered_views()[0];
+    let backing = Arc::clone(mapping.view.backing());
+    let access = monitor::Access::new(
+        Arc::clone(&backing),
+        Arc::clone(&mapping.monitor),
+        0,
+        8,
+        monitor::Shape::Scalar,
+    )
+    .unwrap();
+    let mut reservation = system.reservations.thread();
+    system
+        .reservations
+        .load(&mut reservation, &access, || {
+            Ok::<_, ()>(native(&backing, 0, 8))
+        })
+        .unwrap();
+    let mut actual_thread = domain.thread(MemoryControls::new(
+        LowerAddressProfile::new(47, false).unwrap(),
+        false,
+        false,
+        false,
+        TagCheckFaultMode::Ignore,
+        false,
+    ));
+    {
+        let mut service = owner.service_memory(&mut actual_thread).unwrap();
+        service.validate_write(base, 8).unwrap();
+        assert_eq!(service.read_snapshot(base, 8).unwrap(), [0; 8]);
+        // Even a same-value write is a real physical writer effect.
+        service.write(base, &0u64.to_le_bytes()).unwrap();
+    }
+    assert!(matches!(
+        system
+            .reservations
+            .store(&mut reservation, &access, || Ok::<_, ()>(())),
+        Ok(monitor::ConditionalWrite::Failed)
+    ));
+    assert_eq!(domain.generation().unwrap(), 0);
+}
+
+#[test]
 fn bound_host_same_value_and_aba_invalidate_existing_system_reservation() {
     let (mut owner, base) = owned();
     let system = MemorySystem::new(16, 8).unwrap();

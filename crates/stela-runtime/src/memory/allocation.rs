@@ -123,7 +123,38 @@ impl OwnedMemory {
             .as_ref()
             .map(|shared| shared.domain.service_loan())
             .transpose()
-            .map_err(|_| E::SharedDomainBound)?;
+            .map_err(|_| E::SharedDomainBound)?
+            .map(AllocationServiceLoan::Owned);
+        self.begin_data_allocation_with_service(request, service)
+    }
+
+    pub(in crate::memory) fn begin_data_allocation_in_service<'a>(
+        &'a mut self,
+        request: AllocateDataRequest,
+        service: &'a super::domain::MemoryServiceLoan,
+    ) -> Result<PendingDataAllocation<'a>, AllocateDataError> {
+        let shared = self
+            .shared
+            .as_ref()
+            .ok_or(AllocateDataError::SharedDomainBound)?;
+        shared
+            .check()
+            .map_err(|_| AllocateDataError::AddressSpaceUnusable)?;
+        if !service.belongs_to(&shared.domain) {
+            return Err(AllocateDataError::SharedDomainBound);
+        }
+        self.begin_data_allocation_with_service(
+            request,
+            Some(AllocationServiceLoan::Borrowed(service)),
+        )
+    }
+
+    fn begin_data_allocation_with_service<'a>(
+        &'a mut self,
+        request: AllocateDataRequest,
+        service: Option<AllocationServiceLoan<'a>>,
+    ) -> Result<PendingDataAllocation<'a>, AllocateDataError> {
+        use AllocateDataError as E;
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -225,7 +256,23 @@ pub struct PendingDataAllocation<'a> {
     allocation: DataAllocation,
     current: DataPermissions,
     initialized_bytes: usize,
-    service: Option<super::domain::MemoryServiceLoan>,
+    service: Option<AllocationServiceLoan<'a>>,
+}
+
+enum AllocationServiceLoan<'a> {
+    Owned(super::domain::MemoryServiceLoan),
+    Borrowed(&'a super::domain::MemoryServiceLoan),
+}
+
+impl std::ops::Deref for AllocationServiceLoan<'_> {
+    type Target = super::domain::MemoryServiceLoan;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(loan) => loan,
+            Self::Borrowed(loan) => loan,
+        }
+    }
 }
 
 impl std::fmt::Debug for PendingDataAllocation<'_> {

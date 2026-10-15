@@ -1,7 +1,8 @@
 use super::*;
 use crate::memory::binding::tests::{config, owned, published};
 use crate::memory::{
-    AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement, host_page_size,
+    AllocateDataError, AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement,
+    host_page_size,
 };
 
 fn request(bytes: u64) -> AllocateDataRequest {
@@ -18,6 +19,164 @@ fn request(bytes: u64) -> AllocateDataRequest {
         maximum: rights,
         alias_tag: 0,
         inheritance: DataInheritance::Copy,
+    }
+}
+
+fn controls() -> crate::memory::policy::MemoryControls {
+    use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
+    MemoryControls::new(
+        LowerAddressProfile::new(47, false).unwrap(),
+        false,
+        false,
+        false,
+        TagCheckFaultMode::Ignore,
+        false,
+    )
+}
+
+#[test]
+fn actual_service_guard_spans_allocation_copyout_and_data_protection() {
+    let page = host_page_size().unwrap() as u64;
+    let (mut owner, pointer) = owned();
+    let (mut facade, other) = owned();
+    // SAFETY: actual owned Normal-WB software storage and complete writers.
+    let domain = unsafe {
+        owner.bind_shared_memory_group(
+            config(MemorySystem::new(16, 8).unwrap(), 77),
+            &mut [&mut facade],
+            &mut [],
+        )
+    }
+    .unwrap();
+    let other_view = domain
+        .registered_views()
+        .into_iter()
+        .find(|view| view.view.guest_base() == other)
+        .unwrap()
+        .view;
+    let mut thread = domain.thread(controls());
+    let address;
+    {
+        let mut service = owner.service_memory(&mut thread).unwrap();
+        assert!(domain.execution_loan().is_err());
+        {
+            let unpublished = service.begin_data_allocation(request(page)).unwrap();
+            assert!(domain.execution_loan().is_err());
+            drop(unpublished);
+        }
+        assert_eq!(domain.generation().unwrap(), 0);
+        assert!(domain.execution_loan().is_err());
+        let mut pending = service.begin_data_allocation(request(page)).unwrap();
+        address = pending.allocation().guest_address;
+        pending.write(0, &[1, 2, 3]).unwrap();
+        assert!(domain.execution_loan().is_err());
+        let allocation = pending.publish().unwrap();
+        assert_eq!(service.data_allocation_at(address), Some(allocation));
+        assert_eq!(domain.generation().unwrap(), 1);
+        service.write(pointer, &address.to_le_bytes()).unwrap();
+        assert_eq!(service.read_snapshot(address, 3).unwrap(), [1, 2, 3]);
+        service.protect_data(address, page, true, false).unwrap();
+        assert_eq!(domain.generation().unwrap(), 2);
+        assert!(service.write(address, &[9]).is_err());
+        assert_eq!(service.read_snapshot(address, 3).unwrap(), [1, 2, 3]);
+        assert!(service.regions().iter().any(|region| {
+            region.guest_address == address && region.readable && !region.writable
+        }));
+        assert!(domain.execution_loan().is_err());
+        assert!(other_view.is_current());
+        assert!(facade.write(other, &[9]).is_err());
+    }
+    assert!(domain.execution_loan().is_ok());
+    assert_eq!(
+        owner.read_snapshot(pointer, 8).unwrap(),
+        address.to_le_bytes()
+    );
+    assert_eq!(facade.read_snapshot(other, 1).unwrap(), [0]);
+}
+
+#[test]
+fn supplied_guard_never_falls_back_to_private_or_other_domain_mapping() {
+    let page = host_page_size().unwrap() as u64;
+    let (mut owner, base) = owned();
+    let (mut other, _) = owned();
+    // SAFETY: complete fresh owned software domains with independent storage.
+    let domain =
+        unsafe { owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut []) }
+            .unwrap();
+    // SAFETY: independent actual source/storage, deliberately same numeric ASID.
+    let other_domain =
+        unsafe { other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut []) }
+            .unwrap();
+    let wrong = other_domain.service_loan().unwrap();
+    let (mut private, private_base) = owned();
+    for (memory, address) in [(&mut owner, base), (&mut private, private_base)] {
+        assert!(matches!(
+            memory.begin_data_allocation_in_service(request(page), &wrong),
+            Err(AllocateDataError::SharedDomainBound)
+        ));
+        let mut host_calls = 0;
+        assert_eq!(
+            memory.protect_data_with_service(
+                address,
+                page,
+                false,
+                false,
+                Some(&wrong),
+                |_, _, _| {
+                    host_calls += 1;
+                    Ok(())
+                }
+            ),
+            Err(ProtectionError::SharedDomainBound)
+        );
+        assert_eq!(host_calls, 0);
+        assert_eq!(memory.regions().len(), 1);
+        assert_eq!(memory.read_snapshot(address, 1).unwrap(), [0]);
+    }
+    assert_eq!(domain.generation().unwrap(), 0);
+}
+
+#[test]
+fn borrowed_protection_rollback_renews_views_and_failed_rollback_quarantines() {
+    let page = host_page_size().unwrap() as u64;
+    for restore in [true, false] {
+        let (mut owner, base) = owned();
+        // SAFETY: fresh actual owned software storage and complete writers.
+        let domain = unsafe {
+            owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 79), &mut [])
+        }
+        .unwrap();
+        let old = domain.registered_views()[0].view.clone();
+        let loan = domain.service_loan().unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            owner.protect_data_with_service(base, page, true, false, Some(&loan), |_, _, _| {
+                calls += 1;
+                if calls == 1 || !restore {
+                    Err(Some(libc::EACCES))
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(ProtectionError::HostFailure {
+                errno: Some(libc::EACCES),
+                rollback_succeeded: restore,
+            })
+        );
+        assert!(!old.is_current());
+        assert!(domain.execution_loan().is_err());
+        drop(loan);
+        if restore {
+            assert!(owner.is_usable());
+            assert_eq!(domain.generation().unwrap(), 1);
+            assert!(domain.execution_loan().is_ok());
+            owner.write(base, &[9]).unwrap();
+        } else {
+            assert!(!owner.is_usable());
+            assert!(domain.generation().is_err());
+            assert!(domain.execution_loan().is_err());
+            assert!(owner.write(base, &[9]).is_err());
+        }
     }
 }
 

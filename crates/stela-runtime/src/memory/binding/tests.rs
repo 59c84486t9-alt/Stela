@@ -375,6 +375,99 @@ impl crate::memory::domain::DataPolicy for Policy {
 }
 
 #[test]
+fn actual_service_borrow_excludes_native_and_competing_facade_operations() {
+    let (mut memory, base) = owned();
+    let (mut facade, other) = owned();
+    // SAFETY: fresh owned anonymous Normal-WB storage and its complete writers.
+    let domain = unsafe {
+        memory.bind_shared_memory_group(
+            config(MemorySystem::new(16, 8).unwrap(), 72),
+            &mut [&mut facade],
+            &mut [],
+        )
+    }
+    .unwrap();
+    let mut thread = domain.thread(Policy);
+    let outer = domain.execution_loan().unwrap();
+    assert!(memory.service_memory(&mut thread).is_err());
+    drop(outer);
+    {
+        let mut service = memory.service_memory(&mut thread).unwrap();
+        assert!(domain.execution_loan().is_err());
+        assert!(facade.read_snapshot(other, 1).is_err());
+        assert!(facade.write(other, &[9]).is_err());
+        assert!(service.read_snapshot(other, 1).is_err());
+        assert!(service.write(other, &[9]).is_err());
+        assert!(service.read_snapshot(u64::MAX, 2).is_err());
+        service.write(base, &[4, 5, 6]).unwrap();
+        assert_eq!(service.read_snapshot(base, 3).unwrap(), [4, 5, 6]);
+        assert!(service.is_usable());
+        assert_eq!(domain.generation().unwrap(), 0);
+    }
+    assert!(domain.execution_loan().is_ok());
+    assert_eq!(memory.read_snapshot(base, 3).unwrap(), [4, 5, 6]);
+    assert_eq!(facade.read_snapshot(other, 1).unwrap(), [0]);
+}
+
+#[test]
+fn service_borrow_requires_actual_domain_even_with_equal_namespace() {
+    let (mut memory, base) = owned();
+    let (mut other, _) = owned();
+    // SAFETY: each fixture owns an independent complete fresh software domain.
+    let domain = unsafe {
+        memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut [])
+    }
+    .unwrap();
+    // SAFETY: independent actual storage, deliberately the same numeric ASID.
+    let other_domain =
+        unsafe { other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut []) }
+            .unwrap();
+    let mut wrong_thread = other_domain.thread(Policy);
+    assert!(matches!(
+        memory.service_memory(&mut wrong_thread),
+        Err(MemoryStatus::Domain)
+    ));
+    let wrong_service = other_domain.service_loan().unwrap();
+    for bytes in [&[][..], &[9][..]] {
+        let error = memory
+            .write_shared_in_service(&wrong_service, base, bytes)
+            .unwrap_err();
+        let fault = error.downcast_ref::<PublicationFault>().unwrap();
+        assert_eq!(fault.status, MemoryStatus::Domain);
+        assert_eq!(fault.completed, 0);
+    }
+    assert_eq!(memory.read_snapshot(base, 1).unwrap(), [0]);
+    assert!(domain.execution_loan().is_ok());
+    drop(wrong_service);
+    let (mut private, _) = owned();
+    assert!(matches!(
+        private.service_memory(&mut wrong_thread),
+        Err(MemoryStatus::Unsupported)
+    ));
+}
+
+#[test]
+fn service_failure_poison_cannot_restore_native_admission_on_drop() {
+    let (mut memory, _) = owned();
+    // SAFETY: fresh owned software storage and complete serialized writers.
+    let domain = unsafe {
+        memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 74), &mut [])
+    }
+    .unwrap();
+    let mut thread = domain.thread(Policy);
+    {
+        let mut service = memory.service_memory(&mut thread).unwrap();
+        service.poison();
+        assert!(!service.is_usable());
+        assert!(service.read_snapshot(0, 0).is_err());
+        assert!(service.write(0, &[]).is_err());
+    }
+    assert!(domain.execution_loan().is_err());
+    assert!(memory.service_memory(&mut thread).is_err());
+    assert!(!memory.is_usable());
+}
+
+#[test]
 fn checked_entry_declines_unavailable_source_capabilities_before_effects() {
     use stela_compiler::context::memory::{MemoryRequirements, host_caps, profile_requirements};
     let (mut memory, base) = owned();

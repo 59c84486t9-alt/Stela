@@ -379,6 +379,31 @@ impl OwnedMemory {
                 status,
                 completed: 0,
             })?;
+        self.write_shared_in_service(&loan, address, bytes)
+    }
+
+    pub(in crate::memory) fn write_shared_in_service(
+        &self,
+        loan: &super::domain::MemoryServiceLoan,
+        address: u64,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        let shared = self.shared.as_ref().ok_or(PublicationFault {
+            status: MemoryStatus::Unsupported,
+            completed: 0,
+        })?;
+        shared.check().map_err(|status| PublicationFault {
+            status,
+            completed: 0,
+        })?;
+        if !loan.belongs_to(&shared.domain) {
+            return Err(PublicationFault {
+                status: MemoryStatus::Domain,
+                completed: 0,
+            }
+            .into());
+        }
+        self.validate_access(address, bytes.len(), true)?;
         for (start, count, source_offset) in self.access_spans(address, bytes.len()) {
             let allocation = self
                 .allocations
@@ -394,7 +419,7 @@ impl OwnedMemory {
             let backing_offset = usize::try_from(start - allocation.base)?;
             shared
                 .publish_in_service(
-                    &loan,
+                    loan,
                     backing,
                     backing_offset,
                     &bytes[source_offset..source_offset + count],
