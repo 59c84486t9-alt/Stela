@@ -10,6 +10,7 @@ pub mod recovery;
 
 use crate::{
     GuestAddress,
+    aarch64::integer_math::Kind as IntegerMath,
     aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register, WideMove, Width},
 };
 #[cfg(test)]
@@ -80,7 +81,6 @@ struct Emitter<'a> {
     phase: Phase,
     constants: constant::ConstantRegisters,
     pool_start: usize,
-    operand_reuse: bool,
 }
 
 impl Emitter<'_> {
@@ -290,9 +290,7 @@ impl Emitter<'_> {
         // value to frame. Borrow its remaining RCX copy without another load or
         // register move. General allocation still skips RCX in this tier, and
         // the next memory access flushes any later change before clobbering it.
-        if self.operand_reuse
-            && let Some(guest) = slot(data)
-        {
+        if let Some(guest) = slot(data) {
             debug_assert_eq!(POOL[0], HostGpr::Rcx);
             debug_assert!(self.resident[0].is_none());
             self.resident[0] = Some(Resident {
@@ -409,8 +407,7 @@ impl Emitter<'_> {
                 shift,
                 amount,
             } => {
-                let (left, right) = if self.operand_reuse
-                    && !subtract
+                let (left, right) = if !subtract
                     && amount == 0
                     && self.in_place(destination, left).is_none()
                     && self.in_place(destination, right).is_some()
@@ -487,8 +484,7 @@ impl Emitter<'_> {
                 shift,
                 amount,
             } => {
-                let (left, right) = if self.operand_reuse
-                    && !invert
+                let (left, right) = if !invert
                     && amount == 0
                     && self.in_place(destination, left).is_none()
                     && self.in_place(destination, right).is_some()
@@ -548,6 +544,84 @@ impl Emitter<'_> {
                     self.commit(destination, width);
                 }
             }
+            Operation::IntegerMath(operand) => match operand.kind {
+                IntegerMath::Low { width } => {
+                    // All sources retain their original architectural value until
+                    // commit, including Rd==Rn/Rm/Ra. The low product is identical
+                    // for signed and unsigned inputs modulo the selected width.
+                    self.read(operand.left, RESULT);
+                    let right = self.cached(operand.right);
+                    if right.is_some() {
+                        self.output.stats.cache_hits += 1;
+                    } else {
+                        self.read(operand.right, RIGHT);
+                    }
+                    self.emit(|code| {
+                        encoding::multiply(code, RESULT, right.unwrap_or(RIGHT), width)
+                    });
+                    if operand.subtract {
+                        self.emit(|code| encoding::negate(code, RESULT, width));
+                    }
+                    if operand.accumulator != Register::Zero {
+                        let accumulator = self.cached(operand.accumulator);
+                        if accumulator.is_some() {
+                            self.output.stats.cache_hits += 1;
+                        } else {
+                            self.read(operand.accumulator, RIGHT);
+                        }
+                        self.emit(|code| {
+                            encoding::binary(
+                                code,
+                                RESULT,
+                                accumulator.unwrap_or(RIGHT),
+                                encoding::Binary::Add,
+                                width,
+                            )
+                        });
+                    }
+                    self.commit(operand.destination, width);
+                }
+                IntegerMath::Extract { width, amount } => {
+                    debug_assert_eq!(operand.left, operand.right);
+                    if let Some(host) = self.in_place(operand.destination, operand.left) {
+                        // ROR with a zero count is not a W-register write on x86.
+                        // Explicitly narrow it so every W result clears upper bits.
+                        if width == Width::W32 && amount == 0 {
+                            self.emit(|code| encoding::copy(code, host, host, width));
+                        } else {
+                            self.emit(|code| {
+                                encoding::shift_register(
+                                    code,
+                                    host,
+                                    crate::aarch64::Shift::Ror,
+                                    amount,
+                                    width,
+                                )
+                            });
+                        }
+                        self.committed_in_place(operand.destination);
+                    } else {
+                        self.read(operand.left, RESULT);
+                        if width == Width::W32 && amount == 0 {
+                            self.emit(|code| encoding::copy(code, RESULT, RESULT, width));
+                        } else {
+                            self.emit(|code| {
+                                encoding::shift_register(
+                                    code,
+                                    RESULT,
+                                    crate::aarch64::Shift::Ror,
+                                    amount,
+                                    width,
+                                )
+                            });
+                        }
+                        self.commit(operand.destination, width);
+                    }
+                }
+                _ => unreachable!(
+                    "prefix analysis selects only low product and equal-source extract"
+                ),
+            },
             Operation::LogicalImmediate {
                 width,
                 kind,
@@ -668,7 +742,6 @@ fn emit_prefix_selected(
         phase: Phase::BeforeGuestCommit,
         constants: constant::ConstantRegisters::default(),
         pool_start: usize::from(contains_load),
-        operand_reuse: true,
     };
     for instruction in instructions.iter().take(consumed) {
         #[cfg(test)]

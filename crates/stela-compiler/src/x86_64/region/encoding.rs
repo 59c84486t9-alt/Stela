@@ -40,6 +40,8 @@ const IMMEDIATE_GROUP: u8 = 0x81;
 const SHIFT_IMMEDIATE_GROUP: u8 = 0xc1;
 const UNARY_GROUP: u8 = 0xf7;
 const NOP: u8 = 0x90;
+const TWO_BYTE_OPCODE: u8 = 0x0f;
+const IMUL: u8 = 0xaf;
 
 pub fn nop(code: &mut Vec<u8>) {
     code.push(NOP);
@@ -121,6 +123,25 @@ pub enum Binary {
     Xor = 0x31,
 }
 
+/// Low product modulo operand width; only destination and host flags change.
+pub fn multiply(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Width) {
+    rex(code, width, destination, source);
+    code.extend([
+        TWO_BYTE_OPCODE,
+        IMUL,
+        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
+    ]);
+}
+
+pub fn negate(code: &mut Vec<u8>, destination: HostGpr, width: Width) {
+    const NEG_EXTENSION: u8 = 3;
+    rex(code, width, HostGpr::Rax, destination);
+    code.extend([
+        UNARY_GROUP,
+        REGISTER_MODE | (NEG_EXTENSION << 3) | (destination as u8 & 7),
+    ]);
+}
+
 pub fn logical_opcode(kind: Logical) -> Binary {
     match kind {
         Logical::And => Binary::And,
@@ -146,7 +167,17 @@ pub fn arithmetic_immediate(
 }
 
 pub fn shift(code: &mut Vec<u8>, kind: Shift, amount: u8, width: Width) {
-    rex(code, width, HostGpr::Rax, RIGHT);
+    shift_register(code, RIGHT, kind, amount, width);
+}
+
+pub fn shift_register(
+    code: &mut Vec<u8>,
+    destination: HostGpr,
+    kind: Shift,
+    amount: u8,
+    width: Width,
+) {
+    rex(code, width, HostGpr::Rax, destination);
     let extension = match kind {
         Shift::Lsl => 4,
         Shift::Lsr => 5,
@@ -155,7 +186,7 @@ pub fn shift(code: &mut Vec<u8>, kind: Shift, amount: u8, width: Width) {
     };
     code.extend([
         SHIFT_IMMEDIATE_GROUP,
-        REGISTER_MODE | (extension << 3) | RIGHT as u8,
+        REGISTER_MODE | (extension << 3) | (destination as u8 & 7),
         amount,
     ]);
 }

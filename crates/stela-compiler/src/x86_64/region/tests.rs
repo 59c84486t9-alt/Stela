@@ -42,6 +42,119 @@ fn chain_reuses_value_and_settles_once() {
     );
     assert_eq!(result.recovery.last().unwrap().retired_instructions, 256);
 }
+
+#[test]
+fn product_rotate_chain_stays_resident_until_canonical_exit() {
+    use crate::aarch64::integer_math::{Kind, Operand};
+    let product = Operation::IntegerMath(Operand {
+        kind: Kind::Low { width: Width::W32 },
+        subtract: false,
+        destination: Register::X(0),
+        left: Register::X(1),
+        right: Register::X(2),
+        accumulator: Register::X(0),
+    });
+    let rotate = Operation::IntegerMath(Operand {
+        kind: Kind::Extract {
+            width: Width::W32,
+            amount: 13,
+        },
+        subtract: false,
+        destination: Register::X(0),
+        left: Register::X(0),
+        right: Register::X(0),
+        accumulator: Register::Zero,
+    });
+    let instructions = [
+        instruction(0, add(Register::X(0), Register::X(0))),
+        instruction(1, product.clone()),
+        instruction(2, rotate.clone()),
+        instruction(3, product),
+        instruction(4, rotate),
+    ];
+    let region = emit_prefix(&instructions).unwrap();
+    assert_eq!(region.consumed_instructions, instructions.len());
+    assert_eq!(region.stats.exit_stores, 1);
+    assert_eq!(region.stats.pressure_stores, 0);
+    assert_eq!(region.stats.peak_resident, 1);
+    assert!(region.recovery.iter().all(RecoveryPoint::validate));
+    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
+}
+
+#[test]
+fn integer_region_eligibility_refuses_other_math_and_malformed_ir() {
+    use crate::aarch64::integer_math::{Kind, Operand};
+    let operand = Operand {
+        kind: Kind::Extract {
+            width: Width::W32,
+            amount: 0,
+        },
+        subtract: false,
+        destination: Register::X(0),
+        left: Register::X(0),
+        right: Register::X(0),
+        accumulator: Register::Zero,
+    };
+    let accepted = emit_prefix(&[instruction(0, Operation::IntegerMath(operand))]).unwrap();
+    assert_eq!(accepted.consumed_instructions, 1);
+    for malformed in [
+        Operand {
+            kind: Kind::Extract {
+                width: Width::W32,
+                amount: 32,
+            },
+            ..operand
+        },
+        Operand {
+            right: Register::X(1),
+            ..operand
+        },
+        Operand {
+            subtract: true,
+            ..operand
+        },
+        Operand {
+            accumulator: Register::X(2),
+            ..operand
+        },
+        Operand {
+            kind: Kind::Low { width: Width::X64 },
+            left: Register::Sp,
+            ..operand
+        },
+        Operand {
+            kind: Kind::Long { signed: false },
+            ..operand
+        },
+        Operand {
+            kind: Kind::High { signed: true },
+            ..operand
+        },
+        Operand {
+            kind: Kind::Divide {
+                signed: false,
+                width: Width::X64,
+            },
+            ..operand
+        },
+    ] {
+        let result = emit_prefix(&[instruction(0, Operation::IntegerMath(malformed))]).unwrap();
+        assert_eq!(result.consumed_instructions, 0);
+        assert!(result.code.is_empty());
+    }
+}
+
+#[test]
+fn selected_math_cost_inspection_refuses_unselected_memory_forms() {
+    use analysis::selected_output_instruction_count as count;
+    assert_eq!(count(&[0x4d, 0x0f, 0xaf, 0xd3]), Some(1));
+    assert_eq!(count(&[0x48, 0x0f, 0xac, 0xc1, 63]), Some(1));
+    assert_eq!(count(&[0x48, 0xf7, 0xd8]), Some(1));
+    assert_eq!(count(&[0x48, 0x0f, 0xaf, 0x07]), None);
+    assert_eq!(count(&[0x48, 0xf7, 0x1f]), None);
+    assert_eq!(count(&[0x0f, 0xac, 0xc1]), None);
+    assert_eq!(count(&[0x66, 0x0f, 0xaf, 0xc1]), None);
+}
 #[test]
 fn pressure_never_discards_final_architectural_values() {
     let mut instructions: Vec<_> = (0..31)

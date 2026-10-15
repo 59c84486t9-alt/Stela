@@ -1,5 +1,6 @@
 //! Bounded architectural liveness. Every final GPR is live at the exit.
 use super::recovery::GPR_SLOTS;
+use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
 };
@@ -82,6 +83,32 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             source,
             ..
         } => (vec![source], destination),
+        Operation::IntegerMath(operand) => {
+            let registers = [
+                operand.destination,
+                operand.left,
+                operand.right,
+                operand.accumulator,
+            ];
+            if registers.contains(&Register::Sp) || !registers.into_iter().all(valid) {
+                return None;
+            }
+            match operand.kind {
+                IntegerMath::Low { .. } => (
+                    vec![operand.left, operand.right, operand.accumulator],
+                    operand.destination,
+                ),
+                IntegerMath::Extract { width, amount }
+                    if operand.left == operand.right
+                        && amount < bits(width)
+                        && !operand.subtract
+                        && operand.accumulator == Register::Zero =>
+                {
+                    (vec![operand.left], operand.destination)
+                }
+                _ => return None,
+            }
+        }
         _ => return None,
     };
     if !valid(destination) || !reads.iter().copied().all(valid) {
@@ -214,6 +241,8 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
     const LEA_RDX_RAX_DISP32: u8 = 0x90;
     const TWO_BYTE_OPCODE: u8 = 0x0f;
     const MOVZX_BYTE: u8 = 0xb6;
+    const IMUL: u8 = 0xaf;
+    const SHRD_IMMEDIATE: u8 = 0xac;
     const ECX_FROM_RAX_MEMORY: u8 = 0x08;
 
     let mut cursor = 0usize;
@@ -242,12 +271,24 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
                 return None;
             }
             cursor += 5;
-        } else if opcode == TWO_BYTE_OPCODE && !word && rex.is_none() {
-            // Exact existing LDRB data access MOVZX ECX,byte [RAX].
-            if code.get(cursor..cursor + 2)? != [MOVZX_BYTE, ECX_FROM_RAX_MEMORY] {
+        } else if opcode == TWO_BYTE_OPCODE && !word {
+            let second = *code.get(cursor)?;
+            if second == MOVZX_BYTE && rex.is_none() {
+                // Exact existing LDRB data access MOVZX ECX,byte [RAX].
+                if code.get(cursor..cursor + 2)? != [MOVZX_BYTE, ECX_FROM_RAX_MEMORY] {
+                    return None;
+                }
+                cursor += 2;
+            } else if matches!(second, IMUL | SHRD_IMMEDIATE) {
+                // Selected low multiply and baseline equal-source EXTR recipes.
+                // Memory forms are deliberately outside this cost inspector.
+                if *code.get(cursor + 1)? >> 6 != 3 {
+                    return None;
+                }
+                cursor += 2 + usize::from(second == SHRD_IMMEDIATE);
+            } else {
                 return None;
             }
-            cursor += 2;
         } else if opcode == NOP && !word && rex.is_none() {
             // Exact single-byte NOP only.
         } else {
@@ -297,7 +338,7 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
                 IMMEDIATE_GROUP => return None,
                 SHIFT_IMMEDIATE_GROUP if matches!(extension, 1 | 4 | 5 | 7) => cursor += 1,
                 SHIFT_IMMEDIATE_GROUP => return None,
-                UNARY_GROUP if extension == 2 => {}
+                UNARY_GROUP if extension == 2 || (extension == 3 && mode == 3) => {}
                 UNARY_GROUP => return None,
                 _ => {}
             }
