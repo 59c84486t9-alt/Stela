@@ -44,6 +44,7 @@
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+    "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
     "crates/stela-compiler/src/aarch64/sme.rs",
     "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
@@ -63,6 +64,7 @@
     "crates/stela-compiler/src/x86_64/sve/integer_products/widening.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+    "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
     "crates/stela-compiler/src/x86_64/sme.rs",
     "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
@@ -424,6 +426,35 @@
         "registered_inputs": 178
       },
       "require_current_executable": true
+    }
+  ,
+    "streaming_sve_rearrange_widen": {
+      "harness": ".stela/research/coverage-race/sve-integer/permute/widen-narrow/final_cli_bridge.py",
+      "report": ".stela/research/coverage-race/sve-integer/permute/widen-narrow/integration/admission-report-3.json",
+      "kind": "streaming_sve_rearrange_widen_selected_body_transfer",
+      "comparison_field": "historical_strict_comparisons_retained",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/scalable_original.py",
+        "dev/simd_fixtures/sve_integer/rearrange_widen.py"
+      ],
+      "require_current_executable": true,
+      "required_measurements": {
+        "canonical_forms": 25,
+        "original_cases": 1250,
+        "historical_strict_comparisons_retained": 5000,
+        "production_compiled_functions": 4060,
+        "native_body_byte_bridges": 4060,
+        "historical_actual_wrapper_comparisons_retained": 5000,
+        "mode_declines": 250,
+        "za_independent_mode_probes": 125,
+        "legacy_declines": 25,
+        "reserved_declines": 26,
+        "state_bytes": 784
+      }
     }
   },
   "forms": [
@@ -16575,6 +16606,2107 @@
         "streaming_sve_register_extract"
       ],
       "source_archive_member": "ISA_A64_xml_A_profile-2026-06/lastb_v_p_z.xml"
+    }
+  ,
+    {
+      "id": "addhnb_z_zz_",
+      "instruction_id": "addhnb_z_zz",
+      "mnemonic": "ADDHNB",
+      "category": "sve",
+      "source_file": "addhnb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45206000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "cb24cb9a08ace6b60f2f70d46d258c8e79f0a9e03487e6def7e0d44a25d51fb3",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/addhnb_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45626020",
+          "expected_mnemonics": [
+            "addhnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626020",
+          "expected_mnemonics": [
+            "addhnb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626020",
+          "expected_mnemonics": [
+            "addhnb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626020",
+          "expected_mnemonics": [
+            "addhnb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626020",
+          "expected_mnemonics": [
+            "addhnb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "addhnt_z_zz_",
+      "instruction_id": "addhnt_z_zz",
+      "mnemonic": "ADDHNT",
+      "category": "sve",
+      "source_file": "addhnt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45206400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "0008677ee0d76a9ad85fd1aae099baf7392648526275d738eccc4c9ef98762ac",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/addhnt_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45626420",
+          "expected_mnemonics": [
+            "addhnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626420",
+          "expected_mnemonics": [
+            "addhnt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626420",
+          "expected_mnemonics": [
+            "addhnt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626420",
+          "expected_mnemonics": [
+            "addhnt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626420",
+          "expected_mnemonics": [
+            "addhnt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "addp_z_p_zz_",
+      "instruction_id": "addp_z_p_zz",
+      "mnemonic": "ADDP",
+      "category": "sve",
+      "source_file": "addp_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4411a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "19ac5ff78a9e06ec854830e9075eea4d365e3260c56100895b5d8437b4a6ec77",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/addp_z_p_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4411bc40",
+          "expected_mnemonics": [
+            "addp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4411bc40",
+          "expected_mnemonics": [
+            "addp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4411bc40",
+          "expected_mnemonics": [
+            "addp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4411bc40",
+          "expected_mnemonics": [
+            "addp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4411bc40",
+          "expected_mnemonics": [
+            "addp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "raddhnb_z_zz_",
+      "instruction_id": "raddhnb_z_zz",
+      "mnemonic": "RADDHNB",
+      "category": "sve",
+      "source_file": "raddhnb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45206800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "a14723a5bf7751bf990ff302a0186cee48f1c683a519d51fd34fa9a25c4f391d",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/raddhnb_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45626820",
+          "expected_mnemonics": [
+            "raddhnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626820",
+          "expected_mnemonics": [
+            "raddhnb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626820",
+          "expected_mnemonics": [
+            "raddhnb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626820",
+          "expected_mnemonics": [
+            "raddhnb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626820",
+          "expected_mnemonics": [
+            "raddhnb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "raddhnt_z_zz_",
+      "instruction_id": "raddhnt_z_zz",
+      "mnemonic": "RADDHNT",
+      "category": "sve",
+      "source_file": "raddhnt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45206c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "00f4140a1fb23a1f3d134acd6cdd89e66ce482c4bbb26e5ef310f71a80c4f704",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/raddhnt_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45626c20",
+          "expected_mnemonics": [
+            "raddhnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626c20",
+          "expected_mnemonics": [
+            "raddhnt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626c20",
+          "expected_mnemonics": [
+            "raddhnt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626c20",
+          "expected_mnemonics": [
+            "raddhnt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45626c20",
+          "expected_mnemonics": [
+            "raddhnt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "rsubhnb_z_zz_",
+      "instruction_id": "rsubhnb_z_zz",
+      "mnemonic": "RSUBHNB",
+      "category": "sve",
+      "source_file": "rsubhnb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45207800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "05c1845c6cec674c23a27f5688dd1c1aa1f7db333f45b060817e15b2cb5dc5cc",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rsubhnb_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45627820",
+          "expected_mnemonics": [
+            "rsubhnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627820",
+          "expected_mnemonics": [
+            "rsubhnb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627820",
+          "expected_mnemonics": [
+            "rsubhnb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627820",
+          "expected_mnemonics": [
+            "rsubhnb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627820",
+          "expected_mnemonics": [
+            "rsubhnb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "rsubhnt_z_zz_",
+      "instruction_id": "rsubhnt_z_zz",
+      "mnemonic": "RSUBHNT",
+      "category": "sve",
+      "source_file": "rsubhnt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45207c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "073ca93dfca942cf20c3b2f0b4f0fcc27f009a5d332a13f0ad723acccb5ac268",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/rsubhnt_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45627c20",
+          "expected_mnemonics": [
+            "rsubhnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627c20",
+          "expected_mnemonics": [
+            "rsubhnt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627c20",
+          "expected_mnemonics": [
+            "rsubhnt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627c20",
+          "expected_mnemonics": [
+            "rsubhnt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627c20",
+          "expected_mnemonics": [
+            "rsubhnt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sadalp_z_p_z_",
+      "instruction_id": "sadalp_z_p_z",
+      "mnemonic": "SADALP",
+      "category": "sve",
+      "source_file": "sadalp_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4404a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5fdcf2b449557cf6a2063f79e19691e0917dd2c734e6846b302258906aaa0690",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sadalp_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4444bc20",
+          "expected_mnemonics": [
+            "sadalp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4444bc20",
+          "expected_mnemonics": [
+            "sadalp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4444bc20",
+          "expected_mnemonics": [
+            "sadalp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4444bc20",
+          "expected_mnemonics": [
+            "sadalp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4444bc20",
+          "expected_mnemonics": [
+            "sadalp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "smaxp_z_p_zz_",
+      "instruction_id": "smaxp_z_p_zz",
+      "mnemonic": "SMAXP",
+      "category": "sve",
+      "source_file": "smaxp_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4414a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "51f06afa3b9f276bed26bea55c673a89d1e6b77aff7cce85433b5d322b8a6086",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/smaxp_z_p_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4414bc40",
+          "expected_mnemonics": [
+            "smaxp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4414bc40",
+          "expected_mnemonics": [
+            "smaxp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4414bc40",
+          "expected_mnemonics": [
+            "smaxp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4414bc40",
+          "expected_mnemonics": [
+            "smaxp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4414bc40",
+          "expected_mnemonics": [
+            "smaxp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sminp_z_p_zz_",
+      "instruction_id": "sminp_z_p_zz",
+      "mnemonic": "SMINP",
+      "category": "sve",
+      "source_file": "sminp_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4416a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "c060c8516077d80793a4c394b0e42f6f36cb944ce0154063cc8d2bb1ed0f2d97",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sminp_z_p_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4416bc40",
+          "expected_mnemonics": [
+            "sminp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4416bc40",
+          "expected_mnemonics": [
+            "sminp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4416bc40",
+          "expected_mnemonics": [
+            "sminp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4416bc40",
+          "expected_mnemonics": [
+            "sminp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4416bc40",
+          "expected_mnemonics": [
+            "sminp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "subhnb_z_zz_",
+      "instruction_id": "subhnb_z_zz",
+      "mnemonic": "SUBHNB",
+      "category": "sve",
+      "source_file": "subhnb_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45207000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "3876578a633c9b49ca08ea0b91f5f55688564468bdd7db885cbf040a5f1a75a0",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subhnb_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45627020",
+          "expected_mnemonics": [
+            "subhnb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627020",
+          "expected_mnemonics": [
+            "subhnb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627020",
+          "expected_mnemonics": [
+            "subhnb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627020",
+          "expected_mnemonics": [
+            "subhnb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627020",
+          "expected_mnemonics": [
+            "subhnb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "subhnt_z_zz_",
+      "instruction_id": "subhnt_z_zz",
+      "mnemonic": "SUBHNT",
+      "category": "sve",
+      "source_file": "subhnt_z_zz.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x45207400",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "6147b9c45c767901f44c6a68aaaeb16d4f2ebae687a590d1c328fce1de7fa696",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/subhnt_z_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x45627420",
+          "expected_mnemonics": [
+            "subhnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627420",
+          "expected_mnemonics": [
+            "subhnt"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627420",
+          "expected_mnemonics": [
+            "subhnt"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627420",
+          "expected_mnemonics": [
+            "subhnt"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x45627420",
+          "expected_mnemonics": [
+            "subhnt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sunpkhi_z_z_",
+      "instruction_id": "sunpkhi_z_z",
+      "mnemonic": "SUNPKHI",
+      "category": "sve",
+      "source_file": "sunpkhi_z_z.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05313800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f531b7194de8b9fe2831febceb10f1a9c16f6116f032c37ff0d70846627b4443",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sunpkhi_z_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x05713820",
+          "expected_mnemonics": [
+            "sunpkhi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05713820",
+          "expected_mnemonics": [
+            "sunpkhi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05713820",
+          "expected_mnemonics": [
+            "sunpkhi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05713820",
+          "expected_mnemonics": [
+            "sunpkhi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05713820",
+          "expected_mnemonics": [
+            "sunpkhi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sunpklo_z_z_",
+      "instruction_id": "sunpkhi_z_z",
+      "mnemonic": "SUNPKLO",
+      "category": "sve",
+      "source_file": "sunpkhi_z_z.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05303800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "f531b7194de8b9fe2831febceb10f1a9c16f6116f032c37ff0d70846627b4443",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sunpkhi_z_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x05703820",
+          "expected_mnemonics": [
+            "sunpklo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05703820",
+          "expected_mnemonics": [
+            "sunpklo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05703820",
+          "expected_mnemonics": [
+            "sunpklo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05703820",
+          "expected_mnemonics": [
+            "sunpklo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05703820",
+          "expected_mnemonics": [
+            "sunpklo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sxtb_z_p_z_m",
+      "instruction_id": "sxtb_z_p_z",
+      "mnemonic": "SXTB",
+      "category": "sve",
+      "source_file": "sxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0410a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "14e742488603968178631fc6d7da5b28e3e8a90f114967d6af9ace3310ce458c",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x0450bc20",
+          "expected_mnemonics": [
+            "sxtb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0450bc20",
+          "expected_mnemonics": [
+            "sxtb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0450bc20",
+          "expected_mnemonics": [
+            "sxtb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0450bc20",
+          "expected_mnemonics": [
+            "sxtb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0450bc20",
+          "expected_mnemonics": [
+            "sxtb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sxth_z_p_z_m",
+      "instruction_id": "sxtb_z_p_z",
+      "mnemonic": "SXTH",
+      "category": "sve",
+      "source_file": "sxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0412a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "14e742488603968178631fc6d7da5b28e3e8a90f114967d6af9ace3310ce458c",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x0492bc20",
+          "expected_mnemonics": [
+            "sxth"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0492bc20",
+          "expected_mnemonics": [
+            "sxth"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0492bc20",
+          "expected_mnemonics": [
+            "sxth"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0492bc20",
+          "expected_mnemonics": [
+            "sxth"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0492bc20",
+          "expected_mnemonics": [
+            "sxth"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "sxtw_z_p_z_m",
+      "instruction_id": "sxtb_z_p_z",
+      "mnemonic": "SXTW",
+      "category": "sve",
+      "source_file": "sxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0414a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "14e742488603968178631fc6d7da5b28e3e8a90f114967d6af9ace3310ce458c",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x04d4bc20",
+          "expected_mnemonics": [
+            "sxtw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d4bc20",
+          "expected_mnemonics": [
+            "sxtw"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d4bc20",
+          "expected_mnemonics": [
+            "sxtw"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d4bc20",
+          "expected_mnemonics": [
+            "sxtw"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d4bc20",
+          "expected_mnemonics": [
+            "sxtw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uadalp_z_p_z_",
+      "instruction_id": "uadalp_z_p_z",
+      "mnemonic": "UADALP",
+      "category": "sve",
+      "source_file": "uadalp_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4405a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "b57597d0d4f8eb0803a2d08dd6a2c179ed242922827cb8600010128c8770a6d0",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uadalp_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4445bc20",
+          "expected_mnemonics": [
+            "uadalp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4445bc20",
+          "expected_mnemonics": [
+            "uadalp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4445bc20",
+          "expected_mnemonics": [
+            "uadalp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4445bc20",
+          "expected_mnemonics": [
+            "uadalp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4445bc20",
+          "expected_mnemonics": [
+            "uadalp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "umaxp_z_p_zz_",
+      "instruction_id": "umaxp_z_p_zz",
+      "mnemonic": "UMAXP",
+      "category": "sve",
+      "source_file": "umaxp_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4415a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "5e3bca86f37d30793ace8cfcefa70d7c4b6a3fed641460214e48d681c2a30a05",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/umaxp_z_p_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4415bc40",
+          "expected_mnemonics": [
+            "umaxp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4415bc40",
+          "expected_mnemonics": [
+            "umaxp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4415bc40",
+          "expected_mnemonics": [
+            "umaxp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4415bc40",
+          "expected_mnemonics": [
+            "umaxp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4415bc40",
+          "expected_mnemonics": [
+            "umaxp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uminp_z_p_zz_",
+      "instruction_id": "uminp_z_p_zz",
+      "mnemonic": "UMINP",
+      "category": "sve",
+      "source_file": "uminp_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x4417a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2 || FEAT_SME",
+          "name": "v9Ap0 || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "25dad8038c1797e901f79c980b0bdb7a8853acef76e9add8a48e2c2c370e6a27",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uminp_z_p_zz.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x4417bc40",
+          "expected_mnemonics": [
+            "uminp"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x4417bc40",
+          "expected_mnemonics": [
+            "uminp"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x4417bc40",
+          "expected_mnemonics": [
+            "uminp"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x4417bc40",
+          "expected_mnemonics": [
+            "uminp"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x4417bc40",
+          "expected_mnemonics": [
+            "uminp"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uunpkhi_z_z_",
+      "instruction_id": "uunpkhi_z_z",
+      "mnemonic": "UUNPKHI",
+      "category": "sve",
+      "source_file": "uunpkhi_z_z.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05333800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "e1ee82189b93c815b641de6b9526487c6db51d6aefd9eb5134f83c895f7d0121",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uunpkhi_z_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x05733820",
+          "expected_mnemonics": [
+            "uunpkhi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05733820",
+          "expected_mnemonics": [
+            "uunpkhi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05733820",
+          "expected_mnemonics": [
+            "uunpkhi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05733820",
+          "expected_mnemonics": [
+            "uunpkhi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05733820",
+          "expected_mnemonics": [
+            "uunpkhi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uunpklo_z_z_",
+      "instruction_id": "uunpkhi_z_z",
+      "mnemonic": "UUNPKLO",
+      "category": "sve",
+      "source_file": "uunpkhi_z_z.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05323800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "e1ee82189b93c815b641de6b9526487c6db51d6aefd9eb5134f83c895f7d0121",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uunpkhi_z_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x05723820",
+          "expected_mnemonics": [
+            "uunpklo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05723820",
+          "expected_mnemonics": [
+            "uunpklo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05723820",
+          "expected_mnemonics": [
+            "uunpklo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05723820",
+          "expected_mnemonics": [
+            "uunpklo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05723820",
+          "expected_mnemonics": [
+            "uunpklo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uxtb_z_p_z_m",
+      "instruction_id": "uxtb_z_p_z",
+      "mnemonic": "UXTB",
+      "category": "sve",
+      "source_file": "uxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0411a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ec8c273ce86d59f2d95bfce875b54eef4cdbbb81bdc7788a724ea9c0be2a4b68",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x0451bc20",
+          "expected_mnemonics": [
+            "uxtb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0451bc20",
+          "expected_mnemonics": [
+            "uxtb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0451bc20",
+          "expected_mnemonics": [
+            "uxtb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0451bc20",
+          "expected_mnemonics": [
+            "uxtb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0451bc20",
+          "expected_mnemonics": [
+            "uxtb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uxth_z_p_z_m",
+      "instruction_id": "uxtb_z_p_z",
+      "mnemonic": "UXTH",
+      "category": "sve",
+      "source_file": "uxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0413a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ec8c273ce86d59f2d95bfce875b54eef4cdbbb81bdc7788a724ea9c0be2a4b68",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x0493bc20",
+          "expected_mnemonics": [
+            "uxth"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0493bc20",
+          "expected_mnemonics": [
+            "uxth"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0493bc20",
+          "expected_mnemonics": [
+            "uxth"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0493bc20",
+          "expected_mnemonics": [
+            "uxth"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0493bc20",
+          "expected_mnemonics": [
+            "uxth"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
+    },
+    {
+      "id": "uxtw_z_p_z_m",
+      "instruction_id": "uxtb_z_p_z",
+      "mnemonic": "UXTW",
+      "category": "sve",
+      "source_file": "uxtb_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0415a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "source_sha256": "ec8c273ce86d59f2d95bfce875b54eef4cdbbb81bdc7788a724ea9c0be2a4b68",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/uxtb_z_p_z.xml",
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Standalone streaming integer widening, merging extension, pairwise add/min/max, widening pair accumulation and rounded/unrounded high-half narrowing. Complete allocated widths and register aliases at fixed SVLs of 16/32/64/128/256 bytes. Preserves unrelated primary/scalable state; no memory access or architectural flags/FP effects. SME required, streaming mode required, ZA not required. MOVPRFX pairs, scalable persistent cache, original FFR/FPMR and disabled-access traps remain unverified; no application or macOS execution claim.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/simd.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+        "crates/stela-compiler/src/aarch64/scalable.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/target.rs"
+      ],
+      "evidence_groups": [
+        "streaming_sve_rearrange_widen"
+      ],
+      "review": "Pinned allocated encoding/semantic review; 1,250 genuine original cases and 5,000 strict original/model/native comparisons, plus focused source/recipe bridges. Final selected bodies transfer exactly to 19-cohort measured programs; actual production CLI manifests, complete wrappers, profiles, modes and reserved declines are verified, with exact complete-wrapper transfer through strict-Clippy-only source cleanup.",
+      "smoke_samples": [
+        {
+          "word": "0x04d5bc20",
+          "expected_mnemonics": [
+            "uxtw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d5bc20",
+          "expected_mnemonics": [
+            "uxtw"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d5bc20",
+          "expected_mnemonics": [
+            "uxtw"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d5bc20",
+          "expected_mnemonics": [
+            "uxtw"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d5bc20",
+          "expected_mnemonics": [
+            "uxtw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ]
     }
   ],
   "execution_profiles": {

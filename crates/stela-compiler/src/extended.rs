@@ -19,7 +19,7 @@ use crate::{
         sve::{
             dot, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, rearrange_extract, sign,
+            integer_products, integer_saturation, rearrange_extract, rearrange_widen, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -221,6 +221,7 @@ enum Decoded {
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
     RearrangeExtract(rearrange_extract::Operand),
+    RearrangeWiden(rearrange_widen::Operand),
     Sign(sign::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     Length(length::Operand),
@@ -360,6 +361,25 @@ fn decode(
         )?;
         return Ok(Decoded::IntegerSaturation(operand));
     }
+    if let Some(decoded) = rearrange_widen::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming rearrangement encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        return Ok(Decoded::RearrangeWiden(operand));
+    }
     if let Some(decoded) = sign::decode(word) {
         let operand = decoded.map_err(|()| {
             CompileError(format!("reserved streaming sign encoding at {:#x}", pc.0))
@@ -497,6 +517,9 @@ fn emit_decoded(
         }
         Decoded::IntegerSaturation(operand) => {
             x86_64::sve::integer_saturation::emit(code, operand, profile.length, target);
+        }
+        Decoded::RearrangeWiden(operand) => {
+            x86_64::sve::rearrange_widen::emit(code, operand, profile.length, target);
         }
         Decoded::Sign(operand) => {
             x86_64::sve::sign::emit(code, &operand, profile.length, target);
