@@ -31,6 +31,9 @@
   ],
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
     "crates/stela-compiler/src/context.rs",
     "crates/stela-compiler/src/context/memory.rs",
     "crates/stela-compiler/src/extended.rs",
@@ -730,6 +733,30 @@
         "za_independent_mode_probes",
         "legacy_declines",
         "manifest_identity_probes"
+      ]
+    },
+    "sve_integer_comparisons": {
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "comparison_field": "retained_primary_original_native_comparisons",
+      "harness": ".stela/research/coverage-race/sve-integer/comparisons/integration-2/admission-4/admit.py",
+      "kind": "scalable_comparison_retained_semantics_current_body_transfer",
+      "report": ".stela/research/coverage-race/sve-integer/comparisons/integration-2/admission-4/production-admission-final.json",
+      "require_current_executable": true,
+      "required_measurements": {
+        "canonical_forms": 26,
+        "fresh_production_entry_comparisons": 52,
+        "genuine_original_inputs": 8178,
+        "production_body_matches": 2940,
+        "production_source_map_matches": 2940,
+        "retained_checked_pmov_candidate_comparisons": 3378,
+        "retained_primary_original_native_comparisons": 14100,
+        "retained_range_candidate_comparisons": 6756
+      },
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/comparison.py"
       ]
     }
   },
@@ -35403,6 +35430,1150 @@
           "svcr": 3
         }
       ]
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25008000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpeq_p_p_zi_",
+      "mnemonic": "CMPEQ",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpeq"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25008002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24002000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpeq_p_p_zw_",
+      "mnemonic": "CMPEQ",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpeq"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24012002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400a000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpeq_p_p_zz_",
+      "mnemonic": "CMPEQ",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpeq"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401a002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25000000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpge_p_p_zi_",
+      "mnemonic": "CMPGE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpge"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25000002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24004000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpge_p_p_zw_",
+      "mnemonic": "CMPGE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpge"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24014002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24008000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpge_p_p_zz_",
+      "mnemonic": "CMPGE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpge"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24018002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25000010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpgt_p_p_zi_",
+      "mnemonic": "CMPGT",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpgt"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25000012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24004010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpgt_p_p_zw_",
+      "mnemonic": "CMPGT",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpgt"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24014012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24008010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpgt_p_p_zz_",
+      "mnemonic": "CMPGT",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpgt"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24018012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff202010",
+      "encoding_value": "0x24200010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphi_p_p_zi_",
+      "mnemonic": "CMPHI",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphi"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24200012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400c010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphi_p_p_zw_",
+      "mnemonic": "CMPHI",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphi"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401c012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24000010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphi_p_p_zz_",
+      "mnemonic": "CMPHI",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphi"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24010012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff202010",
+      "encoding_value": "0x24200000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphs_p_p_zi_",
+      "mnemonic": "CMPHS",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphs"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24200002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400c000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphs_p_p_zw_",
+      "mnemonic": "CMPHS",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphs"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401c002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24000000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmphs_p_p_zz_",
+      "mnemonic": "CMPHS",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmphs"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24010002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25002010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmple_p_p_zi_",
+      "mnemonic": "CMPLE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmple"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25002012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24006010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmple_p_p_zw_",
+      "mnemonic": "CMPLE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmple"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24016012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff202010",
+      "encoding_value": "0x24202000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmplo_p_p_zi_",
+      "mnemonic": "CMPLO",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmplo"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24202002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400e000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmplo_p_p_zw_",
+      "mnemonic": "CMPLO",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmplo"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401e002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff202010",
+      "encoding_value": "0x24202010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpls_p_p_zi_",
+      "mnemonic": "CMPLS",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpls"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24202012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400e010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpls_p_p_zw_",
+      "mnemonic": "CMPLS",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpls"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401e012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25002000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmplt_p_p_zi_",
+      "mnemonic": "CMPLT",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmplt"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25002002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24006000",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmplt_p_p_zw_",
+      "mnemonic": "CMPLT",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmplt"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24016002"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x25008010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpne_p_p_zi_",
+      "mnemonic": "CMPNE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpne"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x25008012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zi.xml",
+      "source_sha256": "7b29d2e878e92ced57d5c689ab6486f65579f17bd7521079241b08484af2d395",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x24002010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpne_p_p_zw_",
+      "mnemonic": "CMPNE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpne"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x24012012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zw.xml",
+      "source_sha256": "522bca2f3ea9044f2063c10515c556b5b46bab8465f0f9aef22aa4671fa28b24",
+      "status": "implemented"
+    },
+    {
+      "alias": false,
+      "category": "sve",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_comparison/wide.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs",
+        "crates/stela-compiler/src/x86_64/scalable/predicate.rs"
+      ],
+      "encoding_mask": "0xff20e010",
+      "encoding_value": "0x2400a010",
+      "evidence_groups": [
+        "sve_integer_comparisons"
+      ],
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "id": "cmpne_p_p_zz_",
+      "mnemonic": "CMPNE",
+      "profile": "apple-sme2-streaming-v1",
+      "review": "Pinned June canonical semantics and operand/allocation review; 8,178 unique genuine original frames; retained primary 14,100, range-candidate 6,756 and checked-PMOV-candidate 3,378 comparisons are distinct candidate lineages, never an all-input selected-pair execution count. Admission requires fresh exact production instruction-body/source-map transfer to the selected receipt-4 leaves, current CLI profile probes and bounded actual production-entry checks. Historical comparisons and fresh entry/transfer checks remain separately counted.",
+      "scope": "SME2 context-leaf guest profile with SME enabled, observed SVCR=3 (SM+ZA) and validated power-of-two SVL 16..256 bytes. All allocated same-width/immediate B/H/W/D and narrow-versus-wide B/H/W arrangements; signed/unsigned immediate endpoints, full signed/unsigned 64-bit RHS groups, Z31/source aliases and Pd==Pg. Governing predicates select each element-leading bit; false and inactive destination predicate bits clear, and NZCV follows first/any/last active result. Only Pd and NZCV change; primary GPR/SP/FPCR/FPSR, all Z, other P, ZA/ZT0, SVCR and TPIDR2 are preserved. No guest RAM access. FFR/FPMR have no original architectural credit. No general non-streaming SVE, Apple hardware, production block/cache entry, complete exception delivery, application or macOS claim.",
+      "smoke_samples": [
+        {
+          "expected_mnemonics": [
+            "cmpne"
+          ],
+          "svcr": 3,
+          "svl_bytes": 32,
+          "word": "0x2401a012"
+        }
+      ],
+      "source_file": "cmpeq_p_p_zz.xml",
+      "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
+      "status": "implemented"
     }
   ],
   "execution_profiles": {

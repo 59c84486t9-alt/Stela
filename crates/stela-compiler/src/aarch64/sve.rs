@@ -5,6 +5,7 @@ pub mod address;
 pub mod dot;
 pub mod floating_copy;
 pub mod integer_arithmetic;
+pub mod integer_comparison;
 pub mod integer_logic;
 pub mod integer_products;
 pub mod integer_saturation;
@@ -22,6 +23,7 @@ pub enum Operand {
     Dot(dot::Operand),
     FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
+    IntegerComparison(integer_comparison::Operand),
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
@@ -64,6 +66,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         })
         .or_else(|| rearrange::decode(word).map(|operand| operand.map(Operand::Rearrange)))
         .or_else(|| reductions::decode(word).map(|operand| operand.map(Operand::Reductions)))
+        .or_else(|| {
+            integer_comparison::decode(word).map(|operand| operand.map(Operand::IntegerComparison))
+        })
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
         .or_else(|| floating_copy::decode(word).map(|operand| operand.map(Operand::FloatingCopy)))
 }

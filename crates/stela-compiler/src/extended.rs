@@ -17,7 +17,7 @@ use crate::{
         },
         sme::{integer_dots, length},
         sve::{
-            address, dot, floating_copy, integer_arithmetic,
+            address, dot, floating_copy, integer_arithmetic, integer_comparison,
             integer_logic::{self, CopySource, Kind},
             integer_products, integer_saturation, predicate_generation, predicate_logic, rearrange,
             rearrange_extract, rearrange_widen, reductions, sign,
@@ -229,6 +229,7 @@ enum Decoded {
     Sign(sign::Operand),
     FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
+    IntegerComparison(integer_comparison::Operand),
     PredicateGeneration(predicate_generation::Operand),
     PredicateLogic(predicate_logic::Operand),
     Length(length::Operand),
@@ -352,6 +353,25 @@ fn decode(
             pc,
         )?;
         return Ok(Decoded::IntegerLogic(operand));
+    }
+    if let Some(decoded) = integer_comparison::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming integer comparison encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        return Ok(Decoded::IntegerComparison(operand));
     }
     if let Some(decoded) = integer_arithmetic::decode(word) {
         let operand = decoded.map_err(|()| {
@@ -673,6 +693,9 @@ fn emit_decoded(
         }
         Decoded::IntegerLogic(operand) => {
             x86_64::sve::integer_logic::emit(code, operand, profile.length, target);
+        }
+        Decoded::IntegerComparison(operand) => {
+            x86_64::sve::integer_comparison::emit(code, operand, profile.length, target);
         }
         Decoded::IntegerArithmetic(operand) => {
             x86_64::sve::integer_arithmetic::emit(code, operand, profile.length, target);
@@ -1323,6 +1346,57 @@ mod tests {
             native.source_map[2].1 as i64
         );
     }
+    #[test]
+    fn integer_comparison_preflight_rejects_non_streaming_reserved_and_prefix_inputs() {
+        const CMPEQ_BYTE: u32 = 0x2400_2020;
+        const CMPEQ_WIDE_RESERVED_DOUBLEWORD: u32 = 0x24c0_2020;
+        const MOVPRFX_Z0_Z1: u32 = 0x0420_bc20;
+        for (input, streaming, reason) in [
+            (vec![CMPEQ_BYTE, RET_X30], false, "streaming mode required"),
+            (
+                vec![CMPEQ_WIDE_RESERVED_DOUBLEWORD, RET_X30],
+                true,
+                "reserved streaming integer comparison",
+            ),
+            (vec![MOVPRFX_Z0_Z1, CMPEQ_BYTE, RET_X30], true, "MOVPRFX"),
+        ] {
+            let error = compile_for_profile(
+                &words(&input),
+                GuestAddress(0),
+                profile(32, streaming),
+                TargetCpu::Baseline,
+            )
+            .unwrap_err();
+            assert!(error.0.contains(reason), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn integer_comparison_accepts_declared_sme_without_sme2() {
+        const CMPEQ_BYTE: u32 = 0x2400_2020;
+        let length = VectorLength::from_bytes(32).unwrap();
+        let mode = ScalableMode::new(true, true);
+        let declared = ScalableProfile::new_with_features(
+            length,
+            mode,
+            ScalableFeatures::of(ScalableFeature::Sme),
+            ScalableControls::new(length, false),
+        )
+        .unwrap();
+        let source = words(&[CMPEQ_BYTE, RET_X30]);
+        let fixed = compile_for_profile(
+            &source,
+            GuestAddress(0),
+            ScalableProfile::new(length, mode),
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        let explicit =
+            compile_for_profile(&source, GuestAddress(0), declared, TargetCpu::Baseline).unwrap();
+        assert_eq!(fixed.x86_64_code, explicit.x86_64_code);
+        assert_eq!(fixed.source_map, explicit.source_map);
+    }
+
     #[test]
     fn integer_arithmetic_maps_all_families_with_exact_body_boundaries() {
         const CANONICAL_WORDS: [u32; 48] = [

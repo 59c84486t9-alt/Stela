@@ -98,6 +98,8 @@ catalog! {
     MultiplyAddUnsignedBytes => ("pmaddubsw", Ssse3, [0x66,0x0f,0x38,0x04]),
     SignExtendWordToDword => ("pmovsxwd", Sse41, [0x66,0x0f,0x38,0x23]),
     ZeroExtendWordToDword => ("pmovzxwd", Sse41, [0x66,0x0f,0x38,0x33]),
+    SignExtendWordToQword => ("pmovsxwq", Sse41, [0x66,0x0f,0x38,0x24]),
+    ZeroExtendWordToQword => ("pmovzxwq", Sse41, [0x66,0x0f,0x38,0x34]),
     SignExtendDwordToQword => ("pmovsxdq", Sse41, [0x66,0x0f,0x38,0x25]),
     ZeroExtendDwordToQword => ("pmovzxdq", Sse41, [0x66,0x0f,0x38,0x35]),
     RoundPackedSingle => ("roundps", Sse41, [0x66,0x0f,0x3a,0x08]),
@@ -277,5 +279,42 @@ impl CrcTableInstruction {
             Self::JumpOverTable => &[0xe9],                    // jmp rel32
             Self::Discard => &[0x90],                          // nop, nonempty source-map interval
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn word_to_qword_widening_requires_checked_sse41() {
+        for (opcode, mnemonic, encoding) in [
+            (
+                SimdOpcode::SignExtendWordToQword,
+                "pmovsxwq",
+                [0x66, 0x0f, 0x38, 0x24],
+            ),
+            (
+                SimdOpcode::ZeroExtendWordToQword,
+                "pmovzxwq",
+                [0x66, 0x0f, 0x38, 0x34],
+            ),
+        ] {
+            assert_eq!(opcode.mnemonic(), mnemonic);
+            assert_eq!(opcode.encoding(), encoding);
+            assert_eq!(opcode.requires(), TargetCpu::Sse41);
+            for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
+                let mut code = Vec::new();
+                let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    opcode.append(&mut code, target)
+                }));
+                assert!(declined.is_err());
+                assert!(code.is_empty());
+            }
+            for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
+                let mut code = Vec::new();
+                opcode.append(&mut code, target);
+                assert_eq!(code, encoding);
+            }
+        }
     }
 }
