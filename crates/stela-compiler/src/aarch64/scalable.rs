@@ -1,5 +1,8 @@
 //! Shared scalable operands. Instruction families own allocation and mode checks.
 
+pub mod features;
+pub mod profile;
+
 pub const VECTOR_REGISTER_COUNT: u8 = 32;
 pub const PREDICATE_REGISTER_COUNT: u8 = 16;
 pub const VECTOR_CHUNK_BYTES: usize = 16;

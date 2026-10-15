@@ -18,6 +18,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("context.rs"),
     include_str!("extended.rs"),
     include_str!("aarch64/scalable.rs"),
+    include_str!("aarch64/scalable/features.rs"),
+    include_str!("aarch64/scalable/profile.rs"),
     include_str!("aarch64/sve.rs"),
     include_str!("aarch64/sve/dot.rs"),
     include_str!("aarch64/sve/integer_arithmetic.rs"),

@@ -432,7 +432,7 @@ enum Command {
         #[arg(long, default_value = "0x100000", value_parser = parse_address)]
         guest_base: u64,
         /// Compile for an explicit guest execution profile.
-        #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID])]
+        #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
         guest_profile: Option<String>,
         /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
         #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
@@ -440,6 +440,15 @@ enum Command {
         /// Explicit initial SVCR bits: streaming mode is bit0, ZA enable is bit1.
         #[arg(long, requires = "guest_profile", value_parser = parse_scalable_mode)]
         svcr: Option<stela_compiler::aarch64::scalable::ScalableMode>,
+        /// Explicit architectural feature declaration; repeat for each V2 feature.
+        #[arg(long, requires = "guest_profile")]
+        guest_feature: Vec<String>,
+        /// Explicit maximum streaming vector length for the V2 guest profile.
+        #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
+        max_svl_bytes: Option<stela_compiler::aarch64::scalable::VectorLength>,
+        /// Explicit V2 ZT0 permission: true or false.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        zt0_enabled: Option<bool>,
         #[arg(long)]
         output_dir: PathBuf,
     },
@@ -479,6 +488,58 @@ fn parse_scalable_mode(
     let bits = value.parse::<u64>().map_err(|error| error.to_string())?;
     stela_compiler::aarch64::scalable::ScalableMode::from_svcr(bits)
         .ok_or_else(|| "SVCR must be in 0..=3".into())
+}
+
+/// Validate declared guest specialization before reading or compiling input.
+fn compile_leaf_profile(
+    id: Option<&str>,
+    length: Option<stela_compiler::aarch64::scalable::VectorLength>,
+    mode: Option<stela_compiler::aarch64::scalable::ScalableMode>,
+    feature_names: &[String],
+    max_length: Option<stela_compiler::aarch64::scalable::VectorLength>,
+    zt0_enabled: Option<bool>,
+) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
+    use stela_compiler::{
+        aarch64::scalable::{features::ScalableFeatures, profile::ScalableControls},
+        extended::{DECLARED_PROFILE_ID, PROFILE_ID, ScalableProfile},
+    };
+    let Some(id) = id else {
+        ensure!(
+            length.is_none()
+                && mode.is_none()
+                && feature_names.is_empty()
+                && max_length.is_none()
+                && zt0_enabled.is_none(),
+            "scalable options require an explicit guest profile"
+        );
+        return Ok(None);
+    };
+    let length = length.context("guest profile requires an explicit SVL")?;
+    let mode = mode.context("guest profile requires an initial SVCR")?;
+    let profile = match id {
+        PROFILE_ID => {
+            ensure!(
+                feature_names.is_empty() && max_length.is_none() && zt0_enabled.is_none(),
+                "V1 profile does not accept V2 feature or control options"
+            );
+            ScalableProfile::new(length, mode)
+        }
+        DECLARED_PROFILE_ID => {
+            ensure!(
+                !feature_names.is_empty(),
+                "V2 profile requires explicit guest features"
+            );
+            let features =
+                ScalableFeatures::checked_from_names(feature_names.iter().map(String::as_str))?;
+            let controls = ScalableControls::new(
+                max_length.context("V2 profile requires an explicit maximum SVL")?,
+                zt0_enabled.context("V2 profile requires explicit ZT0 permission")?,
+            );
+            ScalableProfile::new_with_features(length, mode, features, controls)?
+        }
+        _ => anyhow::bail!("unknown guest profile {id:?}"),
+    };
+    Ok(Some(profile))
 }
 
 fn parse_address(value: &str) -> Result<u64, String> {
@@ -2091,17 +2152,20 @@ fn run() -> Result<()> {
             guest_profile,
             svl_bytes,
             svcr,
+            guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
             output_dir,
         } => {
+            let profile = compile_leaf_profile(
+                guest_profile.as_deref(),
+                svl_bytes,
+                svcr,
+                &guest_feature,
+                max_svl_bytes,
+                zt0_enabled,
+            )?;
             let source = std::fs::read(&input)?;
-            let profile = if guest_profile.is_some() {
-                Some(stela_compiler::extended::ScalableProfile::new(
-                    svl_bytes.context("guest profile requires an explicit SVL")?,
-                    svcr.context("guest profile requires an initial SVCR")?,
-                ))
-            } else {
-                None
-            };
             let block = if let Some(profile) = profile {
                 stela_compiler::extended::compile_for_profile(
                     &source,
@@ -2147,6 +2211,19 @@ fn run() -> Result<()> {
                     "svl_bytes": profile.vector_length().bytes(),
                     "svcr": profile.mode().svcr(),
                 });
+                if let Some(features) = profile.declared_features() {
+                    let controls = profile.controls();
+                    let execution = &mut manifest["execution_profile"];
+                    execution["features"] = serde_json::json!(features.names());
+                    execution["max_svl_bytes"] =
+                        serde_json::json!(controls.max_vector_length().bytes());
+                    execution["zt0_enabled"] = serde_json::json!(controls.zt0_enabled());
+                    execution["dit"] = serde_json::json!(
+                        profile
+                            .required_dit()
+                            .context("V2 profile requires a DIT declaration")?
+                    );
+                }
                 manifest["entry_prefix_bytes"] =
                     serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
             }
@@ -2632,5 +2709,101 @@ mod cpu_target_cli_tests {
         for invalid in ["native+aes", "baseline+sha+aes", "baseline+bmi1+bmi1"] {
             assert!(parse_cpu_target(invalid).is_err(), "{invalid}");
         }
+    }
+}
+
+#[cfg(test)]
+mod scalable_profile_cli_tests {
+    use super::*;
+
+    fn resolve(extra: &[&str]) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
+        let mut args = vec!["stela", "compile-leaf", "input.bin", "--output-dir", "out"];
+        args.extend_from_slice(extra);
+        let Command::CompileLeaf {
+            guest_profile,
+            svl_bytes,
+            svcr,
+            guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
+            ..
+        } = Cli::try_parse_from(args)?.command
+        else {
+            anyhow::bail!("expected compile-leaf");
+        };
+        compile_leaf_profile(
+            guest_profile.as_deref(),
+            svl_bytes,
+            svcr,
+            &guest_feature,
+            max_svl_bytes,
+            zt0_enabled,
+        )
+    }
+
+    #[test]
+    fn existing_profile_identity_and_rejected_metadata() -> Result<()> {
+        assert_eq!(resolve(&[])?, None);
+        let original = [
+            "--guest-profile",
+            "apple-sme2-streaming-v1",
+            "--svl-bytes",
+            "64",
+            "--svcr",
+            "1",
+        ];
+        let profile = resolve(&original)?.unwrap();
+        assert_eq!(profile.declared_features(), None);
+        assert_eq!(profile.required_dit(), None);
+        for extra in [
+            vec!["--guest-feature", "FEAT_SME"],
+            vec!["--max-svl-bytes", "64"],
+            vec!["--zt0-enabled", "false"],
+        ] {
+            let mut args = original.to_vec();
+            args.extend(extra);
+            assert!(resolve(&args).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn declared_profile_requires_and_preserves_explicit_metadata() -> Result<()> {
+        let original = [
+            "--guest-profile",
+            "sme-streaming-v2",
+            "--svl-bytes",
+            "32",
+            "--svcr",
+            "2",
+        ];
+        for suffix in [
+            vec![],
+            vec!["--guest-feature", "FEAT_SME"],
+            vec!["--guest-feature", "FEAT_SME", "--max-svl-bytes", "128"],
+        ] {
+            let mut args = original.to_vec();
+            args.extend(suffix);
+            assert!(resolve(&args).is_err());
+        }
+        let mut args = original.to_vec();
+        args.extend([
+            "--guest-feature",
+            "FEAT_SME2",
+            "--guest-feature",
+            "FEAT_SME",
+            "--max-svl-bytes",
+            "128",
+            "--zt0-enabled",
+            "false",
+        ]);
+        let profile = resolve(&args)?.unwrap();
+        assert_eq!(profile.features().names(), ["FEAT_SME", "FEAT_SME2"]);
+        assert_eq!(profile.controls().max_vector_length().bytes(), 128);
+        assert!(!profile.controls().zt0_enabled());
+        assert_eq!(profile.required_dit(), Some(false));
+        assert!(!profile.mode().streaming());
+        assert!(profile.mode().za_enabled());
+        Ok(())
     }
 }

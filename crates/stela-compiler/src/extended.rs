@@ -10,7 +10,11 @@ use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock, TargetCpu,
     aarch64::{
         Decoder, Instruction, Operation,
-        scalable::{ScalableMode, VectorLength},
+        scalable::{
+            ScalableMode, VectorLength,
+            features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
+            profile::ScalableControls,
+        },
         sme::length,
         sve::{
             dot, integer_arithmetic,
@@ -23,6 +27,7 @@ use crate::{
 };
 
 pub const PROFILE_ID: &str = "apple-sme2-streaming-v1";
+pub const DECLARED_PROFILE_ID: &str = "sme-streaming-v2";
 const INSTRUCTION_BYTES: usize = size_of::<u32>();
 const PUSH_R15: &[u8] = &[0x41, 0x57];
 const MOV_R15_RSI: &[u8] = &[0x49, 0x89, 0xf7];
@@ -33,21 +38,69 @@ const CALL_BYTES: usize = 1 + size_of::<i32>();
 const CALL_END: usize = PUSH_R15.len() + MOV_R15_RSI.len() + CALL_BYTES;
 pub const CONTEXT_WRAPPER_BYTES: usize = CALL_END + POP_R15.len() + 1;
 
-/// A declared SME2 streaming execution profile, not an Apple hardware capture.
+/// Guest features and controls are immutable specialization identity.
 /// Host capability selection remains a separate TargetCpu value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScalableProfile {
     length: VectorLength,
     mode: ScalableMode,
+    kind: ScalableProfileKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ScalableProfileKind {
+    V1,
+    V2 {
+        features: ScalableFeatures,
+        controls: ScalableControls,
+    },
 }
 
 impl ScalableProfile {
+    /// Preserve the original fixed SME2 profile and its artifact identity.
     pub const fn new(length: VectorLength, mode: ScalableMode) -> Self {
-        Self { length, mode }
+        Self {
+            length,
+            mode,
+            kind: ScalableProfileKind::V1,
+        }
+    }
+
+    /// Declare guest availability and controls explicitly, without inferring
+    /// Apple hardware capabilities or silently adding feature dependencies.
+    /// V2 requires PSTATE.DIT=0; the execution caller must validate that state.
+    pub fn new_with_features(
+        length: VectorLength,
+        mode: ScalableMode,
+        features: ScalableFeatures,
+        controls: ScalableControls,
+    ) -> Result<Self, CompileError> {
+        if !features.contains(ScalableFeature::Sme) {
+            return Err(CompileError("scalable profile requires FEAT_SME".into()));
+        }
+        if features.contains(ScalableFeature::Sme2p1) && !features.contains(ScalableFeature::Sme2) {
+            return Err(CompileError("FEAT_SME2p1 requires FEAT_SME2".into()));
+        }
+        if controls.zt0_enabled() && !features.contains(ScalableFeature::Sme2) {
+            return Err(CompileError("ZT0 enable requires FEAT_SME2".into()));
+        }
+        if length > controls.max_vector_length() {
+            return Err(CompileError(
+                "current streaming vector length exceeds declared maximum".into(),
+            ));
+        }
+        Ok(Self {
+            length,
+            mode,
+            kind: ScalableProfileKind::V2 { features, controls },
+        })
     }
 
     pub const fn id(self) -> &'static str {
-        PROFILE_ID
+        match self.kind {
+            ScalableProfileKind::V1 => PROFILE_ID,
+            ScalableProfileKind::V2 { .. } => DECLARED_PROFILE_ID,
+        }
     }
 
     pub const fn vector_length(self) -> VectorLength {
@@ -58,8 +111,77 @@ impl ScalableProfile {
         self.mode
     }
 
+    pub const fn features(self) -> ScalableFeatures {
+        match self.kind {
+            ScalableProfileKind::V1 => {
+                ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2)
+            }
+            ScalableProfileKind::V2 { features, .. } => features,
+        }
+    }
+
+    /// Decline unavailable guest instructions before emission or execution.
+    pub fn require_features(
+        self,
+        requirement: FeatureRequirement,
+        pc: GuestAddress,
+    ) -> Result<(), CompileError> {
+        let available = self.features();
+        if requirement.is_satisfied_by(available) {
+            return Ok(());
+        }
+        let available_names = available.names();
+        let missing: Vec<_> = requirement
+            .all_features()
+            .names()
+            .into_iter()
+            .filter(|name| !available_names.contains(name))
+            .collect();
+        let alternatives = requirement.any_features().names();
+        let mut reasons = Vec::new();
+        if !missing.is_empty() {
+            reasons.push(format!("requires {}", missing.join(", ")));
+        }
+        if !alternatives.is_empty()
+            && !FeatureRequirement::any(requirement.any_features()).is_satisfied_by(available)
+        {
+            reasons.push(format!("requires one of {}", alternatives.join(", ")));
+        }
+        Err(CompileError(format!(
+            "unavailable guest features at {:#x}: {}",
+            pc.0,
+            reasons.join("; ")
+        )))
+    }
+
+    /// Only V2 manifests carry a declared feature list. V1 artifacts retain
+    /// their original shape and fixed profile ID.
+    pub const fn declared_features(self) -> Option<ScalableFeatures> {
+        match self.kind {
+            ScalableProfileKind::V1 => None,
+            ScalableProfileKind::V2 { features, .. } => Some(features),
+        }
+    }
+
+    pub const fn controls(self) -> ScalableControls {
+        match self.kind {
+            ScalableProfileKind::V1 => ScalableControls::new(self.length, false),
+            ScalableProfileKind::V2 { controls, .. } => controls,
+        }
+    }
+
+    /// V2 mappings require DIT=0. DIT is not stored in the borrowed context;
+    /// the execution caller validates this requirement before entering native code.
+    pub const fn required_dit(self) -> Option<bool> {
+        match self.kind {
+            ScalableProfileKind::V1 => None,
+            ScalableProfileKind::V2 { .. } => Some(false),
+        }
+    }
+
     /// Validate borrowed metadata before native entry. Ownership, bounds and
     /// guest-RAM separation remain requirements of the unsafe execution caller.
+    /// This view does not contain DIT; the caller must also check required_dit().
     pub fn validate_view(
         self,
         context: &ExecutionContext,
@@ -74,7 +196,14 @@ impl ScalableProfile {
                 || ((!view.z_upper.is_null() || self.length.chunks() == 1)
                     && !view.predicates.is_null()
                     && !view.ffr.is_null()))
-            && (!self.mode.za_enabled() || (!view.za.is_null() && !view.zt0.is_null()));
+            && (!self.mode.za_enabled()
+                || (!view.za.is_null()
+                    && match self.kind {
+                        ScalableProfileKind::V1 => !view.zt0.is_null(),
+                        ScalableProfileKind::V2 { controls, .. } => {
+                            !controls.zt0_enabled() || !view.zt0.is_null()
+                        }
+                    }));
         if valid {
             Ok(())
         } else {
@@ -137,7 +266,7 @@ fn decode(
                 pc.0
             ))
         })?;
-        if operand.requires_i8mm() {
+        if operand.requires_i8mm() && profile.declared_features().is_none() {
             return Err(CompileError(format!(
                 "guest I8MM is outside the streaming profile at {:#x}",
                 pc.0
@@ -149,6 +278,20 @@ fn decode(
                 pc.0
             )));
         }
+        let mut required = ScalableFeatures::of(ScalableFeature::Sme);
+        if operand.requires_i8mm() {
+            required = required.with(ScalableFeature::I8mm);
+        }
+        if matches!(
+            operand.kind,
+            dot::Kind::Integer {
+                products: dot::Products::Two,
+                ..
+            }
+        ) {
+            required = required.with(ScalableFeature::Sme2);
+        }
+        profile.require_features(FeatureRequirement::all(required), pc)?;
         return Ok(Decoded::IntegerDot(operand));
     }
     if let Some(decoded) = integer_logic::decode(word) {
@@ -170,6 +313,10 @@ fn decode(
                 pc.0
             )));
         }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
         return Ok(Decoded::IntegerLogic(operand));
     }
     if let Some(decoded) = integer_arithmetic::decode(word) {
@@ -185,6 +332,10 @@ fn decode(
                 pc.0
             )));
         }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
         return Ok(Decoded::IntegerArithmetic(operand));
     }
     if let Some(decoded) = integer_saturation::decode(word) {
@@ -200,6 +351,10 @@ fn decode(
                 pc.0
             )));
         }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
         return Ok(Decoded::IntegerSaturation(operand));
     }
     if let Some(decoded) = sign::decode(word) {
@@ -212,9 +367,17 @@ fn decode(
                 pc.0
             )));
         }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
         return Ok(Decoded::Sign(operand));
     }
     if let Some(operand) = length::decode(word) {
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
         return Ok(Decoded::Length(operand));
     }
     let instruction = Decoder
@@ -240,6 +403,45 @@ fn context_wrapper() -> Vec<u8> {
     code.extend(POP_R15);
     code.push(RET);
     code
+}
+
+fn emit_decoded(
+    code: &mut Vec<u8>,
+    pc: GuestAddress,
+    instruction: Decoded,
+    profile: ScalableProfile,
+    target: TargetCpu,
+    fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
+) -> Result<(), CompileError> {
+    match instruction {
+        Decoded::Ordinary(instruction) => {
+            x86_64::emit_instruction(code, &instruction, fixups, target);
+        }
+        Decoded::IntegerDot(operand) => {
+            if !x86_64::sve::dot::emit_integer(code, &operand, profile.length, target) {
+                return Err(CompileError(format!(
+                    "unsupported streaming integer dot operands at {:#x}",
+                    pc.0
+                )));
+            }
+        }
+        Decoded::IntegerLogic(operand) => {
+            x86_64::sve::integer_logic::emit(code, operand, profile.length, target);
+        }
+        Decoded::IntegerArithmetic(operand) => {
+            x86_64::sve::integer_arithmetic::emit(code, operand, profile.length, target);
+        }
+        Decoded::IntegerSaturation(operand) => {
+            x86_64::sve::integer_saturation::emit(code, operand, profile.length, target);
+        }
+        Decoded::Sign(operand) => {
+            x86_64::sve::sign::emit(code, &operand, profile.length, target);
+        }
+        Decoded::Length(operand) => {
+            x86_64::sme::length::emit(code, &operand, profile.length);
+        }
+    }
+    Ok(())
 }
 
 /// Compile an extended two-argument leaf ending in RET X30. The runtime must
@@ -289,34 +491,7 @@ pub fn compile_for_profile(
     let mut fixups = Vec::new();
     for (pc, instruction) in instructions {
         source_map.push((pc, code.len()));
-        match instruction {
-            Decoded::Ordinary(instruction) => {
-                x86_64::emit_instruction(&mut code, &instruction, &mut fixups, target);
-            }
-            Decoded::IntegerDot(operand) => {
-                if !x86_64::sve::dot::emit_integer(&mut code, &operand, profile.length, target) {
-                    return Err(CompileError(format!(
-                        "unsupported streaming integer dot operands at {:#x}",
-                        pc.0
-                    )));
-                }
-            }
-            Decoded::IntegerLogic(operand) => {
-                x86_64::sve::integer_logic::emit(&mut code, operand, profile.length, target);
-            }
-            Decoded::IntegerArithmetic(operand) => {
-                x86_64::sve::integer_arithmetic::emit(&mut code, operand, profile.length, target);
-            }
-            Decoded::IntegerSaturation(operand) => {
-                x86_64::sve::integer_saturation::emit(&mut code, operand, profile.length, target);
-            }
-            Decoded::Sign(operand) => {
-                x86_64::sve::sign::emit(&mut code, &operand, profile.length, target);
-            }
-            Decoded::Length(operand) => {
-                x86_64::sme::length::emit(&mut code, &operand, profile.length);
-            }
-        }
+        emit_decoded(&mut code, pc, instruction, profile, target, &mut fixups)?;
     }
     let offsets: BTreeMap<_, _> = source_map
         .iter()
@@ -344,6 +519,257 @@ pub fn compile_for_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_admission_declines_with_exact_pc_and_missing_clause_names() {
+        let length = VectorLength::from_bytes(16).unwrap();
+        let features = ScalableFeatures::of(ScalableFeature::Sme);
+        let profile = ScalableProfile::new_with_features(
+            length,
+            ScalableMode::new(true, false),
+            features,
+            ScalableControls::new(length, false),
+        )
+        .unwrap();
+        let required = ScalableFeatures::of(ScalableFeature::Sme2);
+        let alternatives =
+            ScalableFeatures::of(ScalableFeature::SmeF16F16).with(ScalableFeature::SmeF8F16);
+        let pc = GuestAddress(0x1234);
+        let error = profile
+            .require_features(FeatureRequirement::all_and_any(required, alternatives), pc)
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            "unavailable guest features at 0x1234: requires FEAT_SME2; requires one of FEAT_SME_F16F16, FEAT_SME_F8F16"
+        );
+        assert!(
+            profile
+                .require_features(FeatureRequirement::all(features), pc)
+                .is_ok()
+        );
+        assert!(
+            profile
+                .require_features(FeatureRequirement::default(), pc)
+                .is_ok()
+        );
+        assert!(
+            ScalableProfile::new(length, ScalableMode::default())
+                .require_features(FeatureRequirement::all(required), pc)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn declared_sme1_za_storage_does_not_require_zt0_or_streaming_banks() {
+        let length = VectorLength::from_bytes(64).unwrap();
+        let mode = ScalableMode::new(false, true);
+        let sme = ScalableFeatures::of(ScalableFeature::Sme);
+        let mut za = [0_u8; 64 * 64];
+        let mut view = ScalableStateView {
+            svl_bytes: length.bytes() as u16,
+            reserved: [0; 6],
+            svcr: mode.svcr(),
+            tpidr2_el0: 0,
+            fpmr: 0,
+            z_upper: std::ptr::null_mut(),
+            predicates: std::ptr::null_mut(),
+            ffr: std::ptr::null_mut(),
+            za: za.as_mut_ptr(),
+            zt0: std::ptr::null_mut(),
+        };
+        let context = ExecutionContext {
+            scalable: &mut view,
+            ..ExecutionContext::default()
+        };
+        let profile = ScalableProfile::new_with_features(
+            length,
+            mode,
+            sme,
+            ScalableControls::new(length, false),
+        )
+        .unwrap();
+        assert!(profile.validate_view(&context, &view).is_ok());
+        assert_eq!(profile.required_dit(), Some(false));
+        let zt0_profile = ScalableProfile::new_with_features(
+            length,
+            mode,
+            sme.with(ScalableFeature::Sme2),
+            ScalableControls::new(length, true),
+        )
+        .unwrap();
+        assert!(zt0_profile.validate_view(&context, &view).is_err());
+        let original = ScalableProfile::new(length, mode);
+        assert!(original.validate_view(&context, &view).is_err());
+        assert_eq!(original.required_dit(), None);
+        let mut zt0 = [0_u8; crate::aarch64::scalable::LOOKUP_TABLE_BYTES];
+        view.zt0 = zt0.as_mut_ptr();
+        assert!(zt0_profile.validate_view(&context, &view).is_ok());
+        assert!(original.validate_view(&context, &view).is_ok());
+        view.za = std::ptr::null_mut();
+        assert!(profile.validate_view(&context, &view).is_err());
+        assert!(zt0_profile.validate_view(&context, &view).is_err());
+    }
+
+    #[test]
+    fn declared_profile_requires_explicit_dependencies_and_controls() {
+        let length = VectorLength::from_bytes(64).unwrap();
+        let controls = ScalableControls::new(length, false);
+        let sme = ScalableFeatures::of(ScalableFeature::Sme);
+        let mode = ScalableMode::new(true, false);
+        assert!(
+            ScalableProfile::new_with_features(length, mode, ScalableFeatures::empty(), controls)
+                .is_err()
+        );
+        assert!(
+            ScalableProfile::new_with_features(
+                length,
+                mode,
+                sme.with(ScalableFeature::Sme2p1),
+                controls
+            )
+            .is_err()
+        );
+        assert!(
+            ScalableProfile::new_with_features(
+                length,
+                mode,
+                sme,
+                ScalableControls::new(length, true)
+            )
+            .is_err()
+        );
+        assert!(
+            ScalableProfile::new_with_features(
+                length,
+                mode,
+                sme,
+                ScalableControls::new(VectorLength::from_bytes(32).unwrap(), false)
+            )
+            .is_err()
+        );
+        let profile = ScalableProfile::new_with_features(length, mode, sme, controls).unwrap();
+        assert_eq!(profile.id(), DECLARED_PROFILE_ID);
+        assert_eq!(profile.features(), sme);
+        assert_eq!(profile.declared_features(), Some(sme));
+        assert_eq!(profile.controls(), controls);
+    }
+
+    #[test]
+    fn declared_profile_identity_includes_features_and_controls() {
+        let length = VectorLength::from_bytes(32).unwrap();
+        let mode = ScalableMode::new(true, true);
+        let features = ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2);
+        let controls = ScalableControls::new(length, false);
+        let original =
+            ScalableProfile::new_with_features(length, mode, features, controls).unwrap();
+        for (other_features, other_controls) in [
+            (features.with(ScalableFeature::Sme2p1), controls),
+            (
+                features,
+                ScalableControls::new(VectorLength::from_bytes(64).unwrap(), false),
+            ),
+            (features, ScalableControls::new(length, true)),
+        ] {
+            assert_ne!(
+                original,
+                ScalableProfile::new_with_features(length, mode, other_features, other_controls)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn original_profile_retains_fixed_identity_and_manifest_shape() {
+        let length = VectorLength::from_bytes(64).unwrap();
+        let mode = ScalableMode::new(false, true);
+        let original = ScalableProfile::new(length, mode);
+        assert_eq!(original.id(), PROFILE_ID);
+        assert_eq!(original.vector_length(), length);
+        assert_eq!(original.mode(), mode);
+        assert_eq!(original.declared_features(), None);
+        assert_eq!(original.features().names(), ["FEAT_SME", "FEAT_SME2"]);
+        assert_eq!(original.controls(), ScalableControls::new(length, false));
+        assert_ne!(
+            original,
+            ScalableProfile::new_with_features(
+                length,
+                mode,
+                original.features(),
+                original.controls()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn declared_profiles_keep_base_sme_families_available() {
+        const BASE_SME_WORDS: [u32; 6] = [
+            0x041a_0040, // AND predicated.
+            0x0461_5820, // ADDSPL.
+            0x0416_a020, // ABS predicated.
+            0x045c_bfff, // FABS predicated.
+            0x4500_f820, // SABA.
+            0x4482_003f, // Four-product SDOT.
+        ];
+        for bytes in [16, 32, 64, 128, 256] {
+            let length = VectorLength::from_bytes(bytes).unwrap();
+            let profile = ScalableProfile::new_with_features(
+                length,
+                ScalableMode::new(true, false),
+                ScalableFeatures::of(ScalableFeature::Sme),
+                ScalableControls::new(length, false),
+            )
+            .unwrap();
+            for word in BASE_SME_WORDS {
+                assert!(
+                    compile_for_profile(
+                        &words(&[word, RET_X30]),
+                        GuestAddress(0x1234),
+                        profile,
+                        TargetCpu::Baseline,
+                    )
+                    .is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn declared_dot_features_preserve_v1_scope_and_check_optional_requirements() {
+        const TWO_PRODUCT_SDOT: u32 = 0x4402_c820;
+        const MIXED_DOT_WORDS: [u32; 3] = [0x4482_7820, 0x44a2_1820, 0x44a2_1c20];
+        let length = VectorLength::from_bytes(16).unwrap();
+        let mode = ScalableMode::new(true, false);
+        let sme = ScalableFeatures::of(ScalableFeature::Sme);
+        let declared = |features| {
+            ScalableProfile::new_with_features(
+                length,
+                mode,
+                features,
+                ScalableControls::new(length, false),
+            )
+            .unwrap()
+        };
+        let compile = |word, profile| {
+            compile_for_profile(
+                &words(&[word, RET_X30]),
+                GuestAddress(0x1234),
+                profile,
+                TargetCpu::Baseline,
+            )
+        };
+        let missing = compile(TWO_PRODUCT_SDOT, declared(sme)).unwrap_err();
+        assert!(missing.0.contains("0x1234") && missing.0.contains("requires FEAT_SME2"));
+        assert!(compile(TWO_PRODUCT_SDOT, declared(sme.with(ScalableFeature::Sme2))).is_ok());
+        assert!(compile(TWO_PRODUCT_SDOT, ScalableProfile::new(length, mode)).is_ok());
+        for word in MIXED_DOT_WORDS {
+            let legacy = compile(word, ScalableProfile::new(length, mode)).unwrap_err();
+            assert!(legacy.0.contains("I8MM is outside") && legacy.0.contains("0x1234"));
+            let missing = compile(word, declared(sme.with(ScalableFeature::Sme2))).unwrap_err();
+            assert!(missing.0.contains("requires FEAT_I8MM") && missing.0.contains("0x1234"));
+            assert!(compile(word, declared(sme.with(ScalableFeature::I8mm))).is_ok());
+        }
+    }
 
     const RET_X30: u32 = 0xd65f_03c0;
     const NOP: u32 = 0xd503_201f;
