@@ -1525,6 +1525,31 @@
         "new_current338_native_entries": 0,
         "new_original_entries": 0
       }
+    },
+    "sve_memory_store": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/scalable-memory/store56-final338-1/serialize.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/scalable-memory/store56-final338-1/reports/Store56.json",
+      "kind": "Store56_current338_literal147_retained_qualification_v1",
+      "comparison_field": "qualified_retained_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "required_measurements": {
+        "canonical_count": 56,
+        "qualified_retained_comparisons": 145,
+        "SP_model_controls": 2,
+        "current_compilation_subjects": 144,
+        "retained_native_buffers": 147,
+        "new_native_entries": 0,
+        "new_original_entries": 0,
+        "timing_samples": 378,
+        "policy_qualified_wins": 0,
+        "policy_regressions": 0
+      }
     }
   },
   "forms": [
@@ -85501,6 +85526,2302 @@
           "svl_bytes": 256,
           "svcr": 1,
           "cpu_target": "x86_64-baseline+atomic-load16"
+        }
+      ]
+    },
+    {
+      "id": "prfb_i_p_bi_s",
+      "instruction_id": "prfb_i_p_bi",
+      "mnemonic": "PRFB",
+      "category": "sve",
+      "source_file": "prfb_i_p_bi.xml",
+      "encoding_mask": "0xffc0e010",
+      "encoding_value": "0x85c00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "60626de444fa2565003ff972a97cd9c2300f4a80459b1e92d28eb2bb61194793",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x85c01c0f",
+          "expected_mnemonics": [
+            "prfb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfb_i_p_br_s",
+      "instruction_id": "prfb_i_p_br",
+      "mnemonic": "PRFB",
+      "category": "sve",
+      "source_file": "prfb_i_p_br.xml",
+      "encoding_mask": "0xffe0e010",
+      "encoding_value": "0x8400c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "d0545b3054352ca84c59bba5f9549201d0d464a29c284727df81f42bf75dba65",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x8401dc0f",
+          "expected_mnemonics": [
+            "prfb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfd_i_p_bi_s",
+      "instruction_id": "prfd_i_p_bi",
+      "mnemonic": "PRFD",
+      "category": "sve",
+      "source_file": "prfd_i_p_bi.xml",
+      "encoding_mask": "0xffc0e010",
+      "encoding_value": "0x85c06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f26de6d3c8d8692b88fb6f979a9c48380dbc51d6c4a1e071cc1d963843026ddc",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x85c07c0f",
+          "expected_mnemonics": [
+            "prfd"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfd_i_p_br_s",
+      "instruction_id": "prfd_i_p_br",
+      "mnemonic": "PRFD",
+      "category": "sve",
+      "source_file": "prfd_i_p_br.xml",
+      "encoding_mask": "0xffe0e010",
+      "encoding_value": "0x8580c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b788f54015c3b9bf4999a185dbc52fe4fb4595c254a5a3d9826c7988a5a08b1a",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x8581dc0f",
+          "expected_mnemonics": [
+            "prfd"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfh_i_p_bi_s",
+      "instruction_id": "prfh_i_p_bi",
+      "mnemonic": "PRFH",
+      "category": "sve",
+      "source_file": "prfh_i_p_bi.xml",
+      "encoding_mask": "0xffc0e010",
+      "encoding_value": "0x85c02000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2792bb0d5ed8a7e02ea511ea39d3846f36fee88424388c39c12d25f2990cf465",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x85c03c0f",
+          "expected_mnemonics": [
+            "prfh"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfh_i_p_br_s",
+      "instruction_id": "prfh_i_p_br",
+      "mnemonic": "PRFH",
+      "category": "sve",
+      "source_file": "prfh_i_p_br.xml",
+      "encoding_mask": "0xffe0e010",
+      "encoding_value": "0x8480c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "6197a5f6854e6d43fa0994698c07cee66c2a13e1f41fdc15be9319cef0457d89",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x8481dc0f",
+          "expected_mnemonics": [
+            "prfh"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfw_i_p_bi_s",
+      "instruction_id": "prfw_i_p_bi",
+      "mnemonic": "PRFW",
+      "category": "sve",
+      "source_file": "prfw_i_p_bi.xml",
+      "encoding_mask": "0xffc0e010",
+      "encoding_value": "0x85c04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b7b55aa9c5f4b0c0a808a7fca368b46765269129ba94a4feb01b58103ed6bcb7",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x85c05c0f",
+          "expected_mnemonics": [
+            "prfw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "prfw_i_p_br_s",
+      "instruction_id": "prfw_i_p_br",
+      "mnemonic": "PRFW",
+      "category": "sve",
+      "source_file": "prfw_i_p_br.xml",
+      "encoding_mask": "0xffe0e010",
+      "encoding_value": "0x8500c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "3fb02a76856e934afe3766deb4c58ff8bb1109dbbe7b9a4b9382020acc6f6273",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0x8501dc0f",
+          "expected_mnemonics": [
+            "prfw"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1b_z_p_bi_",
+      "instruction_id": "st1b_z_p_bi",
+      "mnemonic": "ST1B",
+      "category": "sve",
+      "source_file": "st1b_z_p_bi.xml",
+      "encoding_mask": "0xff90e000",
+      "encoding_value": "0xe400e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "e3bfff9beb97efa72ee99bbe23f89d0d92a15c6ef584fb56a603b9c8654ffccb",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe400fc1f",
+          "expected_mnemonics": [
+            "st1b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1b_z_p_br_",
+      "instruction_id": "st1b_z_p_br",
+      "mnemonic": "ST1B",
+      "category": "sve",
+      "source_file": "st1b_z_p_br.xml",
+      "encoding_mask": "0xff80e000",
+      "encoding_value": "0xe4004000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "a092f030e2030f1f8b7506e986109bb5521af06009428b22f13d9511f05d789e",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4015c1f",
+          "expected_mnemonics": [
+            "st1b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1d_z_p_bi_",
+      "instruction_id": "st1d_z_p_bi",
+      "mnemonic": "ST1D",
+      "category": "sve",
+      "source_file": "st1d_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe5e0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f781b582af47ee06f65d9748206a93f8259ce490c369910e6c32682ee9b9ae77",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5e0fc1f",
+          "expected_mnemonics": [
+            "st1d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1d_z_p_br_",
+      "instruction_id": "st1d_z_p_br",
+      "mnemonic": "ST1D",
+      "category": "sve",
+      "source_file": "st1d_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5e04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2f9648cbdb95dd1ef8c5b0aaa95dba5f12a3db3da41d1757350349b2c8b89ffa",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5e15c1f",
+          "expected_mnemonics": [
+            "st1d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1h_z_p_bi_",
+      "instruction_id": "st1h_z_p_bi",
+      "mnemonic": "ST1H",
+      "category": "sve",
+      "source_file": "st1h_z_p_bi.xml",
+      "encoding_mask": "0xff90e000",
+      "encoding_value": "0xe480e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "72346adecd494d50321d4627c9adf994b339b8913b983ec28a1298b62f7875a0",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4a0fc1f",
+          "expected_mnemonics": [
+            "st1h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1h_z_p_br_",
+      "instruction_id": "st1h_z_p_br",
+      "mnemonic": "ST1H",
+      "category": "sve",
+      "source_file": "st1h_z_p_br.xml",
+      "encoding_mask": "0xff80e000",
+      "encoding_value": "0xe4804000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f54da824cf42cf73e92c57c076b704eda8430a4fcb489459be0f4162db3aeb8b",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4a15c1f",
+          "expected_mnemonics": [
+            "st1h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1w_z_p_bi_",
+      "instruction_id": "st1w_z_p_bi",
+      "mnemonic": "ST1W",
+      "category": "sve",
+      "source_file": "st1w_z_p_bi.xml",
+      "encoding_mask": "0xffd0e000",
+      "encoding_value": "0xe540e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f20fe417017fec7157897dded36584aeb0ee06ec6e1b2dbaf03a7730726be484",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe540fc1f",
+          "expected_mnemonics": [
+            "st1w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st1w_z_p_br_",
+      "instruction_id": "st1w_z_p_br",
+      "mnemonic": "ST1W",
+      "category": "sve",
+      "source_file": "st1w_z_p_br.xml",
+      "encoding_mask": "0xffc0e000",
+      "encoding_value": "0xe5404000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "57aada72eb83565dadaa2da66350d52f37b0c42c0d5a5d9020a396d56a62a32d",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5415c1f",
+          "expected_mnemonics": [
+            "st1w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2b_z_p_bi_contiguous",
+      "instruction_id": "st2b_z_p_bi",
+      "mnemonic": "ST2B",
+      "category": "sve",
+      "source_file": "st2b_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe430e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "70f653c11eb646e670fde6ee38caf5b50cdb0e6cfbd752727b6579d0fe4feffd",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe430fc1f",
+          "expected_mnemonics": [
+            "st2b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2b_z_p_br_contiguous",
+      "instruction_id": "st2b_z_p_br",
+      "mnemonic": "ST2B",
+      "category": "sve",
+      "source_file": "st2b_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4206000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8149bdded06fe5d2df7a443aad14a8370b53ddb1860f23f24f8f16f31ec2be17",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4217c1f",
+          "expected_mnemonics": [
+            "st2b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2d_z_p_bi_contiguous",
+      "instruction_id": "st2d_z_p_bi",
+      "mnemonic": "ST2D",
+      "category": "sve",
+      "source_file": "st2d_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe5b0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "db4a8ee62923d196f7ff2fb1a380a3dd6fa8ac3d69fa9c2150260804156ac85a",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5b0fc1f",
+          "expected_mnemonics": [
+            "st2d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2d_z_p_br_contiguous",
+      "instruction_id": "st2d_z_p_br",
+      "mnemonic": "ST2D",
+      "category": "sve",
+      "source_file": "st2d_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5a06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "a8928b270206c227ad8adff5f9703b2cd64245729c424f415577e2b14c76c8dc",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5a17c1f",
+          "expected_mnemonics": [
+            "st2d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2h_z_p_bi_contiguous",
+      "instruction_id": "st2h_z_p_bi",
+      "mnemonic": "ST2H",
+      "category": "sve",
+      "source_file": "st2h_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4b0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f02e2d8c8cffff31f8e9815ae2615654554aa33164cf5c7b75021e57e7208d1c",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4b0fc1f",
+          "expected_mnemonics": [
+            "st2h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2h_z_p_br_contiguous",
+      "instruction_id": "st2h_z_p_br",
+      "mnemonic": "ST2H",
+      "category": "sve",
+      "source_file": "st2h_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4a06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "041aa77f26c20cb92e35e62f3bd19236d704e69d31e3efa9798f7936524402cb",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4a17c1f",
+          "expected_mnemonics": [
+            "st2h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2q_z_p_bi_contiguous",
+      "instruction_id": "st2q_z_p_bi",
+      "mnemonic": "ST2Q",
+      "category": "sve",
+      "source_file": "st2q_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4400000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "1d9a65baf7e382161a62a4b330abe2cd13e00cb5d266c1baf32cfb168e065c61",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4401c1f",
+          "expected_mnemonics": [
+            "st2q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2q_z_p_br_contiguous",
+      "instruction_id": "st2q_z_p_br",
+      "mnemonic": "ST2Q",
+      "category": "sve",
+      "source_file": "st2q_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4600000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8f4c1eb76d2a2be54cac7fb7ec490ddc5022d6f1f3ea10ce08b0005ff9b57c9c",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4611c1f",
+          "expected_mnemonics": [
+            "st2q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2w_z_p_bi_contiguous",
+      "instruction_id": "st2w_z_p_bi",
+      "mnemonic": "ST2W",
+      "category": "sve",
+      "source_file": "st2w_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe530e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8cdaa3d673bae310d534ffb8fc1b6191d4f01626f16815be1318cfce7e7178b1",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe530fc1f",
+          "expected_mnemonics": [
+            "st2w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st2w_z_p_br_contiguous",
+      "instruction_id": "st2w_z_p_br",
+      "mnemonic": "ST2W",
+      "category": "sve",
+      "source_file": "st2w_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5206000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8d292bf9e0570318b7c2ca725342595f2c278a66386b036303e84dfabcf40f02",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5217c1f",
+          "expected_mnemonics": [
+            "st2w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3b_z_p_bi_contiguous",
+      "instruction_id": "st3b_z_p_bi",
+      "mnemonic": "ST3B",
+      "category": "sve",
+      "source_file": "st3b_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe450e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "1fe05e38323f9397293145cd475628d21becb1161f071902d11dbb0be2e0dc69",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe450fc1f",
+          "expected_mnemonics": [
+            "st3b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3b_z_p_br_contiguous",
+      "instruction_id": "st3b_z_p_br",
+      "mnemonic": "ST3B",
+      "category": "sve",
+      "source_file": "st3b_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4406000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8650be030ea5a72e20c590f8a866925b1974a7d6f4798cb050ea3fd7ae9e8f2b",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4417c1f",
+          "expected_mnemonics": [
+            "st3b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3d_z_p_bi_contiguous",
+      "instruction_id": "st3d_z_p_bi",
+      "mnemonic": "ST3D",
+      "category": "sve",
+      "source_file": "st3d_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe5d0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "20cfa216065bf3398b205f1e7ea942cf63313f2d1b2868bdbbd4ad51d2d67760",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5d0fc1f",
+          "expected_mnemonics": [
+            "st3d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3d_z_p_br_contiguous",
+      "instruction_id": "st3d_z_p_br",
+      "mnemonic": "ST3D",
+      "category": "sve",
+      "source_file": "st3d_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5c06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2773bc7492a3b443acaf43c82c097770ac514700954db85465c2a1796fb4835b",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5c17c1f",
+          "expected_mnemonics": [
+            "st3d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3h_z_p_bi_contiguous",
+      "instruction_id": "st3h_z_p_bi",
+      "mnemonic": "ST3H",
+      "category": "sve",
+      "source_file": "st3h_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4d0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "36b696538b061a6ba75c2d055b1b28457c8e714ec0761e0e8d5178b3bbac0319",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4d0fc1f",
+          "expected_mnemonics": [
+            "st3h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3h_z_p_br_contiguous",
+      "instruction_id": "st3h_z_p_br",
+      "mnemonic": "ST3H",
+      "category": "sve",
+      "source_file": "st3h_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4c06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "fd5d2383f3325a93f1eeba6664429f89bc8c2f7a2aebc00bfd55e484be80e221",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4c17c1f",
+          "expected_mnemonics": [
+            "st3h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3q_z_p_bi_contiguous",
+      "instruction_id": "st3q_z_p_bi",
+      "mnemonic": "ST3Q",
+      "category": "sve",
+      "source_file": "st3q_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4800000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f20aa2334691a4aca38345b751d9159172ef54dd8335bcd5b89e80a26c2e33c4",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4801c1f",
+          "expected_mnemonics": [
+            "st3q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3q_z_p_br_contiguous",
+      "instruction_id": "st3q_z_p_br",
+      "mnemonic": "ST3Q",
+      "category": "sve",
+      "source_file": "st3q_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4a00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "61c8f7d409d91f96fc2897ade3b56d9ac4cde750c1c56093542bf03211988eb2",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4a11c1f",
+          "expected_mnemonics": [
+            "st3q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3w_z_p_bi_contiguous",
+      "instruction_id": "st3w_z_p_bi",
+      "mnemonic": "ST3W",
+      "category": "sve",
+      "source_file": "st3w_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe550e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "be8fa8bb175891f62c2da0e75889230b0c71021d3ba0b17f3acc3fccbfe727b5",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe550fc1f",
+          "expected_mnemonics": [
+            "st3w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st3w_z_p_br_contiguous",
+      "instruction_id": "st3w_z_p_br",
+      "mnemonic": "ST3W",
+      "category": "sve",
+      "source_file": "st3w_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5406000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "5c7331f243c38fcdab2f8fbef9f5fbec3719e89a7a11fc96a857f3b4e07b171d",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5417c1f",
+          "expected_mnemonics": [
+            "st3w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4b_z_p_bi_contiguous",
+      "instruction_id": "st4b_z_p_bi",
+      "mnemonic": "ST4B",
+      "category": "sve",
+      "source_file": "st4b_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe470e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "6b4d43191eaf2d49dbfe9e8ce680cab68b867b75caee1f4ea33be87343b24348",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe470fc1f",
+          "expected_mnemonics": [
+            "st4b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4b_z_p_br_contiguous",
+      "instruction_id": "st4b_z_p_br",
+      "mnemonic": "ST4B",
+      "category": "sve",
+      "source_file": "st4b_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4606000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b4daff9021020da0ef6bedcc1ccca377c24e47859b333a5a79575ee4073a74e7",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4617c1f",
+          "expected_mnemonics": [
+            "st4b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4d_z_p_bi_contiguous",
+      "instruction_id": "st4d_z_p_bi",
+      "mnemonic": "ST4D",
+      "category": "sve",
+      "source_file": "st4d_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe5f0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "8cf7fa613984750c6f692f6f9321b7278a083a2d9763bd2a7c320abfbacad09d",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5f0fc1f",
+          "expected_mnemonics": [
+            "st4d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4d_z_p_br_contiguous",
+      "instruction_id": "st4d_z_p_br",
+      "mnemonic": "ST4D",
+      "category": "sve",
+      "source_file": "st4d_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5e06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "3b96b05f95ce1cc3eb33774c23cd1b5df87d5101314d75268aae144c2a9de6a1",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5e17c1f",
+          "expected_mnemonics": [
+            "st4d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4h_z_p_bi_contiguous",
+      "instruction_id": "st4h_z_p_bi",
+      "mnemonic": "ST4H",
+      "category": "sve",
+      "source_file": "st4h_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4f0e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "d703bcf7c5464408c6f6166b305ab0b98d7d13166d5f4d591a4355c90ea1c01e",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4f0fc1f",
+          "expected_mnemonics": [
+            "st4h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4h_z_p_br_contiguous",
+      "instruction_id": "st4h_z_p_br",
+      "mnemonic": "ST4H",
+      "category": "sve",
+      "source_file": "st4h_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4e06000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "d5b7b47736c574c0a59f7a7c1d62a499e704b59e97067a5de1efd5b49a2d43b8",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4e17c1f",
+          "expected_mnemonics": [
+            "st4h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4q_z_p_bi_contiguous",
+      "instruction_id": "st4q_z_p_bi",
+      "mnemonic": "ST4Q",
+      "category": "sve",
+      "source_file": "st4q_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe4c00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "e5a0f2912e4e533b717396e1fa971ea92907aefb30779c2462dd285b01ab51e1",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4c01c1f",
+          "expected_mnemonics": [
+            "st4q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4q_z_p_br_contiguous",
+      "instruction_id": "st4q_z_p_br",
+      "mnemonic": "ST4Q",
+      "category": "sve",
+      "source_file": "st4q_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4e00000",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "aa946ae288aae69439b52d9fb83a688540c19fb228a3d994b14eb2830dc7ce7e",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4e11c1f",
+          "expected_mnemonics": [
+            "st4q"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4w_z_p_bi_contiguous",
+      "instruction_id": "st4w_z_p_bi",
+      "mnemonic": "ST4W",
+      "category": "sve",
+      "source_file": "st4w_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe570e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f892ceb84c4f5762e5c2777d41ca64df4fe9b35f1c408e32542e7e94c93a18bd",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe570fc1f",
+          "expected_mnemonics": [
+            "st4w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "st4w_z_p_br_contiguous",
+      "instruction_id": "st4w_z_p_br",
+      "mnemonic": "ST4W",
+      "category": "sve",
+      "source_file": "st4w_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5606000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "c9bbf15f87cd810bb85205833b3c5d56e46b82eb5921ea2a5383984a7aa51b52",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5617c1f",
+          "expected_mnemonics": [
+            "st4w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1b_z_p_bi_contiguous",
+      "instruction_id": "stnt1b_z_p_bi",
+      "mnemonic": "STNT1B",
+      "category": "sve",
+      "source_file": "stnt1b_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe410e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "67c951b2a70984b410687b4cbd4d6949af19f0ead055567d5856979259cf2e55",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe410fc1f",
+          "expected_mnemonics": [
+            "stnt1b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1b_z_p_br_contiguous",
+      "instruction_id": "stnt1b_z_p_br",
+      "mnemonic": "STNT1B",
+      "category": "sve",
+      "source_file": "stnt1b_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4006000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "da4e642cbfc9b18892cb94404149de70d21993a9036ed67915d691295c4aa4c8",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4017c1f",
+          "expected_mnemonics": [
+            "stnt1b"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1d_z_p_bi_contiguous",
+      "instruction_id": "stnt1d_z_p_bi",
+      "mnemonic": "STNT1D",
+      "category": "sve",
+      "source_file": "stnt1d_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe590e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "cae869fbfef324c16915110c9a6c29a0f1f0c1b175821376f6a1f74fbcf52339",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe590fc1f",
+          "expected_mnemonics": [
+            "stnt1d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1d_z_p_br_contiguous",
+      "instruction_id": "stnt1d_z_p_br",
+      "mnemonic": "STNT1D",
+      "category": "sve",
+      "source_file": "stnt1d_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5806000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "26495a16c91e5211a7b770f39666ce57edf2bc4080d49c7932eedd8f93cb31ef",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5817c1f",
+          "expected_mnemonics": [
+            "stnt1d"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1h_z_p_bi_contiguous",
+      "instruction_id": "stnt1h_z_p_bi",
+      "mnemonic": "STNT1H",
+      "category": "sve",
+      "source_file": "stnt1h_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe490e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "dec0d51b83400cf0fef738a73bec7ec37a5af3891a03f18560e8c7c97e635f1b",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe490fc1f",
+          "expected_mnemonics": [
+            "stnt1h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1h_z_p_br_contiguous",
+      "instruction_id": "stnt1h_z_p_br",
+      "mnemonic": "STNT1H",
+      "category": "sve",
+      "source_file": "stnt1h_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe4806000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f94d6785d276282fe66f85f31fa891db17874e0780db3068c240fe37c51afcbd",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe4817c1f",
+          "expected_mnemonics": [
+            "stnt1h"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1w_z_p_bi_contiguous",
+      "instruction_id": "stnt1w_z_p_bi",
+      "mnemonic": "STNT1W",
+      "category": "sve",
+      "source_file": "stnt1w_z_p_bi.xml",
+      "encoding_mask": "0xfff0e000",
+      "encoding_value": "0xe510e000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f80cb3025a3a7869ed5a5729e1479611b099d9eca692a47f826e45eba1cd8575",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe510fc1f",
+          "expected_mnemonics": [
+            "stnt1w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "stnt1w_z_p_br_contiguous",
+      "instruction_id": "stnt1w_z_p_br",
+      "mnemonic": "STNT1W",
+      "category": "sve",
+      "source_file": "stnt1w_z_p_br.xml",
+      "encoding_mask": "0xffe0e000",
+      "encoding_value": "0xe5006000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "5874a7182ceb1f66359f36116c1963134becb6b428564d85e93c4b5b61f7dc41",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe5017c1f",
+          "expected_mnemonics": [
+            "stnt1w"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "str_p_bi_",
+      "instruction_id": "str_p_bi",
+      "mnemonic": "STR",
+      "category": "sve",
+      "source_file": "str_p_bi.xml",
+      "encoding_mask": "0xffc0e010",
+      "encoding_value": "0xe5800000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "7cd800fd24bd661d4358d3cf7c6e4fd68e026e965ea54f9ebcfd57d4a1e9060b",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe580000f",
+          "expected_mnemonics": [
+            "str"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
+        }
+      ]
+    },
+    {
+      "id": "str_z_bi_",
+      "instruction_id": "str_z_bi",
+      "mnemonic": "STR",
+      "category": "sve",
+      "source_file": "str_z_bi.xml",
+      "encoding_mask": "0xffc0e000",
+      "encoding_value": "0xe5804000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "1ea55ff3dfe64d4edfb0f33e5718c29103e6cb2ddf7ed7fcabbe95c5d4d8697c",
+      "status": "implemented",
+      "profiles": [],
+      "profile": "sme2p1-zt0-v2",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+        "crates/stela-compiler/src/x86_64/sve/memory_store.rs"
+      ],
+      "evidence_groups": [
+        "sve_memory_store"
+      ],
+      "scope": "Complete allocated standalone form in the declared SME/SME2/SME2p1 streaming software profile, SM1/ZA1, ZT0 enabled, DIT0, fixed SVL16/32/64/128/256 and explicit Cx16 host target. Same Snapshot/System/domain/thread and retained source/native execution loans; little-endian mapped Normal-WB, effective MTE disabled and FixedSCA16 source atomicity. Ordered reached stores, narrowing, source aliases, nonzero offsets and applicable faults retain full native/model state and RAM. Observed-original masks247/503 and C0/C1 controls stay attached; two SP controls are model-only, including the explicit empty-mask policy choice and unresolved active-SP QEMU discrepancy. No Device/M0, general stage1, signal recovery, full guest exception delivery, Apple hardware, process/macOS or performance claim.",
+      "review": "Three actual recipes inspected and functionally compared; seven paired timing waves independently audited. Retain incumbent compactLEA with no faster/equal-speed claim. Current338 CLI literal full-byte/map/requirements/target/profile/ABI equality for all147 retained buffers (144 subjects, three aliases) transfers historical321 qualified runtime evidence; 145 observed-original component matches and two SP model controls are distinct.",
+      "smoke_samples": [
+        {
+          "word": "0xe580401f",
+          "expected_mnemonics": [
+            "str"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+cx16"
         }
       ]
     }
