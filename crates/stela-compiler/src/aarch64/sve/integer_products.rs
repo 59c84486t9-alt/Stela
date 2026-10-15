@@ -643,6 +643,216 @@ fn classify(word: u32) -> Option<(Kind, Format)> {
     None
 }
 
+impl Operand {
+    /// Exact canonical-word MOVPRFX requirements, independently of normalized
+    /// arithmetic kinds. Future unaudited allocations remain unauthorized.
+    #[allow(clippy::result_unit_err)]
+    pub fn prefix_requirement(
+        self,
+        original_word: u32,
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+        use crate::aarch64::sve::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
+
+        if decode(original_word) != Some(Ok(self)) {
+            return Err(());
+        }
+        let source_bit = |register: u8| 1_u32 << register;
+        let multiplier_mask = match self.multiplier {
+            Multiplier::Vector { register, .. } => source_bit(register),
+            Multiplier::Immediate(_) => 0,
+        };
+        let predicated = match self.predication {
+            Predication::Merging(predicate) => Some(PredicatedPrefixRequirement {
+                predicate,
+                element: self.element_size,
+            }),
+            Predication::Unpredicated | Predication::Zeroing(_) => None,
+        };
+        let vector = |predicated, other_vector_sources| PrefixRequirement::Vector {
+            destination: self.destination,
+            predicated,
+            other_vector_sources,
+        };
+        if matches!(original_word & COMPLEX_MASK, CMLA_Z_ZZZ | SQRDCMLAH_Z_ZZZ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & INDEXED_COMPLEX_MASK,
+            CMLA_Z_ZZZI_H | CMLA_Z_ZZZI_S | SQRDCMLAH_Z_ZZZI_H | SQRDCMLAH_Z_ZZZI_S
+        ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & PREDICATED_TERNARY_MASK,
+            MAD_Z_P_ZZZ | MSB_Z_P_ZZZ
+        ) {
+            return Ok(Some(vector(
+                predicated,
+                multiplier_mask | source_bit(self.accumulator.ok_or(())?),
+            )));
+        }
+        if matches!(
+            original_word & PREDICATED_TERNARY_MASK,
+            MLA_Z_P_ZZZ | MLS_Z_P_ZZZ
+        ) {
+            return Ok(Some(vector(
+                predicated,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & INDEXED_WORD_MASK,
+            MLA_Z_ZZZI_D
+                | MLA_Z_ZZZI_S
+                | MLS_Z_ZZZI_D
+                | MLS_Z_ZZZI_S
+                | SQRDMLAH_Z_ZZZI_D
+                | SQRDMLAH_Z_ZZZI_S
+                | SQRDMLSH_Z_ZZZI_D
+                | SQRDMLSH_Z_ZZZI_S
+        ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & INDEXED_HALFWORD_MASK,
+            MLA_Z_ZZZI_H | MLS_Z_ZZZI_H | SQRDMLAH_Z_ZZZI_H | SQRDMLSH_Z_ZZZI_H
+        ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & PREDICATED_BINARY_MASK,
+            MUL_Z_P_ZZ | SMULH_Z_P_ZZ | UMULH_Z_P_ZZ
+        ) {
+            return Ok(Some(vector(predicated, multiplier_mask)));
+        }
+        if matches!(original_word & PREDICATED_BINARY_MASK, MUL_Z_ZI) {
+            return Ok(Some(vector(None, 0)));
+        }
+        if matches!(
+            original_word & VECTOR_MASK,
+            MUL_Z_ZZ
+                | PMULLB_Z_ZZ
+                | PMULLT_Z_ZZ
+                | SMULH_Z_ZZ
+                | SMULLB_Z_ZZ
+                | SMULLT_Z_ZZ
+                | SQDMULH_Z_ZZ
+                | SQDMULLB_Z_ZZ
+                | SQDMULLT_Z_ZZ
+                | SQRDMULH_Z_ZZ
+                | UMULH_Z_ZZ
+                | UMULLB_Z_ZZ
+                | UMULLT_Z_ZZ
+        ) {
+            return Ok(Some(PrefixRequirement::Forbidden));
+        }
+        if matches!(
+            original_word & INDEXED_WORD_MASK,
+            MUL_Z_ZZI_D
+                | MUL_Z_ZZI_S
+                | PMUL_Z_ZZ
+                | SQDMULH_Z_ZZI_D
+                | SQDMULH_Z_ZZI_S
+                | SQRDMULH_Z_ZZI_D
+                | SQRDMULH_Z_ZZI_S
+        ) {
+            return Ok(Some(PrefixRequirement::Forbidden));
+        }
+        if matches!(
+            original_word & INDEXED_HALFWORD_MASK,
+            MUL_Z_ZZI_H | SQDMULH_Z_ZZI_H | SQRDMULH_Z_ZZI_H
+        ) {
+            return Ok(Some(PrefixRequirement::Forbidden));
+        }
+        if matches!(
+            original_word & VECTOR_MASK,
+            SMLALB_Z_ZZZ
+                | SMLALT_Z_ZZZ
+                | SMLSLB_Z_ZZZ
+                | SMLSLT_Z_ZZZ
+                | SQDMLALB_Z_ZZZ
+                | SQDMLALBT_Z_ZZZ
+                | SQDMLALT_Z_ZZZ
+                | SQDMLSLB_Z_ZZZ
+                | SQDMLSLBT_Z_ZZZ
+                | SQDMLSLT_Z_ZZZ
+                | SQRDMLAH_Z_ZZZ
+                | SQRDMLSH_Z_ZZZ
+                | UMLALB_Z_ZZZ
+                | UMLALT_Z_ZZZ
+                | UMLSLB_Z_ZZZ
+                | UMLSLT_Z_ZZZ
+        ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & INDEXED_LONG_MASK,
+            SMLALB_Z_ZZZI_D
+                | SMLALB_Z_ZZZI_S
+                | SMLALT_Z_ZZZI_D
+                | SMLALT_Z_ZZZI_S
+                | SMLSLB_Z_ZZZI_D
+                | SMLSLB_Z_ZZZI_S
+                | SMLSLT_Z_ZZZI_D
+                | SMLSLT_Z_ZZZI_S
+                | SQDMLALB_Z_ZZZI_D
+                | SQDMLALB_Z_ZZZI_S
+                | SQDMLALT_Z_ZZZI_D
+                | SQDMLALT_Z_ZZZI_S
+                | SQDMLSLB_Z_ZZZI_D
+                | SQDMLSLB_Z_ZZZI_S
+                | SQDMLSLT_Z_ZZZI_D
+                | SQDMLSLT_Z_ZZZI_S
+                | UMLALB_Z_ZZZI_D
+                | UMLALB_Z_ZZZI_S
+                | UMLALT_Z_ZZZI_D
+                | UMLALT_Z_ZZZI_S
+                | UMLSLB_Z_ZZZI_D
+                | UMLSLB_Z_ZZZI_S
+                | UMLSLT_Z_ZZZI_D
+                | UMLSLT_Z_ZZZI_S
+        ) {
+            return Ok(Some(vector(
+                None,
+                source_bit(self.source) | multiplier_mask,
+            )));
+        }
+        if matches!(
+            original_word & INDEXED_LONG_MASK,
+            SMULLB_Z_ZZI_D
+                | SMULLB_Z_ZZI_S
+                | SMULLT_Z_ZZI_D
+                | SMULLT_Z_ZZI_S
+                | SQDMULLB_Z_ZZI_D
+                | SQDMULLB_Z_ZZI_S
+                | SQDMULLT_Z_ZZI_D
+                | SQDMULLT_Z_ZZI_S
+                | UMULLB_Z_ZZI_D
+                | UMULLB_Z_ZZI_S
+                | UMULLT_Z_ZZI_D
+                | UMULLT_Z_ZZI_S
+        ) {
+            return Ok(Some(PrefixRequirement::Forbidden));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

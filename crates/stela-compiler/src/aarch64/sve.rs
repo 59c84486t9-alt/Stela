@@ -13,6 +13,7 @@ pub mod integer_products;
 pub mod integer_saturation;
 pub mod predicate_generation;
 pub mod predicate_logic;
+pub mod prefix;
 pub mod rearrange;
 pub mod rearrange_extract;
 pub mod rearrange_widen;

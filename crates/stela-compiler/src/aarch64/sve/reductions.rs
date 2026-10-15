@@ -1,5 +1,6 @@
 //! Predicated SVE integer reductions to scalar or 128-bit V results.
 //! Streaming permission and scalable register storage belong to the shared core.
+use super::prefix;
 use crate::aarch64::scalable::ElementSize;
 
 const REDUCTION_MASK: u32 = 0xff3f_e000;
@@ -58,6 +59,20 @@ pub struct Operand {
 }
 
 impl Operand {
+    /// Recheck the exact original reduction before supplying pairing metadata.
+    /// The reviewed June scalar and quadword reduction pages document no
+    /// MOVPRFX compatibility. Shared V/Z storage alone grants no authority.
+    #[allow(clippy::result_unit_err)]
+    pub fn prefix_requirement(
+        self,
+        original_word: u32,
+    ) -> Result<Option<prefix::PrefixRequirement>, ()> {
+        if decode(original_word) != Some(Ok(self)) {
+            return Err(());
+        }
+        Ok(None)
+    }
+
     /// Every V result also clears the rest of the current Z register.
     pub const fn result_size(self) -> ElementSize {
         if let Output::Quadword = self.output {
@@ -194,6 +209,111 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reduction_prefix_metadata_has_no_documented_authority_for_all_seventeen_forms() {
+        for (class, kind, _) in ENCODINGS {
+            for size in 0..=SIZE_MASK {
+                if kind == Kind::SignedAdd && size == SIZE_MASK {
+                    continue;
+                }
+                for governing in 0..=GOVERNING_REGISTER_MASK {
+                    for source in [0, VECTOR_REGISTER_MASK] {
+                        for destination in [0, VECTOR_REGISTER_MASK] {
+                            let word = class
+                                | size << SIZE_SHIFT
+                                | governing << GOVERNING_SHIFT
+                                | source << SOURCE_SHIFT
+                                | destination;
+                            let operand = decode(word).unwrap().unwrap();
+                            // This includes V/Z aliases and both scalar and Q
+                            // results; neither creates prefix compatibility.
+                            assert_eq!(operand.prefix_requirement(word), Ok(None));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduction_prefix_metadata_rejects_every_changed_typed_field() {
+        for (class, _, _) in ENCODINGS {
+            let word = class | 3 << GOVERNING_SHIFT | 1 << SOURCE_SHIFT | 2;
+            let operand = decode(word).unwrap().unwrap();
+            let different_kind = if operand.kind == Kind::And {
+                Kind::Or
+            } else {
+                Kind::And
+            };
+            let different_output = if operand.output == Output::Scalar {
+                Output::Quadword
+            } else {
+                Output::Scalar
+            };
+            for changed in [
+                Operand {
+                    kind: different_kind,
+                    ..operand
+                },
+                Operand {
+                    output: different_output,
+                    ..operand
+                },
+                Operand {
+                    element_size: ElementSize::Halfword,
+                    ..operand
+                },
+                Operand {
+                    destination: 3,
+                    ..operand
+                },
+                Operand {
+                    governing: 4,
+                    ..operand
+                },
+                Operand {
+                    source: 2,
+                    ..operand
+                },
+                Operand {
+                    destination: 32,
+                    ..operand
+                },
+                Operand {
+                    governing: 8,
+                    ..operand
+                },
+                Operand {
+                    source: 32,
+                    ..operand
+                },
+            ] {
+                assert_eq!(changed.prefix_requirement(word), Err(()));
+            }
+            assert_eq!(operand.prefix_requirement(word ^ 1), Err(()));
+        }
+    }
+
+    #[test]
+    fn reduction_prefix_metadata_rejects_unknown_and_reserved_original_words() {
+        let reserved = SIGNED_ADD_CLASS | SIZE_MASK << SIZE_SHIFT;
+        for word in [AND_CLASS, QUADWORD_AND_CLASS] {
+            let operand = decode(word).unwrap().unwrap();
+            for original_word in [0, u32::MAX, reserved] {
+                assert_eq!(operand.prefix_requirement(original_word), Err(()));
+            }
+        }
+        let forged_reserved = Operand {
+            kind: Kind::SignedAdd,
+            output: Output::Scalar,
+            element_size: ElementSize::Doubleword,
+            destination: 0,
+            governing: 0,
+            source: 0,
+        };
+        assert_eq!(forged_reserved.prefix_requirement(reserved), Err(()));
     }
 
     #[test]

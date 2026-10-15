@@ -445,6 +445,50 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     Some(Ok(operand))
 }
 
+impl Operand {
+    /// Exact documented MOVPRFX follower requirements. Other allocations remain
+    /// unaudited; a matching typed operand alone cannot authorize a canonical word.
+    #[allow(clippy::result_unit_err)]
+    pub fn prefix_requirement(
+        self,
+        original_word: u32,
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+        use crate::aarch64::sve::prefix::PrefixRequirement;
+
+        if decode(original_word) != Some(Ok(self)) {
+            return Err(());
+        }
+        let permitted = match self {
+            Self::Extract {
+                destination,
+                second,
+                ..
+            } if original_word & EXT_Z_ZI_DES_MASK == EXT_Z_ZI_DES_CLASS
+                || original_word & EXTQ_Z_ZI_DES_MASK == EXTQ_Z_ZI_DES_CLASS =>
+            {
+                Some((destination, second))
+            }
+            Self::Splice {
+                destination,
+                second,
+                ..
+            } if original_word & SPLICE_Z_P_ZZ_DES_MASK == SPLICE_Z_P_ZZ_DES_CLASS => {
+                Some((destination, second))
+            }
+            _ => None,
+        };
+        Ok(
+            permitted.map(|(destination, second)| PrefixRequirement::Vector {
+                destination,
+                predicated: None,
+                // Exclude only the implicit destructive first source. An explicit
+                // second source equal to the destination must remain an alias.
+                other_vector_sources: 1_u32 << second,
+            }),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +584,279 @@ mod tests {
             assert_eq!(decode(REVD_Z_P_Z_M_CLASS | (size << SIZE_SHIFT)), None);
         }
         assert_eq!(decode(REVD_Z_P_Z_M_CLASS | (1 << 13)), None);
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use crate::aarch64::scalable::Predication;
+    use crate::aarch64::sve::prefix::{self, DecodedPrefix, PrefixRequirement, PrefixViolation};
+
+    const DESTINATION: u8 = 3;
+    const SECOND_SOURCE: u8 = 5;
+    const GOVERNING_PREDICATE: u8 = 2;
+    const Z_REGISTER_COUNT: u8 = 32;
+    const PERMITTED_CLASSES: [u32; 3] = [
+        EXT_Z_ZI_DES_CLASS,
+        EXTQ_Z_ZI_DES_CLASS,
+        SPLICE_Z_P_ZZ_DES_CLASS,
+    ];
+    const UNAUDITED_CLASSES: [u32; 25] = [
+        DUPQ_Z_ZI_CLASS | (1 << SECOND_SHIFT),
+        EXT_Z_ZI_CON_CLASS,
+        REV_Z_Z_CLASS,
+        REVD_Z_P_Z_M_CLASS,
+        SPLICE_Z_P_ZZ_CON_CLASS,
+        TBL_Z_ZZ_1_CLASS,
+        TBL_Z_ZZ_2_CLASS,
+        TBLQ_Z_ZZ_CLASS,
+        TBX_Z_ZZ_CLASS,
+        TBXQ_Z_ZZ_CLASS,
+        TRN1_Z_ZZ_CLASS,
+        TRN2_Z_ZZ_CLASS,
+        UZP1_Z_ZZ_CLASS,
+        UZP2_Z_ZZ_CLASS,
+        UZPQ1_Z_ZZ_CLASS,
+        UZPQ2_Z_ZZ_CLASS,
+        ZIP1_Z_ZZ_CLASS,
+        ZIP2_Z_ZZ_CLASS,
+        ZIPQ1_Z_ZZ_CLASS,
+        ZIPQ2_Z_ZZ_CLASS,
+        DUPM_Z_I_CLASS,
+        INDEX_Z_II_CLASS,
+        INDEX_Z_IR_CLASS,
+        INDEX_Z_RI_CLASS,
+        INDEX_Z_RR_CLASS,
+    ];
+
+    fn operand(word: u32) -> Operand {
+        decode(word)
+            .expect("assigned allocation")
+            .expect("valid operands")
+    }
+
+    fn prefix(source: u8, predication: Predication) -> DecodedPrefix {
+        DecodedPrefix {
+            destination: DESTINATION,
+            source,
+            predication,
+            element: Some(ElementSize::Byte),
+        }
+    }
+
+    #[test]
+    fn all_twenty_eight_canonical_policies_are_explicit() {
+        for class in PERMITTED_CLASSES {
+            let word = class | (u32::from(SECOND_SOURCE) << SOURCE_SHIFT) | u32::from(DESTINATION);
+            assert_eq!(
+                operand(word).prefix_requirement(word),
+                Ok(Some(PrefixRequirement::Vector {
+                    destination: DESTINATION,
+                    predicated: None,
+                    other_vector_sources: 1_u32 << SECOND_SOURCE,
+                }))
+            );
+        }
+        for word in UNAUDITED_CLASSES {
+            assert_eq!(operand(word).prefix_requirement(word), Ok(None));
+        }
+    }
+
+    #[test]
+    fn every_explicit_second_source_is_preserved_including_destination_aliases() {
+        for class in PERMITTED_CLASSES {
+            for destination in 0..Z_REGISTER_COUNT {
+                for second in 0..Z_REGISTER_COUNT {
+                    let word = class | (u32::from(second) << SOURCE_SHIFT) | u32::from(destination);
+                    assert_eq!(
+                        operand(word).prefix_requirement(word),
+                        Ok(Some(PrefixRequirement::Vector {
+                            destination,
+                            predicated: None,
+                            other_vector_sources: 1_u32 << second,
+                        }))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constructive_aliases_do_not_authorize_a_destructive_policy() {
+        for (constructive, destructive) in [
+            (EXT_Z_ZI_CON_CLASS, EXT_Z_ZI_DES_CLASS),
+            (SPLICE_Z_P_ZZ_CON_CLASS, SPLICE_Z_P_ZZ_DES_CLASS),
+        ] {
+            let first =
+                constructive | (u32::from(DESTINATION) << SOURCE_SHIFT) | u32::from(DESTINATION);
+            let second =
+                destructive | (u32::from(DESTINATION + 1) << SOURCE_SHIFT) | u32::from(DESTINATION);
+            assert_eq!(operand(first), operand(second));
+            assert_eq!(operand(first).prefix_requirement(first), Ok(None));
+            assert!(matches!(
+                operand(second).prefix_requirement(second),
+                Ok(Some(PrefixRequirement::Vector { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn mismatched_unallocated_and_reserved_words_are_errors() {
+        let word = EXT_Z_ZI_DES_CLASS
+            | (u32::from(SECOND_SOURCE) << SOURCE_SHIFT)
+            | u32::from(DESTINATION);
+        let decoded = operand(word);
+        for other in [
+            word ^ 1,
+            0,
+            DUPQ_Z_ZI_CLASS,
+            DUPM_Z_I_CLASS | (LOGICAL_IMMEDIATE_MASK << SOURCE_SHIFT),
+            REVD_Z_P_Z_M_CLASS | (1 << SIZE_SHIFT),
+        ] {
+            assert_eq!(decoded.prefix_requirement(other), Err(()));
+        }
+        let forged = Operand::Extract {
+            destination: DESTINATION,
+            source: DESTINATION,
+            second: Z_REGISTER_COUNT,
+            byte_offset: 0,
+            segment: false,
+        };
+        assert_eq!(forged.prefix_requirement(word), Err(()));
+    }
+
+    #[test]
+    fn permitted_followers_accept_only_unpredicated_prefixes() {
+        for class in PERMITTED_CLASSES {
+            let word = class | (u32::from(SECOND_SOURCE) << SOURCE_SHIFT) | u32::from(DESTINATION);
+            let requirement = operand(word).prefix_requirement(word).unwrap().unwrap();
+            for source in 0..Z_REGISTER_COUNT {
+                assert_eq!(
+                    prefix::validate(prefix(source, Predication::Unpredicated), requirement),
+                    Ok(())
+                );
+            }
+            for mode in [
+                Predication::Merging(GOVERNING_PREDICATE),
+                Predication::Zeroing(GOVERNING_PREDICATE),
+            ] {
+                assert_eq!(
+                    prefix::validate(prefix(SECOND_SOURCE, mode), requirement),
+                    Err(PrefixViolation::PredicatedPrefixForbidden)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_second_destination_alias_is_rejected_by_the_shared_validator() {
+        for class in PERMITTED_CLASSES {
+            let word = class | (u32::from(DESTINATION) << SOURCE_SHIFT) | u32::from(DESTINATION);
+            let requirement = operand(word).prefix_requirement(word).unwrap().unwrap();
+            assert_eq!(
+                prefix::validate(
+                    prefix(SECOND_SOURCE, Predication::Unpredicated),
+                    requirement
+                ),
+                Err(PrefixViolation::OtherSourceAlias)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefix_boundary_tests {
+    use super::*;
+    use crate::aarch64::sve::prefix::PrefixRequirement;
+
+    const DESTINATION: u8 = 3;
+    const SECOND_SOURCE: u8 = 5;
+    const ELEMENTS: [ElementSize; 4] = [
+        ElementSize::Byte,
+        ElementSize::Halfword,
+        ElementSize::Word,
+        ElementSize::Doubleword,
+    ];
+
+    fn operand(word: u32) -> Operand {
+        decode(word)
+            .expect("assigned allocation")
+            .expect("valid operands")
+    }
+
+    #[test]
+    fn unaudited_wrapped_tables_and_segment_aliases_remain_unaudited() {
+        for class in [
+            TBL_Z_ZZ_2_CLASS,
+            TBLQ_Z_ZZ_CLASS,
+            TBXQ_Z_ZZ_CLASS,
+            UZPQ1_Z_ZZ_CLASS,
+            UZPQ2_Z_ZZ_CLASS,
+            ZIPQ1_Z_ZZ_CLASS,
+            ZIPQ2_Z_ZZ_CLASS,
+        ] {
+            for destination in [0, REGISTER_MASK] {
+                for second in [0, REGISTER_MASK] {
+                    for size in 0..=SIZE_MASK {
+                        let word = class
+                            | (size << SIZE_SHIFT)
+                            | (REGISTER_MASK << SOURCE_SHIFT)
+                            | (second << SECOND_SHIFT)
+                            | destination;
+                        let decoded = operand(word);
+                        if class == TBL_Z_ZZ_2_CLASS {
+                            assert!(matches!(
+                                decoded,
+                                Operand::Table {
+                                    source,
+                                    register_count: 2,
+                                    indexes,
+                                    ..
+                                } if u32::from(source) == REGISTER_MASK && u32::from(indexes) == second
+                            ));
+                        }
+                        assert_eq!(decoded.prefix_requirement(word), Ok(None));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_merging_and_splice_predicate_size_boundaries_keep_their_policy() {
+        for governing in 0..=PREDICATE_MASK {
+            let reverse = REVD_Z_P_Z_M_CLASS
+                | (governing << PREDICATE_SHIFT)
+                | (u32::from(DESTINATION) << SOURCE_SHIFT)
+                | u32::from(DESTINATION);
+            assert!(matches!(
+                operand(reverse),
+                Operand::ReverseDouble { source, destination, governing: predicate }
+                    if source == destination && u32::from(predicate) == governing
+            ));
+            assert_eq!(operand(reverse).prefix_requirement(reverse), Ok(None));
+            for (size, element) in ELEMENTS.into_iter().enumerate() {
+                let splice = SPLICE_Z_P_ZZ_DES_CLASS
+                    | ((size as u32) << SIZE_SHIFT)
+                    | (governing << PREDICATE_SHIFT)
+                    | (u32::from(SECOND_SOURCE) << SOURCE_SHIFT)
+                    | u32::from(DESTINATION);
+                let decoded = operand(splice);
+                assert!(matches!(
+                    decoded,
+                    Operand::Splice { governing: predicate, element_size, .. }
+                        if u32::from(predicate) == governing && element_size == element
+                ));
+                assert_eq!(
+                    decoded.prefix_requirement(splice),
+                    Ok(Some(PrefixRequirement::Vector {
+                        destination: DESTINATION,
+                        predicated: None,
+                        other_vector_sources: 1_u32 << SECOND_SOURCE,
+                    }))
+                );
+            }
+        }
     }
 }

@@ -37,10 +37,12 @@
     "crates/stela-compiler/src/context.rs",
     "crates/stela-compiler/src/context/memory.rs",
     "crates/stela-compiler/src/extended.rs",
+    "crates/stela-compiler/src/extended/prefix.rs",
     "crates/stela-compiler/src/aarch64/scalable.rs",
     "crates/stela-compiler/src/aarch64/scalable/features.rs",
     "crates/stela-compiler/src/aarch64/scalable/profile.rs",
     "crates/stela-compiler/src/aarch64/sve.rs",
+    "crates/stela-compiler/src/aarch64/sve/prefix.rs",
     "crates/stela-compiler/src/aarch64/sve/address.rs",
     "crates/stela-compiler/src/aarch64/sve/dot.rs",
     "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
@@ -983,6 +985,22 @@
         "original_replays": 0
       },
       "require_current_executable": true
+    },
+    "movprfx-pair-transfer": {
+      "harness": ".stela/research/coverage-race/streaming-architecture/movprfx-public-admission-3/admission.py",
+      "report": ".stela/research/coverage-race/streaming-architecture/movprfx-public-admission-3/evidence/movprfx.json",
+      "kind": "scalable_historical_semantics_current_body_transfer",
+      "comparison_field": "historical_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_measurements": {
+        "historical_state_comparisons": 446,
+        "historical_original_cases": 223,
+        "fresh_body_matches": 430,
+        "fresh_source_map_matches": 430,
+        "fresh_semantic_replays": 0,
+        "canonical_prefix_forms": 2
+      }
     }
   },
   "forms": [
@@ -55848,6 +55866,146 @@
       "evidence_groups": [
         "sme_integer_matrix"
       ]
+    },
+    {
+      "id": "movprfx_z_p_z_",
+      "instruction_id": "movprfx_z_p_z",
+      "mnemonic": "MOVPRFX",
+      "category": "sve",
+      "source_file": "movprfx_z_p_z.xml",
+      "encoding_mask": "0xff3ee000",
+      "encoding_value": "0x04102000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "764f97b62186f0c8348de0a2f151cf0d1645f8a69cb16915a99db2a52e11a8f4",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "Complete adjacent MOVPRFX plus an explicitly authorized total register-only follower within one immutable raw context leaf, SM=1, SVL16/32/64/128/256, declared SME/SME2/SME2p1, maximum SVL256, ZT0 disabled and DIT=0. The shared validator checks the original follower word and typed operands, destination, governing predicate, effective element width and explicit vector aliases before any emission. Both predicated merging and zeroing encodings belong to one canonical predicated form. Both subject PCs retain individual source-map intervals; a direct branch to the follower does not execute the lexical prefix. Unsupported, malformed, incomplete, numerical, memory, service, control-flow and mode-changing followers decline explicitly. No source-window refill, budget split, trapping-follower restart, instruction-fetch abort or guest exception-delivery claim. Retained genuine original/model/native full-state and RAM evidence transfers through exact current CLI complete body/maps without semantic replay. Original FFR/FPMR, independent DIT readback, runtime/cache entry, performance, Apple hardware, applications and macOS boot remain unverified.",
+      "review": "Exact June canonical pair permissions and immutable total-effect authorization; 223 new genuine original cases, 446 retained original/model/native full-frame and RAM comparisons across baseline/SSSE3. Current public CLI byte/map transfer and explicit decline gates required before installation.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/extended/prefix.rs",
+        "crates/stela-compiler/src/aarch64/sve/prefix.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "movprfx-pair-transfer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x04102020",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline"
+        },
+        {
+          "word": "0x04102020",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+ssse3"
+        },
+        {
+          "word": "0x04112020",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline"
+        },
+        {
+          "word": "0x04112020",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+ssse3"
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "movprfx_z_z_",
+      "instruction_id": "movprfx_z_z",
+      "mnemonic": "MOVPRFX",
+      "category": "sve",
+      "source_file": "movprfx_z_z.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0x0420bc00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "status": "implemented",
+      "profiles": [],
+      "source_sha256": "b51e93e4b2c336cfd7c51eedfe5ac6ee20334b035c57ce739c4337f28bbe02af",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "Complete adjacent MOVPRFX plus an explicitly authorized total register-only follower within one immutable raw context leaf, SM=1, SVL16/32/64/128/256, declared SME/SME2/SME2p1, maximum SVL256, ZT0 disabled and DIT=0. The shared validator checks the original follower word and typed operands, destination, governing predicate, effective element width and explicit vector aliases before any emission. Both predicated merging and zeroing encodings belong to one canonical predicated form. Both subject PCs retain individual source-map intervals; a direct branch to the follower does not execute the lexical prefix. Unsupported, malformed, incomplete, numerical, memory, service, control-flow and mode-changing followers decline explicitly. No source-window refill, budget split, trapping-follower restart, instruction-fetch abort or guest exception-delivery claim. Retained genuine original/model/native full-state and RAM evidence transfers through exact current CLI complete body/maps without semantic replay. Original FFR/FPMR, independent DIT readback, runtime/cache entry, performance, Apple hardware, applications and macOS boot remain unverified.",
+      "review": "Exact June canonical pair permissions and immutable total-effect authorization; 223 new genuine original cases, 446 retained original/model/native full-frame and RAM comparisons across baseline/SSSE3. Current public CLI byte/map transfer and explicit decline gates required before installation.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/extended/prefix.rs",
+        "crates/stela-compiler/src/aarch64/sve/prefix.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_logic.rs"
+      ],
+      "evidence_groups": [
+        "movprfx-pair-transfer"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x0420bc20",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline"
+        },
+        {
+          "word": "0x0420bc20",
+          "following_words": [
+            "0x041a0040"
+          ],
+          "expected_mnemonics": [
+            "movprfx"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3,
+          "cpu_target": "x86_64-baseline+ssse3"
+        }
+      ],
+      "alias": false
     }
   ],
   "execution_profiles": {

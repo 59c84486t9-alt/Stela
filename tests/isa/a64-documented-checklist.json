@@ -2138,11 +2138,11 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 2429,
+    "implemented": 2431,
     "partial": 5,
-    "unsupported": 1898,
+    "unsupported": 1896,
     "total": 4332,
-    "implementation_percentage": 56.071098799630654,
+    "implementation_percentage": 56.117266851338876,
     "categories": {
       "base_integer_system": {
         "implemented": 555,
@@ -2158,12 +2158,12 @@
         "unsupported": 470
       },
       "sve": {
-        "implemented": 590,
-        "unsupported": 799
+        "implemented": 592,
+        "unsupported": 797
       }
     }
   },
-  "compiler_source_sha256": "4ec2a1c427a4e70e11dda64659fba8cf5159c34ebf089faf0f6956667ff9f8db",
+  "compiler_source_sha256": "7ee4251e5123abd0aa25296a885be8e44aacd3348ce133fd249bc9eee50d0f55",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -5482,8 +5482,8 @@
     {"id":"movaz_z_rza_h","instruction_id":"movaz_z_rza","mnemonic":"MOVAZ","category":"sme","source_file":"movaz_z_rza.xml","encoding_mask":"0xffff1e00","encoding_value":"0xc0420200","features":[{"feature":"FEAT_SME2p1","name":"v9Ap4"}],"status":"implemented","profiles":[{"profile":"sme2p1-zt0-v2","status":"implemented","scope":"All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."}]},
     {"id":"movaz_z_rza_q","instruction_id":"movaz_z_rza","mnemonic":"MOVAZ","category":"sme","source_file":"movaz_z_rza.xml","encoding_mask":"0xffff1e00","encoding_value":"0xc0c30200","features":[{"feature":"FEAT_SME2p1","name":"v9Ap4"}],"status":"implemented","profiles":[{"profile":"sme2p1-zt0-v2","status":"implemented","scope":"All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."}]},
     {"id":"movaz_z_rza_w","instruction_id":"movaz_z_rza","mnemonic":"MOVAZ","category":"sme","source_file":"movaz_z_rza.xml","encoding_mask":"0xffff1e00","encoding_value":"0xc0820200","features":[{"feature":"FEAT_SME2p1","name":"v9Ap4"}],"status":"implemented","profiles":[{"profile":"sme2p1-zt0-v2","status":"implemented","scope":"All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."}]},
-    {"id":"movprfx_z_p_z_","instruction_id":"movprfx_z_p_z","mnemonic":"MOVPRFX","category":"sve","source_file":"movprfx_z_p_z.xml","encoding_mask":"0xff3ee000","encoding_value":"0x04102000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
-    {"id":"movprfx_z_z_","instruction_id":"movprfx_z_z","mnemonic":"MOVPRFX","category":"sve","source_file":"movprfx_z_z.xml","encoding_mask":"0xfffffc00","encoding_value":"0x0420bc00","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"unsupported","profiles":[]},
+    {"id":"movprfx_z_p_z_","instruction_id":"movprfx_z_p_z","mnemonic":"MOVPRFX","category":"sve","source_file":"movprfx_z_p_z.xml","encoding_mask":"0xff3ee000","encoding_value":"0x04102000","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"sme-streaming-v2-sme2p1","status":"implemented","scope":"Complete adjacent MOVPRFX plus an explicitly authorized total register-only follower within one immutable raw context leaf, SM=1, SVL16/32/64/128/256, declared SME/SME2/SME2p1, maximum SVL256, ZT0 disabled and DIT=0. The shared validator checks the original follower word and typed operands, destination, governing predicate, effective element width and explicit vector aliases before any emission. Both predicated merging and zeroing encodings belong to one canonical predicated form. Both subject PCs retain individual source-map intervals; a direct branch to the follower does not execute the lexical prefix. Unsupported, malformed, incomplete, numerical, memory, service, control-flow and mode-changing followers decline explicitly. No source-window refill, budget split, trapping-follower restart, instruction-fetch abort or guest exception-delivery claim. Retained genuine original/model/native full-state and RAM evidence transfers through exact current CLI complete body/maps without semantic replay. Original FFR/FPMR, independent DIT readback, runtime/cache entry, performance, Apple hardware, applications and macOS boot remain unverified."}]},
+    {"id":"movprfx_z_z_","instruction_id":"movprfx_z_z","mnemonic":"MOVPRFX","category":"sve","source_file":"movprfx_z_z.xml","encoding_mask":"0xfffffc00","encoding_value":"0x0420bc00","features":[{"feature":"FEAT_SVE || FEAT_SME","name":"(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"}],"status":"implemented","profiles":[{"profile":"sme-streaming-v2-sme2p1","status":"implemented","scope":"Complete adjacent MOVPRFX plus an explicitly authorized total register-only follower within one immutable raw context leaf, SM=1, SVL16/32/64/128/256, declared SME/SME2/SME2p1, maximum SVL256, ZT0 disabled and DIT=0. The shared validator checks the original follower word and typed operands, destination, governing predicate, effective element width and explicit vector aliases before any emission. Both predicated merging and zeroing encodings belong to one canonical predicated form. Both subject PCs retain individual source-map intervals; a direct branch to the follower does not execute the lexical prefix. Unsupported, malformed, incomplete, numerical, memory, service, control-flow and mode-changing followers decline explicitly. No source-window refill, budget split, trapping-follower restart, instruction-fetch abort or guest exception-delivery claim. Retained genuine original/model/native full-state and RAM evidence transfers through exact current CLI complete body/maps without semantic replay. Original FFR/FPMR, independent DIT readback, runtime/cache entry, performance, Apple hardware, applications and macOS boot remain unverified."}]},
     {"id":"movt_r_zt_","instruction_id":"movt_r_zt","mnemonic":"MOVT","category":"sme","source_file":"movt_r_zt.xml","encoding_mask":"0xffff8fe0","encoding_value":"0xc04c03e0","features":[{"feature":"FEAT_SME2","name":"v9Ap3"}],"status":"unsupported","profiles":[]},
     {"id":"movt_zt_r_","instruction_id":"movt_zt_r","mnemonic":"MOVT","category":"sme","source_file":"movt_zt_r.xml","encoding_mask":"0xffff8fe0","encoding_value":"0xc04e03e0","features":[{"feature":"FEAT_SME2","name":"v9Ap3"}],"status":"unsupported","profiles":[]},
     {"id":"movt_zt_z_","instruction_id":"movt_zt_z","mnemonic":"MOVT","category":"sme","source_file":"movt_zt_z.xml","encoding_mask":"0xffffcfe0","encoding_value":"0xc04f03e0","features":[{"feature":"FEAT_SME_LUTv2","name":"v9Ap5"}],"status":"unsupported","profiles":[]},

@@ -4,6 +4,8 @@
 //! admitted after guest feature and execution-mode checks. Unsupported
 //! effects remain explicit declines.
 
+mod prefix;
+
 use std::collections::BTreeMap;
 
 use crate::{
@@ -243,6 +245,80 @@ enum Decoded {
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
     SmeIntegerMatrix(integer_matrix::Operand),
+}
+
+impl Decoded {
+    /// Original canonical word is rechecked by each frozen family adapter.
+    /// None remains unaudited; no unreviewed effect class receives a default permit.
+    fn prefix_requirement(
+        &self,
+        original_word: u32,
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+        match self {
+            Self::Ordinary(_) => Ok(None),
+            Self::Address(_) => Ok(None),
+            Self::IntegerDot(_) => Ok(None),
+            Self::IntegerBits(_) => Ok(None),
+            Self::IntegerLogic(operand) => operand.prefix_requirement(original_word),
+            Self::IntegerPredicateMove(_) => Ok(None),
+            Self::IntegerProducts(operand) => operand.prefix_requirement(original_word),
+            Self::IntegerSaturation(operand) => operand.prefix_requirement(original_word),
+            Self::Rearrange(operand) => operand.prefix_requirement(original_word),
+            Self::RearrangeExtract(operand) => operand.prefix_requirement(original_word),
+            Self::RearrangeWiden(operand) => operand.prefix_requirement(original_word),
+            Self::Reductions(operand) => operand.prefix_requirement(original_word),
+            Self::Shifts(_) => Ok(None),
+            Self::ShiftsNarrow(_) => Ok(None),
+            Self::Sign(_) => Ok(None),
+            Self::FloatingCopy(_) => Ok(None),
+            Self::IntegerArithmetic(operand) => operand.prefix_requirement(original_word),
+            Self::IntegerComparison(_) => Ok(None),
+            Self::PredicateGeneration(_) => Ok(None),
+            Self::PredicateLogic(_) => Ok(None),
+            Self::Length(_) => Ok(None),
+            Self::SmeTables(_) => Ok(None),
+            Self::SmeMovement(_) => Ok(None),
+            Self::SmeIntegerVector(_) => Ok(None),
+            Self::SmeIntegerDots(_) => Ok(None),
+            Self::SmeIntegerMatrix(_) => Ok(None),
+        }
+    }
+
+    /// Pair execution currently permits only reviewed total register-only mappings.
+    /// Metadata alone never authorizes a service, numerical or memory restart edge.
+    fn require_total_inline_prefix(&self, pc: GuestAddress) -> Result<(), CompileError> {
+        match self {
+            Self::IntegerLogic(_)
+            | Self::IntegerProducts(_)
+            | Self::IntegerSaturation(_)
+            | Self::Rearrange(_)
+            | Self::RearrangeExtract(_)
+            | Self::RearrangeWiden(_)
+            | Self::Reductions(_)
+            | Self::IntegerArithmetic(_) => Ok(()),
+            Self::Ordinary(_)
+            | Self::Address(_)
+            | Self::IntegerDot(_)
+            | Self::IntegerBits(_)
+            | Self::IntegerPredicateMove(_)
+            | Self::Shifts(_)
+            | Self::ShiftsNarrow(_)
+            | Self::Sign(_)
+            | Self::FloatingCopy(_)
+            | Self::IntegerComparison(_)
+            | Self::PredicateGeneration(_)
+            | Self::PredicateLogic(_)
+            | Self::Length(_)
+            | Self::SmeTables(_)
+            | Self::SmeMovement(_)
+            | Self::SmeIntegerVector(_)
+            | Self::SmeIntegerDots(_)
+            | Self::SmeIntegerMatrix(_) => Err(CompileError(format!(
+                "MOVPRFX pair validation: follower pair/effect requirements are not reviewed at {:#x}",
+                pc.0
+            ))),
+        }
+    }
 }
 
 pub(crate) fn ordinary_permitted(operation: &Operation) -> bool {
@@ -1005,20 +1081,28 @@ pub fn compile_for_profile(
             "input and guest base must be nonempty/aligned to 4 bytes".into(),
         ));
     }
-    let instructions: Vec<_> = source
-        .as_chunks::<INSTRUCTION_BYTES>()
-        .0
-        .iter()
-        .enumerate()
-        .map(|(index, bytes)| {
-            let pc = base
-                .0
-                .checked_add((index as u64) * INSTRUCTION_BYTES as u64)
-                .map(GuestAddress)
-                .ok_or_else(|| CompileError("guest address overflow".into()))?;
-            Ok((pc, decode(pc, u32::from_le_bytes(*bytes), profile, target)?))
-        })
-        .collect::<Result<_, CompileError>>()?;
+    let mut instructions = Vec::new();
+    let mut offset = 0;
+    while offset < source.len() {
+        if let Some(pair) = prefix::decode_pair(source, offset, base, profile, target)? {
+            instructions.push((pair.prefix_pc, Decoded::IntegerLogic(pair.prefix)));
+            instructions.push((pair.follower_pc, pair.follower));
+            offset += prefix::PAIR_BYTES;
+            continue;
+        }
+        let pc = GuestAddress(
+            base.0
+                .checked_add(offset as u64)
+                .ok_or_else(|| CompileError("guest address overflow".into()))?,
+        );
+        let word = u32::from_le_bytes(
+            source[offset..offset + INSTRUCTION_BYTES]
+                .try_into()
+                .expect("checked leaf instruction alignment"),
+        );
+        instructions.push((pc, decode(pc, word, profile, target)?));
+        offset += INSTRUCTION_BYTES;
+    }
     if !matches!(
         instructions.last(),
         Some((
@@ -3447,3 +3531,52 @@ mod sme2p1_tests;
 #[cfg(test)]
 #[path = "extended/predicate_move_tests.rs"]
 mod predicate_move_tests;
+
+#[cfg(test)]
+mod prefix_pair_tests {
+    use super::*;
+
+    const BASE: GuestAddress = GuestAddress(0x1000);
+    const UNPREDICATED_PREFIX: u32 = 0x0420_bc20;
+    const ZEROING_PREFIX: u32 = 0x0410_2020;
+    const MERGING_PREFIX: u32 = 0x0411_2020;
+    const AND_DESTRUCTIVE: u32 = 0x041a_0040;
+    const RET: u32 = 0xd65f_03c0;
+
+    #[test]
+    fn both_prefix_forms_compile_as_two_individual_source_map_intervals() {
+        for bytes in [16, 32, 64, 128, 256] {
+            let profile = ScalableProfile::new(
+                VectorLength::from_bytes(bytes).unwrap(),
+                ScalableMode::new(true, false),
+            );
+            for prefix in [UNPREDICATED_PREFIX, ZEROING_PREFIX, MERGING_PREFIX] {
+                let source: Vec<_> = [prefix, AND_DESTRUCTIVE, RET]
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect();
+                let native =
+                    compile_for_profile(&source, BASE, profile, TargetCpu::Baseline).unwrap();
+                assert_eq!(
+                    native
+                        .source_map
+                        .iter()
+                        .map(|(pc, _)| *pc)
+                        .collect::<Vec<_>>(),
+                    [
+                        BASE,
+                        GuestAddress(BASE.0 + INSTRUCTION_BYTES as u64),
+                        GuestAddress(BASE.0 + prefix::PAIR_BYTES as u64)
+                    ]
+                );
+                assert_eq!(native.source_map[0].1, CONTEXT_WRAPPER_BYTES);
+                assert!(
+                    native
+                        .source_map
+                        .windows(2)
+                        .all(|pair| pair[0].1 < pair[1].1)
+                );
+            }
+        }
+    }
+}
