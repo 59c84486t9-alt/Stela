@@ -388,6 +388,8 @@ impl<P: DataPolicy> MemoryThread<P> {
     }
 
     /// Borrow a service view for one synchronous context-backed invocation.
+    /// This legacy API returns R even when finalization fails; owned checked
+    /// execution must use with_checked_view and observe its outer Result.
     ///
     /// # Safety
     /// Native code may call only the supplied callback with valid requests and
@@ -397,6 +399,33 @@ impl<P: DataPolicy> MemoryThread<P> {
     /// Guest and native physical addresses must have congruent low four bits
     /// for the declared SCA16 profile; unsupported native footprints fail explicitly.
     pub unsafe fn with_view<R>(&mut self, callback: impl FnOnce(&mut MemoryContextView) -> R) -> R {
+        // Legacy low-level contract: callers cannot infer successful finalization
+        // from R. Owned checked execution must use with_checked_view instead.
+        let (result, _finalization) = unsafe { self.invoke_memory_view(callback) };
+        result
+    }
+
+    /// Invoke and finalize one checked memory body before returning its result.
+    /// A finalization failure discards R even when native code already returned.
+    /// Callers retaining fault provenance must copy it during the callback.
+    ///
+    /// # Safety
+    /// Inherits with_view's complete synchronous native/staging contract. The
+    /// caller retains the actual policy and storage loan throughout.
+    pub unsafe fn with_checked_view<R>(
+        &mut self,
+        callback: impl FnOnce(&mut MemoryContextView) -> R,
+    ) -> Result<R, MemoryStatus> {
+        // SAFETY: the caller retains the same owner and native invocation loan.
+        let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
+        finalization.map(|()| result)
+    }
+
+    /// One common finalization for callback faults and locally emitted alignment faults.
+    unsafe fn invoke_memory_view<R>(
+        &mut self,
+        callback: impl FnOnce(&mut MemoryContextView) -> R,
+    ) -> (R, Result<(), MemoryStatus>) {
         let mut view = MemoryContextView {
             version: MEMORY_CONTEXT_VERSION,
             bytes: MEMORY_CONTEXT_BYTES,
@@ -410,11 +439,11 @@ impl<P: DataPolicy> MemoryThread<P> {
             reserved_tail: 0,
         };
         let result = callback(&mut view);
-        if let Some(status) = MemoryStatus::from_code(view.fault_kind) {
-            // Includes locally emitted SP/alignment faults which never call dispatch.
-            let _ = self.settle_fault(status);
-        }
-        result
+        let finalization = MemoryStatus::from_code(view.fault_kind)
+            .ok_or(MemoryStatus::Domain)
+            .and_then(|status| self.settle_fault(status))
+            .and_then(|()| self.domain.check_execution());
+        (result, finalization)
     }
 
     unsafe fn transfer(

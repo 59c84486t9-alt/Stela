@@ -173,6 +173,21 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         unsafe { self.thread.with_view(callback) }
     }
 
+    /// Consume this entry and observe finalization before returning the body result.
+    /// Fault provenance needed on failure must be copied during the callback.
+    ///
+    /// # Safety
+    /// The callback must obey `MemoryThread::with_checked_view`'s invocation
+    /// contract and bind the requirements used to prepare this entry.
+    pub unsafe fn with_checked_view<R>(
+        self,
+        callback: impl FnOnce(&mut MemoryContextView) -> R,
+    ) -> Result<R, MemoryStatus> {
+        // SAFETY: the caller binds the checked body's exact requirements and
+        // inherits the low-level callback's staging and lifetime contract.
+        unsafe { self.thread.with_checked_view(callback) }
+    }
+
     /// Consume entry for a dedicated service whose typed adapter owns the
     /// complete checked operation and does not mutate effective controls.
     pub fn thread_mut(self) -> &'a mut MemoryThread<P> {

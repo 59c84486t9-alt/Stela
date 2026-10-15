@@ -984,3 +984,6 @@ fn each_wrapping_raw_part_is_translated_in_its_own_regime() {
     }
     assert_eq!(snapshot(&backing, 17)[15..17], staging);
 }
+
+#[path = "checked_finalization_tests.rs"]
+mod checked_finalization;
