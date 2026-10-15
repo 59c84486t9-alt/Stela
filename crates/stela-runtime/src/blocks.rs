@@ -17,7 +17,7 @@ use std::{
     rc::Rc,
 };
 use stela_compiler::{
-    GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
+    GuestAddress, GuestState,
     block::{
         BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, ClockOperation, DynamicEdge,
         ExitKind, MAX_BLOCK_INSTRUCTIONS, PointerAuthentication, PointerAuthenticationKey,
@@ -520,8 +520,7 @@ impl BlockRuntime {
             "unsupported block translation identity"
         );
         ensure!(
-            manifest.identity.compiler_source_sha256
-                == sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes())
+            manifest.identity.compiler_source_sha256 == crate::compiler_source_sha256()
                 && manifest.identity.source_sha256 == sha256(&window[..prepared.source_bytes]),
             "block compiler/source identity mismatch"
         );

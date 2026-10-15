@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 use std::io::Read;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use stela_compiler::{GuestState, NATIVE_ABI, SOURCE_FINGERPRINT_MATERIAL};
+use stela_compiler::{GuestState, NATIVE_ABI};
 use stela_core::sha256;
 
 // Deliberately bounded research entry point; an oversized cache artifact cannot
@@ -54,7 +54,7 @@ impl ExecutableLeaf {
             "unsupported translation schema"
         );
         ensure!(
-            identity.compiler_source_sha256 == sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+            identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "generated code uses a different compiler"
         );
         ensure!(identity.abi == NATIVE_ABI, "unsupported generated-code ABI");

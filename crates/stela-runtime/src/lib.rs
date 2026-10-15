@@ -18,8 +18,16 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
 use stela_core::{sha256, write_json};
+
+// The compiler material is immutable for this executable. Reuse its exact
+// digest across preparation and loading without weakening artifact validation.
+fn compiler_source_sha256() -> &'static str {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT.get_or_init(|| sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()))
+}
 
 const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
@@ -117,7 +125,7 @@ pub fn prepare_leaf_for_target(
     let identity = Identity {
         schema_version: 1,
         source_sha256: sha256(source),
-        compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+        compiler_source_sha256: compiler_source_sha256().to_owned(),
         guest_base: base.0,
         abi: NATIVE_ABI.into(),
         target_cpu: target.id(),
@@ -175,7 +183,7 @@ pub fn prepare_block_for_target(
     let identity = Identity {
         schema_version: 1,
         source_sha256: sha256(prefix),
-        compiler_source_sha256: sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+        compiler_source_sha256: compiler_source_sha256().to_owned(),
         guest_base: base.0,
         abi: profile.abi().into(),
         target_cpu: target.id(),
