@@ -13,6 +13,7 @@ pub mod shared_cache;
 pub mod shared_cache_exports;
 pub mod shared_cache_memory;
 pub mod shared_cache_slide;
+mod thread_state;
 use anyhow::{Context, Result, ensure};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;

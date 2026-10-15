@@ -304,6 +304,12 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Read original linked root thread metadata; this does not establish boot state.
+    FilesetRootThread {
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Decode a bare plaintext kernel IM4P payload into a bounded output file.
     DecodeIm4p {
         input: PathBuf,
@@ -633,6 +639,31 @@ fn scalable_execution_manifest(
         );
     }
     Ok(execution)
+}
+
+const MAX_FILESET_ROOT_COMMAND_BYTES: usize = 1024 * 1024;
+
+fn fileset_root_thread_metadata(
+    mut input: impl std::io::Read,
+) -> Result<Option<macho::fileset::RootThreadMetadata>> {
+    use object::{LittleEndian, read::macho::MachHeader};
+
+    const HEADER_BYTES: usize = std::mem::size_of::<object::macho::MachHeader64<LittleEndian>>();
+    let mut bytes = vec![0; HEADER_BYTES];
+    input
+        .read_exact(&mut bytes)
+        .context("truncated fileset header")?;
+    let header = object::macho::MachHeader64::<LittleEndian>::parse(bytes.as_slice(), 0)?;
+    let command_bytes = usize::try_from(header.sizeofcmds(LittleEndian))?;
+    ensure!(
+        command_bytes <= MAX_FILESET_ROOT_COMMAND_BYTES,
+        "fileset root load commands exceed the metadata input limit"
+    );
+    bytes.resize(HEADER_BYTES + command_bytes, 0);
+    input
+        .read_exact(&mut bytes[HEADER_BYTES..])
+        .context("truncated fileset root load commands")?;
+    macho::fileset::root_thread_metadata(&bytes)
 }
 
 fn parse_address(value: &str) -> Result<u64, String> {
@@ -1906,6 +1937,23 @@ fn run() -> Result<()> {
                 output.display()
             );
         }
+        Command::FilesetRootThread { input, output } => {
+            ensure!(
+                !output.exists(),
+                "report exists; choose a new --output path"
+            );
+            let report = fileset_root_thread_metadata(File::open(input)?)?;
+            write_json(&output, &report)?;
+            eprintln!(
+                "{}; linked metadata only, no firmware state or boot admission; {}",
+                if report.is_some() {
+                    "root thread descriptor"
+                } else {
+                    "no root thread descriptor"
+                },
+                output.display()
+            );
+        }
         Command::DecodeIm4p {
             input,
             output,
@@ -3153,5 +3201,84 @@ mod context_block_cli_tests {
             assert!(resolve(&[flag, "false"]).is_err());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fileset_root_thread_cli_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn header(command_bytes: u32) -> Vec<u8> {
+        [
+            object::macho::MH_MAGIC_64,
+            object::macho::CPU_TYPE_ARM64,
+            0,
+            object::macho::MH_FILESET,
+            0,
+            command_bytes,
+            0,
+            0,
+        ]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect()
+    }
+
+    #[test]
+    fn metadata_command_is_separate_from_inventory() -> Result<()> {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "stela",
+                "fileset-root-thread",
+                "input",
+                "--output",
+                "metadata.json"
+            ])?
+            .command,
+            Command::FilesetRootThread { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "stela",
+                "fileset-manifest",
+                "input",
+                "--output",
+                "inventory.json"
+            ])?
+            .command,
+            Command::FilesetManifest { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_reader_consumes_only_the_declared_prefix() -> Result<()> {
+        let prefix = header(0);
+        let mut bytes = prefix.clone();
+        bytes.extend_from_slice(b"unread collection contents");
+        let mut input = Cursor::new(bytes);
+        assert!(fileset_root_thread_metadata(&mut input)?.is_none());
+        assert_eq!(input.position(), prefix.len() as u64);
+        assert_eq!(
+            serde_json::to_value(fileset_root_thread_metadata(Cursor::new(prefix))?)?,
+            serde_json::Value::Null
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_reader_bounds_untrusted_declared_sizes() {
+        let prefix = header((MAX_FILESET_ROOT_COMMAND_BYTES + 1) as u32);
+        let mut input = Cursor::new(prefix);
+        let error = fileset_root_thread_metadata(&mut input).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "fileset root load commands exceed the metadata input limit"
+        );
+        assert_eq!(input.position(), input.get_ref().len() as u64);
+        for bytes in [header(0)[..1].to_vec(), header(8)] {
+            assert!(fileset_root_thread_metadata(Cursor::new(bytes)).is_err());
+        }
     }
 }

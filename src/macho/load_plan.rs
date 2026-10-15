@@ -118,26 +118,13 @@ pub struct LoadPlan {
     pub unresolved_requirements: Vec<String>,
 }
 
-/// Original ARM_THREAD_STATE64 descriptor, not a complete guest PSTATE/context.
-/// PC is a preferred virtual address; the process loader must relocate it and
-/// replace the serialized SP with its separately validated KernelArgs stack.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Arm64UnixThread {
-    pub x: [u64; 31],
-    pub sp: u64,
-    pub pc: u64,
-    pub cpsr: u32,
-    pub pad: u32,
-    pub flavor: u32,
-    pub count: u32,
-    pub raw_command_sha256: String,
-    pub raw_command_hex: String,
-}
+pub use super::thread_state::Arm64UnixThread;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DynamicLinkerPlan {
     /// `entry` remains absent: LC_UNIXTHREAD is not an LC_MAIN C-call entry.
     pub image: LoadPlan,
+    /// Serialized SP is not the process stack: the loader supplies validated KernelArgs.
     pub thread: Arm64UnixThread,
     pub install_name: String,
 }
@@ -226,35 +213,6 @@ pub fn plan_dynamic_linker(data: &[u8]) -> Result<DynamicLinkerPlan> {
         install_name: planned
             .install_name
             .ok_or_else(|| invalid("MH_DYLINKER requires LC_ID_DYLINKER"))?,
-    })
-}
-
-fn unix_thread(raw: &[u8]) -> Result<Arm64UnixThread> {
-    // XNU ARM_THREAD_STATE64=6 has 68 uint32 words (272 bytes). Reject extra
-    // flavors/trailing bytes rather than interpreting arbitrary thread state.
-    if raw.len() != 288 {
-        return Err(invalid("LC_UNIXTHREAD requires exactly 288 bytes"));
-    }
-    let word = |offset| u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
-    let flavor = word(8);
-    let count = word(12);
-    if flavor != 6 || count != 68 {
-        return Err(invalid(
-            "LC_UNIXTHREAD requires ARM_THREAD_STATE64 flavor 6/count 68",
-        ));
-    }
-    let state = &raw[16..];
-    let register = |offset| u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
-    Ok(Arm64UnixThread {
-        x: std::array::from_fn(|index| register(index * 8)),
-        sp: register(248),
-        pc: register(256),
-        cpsr: word(280),
-        pad: word(284),
-        flavor,
-        count,
-        raw_command_sha256: sha256(raw),
-        raw_command_hex: hex::encode(raw),
     })
 }
 
@@ -422,7 +380,10 @@ fn plan_kind(data: &[u8], expected_type: u32) -> Result<PlannedImage> {
                 if thread.is_some() {
                     return Err(invalid("duplicate LC_UNIXTHREAD"));
                 }
-                thread = Some(unix_thread(command.raw_data())?);
+                thread = Some(
+                    super::thread_state::unix_thread(command.raw_data())
+                        .map_err(|error| invalid(error.to_string()))?,
+                );
             }
             LoadCommandVariant::IdDylib(dylib) => {
                 if expected_type != macho::MH_DYLIB {
