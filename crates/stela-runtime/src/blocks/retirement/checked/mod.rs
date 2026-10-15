@@ -40,6 +40,7 @@ pub(crate) struct OwnedRunOutcome {
     pub actual_pc: GuestAddress,
     pub last_native_observation: Option<NativeObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
+    pub mach_service_events: Vec<crate::mach::Event>,
 }
 
 /// Diagnostic metadata only; cannot mint entry/retirement/source authority.
@@ -129,6 +130,7 @@ impl BlockRuntime {
         let mut accounting = empty_accounting();
         let mut last_native_observation = None;
         let mut settled_prefixes = Vec::new();
+        let mut mach_service_events = Vec::new();
         let stop = loop {
             if !pe.authority.ready() {
                 break OwnedStop::EntryDeclined("actual PE is not Ready".into());
@@ -184,6 +186,7 @@ impl BlockRuntime {
                 &mut accounting,
                 &mut last_native_observation,
                 &mut settled_prefixes,
+                &mut mach_service_events,
             ) {
                 Ok(None) => {}
                 Ok(Some(stop)) => break stop,
@@ -203,6 +206,7 @@ impl BlockRuntime {
             actual_pc: pe.thread.pc,
             last_native_observation,
             settled_prefixes,
+            mach_service_events,
         }
     }
 }
@@ -222,6 +226,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         accounting: &mut RunOutcome,
         observation: &mut Option<NativeObservation>,
         prefixes: &mut Vec<SettledPrefix>,
+        mach_service_events: &mut Vec<crate::mach::Event>,
     ) -> anyhow::Result<Option<OwnedStop>> {
         let result =
             match self
@@ -396,15 +401,35 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             .authority
                             .enter_system(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("trap entry authority failed"))?;
-                        // There is no mapping service adapter in this source.
-                        // A detached Darwin service callback would release the
-                        // actual adopted PE and therefore is prohibited.
+                        // Non-memory bootstrap services retain native mapping
+                        // exclusion as well as this same actual SystemActive PE.
+                        let continuation = self.pe.backend.complete_trap(
+                            &trap,
+                            self.pe.system,
+                            &mut self.pe.thread.registers,
+                            mach_service_events,
+                        )?;
                         self.pe
                             .authority
                             .start_retirement(&ConsumerKey(()), self.attempt)
-                            .map_err(|()| anyhow::anyhow!("trap block authority failed"))?;
-                        self.finish_retirement(true)?;
-                        Ok(Some(OwnedStop::TrapPending(trap)))
+                            .map_err(|()| anyhow::anyhow!("trap retirement authority failed"))?;
+                        if let Some(continuation) = continuation {
+                            anyhow::ensure!(
+                                continuation == trap.exception_return_pc,
+                                "Mach service continuation differs"
+                            );
+                            self.pe.thread.pc = continuation;
+                            self.pe.backend.post_retirement(
+                                bound,
+                                self.pe.system,
+                                &mut self.pe.thread.registers,
+                            )?;
+                            self.finish_retirement(false)?;
+                            Ok(None)
+                        } else {
+                            self.finish_retirement(true)?;
+                            Ok(Some(OwnedStop::TrapPending(trap)))
+                        }
                     }
                 }
             }

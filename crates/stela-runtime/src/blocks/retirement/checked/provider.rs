@@ -93,7 +93,7 @@ pub(crate) struct CheckedProcessOwner<'pe> {
     pending: NoAsyncSources<'pe>,
     pauth: &'pe pauth::Context,
     clock: &'pe mut clock::Context,
-    thread: &'pe thread::Context,
+    thread: &'pe mut thread::Context,
     fp: Option<&'pe FpControlOwner<'pe>>,
 }
 impl<'pe> CheckedProcessOwner<'pe> {
@@ -117,7 +117,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
         pending: NoAsyncSources<'pe>,
         pauth: &'pe pauth::Context,
         clock: &'pe mut clock::Context,
-        thread: &'pe thread::Context,
+        thread: &'pe mut thread::Context,
         fp: Option<&'pe FpControlOwner<'pe>>,
     ) -> anyhow::Result<Self> {
         let mut owner = Self {
@@ -288,6 +288,13 @@ pub(crate) trait Owner: sealed::Concrete {
         system: &SystemState,
         registers: &mut GuestState,
     ) -> HelperOutcome;
+    fn complete_trap(
+        &mut self,
+        trap: &stela_compiler::block::SynchronousTrap,
+        system: &SystemState,
+        registers: &mut GuestState,
+        events: &mut Vec<crate::mach::Event>,
+    ) -> anyhow::Result<Option<GuestAddress>>;
     fn post_retirement(
         &mut self,
         bound: &BoundSource<'_>,
@@ -528,6 +535,50 @@ impl Owner for CheckedProcessOwner<'_> {
                 }
             }
         }
+    }
+    fn complete_trap(
+        &mut self,
+        trap: &stela_compiler::block::SynchronousTrap,
+        _system: &SystemState,
+        registers: &mut GuestState,
+        events: &mut Vec<crate::mach::Event>,
+    ) -> anyhow::Result<Option<GuestAddress>> {
+        use crate::{darwin::SYSCALL_SELECTOR_REGISTER, mach};
+        let selector = registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
+        let Some(number) = selector
+            .checked_neg()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            number,
+            mach::REPLY_PORT_TRAP
+                | mach::THREAD_SELF_TRAP
+                | mach::TASK_SELF_TRAP
+                | mach::HOST_SELF_TRAP
+        ) {
+            return Ok(None);
+        }
+        self.check_resources()?;
+        // Source settlement and SystemActive were established by the canonical
+        // consumer. This adapter has no actual PC or authority accessor.
+        let pending = mach::PendingCall::from_registers(trap.instruction_pc, registers, trap, 0)?;
+        let mut event = mach::Event {
+            trap: *trap,
+            request: Some(pending.request().clone()),
+            result: None,
+            declined: None,
+        };
+        let result = self.thread.ports_mut().request(pending.request());
+        match &result {
+            Ok(value) => event.result = Some(*value),
+            Err(error) => event.declined = Some(error.to_string()),
+        }
+        // Preserve the actual host attempt before any later validation fails.
+        events.push(event);
+        let value = result?;
+        Ok(Some(pending.complete_registers(registers, value)?))
     }
     fn post_retirement(
         &mut self,

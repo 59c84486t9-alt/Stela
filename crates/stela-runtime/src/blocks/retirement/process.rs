@@ -145,5 +145,6 @@ pub(crate) unsafe fn run_protected_services(
         "registers":format!("{:?}",pe.registers()), "settled_prefixes":prefixes,"retained":observation});
     let mut report = ServiceRunOutcome::unserviced(result.accounting);
     report.protected_observation = Some(diagnostics);
+    report.mach_services = result.mach_service_events;
     Ok(report)
 }

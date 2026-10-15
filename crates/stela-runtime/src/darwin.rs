@@ -128,13 +128,22 @@ impl fmt::Display for AbiError {
 impl Error for AbiError {}
 
 pub(crate) fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Result<(), AbiError> {
+    validate_trap_parts(state.pc, &state.registers, trap)
+}
+
+/// Validate borrowed actual registers without granting access to the PC owner.
+pub(crate) fn validate_trap_parts(
+    pc: stela_compiler::GuestAddress,
+    registers: &stela_compiler::GuestState,
+    trap: &SynchronousTrap,
+) -> Result<(), AbiError> {
     if trap.kind != TrapKind::SupervisorCall || trap.immediate != 0x80 {
         return Err(AbiError::UnsupportedTrap {
             trap_kind: trap.kind,
             immediate: trap.immediate,
         });
     }
-    if state.pc != trap.instruction_pc || !trap.instruction_pc.0.is_multiple_of(4) {
+    if pc != trap.instruction_pc || !trap.instruction_pc.0.is_multiple_of(4) {
         return Err(AbiError::InvalidTrapState {
             detail: "thread PC must identify the aligned SVC instruction",
         });
@@ -144,7 +153,7 @@ pub(crate) fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Resu
             detail: "SVC preferred return PC must be instruction PC plus four",
         });
     }
-    if state.registers.nzcv & !0xf0000000 != 0 {
+    if registers.nzcv & !0xf0000000 != 0 {
         return Err(AbiError::InvalidTrapState {
             detail: "state contains unsupported NZCV bits",
         });

@@ -3,7 +3,7 @@
 //! osfmk/arm64/bsd_arm64.c and osfmk/kern/syscall_sw.c. This is not an IPC bridge.
 use crate::{
     blocks::ThreadState,
-    darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap},
+    darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap_parts},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -37,8 +37,18 @@ impl PendingCall {
         trap: &SynchronousTrap,
         argument_count: usize,
     ) -> Result<Self> {
-        validate_trap(state, trap)?;
-        let selector = state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
+        Self::from_registers(state.pc, &state.registers, trap, argument_count)
+    }
+
+    /// Capture immutable ABI evidence; actual PC remains with its consumer.
+    pub(crate) fn from_registers(
+        pc: stela_compiler::GuestAddress,
+        registers: &stela_compiler::GuestState,
+        trap: &SynchronousTrap,
+        argument_count: usize,
+    ) -> Result<Self> {
+        validate_trap_parts(pc, registers, trap)?;
+        let selector = registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
         ensure!(
             selector < 0 && selector != i32::MIN && selector != -3 && selector != -4,
             "selector is not an ordinary Mach trap"
@@ -50,9 +60,12 @@ impl PendingCall {
         Ok(Self {
             request: Request {
                 number: selector.unsigned_abs(),
-                arguments: state.registers.x[..argument_count].to_vec(),
+                arguments: registers.x[..argument_count].to_vec(),
             },
-            issued: state.clone(),
+            issued: ThreadState {
+                pc,
+                registers: registers.clone(),
+            },
             trap: *trap,
         })
     }
@@ -64,10 +77,23 @@ impl PendingCall {
             state.pc == self.issued.pc && state.registers == self.issued.registers,
             "pending Mach state changed"
         );
-        // Unlike BSD returns, Mach completion does not normalize carry or X1.
-        state.registers.x[0] = value as i64 as u64;
-        state.pc = self.trap.exception_return_pc;
+        state.pc = self.complete_registers(&mut state.registers, value)?;
         Ok(())
+    }
+
+    /// Commit only the actual register bank; caller retires the returned PC.
+    pub(crate) fn complete_registers(
+        self,
+        registers: &mut stela_compiler::GuestState,
+        value: i32,
+    ) -> Result<stela_compiler::GuestAddress> {
+        ensure!(
+            *registers == self.issued.registers,
+            "pending Mach registers changed"
+        );
+        // Unlike BSD returns, Mach completion does not normalize carry or X1.
+        registers.x[0] = value as i64 as u64;
+        Ok(self.trap.exception_return_pc)
     }
 }
 
@@ -311,6 +337,44 @@ pub fn service(state: &mut ThreadState, trap: &SynchronousTrap, ports: &mut Host
 mod tests {
     use super::*;
     use stela_compiler::{GuestAddress, GuestState, block::TrapKind};
+    #[test]
+    fn borrowed_register_completion_preserves_the_pc_owner() {
+        let trap = SynchronousTrap {
+            kind: TrapKind::SupervisorCall,
+            immediate: 0x80,
+            instruction_pc: GuestAddress(0x1000),
+            exception_return_pc: GuestAddress(0x1004),
+        };
+        for flags in 0..16 {
+            for value in [0, i32::MAX, i32::MIN, -1] {
+                let mut state = ThreadState {
+                    pc: trap.instruction_pc,
+                    registers: GuestState {
+                        nzcv: flags << 28,
+                        ..GuestState::default()
+                    },
+                };
+                state.registers.x[SYSCALL_SELECTOR_REGISTER] = 0xfeed_face_ffff_ffe4;
+                let mut borrowed = state.registers.clone();
+                let pending = PendingCall::from_registers(state.pc, &borrowed, &trap, 0).unwrap();
+                let legacy = PendingCall::from_trap(&state, &trap, 0).unwrap();
+                assert_eq!(pending.request(), legacy.request());
+                let continuation = pending.complete_registers(&mut borrowed, value).unwrap();
+                assert_eq!(state.pc, trap.instruction_pc);
+                legacy.complete(&mut state, value).unwrap();
+                assert_eq!(continuation, state.pc);
+                assert_eq!(borrowed, state.registers);
+            }
+        }
+        let mut registers = GuestState::default();
+        registers.x[SYSCALL_SELECTOR_REGISTER] = (-28i64) as u64;
+        let pending =
+            PendingCall::from_registers(trap.instruction_pc, &registers, &trap, 0).unwrap();
+        registers.x[1] = 1;
+        let before = registers.clone();
+        assert!(pending.complete_registers(&mut registers, 7).is_err());
+        assert_eq!(registers, before);
+    }
     #[test]
     fn mach_capture_and_completion_preserve_carry_and_other_state() {
         let trap = SynchronousTrap {
