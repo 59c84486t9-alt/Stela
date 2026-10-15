@@ -936,6 +936,197 @@ class DeclaredScalableProgressTests(unittest.TestCase):
             with self.subTest(attrs=attrs), self.assertRaises(ValueError):
                 progress.validate_scalable_profile({**profile, 'decoder_mattrs': attrs})
 
+
+class RegistryPublicationPreservationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.base_path, self.candidate_path = root / 'base.json', root / 'candidate.json'
+        self.base = {'schema_version': 2, 'kind': 'reviewed_apple_silicon_instruction_forms',
+            'registry_version': 'reviewed-v1', 'profile': {'id': 'apple-sme2-streaming-v1'},
+            'compiler_fingerprint_sources': ['compiler.rs'],
+            'evidence_groups': {'old': {'report': 'old.json', 'scope': 'M1–M5 snapshot'},
+                                'owned': {'report': 'owned.json'}},
+            'forms': [{'id': 'old', 'status': 'implemented', 'scope': 'A–B unchanged'},
+                      {'id': 'owned', 'status': 'partial', 'scope': 'Old owned scope'}]}
+        self.base_path.write_text(json.dumps(self.base, ensure_ascii=False, indent=2) + '\n')
+
+    def check(self, candidate=None, *, text=None, **permissions):
+        if text is None:
+            text = json.dumps(self.base if candidate is None else candidate, ensure_ascii=False, indent=2) + '\n'
+        self.candidate_path.write_text(text)
+        options = {'owned_form_ids': [], 'owned_evidence_group_ids': []}
+        options.update(permissions)
+        return progress.validate_registry_preservation(self.base_path, self.candidate_path, **options)
+
+    def test_noop_preserves_exact_utf8_text_and_reports_bound_identities(self):
+        report = self.check()
+        self.assertTrue(report['passed'])
+        self.assertEqual(report['base_sha256'], progress.sha256(self.base_path))
+        self.assertEqual(report['candidate_sha256'], report['base_sha256'])
+        self.assertEqual(report['entries']['forms']['preserved'], ['old', 'owned'])
+        self.assertFalse(report['compiler_recipe_changed'])
+        self.assertFalse(report['registry_version_changed'])
+
+    def test_explicit_additions_updates_profiles_and_global_recipe_are_permitted(self):
+        candidate = copy.deepcopy(self.base)
+        candidate['registry_version'] = 'reviewed-v2'
+        candidate['compiler_fingerprint_sources'].append('new.rs')
+        candidate['forms'][1].update(status='implemented', scope='Reviewed owned scope')
+        candidate['forms'].append({'id': 'new', 'status': 'implemented', 'scope': 'New form'})
+        candidate['evidence_groups']['owned']['report'] = 'updated.json'
+        candidate['evidence_groups']['new'] = {'report': 'new.json'}
+        candidate['execution_profiles'] = {'new-v2': {'id': 'sme-streaming-v2', 'features': ['FEAT_SME']}}
+        report = self.check(candidate, owned_form_ids=['owned', 'new'],
+            owned_evidence_group_ids=['owned', 'new'], owned_execution_profile_keys=['new-v2'],
+            allow_compiler_recipe_update=True, allow_registry_version_update=True)
+        self.assertEqual(report['entries']['forms'], {'added': ['new'], 'updated': ['owned'], 'preserved': ['old']})
+        self.assertEqual(report['entries']['evidence_groups']['preserved'], ['old'])
+        self.assertEqual(report['entries']['execution_profiles']['added'], ['new-v2'])
+        self.assertTrue(report['compiler_recipe_changed'])
+        self.assertTrue(report['registry_version_changed'])
+
+    def test_default_ascii_serialization_churn_fails_even_with_identical_parsed_rows(self):
+        text = json.dumps(self.base, indent=2) + '\n'  # The actual accidental ensure_ascii=True failure.
+        self.assertEqual(json.loads(text), self.base)
+        with self.assertRaisesRegex(ValueError, 'unowned ID'):
+            self.check(text=text)
+        text = self.base_path.read_text().replace('"scope": "A–B unchanged"', '"scope":"A–B unchanged"')
+        self.assertEqual(json.loads(text), self.base)
+        with self.assertRaisesRegex(ValueError, 'unowned ID'):
+            self.check(text=text)
+
+    def test_unowned_row_and_group_edits_and_additions_fail(self):
+        candidates = []
+        row = copy.deepcopy(self.base); row['forms'][0]['status'] = 'partial'; candidates.append(row)
+        group = copy.deepcopy(self.base); group['evidence_groups']['old']['report'] = 'rewritten.json'; candidates.append(group)
+        added = copy.deepcopy(self.base); added['forms'].append({'id': 'new'}); candidates.append(added)
+        added = copy.deepcopy(self.base); added['evidence_groups']['new'] = {}; candidates.append(added)
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(ValueError, 'unowned ID'):
+                self.check(candidate)
+
+    def test_existing_ids_cannot_be_removed_or_reordered_even_when_owned(self):
+        candidates = []
+        row = copy.deepcopy(self.base); row['forms'].pop(); candidates.append(row)
+        row = copy.deepcopy(self.base); row['forms'].reverse(); candidates.append(row)
+        group = copy.deepcopy(self.base); group['evidence_groups'].pop('owned'); candidates.append(group)
+        group = copy.deepcopy(self.base); group['evidence_groups'] = dict(reversed(list(group['evidence_groups'].items()))); candidates.append(group)
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(ValueError, 'removed|reordered'):
+                self.check(candidate, owned_form_ids=['old', 'owned'], owned_evidence_group_ids=['old', 'owned'])
+
+    def test_metadata_flags_are_deny_default_and_restricted(self):
+        for key, value in (('schema_version', 3), ('profile', {'id': 'sme-streaming-v2'}),
+                           ('registry_version', 'reviewed-v2'), ('compiler_fingerprint_sources', ['new.rs']),
+                           ('undeclared_global', True)):
+            candidate = copy.deepcopy(self.base); candidate[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'metadata'):
+                self.check(candidate)
+        for key, value, permission in (('registry_version', 2, 'allow_registry_version_update'),
+                                       ('compiler_fingerprint_sources', [], 'allow_compiler_recipe_update')):
+            candidate = copy.deepcopy(self.base); candidate[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.check(candidate, **{permission: True})
+        for permission in ('allow_registry_version_update', 'allow_compiler_recipe_update'):
+            with self.subTest(permission=permission), self.assertRaises(ValueError):
+                self.check(**{permission: 1})
+
+    def test_execution_profile_ownership_cannot_rewrite_default_or_unowned_contracts(self):
+        self.base['execution_profiles'] = {'old-v2': {'id': 'sme-streaming-v2', 'features': ['FEAT_SME']}}
+        self.base_path.write_text(json.dumps(self.base, ensure_ascii=False, indent=2) + '\n')
+        candidate = copy.deepcopy(self.base)
+        candidate['execution_profiles']['new-v2'] = {'id': 'sme-streaming-v2', 'features': ['FEAT_SME', 'FEAT_SME2']}
+        report = self.check(candidate, owned_execution_profile_keys=['new-v2'])
+        self.assertEqual(report['entries']['execution_profiles']['preserved'], ['old-v2'])
+        self.assertFalse(report['compiler_recipe_changed'])
+        candidate['execution_profiles']['old-v2']['features'].append('FEAT_SME2p1')
+        with self.assertRaisesRegex(ValueError, 'unowned ID'):
+            self.check(candidate, owned_execution_profile_keys=['new-v2'])
+        with self.assertRaisesRegex(ValueError, 'absent'):
+            self.check(self.base, owned_execution_profile_keys=['missing'])
+
+    def test_empty_registry_additions_preserve_container_framing_and_prior_rows(self):
+        self.base['forms'] = []
+        self.base['evidence_groups'] = {}
+        self.base_path.write_text(json.dumps(self.base, ensure_ascii=False, indent=2) + '\n')
+        candidate = copy.deepcopy(self.base)
+        candidate['forms'].append({'id': 'first'})
+        candidate['evidence_groups']['first'] = {'report': 'first.json'}
+        report = self.check(candidate, owned_form_ids=['first'], owned_evidence_group_ids=['first'])
+        self.assertEqual(report['entries']['forms']['added'], ['first'])
+        self.assertFalse(report['registry_version_changed'])
+        self.base_path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + '\n')
+        text = self.base_path.read_text().replace('\n  ]\n}', '\n ]\n}')
+        with self.assertRaisesRegex(ValueError, 'framing'):
+            self.check(text=text)
+
+    def test_same_file_and_unowned_separator_whitespace_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'distinct'):
+            progress.validate_registry_preservation(self.base_path, self.base_path,
+                owned_form_ids=[], owned_evidence_group_ids=[])
+        text = self.base_path.read_text().replace('"scope": "A–B unchanged"\n    },',
+                                                  '"scope": "A–B unchanged"\n    }  ,')
+        self.assertEqual(json.loads(text), self.base)
+        with self.assertRaisesRegex(ValueError, 'unowned ID'):
+            self.check(text=text)
+
+    def test_empty_container_whitespace_is_unowned_and_metadata_flags_preserve_suffixes(self):
+        self.base['forms'] = []
+        self.base['evidence_groups'] = {}
+        self.base_path.write_text(json.dumps(self.base, ensure_ascii=False, indent=2) + '\n')
+        original = self.base_path.read_text()
+        for text in (original.replace('"forms": []', '"forms": [ \n ]'),
+                     original.replace('"evidence_groups": {}', '"evidence_groups": { \t }')):
+            self.assertEqual(json.loads(text), self.base)
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, 'empty container framing'):
+                self.check(text=text)
+        text = original.replace('"registry_version": "reviewed-v1",',
+                                '"registry_version": "reviewed-v2" \t ,')
+        with self.assertRaisesRegex(ValueError, 'member framing'):
+            self.check(text=text, allow_registry_version_update=True)
+        text = original.replace('"compiler.rs"\n  ],', '"new.rs"\n  ] \t ,')
+        with self.assertRaisesRegex(ValueError, 'member framing'):
+            self.check(text=text, allow_compiler_recipe_update=True)
+
+    def test_owned_append_retains_prior_final_entry_closing_whitespace(self):
+        base = '{"evidence_groups":{"old":{}  },"forms":[{"id":"old"}  ]}\n'
+        candidate = '{"evidence_groups":{"old":{}  ,"new":{}  },"forms":[{"id":"old"}  ,{"id":"new"}  ]}\n'
+        self.base_path.write_text(base)
+        result = self.check(text=candidate, owned_form_ids=['new'], owned_evidence_group_ids=['new'])
+        self.assertEqual(result['entries']['forms']['preserved'], ['old'])
+        self.assertEqual(result['entries']['evidence_groups']['preserved'], ['old'])
+        changed = candidate.replace('{"id":"old"}  ,', '{"id":"old"}\t,')
+        with self.assertRaisesRegex(ValueError, 'unowned ID'):
+            self.check(text=changed, owned_form_ids=['new'], owned_evidence_group_ids=['new'])
+        self.base_path.write_text('{"evidence_groups":{},"forms":[]  }\n')
+        candidate = '{"evidence_groups":{},"forms":[]  ,"execution_profiles":{"new":{"id":"sme-streaming-v2"}}  }\n'
+        result = self.check(text=candidate, owned_execution_profile_keys=['new'])
+        self.assertEqual(result['entries']['execution_profiles']['added'], ['new'])
+        self.base_path.write_text('{"evidence_groups":{},"forms":[],"schema_version":2  }\n')
+        candidate = '{"evidence_groups":{},"forms":[],"schema_version":2  ,"execution_profiles":{"new":{}}  }\n'
+        result = self.check(text=candidate, owned_execution_profile_keys=['new'])
+        self.assertEqual(result['entries']['execution_profiles']['added'], ['new'])
+
+    def test_json_ambiguity_duplicate_ids_and_format_churn_fail(self):
+        original = self.base_path.read_text()
+        malformed = [original.replace('"schema_version": 2,', '"schema_version": 2, "schema_version": 2,'),
+                     original.replace('"report": "old.json"', '"report": "old.json", "report": "other.json"'),
+                     original.replace('"schema_version": 2', '"schema_version": NaN'),
+                     original[:-2] + ',}\n', original + '{}', original.replace('\n', '\r\n')]
+        for text in malformed:
+            with self.subTest(text=text[:80]), self.assertRaises(ValueError):
+                self.check(text=text)
+        duplicate = copy.deepcopy(self.base); duplicate['forms'].append(duplicate['forms'][0])
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            self.check(duplicate, owned_form_ids=['old'])
+        reordered = dict(reversed(list(self.base.items())))
+        with self.assertRaisesRegex(ValueError, 'reordered'):
+            self.check(reordered)
+        with self.assertRaisesRegex(ValueError, 'absent'):
+            self.check(owned_form_ids=['typo'])
+
 class LLVMDisassemblyGuards(unittest.TestCase):
     def test_llvm_hyphenated_feature_segments_are_explicit_and_unambiguous(self):
         for feature in ('+sme-i16i64', '+sme-f64f64', '-sme-i16i64'):
@@ -1126,6 +1317,8 @@ class EvidenceTests(unittest.TestCase):
         (self.root / 'runtime.rs').write_text('changed runtime')
         with self.assertRaisesRegex(ValueError, 'Stale shared'):
             progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+
+
 
 
 if __name__ == '__main__':

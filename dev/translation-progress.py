@@ -56,6 +56,190 @@ def digest(value):
     return value
 
 
+def _publication_entries(text, start, *, object_members):
+    """Locate JSON member/element spans without rewriting their UTF-8 text."""
+    opening, closing = ('{', '}') if object_members else ('[', ']')
+    whitespace = ' \t\r\n'
+    def skip(position):
+        while position < len(text) and text[position] in whitespace:
+            position += 1
+        return position
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate JSON object key in publication input')
+            result[key] = value
+        return result
+    def non_json(value):
+        raise ValueError('Non-JSON numeric constant in publication input: ' + value)
+    decoder = json.JSONDecoder(object_pairs_hook=unique, parse_constant=non_json)
+    position = skip(start)
+    if position >= len(text) or text[position] != opening:
+        raise ValueError('Publication container has the wrong JSON type')
+    entries = []
+    position += 1
+    while True:
+        entry_start = position
+        position = skip(position)
+        if position < len(text) and text[position] == closing:
+            if entries:
+                raise ValueError('Publication input has a trailing comma')
+            return entries, position + 1
+        key = None
+        if object_members:
+            key, position = decoder.raw_decode(text, position)
+            if not isinstance(key, str):
+                raise ValueError('Publication object key must be a string')
+            position = skip(position)
+            if position >= len(text) or text[position] != ':':
+                raise ValueError('Publication object member has no colon')
+            position = skip(position + 1)
+        value_start = position
+        value, value_end = decoder.raw_decode(text, value_start)
+        position = skip(value_end)
+        entry_end = position if position < len(text) and text[position] == ',' else value_end
+        entries.append((key, value, entry_start, value_start, value_end, entry_end))
+        if position < len(text) and text[position] == closing:
+            return entries, position + 1
+        if position >= len(text) or text[position] != ',':
+            raise ValueError('Publication container has an invalid separator')
+        position += 1
+
+
+def validate_registry_preservation(base_path, candidate_path, *, owned_form_ids,
+                                   owned_evidence_group_ids, owned_execution_profile_keys=(),
+                                   allow_compiler_recipe_update=False, allow_registry_version_update=False):
+    """Check a reviewed-registry publication without rewriting either input.
+
+    Existing IDs and their order cannot be removed. Unowned rows, groups,
+    specialization contracts and other metadata retain exact text, including
+    Unicode escapes and indentation. New/updated IDs require explicit ownership;
+    version and global compiler-recipe changes are separate deny-default flags.
+    Builders should serialize new tracked text with ensure_ascii=False, then call
+    this guard as well as the semantic registry/evidence validators.
+    """
+    if type(allow_compiler_recipe_update) is not bool or type(allow_registry_version_update) is not bool:
+        raise ValueError('Publication metadata permissions must be explicit booleans')
+    def owned(values):
+        if isinstance(values, (str, bytes)):
+            raise ValueError('Publication ownership must be a sequence of nonempty IDs')
+        try:
+            values = list(values)
+        except TypeError as error:
+            raise ValueError('Publication ownership must be an iterable of IDs') from error
+        if any(not isinstance(value, str) or not value for value in values) or len(set(values)) != len(values):
+            raise ValueError('Publication ownership IDs must be nonempty and unique')
+        return set(values)
+    permissions = {'forms': owned(owned_form_ids), 'evidence_groups': owned(owned_evidence_group_ids),
+                   'execution_profiles': owned(owned_execution_profile_keys)}
+    if Path(base_path).samefile(candidate_path):
+        raise ValueError('Publication base and candidate must be distinct files')
+    base_data, candidate_data = Path(base_path).read_bytes(), Path(candidate_path).read_bytes()
+    base_text, candidate_text = base_data.decode('utf-8'), candidate_data.decode('utf-8')
+    base_entries, base_end = _publication_entries(base_text, 0, object_members=True)
+    candidate_entries, candidate_end = _publication_entries(candidate_text, 0, object_members=True)
+    if base_text[base_end:].strip(' \t\r\n') or candidate_text[candidate_end:].strip(' \t\r\n'):
+        raise ValueError('Publication input contains trailing non-JSON text')
+    def by_key(entries):
+        result = {}
+        for entry in entries:
+            if entry[0] in result:
+                raise ValueError('Duplicate top-level publication key')
+            result[entry[0]] = entry
+        return result
+    base, candidate = by_key(base_entries), by_key(candidate_entries)
+    if (not all(key in base and key in candidate for key in ('forms', 'evidence_groups'))
+            or set(base) - set(candidate)):
+        raise ValueError('Publication removed required or existing metadata')
+    additions = set(candidate) - set(base)
+    if additions - {'execution_profiles'} or ('execution_profiles' in additions and not permissions['execution_profiles']):
+        raise ValueError('Publication added undeclared top-level metadata')
+    if [key for key in candidate if key in base] != list(base):
+        raise ValueError('Publication reordered existing metadata keys')
+    if (base_text[:base_entries[0][2]] != candidate_text[:candidate_entries[0][2]]
+            or base_text[base_entries[-1][4]:] != candidate_text[candidate_entries[-1][4]:]):
+        raise ValueError('Publication changed outer JSON framing')
+    changes = {}
+    for name, entry in candidate.items():
+        previous = base.get(name)
+        if previous is not None:
+            suffix = candidate_text[entry[4]:entry[5]]
+            final_to_nonfinal = (previous is base_entries[-1] and entry is not candidate_entries[-1]
+                and suffix == base_text[previous[4]:base_end - 1])
+            if (base_text[previous[2]:previous[3]] != candidate_text[entry[2]:entry[3]]
+                    or (base_text[previous[4]:previous[5]] != suffix and not final_to_nonfinal)):
+                raise ValueError('Publication changed metadata member framing: ' + name)
+        if name not in permissions:
+            allowed = ((name == 'compiler_fingerprint_sources' and allow_compiler_recipe_update)
+                       or (name == 'registry_version' and allow_registry_version_update))
+            if name == 'registry_version' and allowed and (not isinstance(previous[1], str)
+                    or not isinstance(entry[1], str) or not entry[1]):
+                raise ValueError('Publication version update must retain a nonempty string')
+            if name == 'compiler_fingerprint_sources' and allowed and (not isinstance(entry[1], list)
+                    or not entry[1] or any(not isinstance(path, str) or not path for path in entry[1])
+                    or len(set(entry[1])) != len(entry[1])):
+                raise ValueError('Publication compiler recipe must retain unique nonempty paths')
+            if not allowed and base_text[previous[3]:previous[4]] != candidate_text[entry[3]:entry[4]]:
+                raise ValueError('Publication changed unowned metadata: ' + name)
+            continue
+        object_members = name != 'forms'
+        current_items, _ = _publication_entries(candidate_text, entry[3], object_members=object_members)
+        prior_items = [] if previous is None else _publication_entries(
+            base_text, previous[3], object_members=object_members)[0]
+        def identify(items):
+            result = {}
+            for item in items:
+                value = item[1]
+                identity = item[0] if object_members else value.get('id') if isinstance(value, dict) else None
+                if not isinstance(value, dict) or not isinstance(identity, str) or not identity or identity in result:
+                    raise ValueError('Publication entries need unique nonempty object IDs: ' + name)
+                result[identity] = item
+            return result
+        if previous is not None and not prior_items and not current_items and (
+                base_text[previous[3]:previous[4]] != candidate_text[entry[3]:entry[4]]):
+            raise ValueError('Publication changed empty container framing: ' + name)
+        if prior_items and current_items and (
+                base_text[prior_items[-1][4]:previous[4]] != candidate_text[current_items[-1][4]:entry[4]]):
+            raise ValueError('Publication changed container closing framing: ' + name)
+        before, after = identify(prior_items), identify(current_items)
+        if set(before) - set(after):
+            raise ValueError('Publication removed existing IDs: ' + name)
+        if [identity for identity in after if identity in before] != list(before):
+            raise ValueError('Publication reordered existing IDs: ' + name)
+        if permissions[name] - set(after):
+            raise ValueError('Publication ownership names an absent candidate ID: ' + name)
+        added, updated, preserved = [], [], []
+        for identity, item in after.items():
+            old = before.get(identity)
+            unchanged = False
+            if old is not None:
+                prefix_value_same = base_text[old[2]:old[4]] == candidate_text[item[2]:item[4]]
+                suffix = candidate_text[item[4]:item[5]]
+                suffix_same = base_text[old[4]:old[5]] == suffix
+                # A prior final entry may retain its container's original
+                # closing whitespace before the new comma of an owned append.
+                final_to_nonfinal = (old is prior_items[-1] and item is not current_items[-1]
+                    and suffix == base_text[old[4]:previous[4] - 1])
+                unchanged = prefix_value_same and (suffix_same or final_to_nonfinal)
+            changed = not unchanged
+            if changed and identity not in permissions[name]:
+                raise ValueError('Publication changed or added an unowned ID: ' + name + '/' + identity)
+            (added if old is None else updated if changed else preserved).append(identity)
+        changes[name] = {'added': added, 'updated': updated, 'preserved': preserved}
+    if permissions['execution_profiles'] and 'execution_profiles' not in candidate:
+        raise ValueError('Publication ownership names absent execution profiles')
+    def metadata_changed(name):
+        before, after = base.get(name), candidate.get(name)
+        return (None if before is None else base_text[before[3]:before[4]]) != (
+            None if after is None else candidate_text[after[3]:after[4]])
+    return {'kind': 'reviewed_registry_publication_preservation', 'passed': True,
+            'base_sha256': hashlib.sha256(base_data).hexdigest(),
+            'candidate_sha256': hashlib.sha256(candidate_data).hexdigest(), 'entries': changes,
+            'compiler_recipe_changed': metadata_changed('compiler_fingerprint_sources'),
+            'registry_version_changed': metadata_changed('registry_version')}
+
+
 def validate_registry(registry):
     if registry.get('schema_version') != 2 or registry.get('kind') != 'reviewed_apple_silicon_instruction_forms':
         raise ValueError('Unsupported Apple-silicon reviewed-form registry')
