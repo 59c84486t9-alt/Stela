@@ -30,12 +30,29 @@ pub enum DomainError {
     WrongDomain,
 }
 
+#[derive(Debug)]
+struct EventRegister {
+    event: AtomicBool,
+    monitor_bound: AtomicBool,
+    live: AtomicBool,
+}
+
+impl EventRegister {
+    fn signal_local(&self) -> bool {
+        if !self.live.load(Ordering::Acquire) {
+            return false;
+        }
+        self.event.store(true, Ordering::Release);
+        true
+    }
+}
+
 /// The registry contains only weak publication handles, not another PE state
 /// bank. Registry locking never calls memory, counter or interrupt services.
 #[derive(Debug)]
 pub struct EventDomain {
     identity: Arc<()>,
-    endpoints: Mutex<Vec<Weak<AtomicBool>>>,
+    endpoints: Mutex<Vec<Weak<EventRegister>>>,
 }
 
 impl EventDomain {
@@ -53,7 +70,11 @@ impl EventDomain {
         initial_event: bool,
         local_timeout: Option<u64>,
     ) -> Result<EventEndpoint, DomainError> {
-        let event = Arc::new(AtomicBool::new(initial_event));
+        let event = Arc::new(EventRegister {
+            event: AtomicBool::new(initial_event),
+            monitor_bound: AtomicBool::new(false),
+            live: AtomicBool::new(true),
+        });
         let mut endpoints = self.endpoints.lock().map_err(|_| DomainError::Poisoned)?;
         endpoints.retain(|endpoint| endpoint.strong_count() != 0);
         endpoints.push(Arc::downgrade(&event));
@@ -68,14 +89,7 @@ impl EventDomain {
     /// Repeated sends coalesce. New registrations do not inherit past sends.
     pub fn signal_all(&self) -> Result<(), DomainError> {
         let mut endpoints = self.endpoints.lock().map_err(|_| DomainError::Poisoned)?;
-        endpoints.retain(|endpoint| {
-            if let Some(event) = endpoint.upgrade() {
-                event.store(true, Ordering::Release);
-                true
-            } else {
-                false
-            }
-        });
+        endpoints.retain(|endpoint| endpoint.upgrade().is_some_and(|event| event.signal_local()));
         Ok(())
     }
 
@@ -95,7 +109,7 @@ impl Default for EventDomain {
 #[derive(Debug)]
 pub struct EventEndpoint {
     domain: Arc<()>,
-    event: Arc<AtomicBool>,
+    event: Arc<EventRegister>,
     local_timeout: Option<u64>,
 }
 
@@ -109,15 +123,15 @@ impl EventEndpoint {
     /// SEVL and legal exception return use this same endpoint. This publication
     /// is not an architectural guest memory barrier.
     pub fn signal_local(&self) {
-        self.event.store(true, Ordering::Release);
+        self.event.event.store(true, Ordering::Release);
     }
 
     pub fn consume_if_set(&self) -> bool {
-        self.event.swap(false, Ordering::AcqRel)
+        self.event.event.swap(false, Ordering::AcqRel)
     }
 
     pub fn is_set(&self) -> bool {
-        self.event.load(Ordering::Acquire)
+        self.event.event.load(Ordering::Acquire)
     }
 
     pub const fn local_timeout(&self) -> Option<u64> {
@@ -208,27 +222,94 @@ impl EventEndpoint {
     }
 }
 
+impl Drop for EventEndpoint {
+    fn drop(&mut self) {
+        // Temporary producer upgrades must not prolong the PE's live identity.
+        self.event.live.store(false, Ordering::Release);
+    }
+}
+
 /// A concrete infallible publication handle suitable under a monitor stripe.
 /// Memory owns once-only Exclusive→Open transitions; this handle only coalesces
 /// the resulting signals. It cannot keep a retired endpoint alive or retarget.
 #[derive(Debug, Clone)]
 pub struct EventProducer {
-    event: Weak<AtomicBool>,
+    event: Weak<EventRegister>,
 }
 
 impl EventProducer {
     /// False means the PE endpoint has retired, not that an event was consumed.
     pub fn signal_local(&self) -> bool {
-        if let Some(event) = self.event.upgrade() {
-            event.store(true, Ordering::Release);
-            true
-        } else {
-            false
-        }
+        self.event
+            .upgrade()
+            .is_some_and(|event| event.signal_local())
     }
 
     pub fn same_endpoint(&self, other: &Self) -> bool {
         Weak::ptr_eq(&self.event, &other.event)
+    }
+
+    /// Claim one active monitor owner across every memory domain. A successful
+    /// claim does not keep the PE alive; retirement may occur immediately after
+    /// return, and subsequent publications then return false.
+    pub fn try_bind_monitor(&self) -> Result<MonitorBinding, MonitorBindError> {
+        let event = self
+            .event
+            .upgrade()
+            .ok_or(MonitorBindError::EndpointRetired)?;
+        if !event.live.load(Ordering::Acquire) {
+            return Err(MonitorBindError::EndpointRetired);
+        }
+        if event
+            .monitor_bound
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(if event.live.load(Ordering::Acquire) {
+                MonitorBindError::AlreadyBound
+            } else {
+                MonitorBindError::EndpointRetired
+            });
+        }
+        if !event.live.load(Ordering::Acquire) {
+            event.monitor_bound.store(false, Ordering::Release);
+            return Err(MonitorBindError::EndpointRetired);
+        }
+        Ok(MonitorBinding {
+            producer: self.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorBindError {
+    EndpointRetired,
+    AlreadyBound,
+}
+
+/// Non-Clone lifetime claim for one monitor owner of the real PE endpoint.
+/// Memory retains this guard while any of that owner's global marks survive;
+/// it owns once-only mark opening and signals through this concrete handle.
+#[derive(Debug)]
+pub struct MonitorBinding {
+    producer: EventProducer,
+}
+
+impl MonitorBinding {
+    pub fn signal_local(&self) -> bool {
+        self.producer.signal_local()
+    }
+
+    pub fn same_endpoint(&self, producer: &EventProducer) -> bool {
+        self.producer.same_endpoint(producer)
+    }
+}
+
+impl Drop for MonitorBinding {
+    fn drop(&mut self) {
+        if let Some(event) = self.producer.event.upgrade() {
+            event.monitor_bound.store(false, Ordering::Release);
+        }
     }
 }
 

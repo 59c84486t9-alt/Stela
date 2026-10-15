@@ -5,6 +5,8 @@ pub mod debug;
 pub mod events;
 pub mod exception;
 pub mod execution;
+pub mod fixed_controls;
+pub mod fixed_execution;
 pub mod identification;
 pub mod interrupt;
 pub mod profile;

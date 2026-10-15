@@ -1,4 +1,4 @@
-//! Checked capability subset for EL0/EL1 exception entry and return.
+//! Checked capability subsets for fixed EL0/EL1 execution and exception entry.
 //!
 //! This is not a complete guest CPU model. The caller retains feature/control
 //! provenance and separately validates the EL/security/debug regime and state.
@@ -9,6 +9,8 @@ const ID_FIELD_MASK: u64 = 0xf;
 const PFR0_SVE_SHIFT: u32 = 32;
 const PFR1_SME_SHIFT: u32 = 24;
 const ARCHITECTURAL_STATE_ABSENT: u64 = 0;
+const DFR0_PMS_VERSION_SHIFT: u32 = 32;
+const SPE_NOT_IMPLEMENTED: u64 = 0;
 const TCR_TBI0: u64 = 1 << 37;
 const TCR_TBI1: u64 = 1 << 38;
 const TCR_TOP_BYTE_IGNORE_MASK: u64 = TCR_TBI0 | TCR_TBI1;
@@ -17,6 +19,34 @@ const MDSCR_KERNEL_DEBUG_ENABLE: u64 = 1 << 13;
 const MDSCR_MONITOR_DEBUG_ENABLE: u64 = 1 << 15;
 const MDSCR_ACTIVE_DEBUG_MASK: u64 =
     MDSCR_SOFTWARE_STEP | MDSCR_KERNEL_DEBUG_ENABLE | MDSCR_MONITOR_DEBUG_ENABLE;
+
+/// Raw base-SPE version which this fixed profile cannot implement.
+/// Present and reserved values both decline; neither proves feature absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedSpe {
+    pub pms_version: u8,
+}
+
+/// Explicit base FEAT_SPE absence, independent from FEAT_SPE_EXC absence.
+///
+/// Construct from this software machine's actual declared ID field or retained
+/// hardware readback. Disabled profiling does not suffice: branch helpers can
+/// still change previous-branch history. This is a feature fact, not a CPU bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseSpeAbsence(());
+
+impl BaseSpeAbsence {
+    pub const fn from_id_aa64dfr0_el1(value: u64) -> Result<Self, UnsupportedSpe> {
+        let version = (value >> DFR0_PMS_VERSION_SHIFT) & ID_FIELD_MASK;
+        if version == SPE_NOT_IMPLEMENTED {
+            Ok(Self(()))
+        } else {
+            Err(UnsupportedSpe {
+                pms_version: version as u8,
+            })
+        }
+    }
+}
 
 /// Optional effects reachable in the reviewed A64 entry/return helpers.
 /// EL2/EL3 routing and debug enablement are separate execution-state checks.
@@ -41,6 +71,8 @@ pub enum SystemEntryFeature {
     TrbeExc,
     Uao,
     Uinj,
+    /// ReportException can write PFAR even with an invalid physical address.
+    Pfar,
 }
 
 const SYSTEM_ENTRY_FEATURES: &[SystemEntryFeature] = &[
@@ -62,6 +94,7 @@ const SYSTEM_ENTRY_FEATURES: &[SystemEntryFeature] = &[
     SystemEntryFeature::TrbeExc,
     SystemEntryFeature::Uao,
     SystemEntryFeature::Uinj,
+    SystemEntryFeature::Pfar,
 ];
 
 impl SystemEntryFeature {
@@ -85,6 +118,7 @@ impl SystemEntryFeature {
             Self::TrbeExc => "FEAT_TRBE_EXC",
             Self::Uao => "FEAT_UAO",
             Self::Uinj => "FEAT_UINJ",
+            Self::Pfar => "FEAT_PFAR",
         }
     }
 
@@ -303,3 +337,30 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod base_spe_tests {
+    use super::*;
+
+    #[test]
+    fn base_spe_absence_requires_exact_zero_and_preserves_unknown_values() {
+        for version in 0..=ID_FIELD_MASK {
+            let raw = version << DFR0_PMS_VERSION_SHIFT;
+            let result = BaseSpeAbsence::from_id_aa64dfr0_el1(raw);
+            if version == SPE_NOT_IMPLEMENTED {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err().pms_version, version as u8);
+            }
+        }
+        // Unrelated ID fields do not stand in for PMSVer.
+        assert!(
+            BaseSpeAbsence::from_id_aa64dfr0_el1(!(ID_FIELD_MASK << DFR0_PMS_VERSION_SHIFT))
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "profile/pfar_tests.rs"]
+mod pfar_tests;

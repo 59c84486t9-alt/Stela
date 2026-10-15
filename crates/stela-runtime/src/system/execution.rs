@@ -219,6 +219,15 @@ pub trait Dispatcher {
         boundary: Boundary,
         registers: &mut GuestState,
     ) -> Result<GuestAddress, Failure>;
+    /// Borrowed after native return; the default certifies no new synchronization.
+    fn complete_with_code_scope(
+        &mut self,
+        boundary: Boundary,
+        registers: &mut GuestState,
+        _code: &mut crate::blocks::CodePublicationScope<'_>,
+    ) -> Result<GuestAddress, Failure> {
+        self.complete(boundary, registers)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -23,6 +23,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use crate::system::events::{EventEndpoint, EventProducer};
+
 use stela_compiler::{
     TargetCpu,
     context::memory::{
@@ -368,13 +370,41 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self.policy
     }
 
+    /// Bind this actual reservation context to one real PE before any mark.
+    /// Binding is fixed until context teardown; live marks cannot be reassigned.
+    pub fn bind_events(&mut self, producer: &EventProducer) -> Result<(), MemoryStatus> {
+        self.domain.check_execution()?;
+        self.domain
+            .system
+            .reservations
+            .bind_events(&mut self.reservation, producer)
+            .map_err(|_| MemoryStatus::Domain)
+    }
+
+    /// Check the retained monitor binding against a borrowed live PE owner.
+    /// Perform this preflight before architectural effects and retain both
+    /// borrows for the complete entry. This check never changes a reservation.
+    pub fn check_event_endpoint(&self, endpoint: &EventEndpoint) -> Result<(), MemoryStatus> {
+        self.domain.check_execution()?;
+        self.domain
+            .system
+            .reservations
+            .check_event_endpoint(&self.reservation, &endpoint.producer())
+            .map_err(|_| MemoryStatus::Domain)
+    }
+
+    /// Clear only the local reservation. The independent global mark survives.
+    /// ERET separately signals its prechecked borrowed endpoint in source order.
     pub fn clear_reservation(&mut self) -> Result<(), MemoryStatus> {
         self.domain.check_execution()?;
         self.domain
             .system
             .reservations
             .clear(&mut self.reservation)
-            .map_err(|_| MemoryStatus::Domain)
+            .map_err(|_| MemoryStatus::Domain)?;
+        // Cleanup can wait behind another PE. A terminal failure while waiting
+        // must remain an explicit backend failure, never guest ERET success.
+        self.domain.check_execution()
     }
 
     /// Selected implementation policy after a genuine architectural memory

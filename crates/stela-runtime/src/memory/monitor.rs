@@ -8,6 +8,7 @@
 //! Native faults need root's actual resumable cleanup boundary; Rust unwinding
 //! fails the whole execution domain and does not stand in for signal recovery.
 
+use crate::system::events::{EventProducer, MonitorBinding};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::PhantomData;
@@ -33,6 +34,11 @@ pub enum MonitorError {
     WrongDomain,
     DeadMapping,
     Poisoned,
+    EventsUnbound,
+    EventsAlreadyBound,
+    ReservationActive,
+    EventBindingUnavailable,
+    WrongEventEndpoint,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -170,6 +176,31 @@ impl Key {
 struct Epoch<B> {
     backing: Arc<B>,
     granule: u64,
+    subscribers: Mutex<Vec<Weak<EventCell<B>>>>,
+}
+
+/// Event scope is chosen by the physical mapping owner, not an opcode name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservationScope {
+    Local,
+    Global,
+}
+
+struct EventState<B> {
+    epoch: Weak<Epoch<B>>,
+    // Active GlobalMark retains this Mapping allocation; no address reuse.
+    mapping: usize,
+}
+
+struct EventCell<B> {
+    endpoint: MonitorBinding,
+    current: Mutex<EventState<B>>,
+}
+
+/// Global lifetime is independent from local reservation validity.
+struct GlobalMark<B, M, A> {
+    epoch: Arc<Epoch<B>>,
+    mapping: Arc<Mapping<M, A>>,
 }
 
 type Entries<B> = HashMap<Key, Weak<Epoch<B>>>;
@@ -207,6 +238,32 @@ pub struct MonitorDomain<B, M, A> {
 pub struct ThreadMonitor<B, M, A> {
     domain: Arc<MonitorDomain<B, M, A>>,
     reservation: Option<Reservation<B, M, A>>,
+    global: Option<GlobalMark<B, M, A>>,
+    event: Option<Arc<EventCell<B>>>,
+}
+
+/// Declare before stripe guards so error/unwind cleanup cannot self-deadlock.
+struct LocalRetirement<'a, B, M, A> {
+    domain: &'a MonitorDomain<B, M, A>,
+    saved: Option<Reservation<B, M, A>>,
+}
+impl<B, M, A> Drop for LocalRetirement<'_, B, M, A> {
+    fn drop(&mut self) {
+        self.domain.retire(self.saved.take());
+    }
+}
+
+struct GlobalRetirement<'a, B, M, A> {
+    domain: &'a MonitorDomain<B, M, A>,
+    saved: Option<GlobalMark<B, M, A>>,
+    cell: Option<Arc<EventCell<B>>>,
+    open: bool,
+}
+impl<B, M, A> Drop for GlobalRetirement<'_, B, M, A> {
+    fn drop(&mut self) {
+        self.domain
+            .finish_global(self.saved.take(), self.cell.as_ref(), self.open);
+    }
 }
 
 impl<B, M, A> MonitorDomain<B, M, A> {
@@ -231,7 +288,180 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         ThreadMonitor {
             domain: Arc::clone(self),
             reservation: None,
+            global: None,
+            event: None,
         }
+    }
+
+    /// Bind one real PE endpoint while this context is unreserved/unbound.
+    /// The endpoint-global non-Clone claim also excludes other monitor domains.
+    pub fn bind_events(
+        &self,
+        thread: &mut ThreadMonitor<B, M, A>,
+        producer: &EventProducer,
+    ) -> Result<(), MonitorError> {
+        self.owner(thread)?;
+        self.check_execution()?;
+        if thread.event.is_some() {
+            return Err(MonitorError::EventsAlreadyBound);
+        }
+        if thread.reservation.is_some() || thread.global.is_some() {
+            return Err(MonitorError::ReservationActive);
+        }
+        let endpoint = producer
+            .try_bind_monitor()
+            .map_err(|_| MonitorError::EventBindingUnavailable)?;
+        thread.event = Some(Arc::new(EventCell {
+            endpoint,
+            current: Mutex::new(EventState {
+                epoch: Weak::new(),
+                mapping: 0,
+            }),
+        }));
+        Ok(())
+    }
+
+    /// Verify retained real endpoint identity; never rebind or mutate a mark.
+    /// The higher owner borrows the live EventEndpoint for the complete entry.
+    pub fn check_event_endpoint(
+        &self,
+        thread: &ThreadMonitor<B, M, A>,
+        producer: &EventProducer,
+    ) -> Result<(), MonitorError> {
+        self.owner(thread)?;
+        self.check_execution()?;
+        let cell = thread.event.as_ref().ok_or(MonitorError::EventsUnbound)?;
+        if cell.endpoint.same_endpoint(producer) {
+            Ok(())
+        } else {
+            Err(MonitorError::WrongEventEndpoint)
+        }
+    }
+
+    // Only monitor metadata mutexes; endpoint publication itself takes no lock.
+    // Poison recovery is terminal teardown, never resumable guest execution.
+    fn event_lock<'a, T>(&self, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        mutex.lock().unwrap_or_else(|error| {
+            self.failed.store(true, Ordering::Release);
+            error.into_inner()
+        })
+    }
+
+    fn current_is(state: &EventState<B>, epoch: &Arc<Epoch<B>>) -> bool {
+        std::ptr::eq(state.epoch.as_ptr(), Arc::as_ptr(epoch))
+    }
+
+    fn open_cell(
+        &self,
+        cell: &EventCell<B>,
+        epoch: &Arc<Epoch<B>>,
+        mapping: Option<usize>,
+    ) -> bool {
+        let mut current = self.event_lock(&cell.current);
+        if Self::current_is(&current, epoch)
+            && mapping.is_none_or(|mapping| current.mapping == mapping)
+        {
+            current.epoch = Weak::new();
+            current.mapping = 0;
+            // Concrete infallible atomic publication, no endpoint locks/callbacks.
+            cell.endpoint.signal_local();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn open_epoch(&self, epoch: &Arc<Epoch<B>>, mapping: Option<usize>) {
+        let mut subscribers = self.event_lock(&epoch.subscribers);
+        subscribers.retain(|subscriber| {
+            let Some(cell) = subscriber.upgrade() else {
+                return false;
+            };
+            if self.open_cell(&cell, epoch, mapping) {
+                return false;
+            }
+            Self::current_is(&self.event_lock(&cell.current), epoch)
+        });
+    }
+
+    fn subscribe(
+        &self,
+        epoch: &Arc<Epoch<B>>,
+        cell: &Arc<EventCell<B>>,
+        mapping: &Arc<Mapping<M, A>>,
+    ) {
+        let mut subscribers = self.event_lock(&epoch.subscribers);
+        // Prune stale/dead entries; same reusable cell is never appended twice.
+        subscribers.retain(|subscriber| {
+            subscriber.upgrade().is_some_and(|other| {
+                Arc::ptr_eq(&other, cell)
+                    || Self::current_is(&self.event_lock(&other.current), epoch)
+            })
+        });
+        {
+            let mut current = self.event_lock(&cell.current);
+            current.epoch = Arc::downgrade(epoch);
+            current.mapping = Arc::as_ptr(mapping) as usize;
+        }
+        if !subscribers
+            .iter()
+            .any(|subscriber| Weak::ptr_eq(subscriber, &Arc::downgrade(cell)))
+        {
+            subscribers.push(Arc::downgrade(cell));
+        }
+    }
+
+    fn finish_global(
+        &self,
+        mark: Option<GlobalMark<B, M, A>>,
+        cell: Option<&Arc<EventCell<B>>>,
+        open: bool,
+    ) {
+        let Some(mark) = mark else {
+            return;
+        };
+        let key = Key::new(&mark.epoch.backing, mark.epoch.granule);
+        let entries = self.stripes[self.stripe(key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cell) = cell {
+            let mut subscribers = self.event_lock(&mark.epoch.subscribers);
+            if open {
+                self.open_cell(cell, &mark.epoch, Some(Arc::as_ptr(&mark.mapping) as usize));
+            }
+            // Same-Epoch retarget is still current: retain its reused subscriber.
+            let still_current = Self::current_is(&self.event_lock(&cell.current), &mark.epoch);
+            if !still_current {
+                subscribers.retain(|subscriber| {
+                    !Weak::ptr_eq(subscriber, &Arc::downgrade(cell))
+                        && subscriber.strong_count() != 0
+                });
+            }
+        }
+        drop(entries);
+        drop(mark);
+        let mut entries = self.stripes[self.stripe(key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries
+            .get(&key)
+            .is_some_and(|epoch| epoch.strong_count() == 0)
+        {
+            entries.remove(&key);
+        }
+    }
+
+    /// Selected CLREX/spurious global-opening policy, separate from local clear.
+    /// This is finite explicit clearing; it makes no fairness/progress admission.
+    pub fn clear_and_open_global(
+        &self,
+        thread: &mut ThreadMonitor<B, M, A>,
+    ) -> Result<(), MonitorError> {
+        let _failure = FailureBoundary(&self.failed);
+        self.owner(thread)?;
+        self.retire(thread.reservation.take());
+        self.finish_global(thread.global.take(), thread.event.as_ref(), true);
+        Ok(())
     }
 
     fn stripe(&self, key: Key) -> usize {
@@ -287,7 +517,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries
             .get(&key)
-            .is_some_and(|epoch| epoch.upgrade().is_none())
+            .is_some_and(|epoch| epoch.strong_count() == 0)
         {
             entries.remove(&key);
         }
@@ -306,34 +536,77 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         access: &Access<B, M, A>,
         read: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, AccessError<E>> {
+        self.load_with_scope(thread, access, ReservationScope::Local, read)
+    }
+
+    pub fn load_with_scope<T, E>(
+        &self,
+        thread: &mut ThreadMonitor<B, M, A>,
+        access: &Access<B, M, A>,
+        scope: ReservationScope,
+        read: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, AccessError<E>> {
         let _failure = FailureBoundary(&self.failed);
         self.owner(thread)?;
         let key = self.key(access)?;
-        self.retire(thread.reservation.take());
-        let mut entries = self.lock(self.stripe(key))?;
-        let _gate_failure = FailureBoundary(&self.failed);
-        if !access.mapping.is_live() {
-            return Err(MonitorError::DeadMapping.into());
+        if scope == ReservationScope::Global && thread.event.is_none() {
+            return Err(MonitorError::EventsUnbound.into());
         }
-        let value = read().map_err(AccessError::Memory)?;
-        let epoch = entries
-            .get(&key)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| {
-                let epoch = Arc::new(Epoch {
-                    backing: Arc::clone(&access.backing),
-                    granule: key.granule,
+        // Local replacement never itself opens the independent global mark.
+        self.retire(thread.reservation.take());
+        let mut old_global = GlobalRetirement {
+            domain: self,
+            saved: None,
+            cell: thread.event.clone(),
+            open: false,
+        };
+        let mut pending = LocalRetirement {
+            domain: self,
+            saved: None,
+        };
+        let value = {
+            let mut entries = self.lock(self.stripe(key))?;
+            let _gate_failure = FailureBoundary(&self.failed);
+            if !access.mapping.is_live() {
+                return Err(MonitorError::DeadMapping.into());
+            }
+            // Error/panic leaves the prior global hold and current cell intact.
+            let value = read().map_err(AccessError::Memory)?;
+            let epoch = entries
+                .get(&key)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let epoch = Arc::new(Epoch {
+                        backing: Arc::clone(&access.backing),
+                        granule: key.granule,
+                        subscribers: Mutex::new(Vec::new()),
+                    });
+                    entries.insert(key, Arc::downgrade(&epoch));
+                    epoch
                 });
-                entries.insert(key, Arc::downgrade(&epoch));
-                epoch
+            pending.saved = Some(Reservation {
+                epoch: Arc::clone(&epoch),
+                mapping: Arc::clone(&access.mapping),
+                offset: access.offset,
+                bytes: access.bytes,
+                shape: access.shape,
             });
-        thread.reservation = Some(Reservation {
-            epoch,
-            mapping: Arc::clone(&access.mapping),
-            offset: access.offset,
-            bytes: access.bytes,
-            shape: access.shape,
-        });
+            if scope == ReservationScope::Global {
+                let cell = thread
+                    .event
+                    .as_ref()
+                    .expect("global scope preflighted binding");
+                self.subscribe(&epoch, cell, &access.mapping);
+                old_global.saved = thread.global.replace(GlobalMark {
+                    epoch,
+                    mapping: Arc::clone(&access.mapping),
+                });
+            }
+            self.check_execution()?;
+            value
+        };
+        thread.reservation = pending.saved.take();
+        drop(old_global); // Old stripe reacquisition occurs after new gate release.
         Ok(value)
     }
 
@@ -349,14 +622,17 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         let _failure = FailureBoundary(&self.failed);
         self.owner(thread)?;
         let key = self.key(access)?;
-        let saved = thread.reservation.take();
+        let saved = LocalRetirement {
+            domain: self,
+            saved: thread.reservation.take(),
+        };
         let result = {
             let mut entries = self.lock(self.stripe(key))?;
             let _gate_failure = FailureBoundary(&self.failed);
             if !access.mapping.is_live() {
                 Err(MonitorError::DeadMapping.into())
             } else {
-                let valid = saved.as_ref().is_some_and(|saved| {
+                let valid = saved.saved.as_ref().is_some_and(|saved| {
                     saved.mapping.is_live()
                         && saved.mapping.attributes == access.mapping.attributes
                         && saved.offset == access.offset
@@ -371,6 +647,11 @@ impl<B, M, A> MonitorDomain<B, M, A> {
                     // Consume and invalidate before the attempted conditional
                     // write; a callback fault cannot leave a reusable mark.
                     entries.remove(&key);
+                    self.open_epoch(
+                        &saved.saved.as_ref().expect("valid saved reservation").epoch,
+                        None,
+                    );
+                    self.check_execution()?;
                     write()
                         .map(ConditionalWrite::Stored)
                         .map_err(AccessError::Memory)
@@ -379,7 +660,12 @@ impl<B, M, A> MonitorDomain<B, M, A> {
                 }
             }
         };
-        self.retire(saved);
+        drop(saved);
+        // Stored and Failed are the only retired conditional outcomes. Errors
+        // are not silently classified as retired StoreExcl or taken DataAbort.
+        if result.is_ok() {
+            self.finish_global(thread.global.take(), thread.event.as_ref(), true);
+        }
         result
     }
 
@@ -404,8 +690,14 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         // Bound work by live reservation metadata, not bytes/ERG in a large
         // copyout. Gate collisions never invalidate unrelated physical keys.
         entries.retain(|key, epoch| {
-            !(key.backing == backing && (first..=last).contains(&key.granule))
-                && epoch.strong_count() != 0
+            if key.backing == backing && (first..=last).contains(&key.granule) {
+                if let Some(epoch) = epoch.upgrade() {
+                    self.open_epoch(&epoch, None);
+                }
+                false
+            } else {
+                epoch.strong_count() != 0
+            }
         });
     }
 
@@ -426,10 +718,12 @@ impl<B, M, A> MonitorDomain<B, M, A> {
             let _gate_failure = FailureBoundary(&self.failed);
             if policy == Invalidation::BeforeAttempt {
                 self.invalidate(&mut entries, range);
+                self.check_execution()?;
             }
             let result = write();
             if policy == Invalidation::OnCommit && result.is_ok() {
                 self.invalidate(&mut entries, range);
+                self.check_execution()?;
             }
             return result.map_err(AccessError::Memory);
         }
@@ -444,24 +738,37 @@ impl<B, M, A> MonitorDomain<B, M, A> {
             for entries in &mut guards {
                 self.invalidate(entries, range);
             }
+            self.check_execution()?;
         }
         let result = write();
         if policy == Invalidation::OnCommit && result.is_ok() {
             for entries in &mut guards {
                 self.invalidate(entries, range);
             }
+            self.check_execution()?;
         }
         result.map_err(AccessError::Memory)
     }
 
     pub fn revoke_mapping(&self, mapping: &Mapping<M, A>) -> Result<(), MonitorError> {
         let _failure = FailureBoundary(&self.failed);
+        // Declare before gates so generic backing payload destruction is outside all gates.
+        let mut deferred_epochs = Vec::new();
         let _guards = self
             .stripes
             .iter()
             .map(|stripe| stripe.lock().map_err(|_| MonitorError::Poisoned))
             .collect::<Result<Vec<_>, _>>()?;
         mapping.live.store(false, Ordering::Release);
+        // Finite mapping-lifetime spurious opening; not universal ISA semantics.
+        for entries in &_guards {
+            for weak in entries.values() {
+                if let Some(epoch) = weak.upgrade() {
+                    self.open_epoch(&epoch, Some(std::ptr::from_ref(mapping) as usize));
+                    deferred_epochs.push(epoch);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -477,22 +784,10 @@ impl<B, M, A> MonitorDomain<B, M, A> {
 impl<B, M, A> Drop for ThreadMonitor<B, M, A> {
     fn drop(&mut self) {
         let _failure = FailureBoundary(&self.domain.failed);
-        let Some(reservation) = self.reservation.take() else {
-            return;
-        };
-        let key = Key::new(&reservation.epoch.backing, reservation.epoch.granule);
-        drop(reservation);
-        // A poisoned domain remains poisoned and cannot execute again. Cleanup
-        // may recover its bookkeeping guard solely to remove dead weak entries.
-        let mut entries = self.domain.stripes[self.domain.stripe(key)]
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries
-            .get(&key)
-            .is_some_and(|epoch| epoch.upgrade().is_none())
-        {
-            entries.remove(&key);
-        }
+        self.domain.retire(self.reservation.take());
+        // Finite PE-owner teardown opening under B2.12.5, with mandatory event.
+        self.domain
+            .finish_global(self.global.take(), self.event.as_ref(), true);
     }
 }
 

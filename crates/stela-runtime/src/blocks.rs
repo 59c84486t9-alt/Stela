@@ -29,6 +29,10 @@ use stela_compiler::{
 };
 use stela_core::sha256;
 
+#[path = "blocks/publication.rs"]
+mod publication;
+pub use publication::CodePublicationScope;
+
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const INSTRUCTION_BYTES: usize = 4;
 const ZERO_REGISTER_INDEX: u8 = 31;
@@ -614,6 +618,7 @@ impl BlockRuntime {
             self.target.id()
         );
         let mapping = platform::Mapping::new(&native)?;
+        serialize_instruction_execution()?;
         if prepared.cache_hit {
             outcome.disk_cache_hits += 1;
         } else {
@@ -1091,7 +1096,9 @@ impl BlockRuntime {
                 let dispatcher = system_dispatcher
                     .as_deref_mut()
                     .context("System exit lacks validated dispatcher")?;
-                match dispatcher.complete(boundary, &mut state.registers) {
+                let mut code = CodePublicationScope::new(&*self, &boundary);
+                match dispatcher.complete_with_code_scope(boundary, &mut state.registers, &mut code)
+                {
                     Ok(next) => state.pc = next,
                     Err(failure) => {
                         outcome.reason = StopReason::SystemFailure {
