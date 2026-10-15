@@ -589,6 +589,38 @@
         "crates/stela-runtime/src/memory/domain.rs",
         "crates/stela-runtime/src/memory/monitor.rs"
       ]
+    },
+    "checked_scalar_exclusive5_current": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/scalar-system/exclusives/current58-scalar5-1/transfer-cli-optimized.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/scalar-system/exclusives/current58-scalar5-1/publication-optimized/evidence.json",
+      "kind": "scalar5_current_cli_body_transfer",
+      "comparison_field": "transferred_original_state_memory_comparisons",
+      "required_positive_counts": [
+        "current_body_transfers",
+        "transferred_original_state_memory_comparisons"
+      ],
+      "required_measurements": {
+        "current_body_transfers": 72,
+        "transferred_original_state_memory_comparisons": 64,
+        "clrex_original_cases": 32,
+        "scalar_original_cases": 24,
+        "high44_original_cases": 8,
+        "fresh_native_guest_executions": 0,
+        "fresh_original_executions": 0
+      },
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3",
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ]
     }
   },
   "forms": [
@@ -3630,6 +3662,208 @@
       "smoke_samples": [
         {
           "word": "0xc81f7d2c",
+          "expected_mnemonics": [
+            "stxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "CLREX_BN_barriers",
+      "mnemonic": "CLREX",
+      "category": "base_integer_system",
+      "source_file": "clrex.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd503305f",
+      "features": [],
+      "alias": false,
+      "source_sha256": "1467a01a771812a3959ec48984d9f426132945b722e4a3f554b002caf35197f6",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Reviewed canonical semantics and same-owner exclusive/CLREX path;64 original/native cases transferred through72 actual current optimized CLI whole-body/source-map/ABI/requirements equality checks. Scoped runtime qualification/source lineage and explicit unused AVX2 target difference reviewed; no whole-runtime identity or fresh execution relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_scalar_exclusive5_current"
+      ],
+      "scope": "All16 CRm options ignore the option field and clear only the actual retained PE local reservation, preserving other guest storage/RAM and independent global/peer marks. CLREX itself publishes no event; full LDXR/CLREX/failed-STXR window separately observes the canonical failed-store event.",
+      "smoke_samples": [
+        {
+          "word": "0xd503305f",
+          "expected_mnemonics": [
+            "clrex"
+          ],
+          "consumed_source_bytes": 8
+        },
+        {
+          "word": "0xd5033f5f",
+          "expected_mnemonics": [
+            "clrex"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDAXR_LR32_ldstexclr",
+      "mnemonic": "LDAXR",
+      "category": "base_integer_system",
+      "source_file": "ldaxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88408000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "743291b9689fdeaaa0bc70f27f21ce6f43f3bde77acaf990e9a51826b5c58edf",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Reviewed canonical semantics and same-owner exclusive/CLREX path;64 original/native cases transferred through72 actual current optimized CLI whole-body/source-map/ABI/requirements equality checks. Scoped runtime qualification/source lineage and explicit unused AVX2 target difference reviewed; no whole-runtime identity or fresh execution relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_scalar_exclusive5_current"
+      ],
+      "scope": "Canonical scalar32 form under fresh EL0 untagged NormalWB/SA0-off checked-memory controls. Exact source-derived category authorization and actual same-domain monitor load/store check precede effects; preserve architectural W zero extension/discard/status, SP-base and overlap/UNDEF policy, no host atomics shortcut. Load-exclusive marks the actual local/global reservation; store-exclusive consumes the actual local mark, writes/status only on qualified pass, and preserves denied/failed raw-access order. Acquire/release service ordering is part of the existing canonical domain; no cross-PE litmus measurement claimed.",
+      "smoke_samples": [
+        {
+          "word": "0x885ffc20",
+          "expected_mnemonics": [
+            "ldaxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXR_LR32_ldstexclr",
+      "mnemonic": "LDXR",
+      "category": "base_integer_system",
+      "source_file": "ldxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88400000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "03fc0f17e72228000b25c0ed7e3ea556933af33627485c30af2b275ed6fd8a54",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Reviewed canonical semantics and same-owner exclusive/CLREX path;64 original/native cases transferred through72 actual current optimized CLI whole-body/source-map/ABI/requirements equality checks. Scoped runtime qualification/source lineage and explicit unused AVX2 target difference reviewed; no whole-runtime identity or fresh execution relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_scalar_exclusive5_current"
+      ],
+      "scope": "Canonical scalar32 form under fresh EL0 untagged NormalWB/SA0-off checked-memory controls. Exact source-derived category authorization and actual same-domain monitor load/store check precede effects; preserve architectural W zero extension/discard/status, SP-base and overlap/UNDEF policy, no host atomics shortcut. Load-exclusive marks the actual local/global reservation; store-exclusive consumes the actual local mark, writes/status only on qualified pass, and preserves denied/failed raw-access order. Acquire/release service ordering is part of the existing canonical domain; no cross-PE litmus measurement claimed.",
+      "smoke_samples": [
+        {
+          "word": "0x885f7c20",
+          "expected_mnemonics": [
+            "ldxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXR_SR32_ldstexclr",
+      "mnemonic": "STLXR",
+      "category": "base_integer_system",
+      "source_file": "stlxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88008000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "3d88fb5c27d25312a266ef3a4f71039cf58bc539e9c43646c6617473dea20bc0",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Reviewed canonical semantics and same-owner exclusive/CLREX path;64 original/native cases transferred through72 actual current optimized CLI whole-body/source-map/ABI/requirements equality checks. Scoped runtime qualification/source lineage and explicit unused AVX2 target difference reviewed; no whole-runtime identity or fresh execution relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_scalar_exclusive5_current"
+      ],
+      "scope": "Canonical scalar32 form under fresh EL0 untagged NormalWB/SA0-off checked-memory controls. Exact source-derived category authorization and actual same-domain monitor load/store check precede effects; preserve architectural W zero extension/discard/status, SP-base and overlap/UNDEF policy, no host atomics shortcut. Load-exclusive marks the actual local/global reservation; store-exclusive consumes the actual local mark, writes/status only on qualified pass, and preserves denied/failed raw-access order. Acquire/release service ordering is part of the existing canonical domain; no cross-PE litmus measurement claimed.",
+      "smoke_samples": [
+        {
+          "word": "0x8802fc20",
+          "expected_mnemonics": [
+            "stlxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXR_SR32_ldstexclr",
+      "mnemonic": "STXR",
+      "category": "base_integer_system",
+      "source_file": "stxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88000000",
+      "features": [],
+      "alias": false,
+      "source_sha256": "cf26b89bdb8ccb7f159628ad202855272137431a2f9dd7caa1881e0955a817f7",
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Reviewed canonical semantics and same-owner exclusive/CLREX path;64 original/native cases transferred through72 actual current optimized CLI whole-body/source-map/ABI/requirements equality checks. Scoped runtime qualification/source lineage and explicit unused AVX2 target difference reviewed; no whole-runtime identity or fresh execution relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/system/process_memory.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_scalar_exclusive5_current"
+      ],
+      "scope": "Canonical scalar32 form under fresh EL0 untagged NormalWB/SA0-off checked-memory controls. Exact source-derived category authorization and actual same-domain monitor load/store check precede effects; preserve architectural W zero extension/discard/status, SP-base and overlap/UNDEF policy, no host atomics shortcut. Load-exclusive marks the actual local/global reservation; store-exclusive consumes the actual local mark, writes/status only on qualified pass, and preserves denied/failed raw-access order. Acquire/release service ordering is part of the existing canonical domain; no cross-PE litmus measurement claimed.",
+      "smoke_samples": [
+        {
+          "word": "0x88027c20",
           "expected_mnemonics": [
             "stxr"
           ],
