@@ -2138,15 +2138,15 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 2621,
+    "implemented": 2623,
     "partial": 5,
-    "unsupported": 1706,
+    "unsupported": 1704,
     "total": 4332,
-    "implementation_percentage": 60.503231763619574,
+    "implementation_percentage": 60.549399815327796,
     "categories": {
       "base_integer_system": {
-        "implemented": 555,
-        "unsupported": 394,
+        "implemented": 557,
+        "unsupported": 392,
         "partial": 5
       },
       "fp_simd": {
@@ -2163,7 +2163,7 @@
       }
     }
   },
-  "compiler_source_sha256": "c48bdba67f6ada7a07d50d5d7d6bafaf21127a7a4a7cd69016305a45faecdadb",
+  "compiler_source_sha256": "d1e8c056891f93c924f60ec88f4407591b2794dcb93131fd303eb336fd12859e",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -3767,8 +3767,8 @@
     {"id":"SETPTN_SET_memcms","instruction_id":"SETPTN","mnemonic":"SETPTN","category":"base_integer_system","source_file":"setptn.xml","encoding_mask":"0x3fe0fc00","encoding_value":"0x19c03400","features":[{"feature":"FEAT_MOPS","name":"v8Ap8"}],"status":"unsupported","profiles":[]},
     {"id":"SETPT_SET_memcms","instruction_id":"SETPT","mnemonic":"SETPT","category":"base_integer_system","source_file":"setpt.xml","encoding_mask":"0x3fe0fc00","encoding_value":"0x19c01400","features":[{"feature":"FEAT_MOPS","name":"v8Ap8"}],"status":"unsupported","profiles":[]},
     {"id":"SETP_SET_memcms","instruction_id":"SETP","mnemonic":"SETP","category":"base_integer_system","source_file":"setp.xml","encoding_mask":"0x3fe0fc00","encoding_value":"0x19c00400","features":[{"feature":"FEAT_MOPS","name":"v8Ap8"}],"status":"unsupported","profiles":[]},
-    {"id":"SEVL_HI_hints","instruction_id":"SEVL","mnemonic":"SEVL","category":"base_integer_system","source_file":"sevl.xml","encoding_mask":"0xffffffff","encoding_value":"0xd50320bf","features":[],"status":"unsupported","profiles":[]},
-    {"id":"SEV_HI_hints","instruction_id":"SEV","mnemonic":"SEV","category":"base_integer_system","source_file":"sev.xml","encoding_mask":"0xffffffff","encoding_value":"0xd503209f","features":[],"status":"unsupported","profiles":[]},
+    {"id":"SEVL_HI_hints","instruction_id":"SEVL","mnemonic":"SEVL","category":"base_integer_system","source_file":"sevl.xml","encoding_mask":"0xffffffff","encoding_value":"0xd50320bf","features":[],"status":"implemented","profiles":[{"profile":"system-v1","status":"implemented","scope":"Complete canonical send effect in declared SystemV1 profile with an attached authoritative same-domain PE event endpoint and checked current EL. SEV publishes to all participating PEs; SEVL publishes only locally; the event bit coalesces. Missing or invalid backend declines before publication. No WFx, scheduler parking, exception delivery, IRQ/timer, or complete CPU/OS claim."}]},
+    {"id":"SEV_HI_hints","instruction_id":"SEV","mnemonic":"SEV","category":"base_integer_system","source_file":"sev.xml","encoding_mask":"0xffffffff","encoding_value":"0xd503209f","features":[],"status":"implemented","profiles":[{"profile":"system-v1","status":"implemented","scope":"Complete canonical send effect in declared SystemV1 profile with an attached authoritative same-domain PE event endpoint and checked current EL. SEV publishes to all participating PEs; SEVL publishes only locally; the event bit coalesces. Missing or invalid backend declines before publication. No WFx, scheduler parking, exception delivery, IRQ/timer, or complete CPU/OS claim."}]},
     {"id":"SHA1C_QSV_cryptosha3","instruction_id":"SHA1C_advsimd","mnemonic":"SHA1C","category":"fp_simd","source_file":"sha1c_advsimd.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x5e000000","features":[{"feature":"FEAT_SHA1","name":"v8Ap0"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope."}]},
     {"id":"SHA1H_SS_cryptosha2","instruction_id":"SHA1H_advsimd","mnemonic":"SHA1H","category":"fp_simd","source_file":"sha1h_advsimd.xml","encoding_mask":"0xfffffc00","encoding_value":"0x5e280800","features":[{"feature":"FEAT_SHA1","name":"v8Ap0"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope."}]},
     {"id":"SHA1M_QSV_cryptosha3","instruction_id":"SHA1M_advsimd","mnemonic":"SHA1M","category":"fp_simd","source_file":"sha1m_advsimd.xml","encoding_mask":"0xffe0fc00","encoding_value":"0x5e002000","features":[{"feature":"FEAT_SHA1","name":"v8Ap0"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled nonstreaming FP/AdvSIMD and SHA1/SHA256. All register roles and aliases; four-round updates and ordered schedules preserve original operand snapshots. SHA1H writes only the rotated low word and clears other destination bits. Independent SHA/SSSE3 mappings preserve NZCV, FPCR/FPSR and RAM. Disabled access, streaming and Apple hardware remain outside scope."}]},

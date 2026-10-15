@@ -655,7 +655,10 @@ pub fn analyze_with_profile(
         Some(Terminator::Trap(value)) => trap = Some(*value),
         Some(Terminator::System(value)) => {
             system_instruction = Some(*value);
-            if matches!(value.operation, system::SystemOperation::TagMemory(_)) {
+            if matches!(
+                value.operation,
+                system::SystemOperation::TagMemory(_) | system::SystemOperation::SendEvent { .. }
+            ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }
         }

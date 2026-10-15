@@ -17,6 +17,8 @@ const ADDRESS_SPACE: u64 = 7;
 const SOURCE_PC: GuestAddress = GuestAddress(0x1000);
 const DATA_ADDRESS: u64 = 0x4000;
 const ADDRESS_BITS: u8 = 48;
+const SEV: u32 = 0xd503_209f;
+const SEVL: u32 = 0xd503_20bf;
 const SVC: u32 = 0xd400_0001;
 const IRG: u32 = 0x9ac0_1000;
 const LDG: u32 = 0xd960_0000;
@@ -79,6 +81,9 @@ fn registers() -> GuestState {
 }
 
 struct BackendFixture {
+    event_domain: Option<std::sync::Arc<super::super::events::EventDomain>>,
+    event_endpoint: Option<super::super::events::EventEndpoint>,
+    event_profile: Option<Profile>,
     entry: Option<EntrySnapshot>,
     tags: Option<TagSnapshot>,
     memory: Option<MemoryThread<MemoryControls>>,
@@ -91,6 +96,9 @@ struct BackendFixture {
 impl BackendFixture {
     fn new() -> Self {
         Self {
+            event_domain: None,
+            event_endpoint: None,
+            event_profile: None,
             entry: Some(EntrySnapshot {
                 profile: Profile {
                     current_el: ExceptionLevel::El1,
@@ -210,6 +218,33 @@ impl Backend for BackendFixture {
     ) -> Result<TagSnapshot, String> {
         self.calls.push("tag_snapshot");
         self.tags.ok_or_else(|| "tag backend unavailable".into())
+    }
+    fn send_event_services(
+        &mut self,
+        boundary: &Boundary,
+        _: &SystemState,
+        _: &GuestState,
+    ) -> Result<SendEventServices<'_>, String> {
+        assert_eq!(
+            boundary.instruction().instruction_pc.0,
+            self.expected_source_pc
+        );
+        self.calls.push("send_event_services");
+        let profile = self.event_profile.ok_or("event profile unavailable")?;
+        let domain = self
+            .event_domain
+            .as_ref()
+            .ok_or("event domain unavailable")?;
+        let endpoint = self
+            .event_endpoint
+            .as_mut()
+            .ok_or("event endpoint unavailable")?;
+        let attachment =
+            SendAttachment::new(domain, endpoint).map_err(|error| format!("{error:?}"))?;
+        Ok(SendEventServices {
+            profile,
+            attachment,
+        })
     }
     fn tag_memory(&mut self) -> Result<&mut MemoryThread<MemoryControls>, String> {
         self.calls.push("tag_memory");
@@ -606,3 +641,227 @@ fn unavailable_optional_feature_beyond_first_word_prevents_all_prefix_effects() 
     );
     Ok(())
 }
+
+fn event_backend() -> BackendFixture {
+    let mut backend = BackendFixture::new();
+    let domain = std::sync::Arc::new(super::super::events::EventDomain::new());
+    backend.event_endpoint = Some(domain.register(false, None).unwrap());
+    backend.event_domain = Some(domain);
+    backend.event_profile = backend.entry.map(|entry| entry.profile);
+    backend
+}
+
+#[test]
+fn real_event_dispatch_publishes_local_or_global_without_register_effects() {
+    for word in [SEVL, SEV] {
+        let mut backend = event_backend();
+        let peer = backend
+            .event_domain
+            .as_ref()
+            .unwrap()
+            .register(false, None)
+            .unwrap();
+        let mut system = state(false, false);
+        let mut registers = registers();
+        let before = registers.clone();
+        let pstate = system.pstate(&registers);
+        assert_eq!(
+            Execution::new(ADDRESS_SPACE, &mut system, &mut backend)
+                .complete(boundary(word), &mut registers),
+            Ok(GuestAddress(SOURCE_PC.0 + size_of::<u32>() as u64))
+        );
+        assert_eq!(registers, before);
+        assert_eq!(system.pstate(&registers), pstate);
+        assert!(backend.event_endpoint.as_ref().unwrap().is_set());
+        assert_eq!(peer.is_set(), word == SEV);
+        assert_eq!(backend.calls, ["send_event_services"]);
+    }
+}
+
+#[test]
+fn event_profile_and_domain_fail_before_publication() {
+    let base = event_backend().event_profile.unwrap();
+    for profile in [
+        Profile {
+            current_el: ExceptionLevel::El0,
+            ..base
+        },
+        Profile {
+            current_el: ExceptionLevel::El2,
+            ..base
+        },
+        Profile {
+            security: SecurityState::Secure,
+            ..base
+        },
+        Profile {
+            security: SecurityState::Realm,
+            ..base
+        },
+        Profile {
+            el2_enabled: true,
+            ..base
+        },
+        Profile {
+            el3_present: true,
+            ..base
+        },
+    ] {
+        let mut backend = event_backend();
+        backend.event_profile = Some(profile);
+        let mut system = state(false, false);
+        let mut registers = registers();
+        let before = registers.clone();
+        assert!(matches!(
+            Execution::new(ADDRESS_SPACE, &mut system, &mut backend)
+                .complete(boundary(SEV), &mut registers),
+            Err(Failure::Unsupported(_))
+        ));
+        assert_eq!(registers, before);
+        assert!(!backend.event_endpoint.as_ref().unwrap().is_set());
+    }
+    let mut backend = event_backend();
+    backend.event_domain = Some(std::sync::Arc::new(super::super::events::EventDomain::new()));
+    assert!(matches!(
+        Execution::new(ADDRESS_SPACE, &mut state(false, false), &mut backend)
+            .complete(boundary(SEV), &mut registers()),
+        Err(Failure::Backend(_))
+    ));
+    assert!(!backend.event_endpoint.as_ref().unwrap().is_set());
+}
+
+#[test]
+fn missing_event_service_is_explicit_failure_without_register_effects() {
+    let mut backend = BackendFixture::new();
+    let mut registers = registers();
+    let before = registers.clone();
+    assert!(matches!(
+        Execution::new(ADDRESS_SPACE, &mut state(false, false), &mut backend)
+            .complete(boundary(SEVL), &mut registers),
+        Err(Failure::Backend(_))
+    ));
+    assert_eq!(registers, before);
+}
+
+#[test]
+fn native_event_blocks_share_real_two_pe_domain_and_exact_source_maps() -> anyhow::Result<()> {
+    use crate::blocks::{BlockRuntime, StopReason, ThreadState};
+    use stela_compiler::block::{BlockProfile, ExitKind};
+    const MOV_RAX_IMMEDIATE: [u8; 2] = [0x48, 0xb8];
+    const MOV_EDX_IMMEDIATE: u8 = 0xba;
+    const RETURN: u8 = 0xc3;
+    const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
+    for word in [SEVL, SEV] {
+        for sender_pe in 0..2 {
+            let cache = tempfile::tempdir()?;
+            let mut runtime = BlockRuntime::new_with_profile(
+                ADDRESS_SPACE,
+                cache.path().into(),
+                BlockProfile::SystemV1,
+            );
+            runtime.register_code(SOURCE_PC, word.to_le_bytes().to_vec())?;
+            let prepared = runtime.prepare(SOURCE_PC)?;
+            let map = &prepared.prepared.manifest.source_map;
+            assert_eq!(map.len(), 1);
+            assert_eq!(map[0].0, SOURCE_PC);
+            let native = std::fs::read(prepared.prepared.directory.join("native.bin"))?;
+            let mut expected = MOV_RAX_IMMEDIATE.to_vec();
+            expected.extend(SOURCE_PC.0.to_le_bytes());
+            expected.push(MOV_EDX_IMMEDIATE);
+            expected.extend((ExitKind::System as u32).to_le_bytes());
+            expected.push(RETURN);
+            assert_eq!(&native[map[0].1..], expected);
+            let domain = std::sync::Arc::new(super::super::events::EventDomain::new());
+            let mut backends = [event_backend(), event_backend()];
+            for backend in &mut backends {
+                backend.event_endpoint = Some(domain.register(false, None).unwrap());
+                backend.event_domain = Some(std::sync::Arc::clone(&domain));
+            }
+            let mut system = state(false, false);
+            let mut thread = ThreadState {
+                registers: registers(),
+                pc: SOURCE_PC,
+            };
+            let before = thread.registers.clone();
+            // SAFETY: the registered original is one trusted event instruction;
+            // the concrete dispatcher performs no guest RAM access.
+            let outcome = unsafe {
+                runtime.run_with_system(
+                    &mut thread,
+                    Some(GuestAddress(SOURCE_PC.0 + INSTRUCTION_BYTES)),
+                    1,
+                    &mut Execution::new(ADDRESS_SPACE, &mut system, &mut backends[sender_pe]),
+                )?
+            };
+            assert_eq!(outcome.reason, StopReason::StopAddress);
+            assert_eq!(
+                outcome.last_exit,
+                Some((SOURCE_PC.0, ExitKind::System as u64))
+            );
+            assert_eq!(thread.registers, before);
+            assert_eq!(thread.pc, GuestAddress(SOURCE_PC.0 + INSTRUCTION_BYTES));
+            for (pe, backend) in backends.iter().enumerate() {
+                assert_eq!(
+                    backend.event_endpoint.as_ref().unwrap().is_set(),
+                    word == SEV || pe == sender_pe
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_event_failure_preserves_original_terminal_and_completed_prefix() -> anyhow::Result<()> {
+    use crate::blocks::{BlockRuntime, StopReason, ThreadState};
+    use stela_compiler::block::BlockProfile;
+    const ADD_X0_X0_ONE: u32 = 0x9100_0400;
+    const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
+    let cache = tempfile::tempdir()?;
+    let mut runtime =
+        BlockRuntime::new_with_profile(ADDRESS_SPACE, cache.path().into(), BlockProfile::SystemV1);
+    runtime.register_code(
+        SOURCE_PC,
+        [ADD_X0_X0_ONE, SEVL]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect(),
+    )?;
+    let mut backend = BackendFixture::new();
+    backend.expected_source_pc = SOURCE_PC.0 + INSTRUCTION_BYTES;
+    let mut system = state(false, false);
+    let mut thread = ThreadState {
+        registers: registers(),
+        pc: SOURCE_PC,
+    };
+    let mut expected = thread.registers.clone();
+    expected.x[0] += 1;
+    // SAFETY: trusted pure ADD prefix and event terminal, no guest RAM accesses.
+    let outcome = unsafe {
+        runtime.run_with_system(
+            &mut thread,
+            None,
+            1,
+            &mut Execution::new(ADDRESS_SPACE, &mut system, &mut backend),
+        )?
+    };
+    let StopReason::SystemFailure {
+        instruction,
+        failure,
+    } = outcome.reason
+    else {
+        panic!("expected exact System failure")
+    };
+    assert_eq!(instruction.word, SEVL);
+    assert_eq!(
+        instruction.instruction_pc,
+        GuestAddress(SOURCE_PC.0 + INSTRUCTION_BYTES)
+    );
+    assert!(matches!(failure, Failure::Backend(_)));
+    assert_eq!(thread.pc, instruction.instruction_pc);
+    assert_eq!(thread.registers, expected);
+    Ok(())
+}
+
+#[path = "tests/event_corpus.rs"]
+mod event_corpus;

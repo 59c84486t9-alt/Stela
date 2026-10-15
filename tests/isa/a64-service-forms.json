@@ -415,6 +415,43 @@
         "crates/stela-runtime/src/memory/tag_execution.rs",
         "crates/stela-runtime/src/memory/domain/tag_transfer.rs"
       ]
+    },
+    "system_events_send": {
+      "harness": "dev/block_system_events.py",
+      "report": ".stela/research/coverage-race/nonstreaming/system-control/integration/sev-sevl-current255-1/current-source-body-lineage-1/receipt.json",
+      "kind": "system_events_source_body_lineage_v1",
+      "comparison_field": "transferred_original_state_comparisons",
+      "required_positive_counts": [
+        "current_cli_body_transfers",
+        "transferred_original_state_comparisons"
+      ],
+      "required_measurements": {
+        "transferred_original_state_comparisons": 20,
+        "fresh_original_state_comparisons": 0,
+        "fresh_native_blocks_executed": 0,
+        "current_cli_body_transfers": 8,
+        "new_original_captures": 0,
+        "original_cases": 6,
+        "both_pe_checks": 12,
+        "send_steps": 6,
+        "nop_steps": 2,
+        "failure_prefix_check_count": 1
+      },
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-system-v1",
+      "required_shared_sources": [
+        "dev/block_system_corpus.py",
+        "dev/block_system_events.py",
+        "crates/stela-runtime/src/lib.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/events.rs",
+        "crates/stela-runtime/src/system/events/tests.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/execution/tests.rs",
+        "crates/stela-runtime/src/system/execution/tests/event_corpus.rs",
+        "crates/stela-runtime/src/system/execution/tests/event_corpus/backend.rs",
+        "crates/stela-runtime/src/system/execution/tests/event_corpus/provenance.rs",
+        "crates/stela-runtime/src/system/execution/tests/event_corpus/source_inventory.rs"
+      ]
     }
   },
   "forms": [
@@ -2646,6 +2683,78 @@
           "word": "0xd9601c20",
           "expected_mnemonics": [
             "stzg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "SEVL_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "sevl.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd50320bf",
+      "alias": false,
+      "source_sha256": "071f0163ae0894aea0cc9fb3494f534e04e576b9e1998c582a838d880561e799",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and six retained original SMP2 WFE-consumption observations; twenty historical232 native full-State and twelve authoritative PE comparisons transferred through reviewed source lineage and eight actual current255 CLI whole-body/source-map/ABI equality checks. No fresh current255 native execution or original capture.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/system/synchronization.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/events.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/system/profile.rs"
+      ],
+      "evidence_groups": [
+        "system_events_send"
+      ],
+      "scope": "Complete canonical send effect in declared SystemV1 profile with an attached authoritative same-domain PE event endpoint and checked current EL. SEV publishes to all participating PEs; SEVL publishes only locally; the event bit coalesces. Missing or invalid backend declines before publication. No WFx, scheduler parking, exception delivery, IRQ/timer, or complete CPU/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd50320bf",
+          "expected_mnemonics": [
+            "sevl"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "SEV_HI_hints",
+      "category": "base_integer_system",
+      "source_file": "sev.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd503209f",
+      "alias": false,
+      "source_sha256": "700bc7a3e6ada073de0bc85a10cd2496a3a8231e1edfbc503f3db2e7de756c69",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and six retained original SMP2 WFE-consumption observations; twenty historical232 native full-State and twelve authoritative PE comparisons transferred through reviewed source lineage and eight actual current255 CLI whole-body/source-map/ABI equality checks. No fresh current255 native execution or original capture.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/system/synchronization.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/events.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/system/profile.rs"
+      ],
+      "evidence_groups": [
+        "system_events_send"
+      ],
+      "scope": "Complete canonical send effect in declared SystemV1 profile with an attached authoritative same-domain PE event endpoint and checked current EL. SEV publishes to all participating PEs; SEVL publishes only locally; the event bit coalesces. Missing or invalid backend declines before publication. No WFx, scheduler parking, exception delivery, IRQ/timer, or complete CPU/OS claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd503209f",
+          "expected_mnemonics": [
+            "sev"
           ],
           "consumed_source_bytes": 4
         }

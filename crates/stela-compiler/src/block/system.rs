@@ -8,7 +8,10 @@
 
 use crate::{
     CompileError, GuestAddress,
-    aarch64::{system::exception, tag_memory},
+    aarch64::{
+        system::{exception, synchronization},
+        tag_memory,
+    },
 };
 use serde::{Serialize, Serializer};
 
@@ -18,6 +21,7 @@ const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
 pub enum SystemOperation {
     Exception(exception::Operation),
     TagMemory(tag_memory::Operand),
+    SendEvent { local: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -36,6 +40,7 @@ fn serialize_family<S: Serializer>(
     serializer.serialize_str(match operation {
         SystemOperation::Exception(_) => "exception",
         SystemOperation::TagMemory(_) => "tag_memory",
+        SystemOperation::SendEvent { .. } => "event",
     })
 }
 
@@ -48,11 +53,16 @@ pub fn decode_system_instruction(
             "system instruction PC must be aligned to 4 bytes".into(),
         ));
     }
-    let operation = match (exception::decode(word), tag_memory::decode(word)) {
-        (Some(operation), None) => SystemOperation::Exception(operation),
-        (None, Some(operand)) => SystemOperation::TagMemory(operand),
-        (None, None) => return Ok(None),
-        (Some(_), Some(_)) => {
+    let event = match synchronization::decode(word) {
+        Some(synchronization::Operation::SendEvent { local }) => Some(local),
+        _ => None,
+    };
+    let operation = match (exception::decode(word), tag_memory::decode(word), event) {
+        (Some(operation), None, None) => SystemOperation::Exception(operation),
+        (None, Some(operand), None) => SystemOperation::TagMemory(operand),
+        (None, None, Some(local)) => SystemOperation::SendEvent { local },
+        (None, None, None) => return Ok(None),
+        _ => {
             return Err(CompileError("ambiguous system instruction family".into()));
         }
     };
@@ -87,6 +97,12 @@ mod tests {
     const LDG: u32 = 0xd960_0000;
     const STG: u32 = 0xd920_0800;
     const STGP: u32 = 0x6900_0000;
+    const SEV: u32 = 0xd503_209f;
+    const SEVL: u32 = 0xd503_20bf;
+    const WFE: u32 = 0xd503_205f;
+    const WFI: u32 = 0xd503_207f;
+    const WFET: u32 = 0xd503_1000;
+    const WFIT: u32 = 0xd503_1020;
     const NOP: u32 = 0xd503_201f;
     const ADD_IMMEDIATE: u32 = 0x9100_0000;
     const RET: u32 = 0xd65f_03c0;
@@ -95,7 +111,7 @@ mod tests {
     #[test]
     fn system_requests_preserve_exact_instruction_identity() {
         let pc = GuestAddress(0x1000);
-        for word in [SVC, ERET, IRG, LDG, STG, STGP] {
+        for word in [SVC, ERET, IRG, LDG, STG, STGP, SEV, SEVL] {
             let instruction = decode_system_instruction(pc, word).unwrap().unwrap();
             assert_eq!(instruction.instruction_pc, pc);
             assert_eq!(instruction.next_pc, GuestAddress(pc.0 + INSTRUCTION_BYTES));
@@ -110,7 +126,7 @@ mod tests {
 
     #[test]
     fn unrelated_words_do_not_become_runtime_system_requests() {
-        for word in [NOP, ADD_IMMEDIATE, RET, UNALLOCATED] {
+        for word in [NOP, ADD_IMMEDIATE, RET, UNALLOCATED, WFE, WFI, WFET, WFIT] {
             assert!(
                 decode_system_instruction(GuestAddress(0x1000), word)
                     .unwrap()

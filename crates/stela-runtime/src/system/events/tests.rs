@@ -498,3 +498,64 @@ fn racing_signal_and_initial_consume_cannot_lose_an_event() {
         }
     });
 }
+
+#[test]
+fn send_attachment_checks_domain_before_publication_and_preserves_timeout() {
+    const TIMEOUT: u64 = 77;
+    let domain = EventDomain::new();
+    let other = EventDomain::new();
+    let mut endpoint = domain.register(false, Some(TIMEOUT)).unwrap();
+    assert!(matches!(
+        SendAttachment::new(&other, &mut endpoint),
+        Err(DomainError::WrongDomain)
+    ));
+    assert!(!endpoint.is_set());
+    assert_eq!(endpoint.local_timeout(), Some(TIMEOUT));
+}
+
+#[test]
+fn borrowed_sends_use_existing_local_and_global_event_owners() {
+    let domain = EventDomain::new();
+    let mut sender = domain.register(false, None).unwrap();
+    let peer = domain.register(false, None).unwrap();
+    {
+        let mut services = SendAttachment::new(&domain, &mut sender).unwrap();
+        services.send(true).unwrap();
+        services.send(true).unwrap();
+    }
+    assert!(sender.consume_if_set());
+    assert!(!sender.consume_if_set());
+    assert!(!peer.consume_if_set());
+    SendAttachment::new(&domain, &mut sender)
+        .unwrap()
+        .send(false)
+        .unwrap();
+    assert!(sender.consume_if_set());
+    assert!(peer.consume_if_set());
+    assert!(!domain.register(false, None).unwrap().is_set());
+}
+
+#[test]
+fn poisoned_global_registry_declines_before_signal_but_local_send_still_works() {
+    let domain = EventDomain::new();
+    let mut sender = domain.register(false, None).unwrap();
+    let peer = domain.register(false, None).unwrap();
+    let _ = std::panic::catch_unwind(|| {
+        let _registry = domain.endpoints.lock().unwrap();
+        panic!("poison fixture registry");
+    });
+    assert_eq!(
+        SendAttachment::new(&domain, &mut sender)
+            .unwrap()
+            .send(false),
+        Err(DomainError::Poisoned)
+    );
+    assert!(!sender.is_set());
+    assert!(!peer.is_set());
+    SendAttachment::new(&domain, &mut sender)
+        .unwrap()
+        .send(true)
+        .unwrap();
+    assert!(sender.is_set());
+    assert!(!peer.is_set());
+}

@@ -4,7 +4,8 @@
 //! native callback ABI nor a second architectural register/control bank.
 
 use super::{
-    access::{ExceptionLevel, Profile},
+    access::{ExceptionLevel, Profile, SecurityState},
+    events::{DomainError, SendAttachment},
     exception::{self, EntryControls, EntryEvent, ExceptionServices, ExecuteError, PrepareError},
     profile::EntryProfile,
     state::{PSTATE_IL_MASK, SystemState},
@@ -114,6 +115,7 @@ pub enum Failure {
     WrongAddressSpace,
     IllegalExecutionState,
     Backend(String),
+    Event(DomainError),
     Unsupported(&'static str),
     ExceptionPrepare(PrepareError),
     ExceptionExecute(ExecuteError<String>),
@@ -130,6 +132,7 @@ impl Serialize for Failure {
             Self::WrongAddressSpace => "wrong_address_space",
             Self::IllegalExecutionState => "illegal_execution_state",
             Self::Backend(_) => "backend",
+            Self::Event(_) => "event",
             Self::Unsupported(_) => "unsupported",
             Self::ExceptionPrepare(_) => "exception_prepare",
             Self::ExceptionExecute(_) => "exception_execute",
@@ -253,9 +256,16 @@ pub struct TagSnapshot {
     pub memory: Option<TagMemorySnapshot>,
 }
 
+/// Fresh CPU profile and a borrow of the authoritative PE event owner. This is
+/// a synchronous Rust service attachment, never a persistent control snapshot.
+pub struct SendEventServices<'a> {
+    pub profile: Profile,
+    pub attachment: SendAttachment<'a>,
+}
+
 /// The CPU/platform owner supplies current source-bound snapshots and real
 /// effect services. Snapshot creation performs feature/access checks but no
-/// guest architectural effect. No default or successful noop backend exists.
+/// guest architectural effect. An unavailable optional service must decline.
 ///
 /// Tag snapshot authorization checks only source-required feature/access gates.
 /// It must not require memory attachment or block geometry before an EL0 bulk
@@ -293,6 +303,19 @@ pub trait Backend: ExceptionServices<Error = String> {
         registers: &GuestState,
     ) -> Result<TagSnapshot, String>;
     fn tag_memory(&mut self) -> Result<&mut MemoryThread<MemoryControls>, String>;
+
+    /// The profile comes from the same authoritative source/control owner used
+    /// by validate_entry. The endpoint is also used by exception-return event
+    /// publication and the local monitor binding; a second event bank is invalid.
+    /// The default explicitly declines availability for existing non-event backends.
+    fn send_event_services(
+        &mut self,
+        _boundary: &Boundary,
+        _system: &SystemState,
+        _registers: &GuestState,
+    ) -> Result<SendEventServices<'_>, String> {
+        Err("event publication services are unavailable".into())
+    }
 }
 
 /// Exclusive borrows of the existing state and backend; this owner stores no
@@ -361,6 +384,36 @@ impl<'a, B: Backend> Execution<'a, B> {
             .execute(self.system, registers, self.backend)
         };
         next.map(GuestAddress).map_err(Failure::ExceptionExecute)
+    }
+
+    fn send_event(
+        &mut self,
+        boundary: &Boundary,
+        registers: &GuestState,
+        local: bool,
+    ) -> Result<GuestAddress, Failure> {
+        let mut services = self
+            .backend
+            .send_event_services(boundary, self.system, registers)
+            .map_err(Failure::Backend)?;
+        let profile = services.profile;
+        if profile.current_el != self.system.current_el() {
+            return Err(Failure::Unsupported("event profile differs from PSTATE"));
+        }
+        if profile.security != SecurityState::NonSecure
+            || !matches!(
+                profile.current_el,
+                ExceptionLevel::El0 | ExceptionLevel::El1
+            )
+            || profile.el2_enabled
+            || profile.el3_present
+        {
+            return Err(Failure::Unsupported(
+                "event execution profile is unsupported",
+            ));
+        }
+        services.attachment.send(local).map_err(Failure::Event)?;
+        Ok(boundary.instruction.next_pc)
     }
 
     fn tag(
@@ -476,6 +529,7 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
                 self.exception(&boundary, registers, operation)
             }
             SystemOperation::TagMemory(operand) => self.tag(&boundary, registers, operand),
+            SystemOperation::SendEvent { local } => self.send_event(&boundary, registers, local),
         }
     }
 }

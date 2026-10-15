@@ -104,6 +104,38 @@ impl Default for EventDomain {
     }
 }
 
+/// A checked, temporary attachment to the existing PE and publication domain.
+/// The exclusive endpoint borrow prevents retirement during completion; no event,
+/// monitor, timeout or control state is copied into the attachment.
+#[derive(Debug)]
+pub struct SendAttachment<'a> {
+    domain: &'a EventDomain,
+    endpoint: &'a mut EventEndpoint,
+}
+
+impl<'a> SendAttachment<'a> {
+    pub fn new(
+        domain: &'a EventDomain,
+        endpoint: &'a mut EventEndpoint,
+    ) -> Result<Self, DomainError> {
+        if !domain.owns(endpoint) {
+            return Err(DomainError::WrongDomain);
+        }
+        Ok(Self { domain, endpoint })
+    }
+
+    /// SEVL publishes one event bit; SEV includes every live registered PE.
+    /// Neither operation is an architectural guest memory barrier.
+    pub fn send(&mut self, local: bool) -> Result<(), DomainError> {
+        if local {
+            self.endpoint.signal_local();
+            Ok(())
+        } else {
+            self.domain.signal_all()
+        }
+    }
+}
+
 /// One authoritative execution handle, deliberately not Clone. Its event bit
 /// can be published concurrently; local timeout mutations require `&mut self`.
 #[derive(Debug)]
