@@ -1,11 +1,14 @@
 //! Bounded architectural liveness. Every final GPR is live at the exit.
 use super::recovery::GPR_SLOTS;
+use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
 };
 
 pub const MAX_INSTRUCTIONS: usize = 256;
+const PAIR_OFFSET_BITS: u32 = 7;
+const PAIR_OFFSET_HALF_RANGE: i32 = 1 << (PAIR_OFFSET_BITS - 1);
 #[cfg(test)]
 pub const ALL_GPRS: u32 = u32::MAX;
 
@@ -31,7 +34,7 @@ pub struct Effects {
 
 /// The caller supplies decoder-validated operations. These additional checks
 /// refuse malformed private IR too. Flags, memory and all control transfers end
-/// the default prefix; the separate clean-load tier adds only its named byte load.
+/// the default prefix; the separate clean-load tier adds only its selected unsigned loads.
 /// Absence here never means architectural support is absent.
 pub fn effects(operation: &Operation) -> Option<Effects> {
     let (reads, destination): (Vec<Register>, Register) = match *operation {
@@ -123,16 +126,47 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
     })
 }
 
-/// Only the existing ordinary unsigned byte load with an X-register base.
+/// Only existing ordinary unsigned byte/word loads with an X-register base.
 /// All other memory addressing/transfer forms remain canonical boundaries.
 pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
+    if let Operation::MemoryPair {
+        transfer:
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+        bytes: WORD_LOAD_BYTES,
+        data,
+        base: Register::X(base),
+        displacement,
+        mode: AddressMode::Offset,
+    } = *operation
+        && base < 31
+        && displacement % i32::from(WORD_LOAD_BYTES) == 0
+        && (-PAIR_OFFSET_HALF_RANGE..PAIR_OFFSET_HALF_RANGE)
+            .contains(&(displacement / i32::from(WORD_LOAD_BYTES)))
+        && data[0] != data[1]
+        && data
+            .iter()
+            .copied()
+            .all(|register| valid(register) && register != Register::Sp)
+    {
+        return Some(Effects {
+            reads: 1 << base,
+            writes: data
+                .into_iter()
+                .filter_map(slot)
+                .fold(0, |mask, guest| mask | (1 << guest)),
+        });
+    }
+
     if let Operation::Memory {
         transfer:
             MemoryTransfer::Load {
                 signed: false,
                 width: Width::W32,
             },
-        bytes: 1,
+        bytes: BYTE_LOAD_BYTES | WORD_LOAD_BYTES,
         data,
         base: Register::X(base),
         mode: AddressMode::Offset,
@@ -244,6 +278,8 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
     const IMUL: u8 = 0xaf;
     const SHRD_IMMEDIATE: u8 = 0xac;
     const ECX_FROM_RAX_MEMORY: u8 = 0x08;
+    const REX_R8_WORD: u8 = 0x44;
+    const R8D_FROM_RAX_DISP8: u8 = 0x40;
 
     let mut cursor = 0usize;
     let mut ends = vec![];
@@ -289,6 +325,20 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
             } else {
                 return None;
             }
+        } else if opcode == MOV_LOAD
+            && !word
+            && rex.is_none()
+            && code.get(cursor).copied() == Some(ECX_FROM_RAX_MEMORY)
+        {
+            // Exact selected unsigned W load into ECX.
+            cursor += 1;
+        } else if opcode == MOV_LOAD
+            && !word
+            && rex == Some(REX_R8_WORD)
+            && code.get(cursor..cursor + 2)? == [R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES]
+        {
+            // Exact second unsigned W pair load into R8D.
+            cursor += 2;
         } else if opcode == NOP && !word && rex.is_none() {
             // Exact single-byte NOP only.
         } else {

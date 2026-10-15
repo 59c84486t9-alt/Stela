@@ -76,7 +76,8 @@ fn product_rotate_chain_stays_resident_until_canonical_exit() {
     assert_eq!(region.consumed_instructions, instructions.len());
     assert_eq!(region.stats.exit_stores, 1);
     assert_eq!(region.stats.pressure_stores, 0);
-    assert_eq!(region.stats.peak_resident, 1);
+    assert_eq!(region.stats.input_cache_loads, 2);
+    assert_eq!(region.stats.peak_resident, 3);
     assert!(region.recovery.iter().all(RecoveryPoint::validate));
     assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
 }
@@ -520,7 +521,7 @@ fn borrowed_load_result_settles_dirty_changes_before_next_faultable_load() {
 }
 
 #[test]
-fn clean_load_tier_declines_sp_signed_and_nonbyte_forms() {
+fn clean_load_tier_declines_unselected_memory_forms() {
     for (base, signed, width, bytes, mode) in [
         (Register::Sp, false, Width::W32, 1, AddressMode::Offset),
         (Register::X(0), true, Width::W32, 1, AddressMode::Offset),
@@ -556,14 +557,248 @@ fn shared_byte_load_recipe_rejects_any_clobber_or_offset_change() {
         AddressMode::Offset,
     );
     assert_eq!(
-        encoding::ordinary_byte_load_ends(&raw, 15, Some(16), -255),
+        encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255),
         Some(vec![7, 14, 17, 20, 27])
     );
     for index in 0..raw.len() {
         let mut mutated = raw.clone();
         mutated[index] ^= 1;
-        assert!(encoding::ordinary_byte_load_ends(&mutated, 15, Some(16), -255).is_none());
+        assert!(encoding::ordinary_load_ends(&mutated, 1, 15, Some(16), -255).is_none());
     }
     raw.push(0x90);
-    assert!(encoding::ordinary_byte_load_ends(&raw, 15, Some(16), -255).is_none());
+    assert!(encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255).is_none());
+}
+
+#[test]
+fn word_load_tier_keeps_clean_residents_and_canonical_fault_state() {
+    let load = |data, base| Operation::Memory {
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width: Width::W32,
+        },
+        bytes: WORD_LOAD_BYTES,
+        data,
+        base,
+        displacement: -4,
+        mode: AddressMode::Offset,
+    };
+    for data in [Register::X(15), Register::X(16), Register::Zero] {
+        let instructions = [
+            instruction(0, add(Register::X(9), Register::X(9))),
+            instruction(1, load(data, Register::X(15))),
+            instruction(2, add(Register::X(9), Register::X(9))),
+        ];
+        let region = emit_clean_load_prefix(&instructions).unwrap();
+        assert_eq!(region.consumed_instructions, instructions.len());
+        assert_eq!(region.stats.clean_loads, 1);
+        assert_eq!(region.stats.load_boundary_stores, 1);
+        assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
+        assert!(region.recovery.iter().all(RecoveryPoint::validate));
+        let access = region
+            .code
+            .windows(2)
+            .position(|bytes| bytes == [0x8b, 0x08])
+            .unwrap();
+        let boundary = region
+            .recovery
+            .iter()
+            .find(|row| row.native_start == access)
+            .unwrap();
+        assert_eq!(boundary.retired_instructions, 1);
+        assert_eq!(boundary.phase, Phase::BeforeGuestCommit);
+    }
+}
+
+#[test]
+fn shared_word_load_recipe_rejects_any_clobber_or_offset_change() {
+    for data in [Register::X(16), Register::Zero] {
+        let mut raw = vec![];
+        super::super::memory(
+            &mut raw,
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            WORD_LOAD_BYTES,
+            data,
+            Register::X(15),
+            -255,
+            AddressMode::Offset,
+        );
+        let selected = slot(data);
+        let ends = encoding::ordinary_load_ends(&raw, WORD_LOAD_BYTES, 15, selected, -255).unwrap();
+        assert_eq!(ends.last(), Some(&raw.len()));
+        for index in 0..raw.len() {
+            let mut mutated = raw.clone();
+            mutated[index] ^= 1;
+            assert!(
+                encoding::ordinary_load_ends(&mutated, WORD_LOAD_BYTES, 15, selected, -255)
+                    .is_none()
+            );
+        }
+        assert!(encoding::ordinary_load_ends(&raw, BYTE_LOAD_BYTES, 15, selected, -255).is_none());
+    }
+}
+
+#[test]
+fn repeated_read_only_inputs_are_cached_without_architectural_writes() {
+    let operation = |destination| Operation::AddSubRegister {
+        width: Width::X64,
+        subtract: true,
+        flags: false,
+        destination,
+        left: destination,
+        right: Register::X(12),
+        shift: Shift::Lsl,
+        amount: 0,
+    };
+    let source = [
+        instruction(0, operation(Register::X(0))),
+        instruction(1, operation(Register::X(1))),
+        instruction(2, operation(Register::X(0))),
+        instruction(3, operation(Register::X(1))),
+    ];
+    let region = emit_prefix(&source).unwrap();
+    assert!(region.stats.input_cache_loads > 0);
+    assert!(region.stats.cache_hits >= 3);
+    assert_eq!(region.stats.pressure_stores, 0);
+    assert_eq!(region.stats.exit_stores + region.stats.lifetime_stores, 2);
+    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
+    assert!(region.recovery.iter().all(RecoveryPoint::validate));
+}
+
+#[test]
+fn pair_loads_retain_clean_results_and_reject_changed_shared_recipe() {
+    let data = [Register::X(16), Register::X(17)];
+    let operation = Operation::MemoryPair {
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width: Width::W32,
+        },
+        bytes: WORD_LOAD_BYTES,
+        data,
+        base: Register::X(15),
+        displacement: -8,
+        mode: AddressMode::Offset,
+    };
+    let source = [
+        instruction(0, add(Register::X(9), Register::X(9))),
+        instruction(1, operation),
+        instruction(2, add(Register::X(9), Register::X(16))),
+        instruction(3, add(Register::X(10), Register::X(17))),
+    ];
+    let region = emit_clean_load_prefix(&source).unwrap();
+    assert_eq!(region.consumed_instructions, source.len());
+    assert_eq!(region.stats.pair_loads, 1);
+    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
+    assert!(region.recovery.iter().all(RecoveryPoint::validate));
+    let mut raw = vec![];
+    super::super::memory_pair(
+        &mut raw,
+        MemoryTransfer::Load {
+            signed: false,
+            width: Width::W32,
+        },
+        WORD_LOAD_BYTES,
+        data,
+        Register::X(15),
+        -8,
+        AddressMode::Offset,
+    );
+    assert!(encoding::ordinary_pair_load_ends(&raw, 15, [Some(16), Some(17)], -8).is_some());
+    for index in 0..raw.len() {
+        let mut changed = raw.clone();
+        changed[index] ^= 1;
+        assert!(
+            encoding::ordinary_pair_load_ends(&changed, 15, [Some(16), Some(17)], -8).is_none()
+        );
+    }
+    assert!(encoding::ordinary_pair_load_ends(&raw, 15, [Some(16), Some(16)], -8).is_none());
+}
+
+#[test]
+fn paired_load_tier_declines_unselected_shapes() {
+    let selected = Operation::MemoryPair {
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width: Width::W32,
+        },
+        bytes: WORD_LOAD_BYTES,
+        data: [Register::X(0), Register::X(1)],
+        base: Register::X(2),
+        displacement: 0,
+        mode: AddressMode::Offset,
+    };
+    assert!(analysis::clean_load_effects(&selected).is_some());
+    for (transfer, bytes, data, base, mode) in [
+        (
+            MemoryTransfer::Store,
+            WORD_LOAD_BYTES,
+            [Register::X(0), Register::X(1)],
+            Register::X(2),
+            AddressMode::Offset,
+        ),
+        (
+            MemoryTransfer::Load {
+                signed: true,
+                width: Width::X64,
+            },
+            WORD_LOAD_BYTES,
+            [Register::X(0), Register::X(1)],
+            Register::X(2),
+            AddressMode::Offset,
+        ),
+        (
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::X64,
+            },
+            8,
+            [Register::X(0), Register::X(1)],
+            Register::X(2),
+            AddressMode::Offset,
+        ),
+        (
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            WORD_LOAD_BYTES,
+            [Register::X(0), Register::X(0)],
+            Register::X(2),
+            AddressMode::Offset,
+        ),
+        (
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            WORD_LOAD_BYTES,
+            [Register::X(0), Register::X(1)],
+            Register::Sp,
+            AddressMode::Offset,
+        ),
+        (
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            WORD_LOAD_BYTES,
+            [Register::X(0), Register::X(1)],
+            Register::X(2),
+            AddressMode::PostIndex,
+        ),
+    ] {
+        assert!(
+            analysis::clean_load_effects(&Operation::MemoryPair {
+                transfer,
+                bytes,
+                data,
+                base,
+                displacement: 0,
+                mode
+            })
+            .is_none()
+        );
+    }
 }

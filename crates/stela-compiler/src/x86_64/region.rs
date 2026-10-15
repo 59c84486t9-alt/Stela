@@ -1,6 +1,6 @@
 //! Bounded scalar regions with canonical prefix exits. The default is nonfaulting.
 //! The private clean-load tier uses existing nonalias ordinary direct-RAM memory
-//! emission and settles every dirty value before its faultable byte access.
+//! emission and settles every dirty value before its faultable access.
 //! Research rows do not provide general asynchronous/native-fault delivery.
 mod analysis;
 pub(super) use analysis::MAX_INSTRUCTIONS;
@@ -20,6 +20,9 @@ use encoding::{HostGpr, POOL, RESULT, RIGHT};
 #[cfg(test)]
 use recovery::Phase;
 use recovery::{FRAME_LOCATIONS, GPR_SLOTS, Location, RecoveryPoint};
+
+const BYTE_LOAD_BYTES: u8 = 1;
+const WORD_LOAD_BYTES: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionError {
@@ -43,6 +46,9 @@ pub struct AllocationStats {
     pub peak_resident: usize,
     pub load_boundary_stores: usize,
     pub clean_loads: usize,
+    pub pair_loads: usize,
+    pub input_cache_loads: usize,
+    pub address_cache_hits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +86,8 @@ struct Emitter<'a> {
     #[cfg(test)]
     phase: Phase,
     constants: constant::ConstantRegisters,
-    pool_start: usize,
+    reserved_hosts: u16,
+    pinned_hosts: u16,
 }
 
 impl Emitter<'_> {
@@ -130,20 +137,21 @@ impl Emitter<'_> {
         {
             return index;
         }
-        let index = self.resident[self.pool_start..]
-            .iter()
-            .position(Option::is_none)
-            .map(|index| index + self.pool_start)
+        let available = (0..POOL.len())
+            .filter(|&index| (self.reserved_hosts | self.pinned_hosts) & POOL[index].mask() == 0);
+        let index = available
+            .clone()
+            .find(|&index| self.resident[index].is_none())
             .unwrap_or_else(|| {
-                self.resident
-                    .iter()
-                    .enumerate()
-                    .skip(self.pool_start)
-                    .max_by_key(|(_, value)| {
-                        next_use(self.effects, self.current + 1, value.unwrap().guest)
+                available
+                    .max_by_key(|&index| {
+                        next_use(
+                            self.effects,
+                            self.current + 1,
+                            self.resident[index].unwrap().guest,
+                        )
                     })
-                    .unwrap()
-                    .0
+                    .expect("three pinned operands leave a result slot")
             });
         self.spill(index, false);
         self.resident[index] = Some(Resident {
@@ -167,6 +175,19 @@ impl Emitter<'_> {
             {
                 self.output.stats.cache_hits += 1;
                 self.emit(|code| encoding::copy(code, destination, POOL[index], Width::X64));
+            } else if self.effects[self.current].writes & (1 << guest) == 0
+                && next_use(self.effects, self.current + 1, guest) != usize::MAX
+            {
+                // Cache the old architectural input only when its next version
+                // is read again before overwrite. Current borrowed operands are
+                // pinned until this instruction commits, so filling a cache
+                // slot cannot destroy an in-place left or cached right value.
+                let index = self.allocate(guest);
+                self.emit(|code| encoding::load(code, POOL[index], guest));
+                self.locations[guest] = Location::Host(POOL[index]);
+                self.emit(|code| encoding::copy(code, destination, POOL[index], Width::X64));
+                self.output.stats.state_loads += 1;
+                self.output.stats.input_cache_loads += 1;
             } else {
                 self.emit(|code| encoding::load(code, destination, guest));
                 self.output.stats.state_loads += 1;
@@ -176,23 +197,21 @@ impl Emitter<'_> {
         }
     }
 
-    fn cached(&self, register: Register) -> Option<HostGpr> {
+    fn cached(&mut self, register: Register) -> Option<HostGpr> {
         let guest = slot(register)?;
-        self.resident
+        let index = self
+            .resident
             .iter()
-            .position(|value| value.is_some_and(|value| value.guest == guest))
-            .map(|index| POOL[index])
+            .position(|value| value.is_some_and(|value| value.guest == guest))?;
+        let host = POOL[index];
+        self.pinned_hosts |= host.mask();
+        Some(host)
     }
 
-    fn in_place(&self, destination: Register, source: Register) -> Option<HostGpr> {
-        let guest = slot(destination)?;
-        if destination != source {
-            return None;
-        }
-        self.resident
-            .iter()
-            .position(|value| value.is_some_and(|value| value.guest == guest))
-            .map(|index| POOL[index])
+    fn in_place(&mut self, destination: Register, source: Register) -> Option<HostGpr> {
+        (destination == source)
+            .then(|| self.cached(source))
+            .flatten()
     }
 
     fn committed_in_place(&mut self, destination: Register) {
@@ -207,6 +226,9 @@ impl Emitter<'_> {
     }
 
     fn commit(&mut self, destination: Register, width: Width) {
+        // All original operands have been consumed. Result allocation may now
+        // evict them according to next use without changing this operation.
+        self.pinned_hosts = 0;
         if let Some(guest) = slot(destination) {
             if next_use(self.effects, self.current + 1, guest) == usize::MAX {
                 // This value has reached its last use in the region. Commit to
@@ -239,7 +261,7 @@ impl Emitter<'_> {
         self.output.stats.commits += 1;
     }
 
-    fn clean_byte_load(
+    fn clean_load(
         &mut self,
         transfer: MemoryTransfer,
         bytes: u8,
@@ -252,15 +274,35 @@ impl Emitter<'_> {
         // If its selected form changes, decline this whole candidate prefix.
         let mut raw = vec![];
         super::memory(&mut raw, transfer, bytes, data, base, displacement, mode);
-        let ends = encoding::ordinary_byte_load_ends(
+        let ends = encoding::ordinary_load_ends(
             &raw,
+            bytes,
             slot(base).expect("eligible X base"),
             slot(data),
             displacement,
         )
         .ok_or(RegionError::ChangedMemoryEncoding)?;
-        // Every dirty architectural value reaches the canonical frame before
-        // the guest access. Nonclobbered clean host copies remain useful.
+        let cached_base = self.cached(base);
+        self.settle_before_load(HostGpr::Rcx.mask(), &[data]);
+        let mut start = 0;
+        for end in ends {
+            if start == 0
+                && let Some(host) = cached_base
+            {
+                self.emit(|code| encoding::copy(code, HostGpr::Rax, host, Width::X64));
+                self.output.stats.address_cache_hits += 1;
+            } else {
+                self.emit(|code| code.extend_from_slice(&raw[start..end]));
+            }
+            start = end;
+        }
+        self.retain_clean_result(data, HostGpr::Rcx);
+        self.output.stats.clean_loads += 1;
+        self.output.stats.commits += 1;
+        Ok(())
+    }
+
+    fn settle_before_load(&mut self, clobbers: u16, destinations: &[Register]) {
         for (index, host) in POOL.iter().copied().enumerate() {
             if let Some(resident) = self.resident[index]
                 && resident.dirty
@@ -270,46 +312,83 @@ impl Emitter<'_> {
                 self.resident[index].as_mut().unwrap().dirty = false;
             }
         }
-        // Existing memory() clobbers RAX/RCX/RDX, and commits destination in
-        // frame. RAX/RDX are scratches; the memory tier never allocates RCX.
         for (index, host) in POOL.iter().copied().enumerate() {
             if let Some(resident) = self.resident[index]
-                && (host == HostGpr::Rcx || slot(data) == Some(resident.guest))
+                && (clobbers & host.mask() != 0
+                    || destinations
+                        .iter()
+                        .any(|&data| slot(data) == Some(resident.guest)))
             {
                 debug_assert!(!resident.dirty);
                 self.locations[resident.guest] = FRAME_LOCATIONS[resident.guest];
                 self.resident[index] = None;
             }
         }
-        let mut start = 0;
-        for end in ends {
-            self.emit(|code| code.extend_from_slice(&raw[start..end]));
-            start = end;
-        }
-        // The unchanged memory recipe has committed this exact zero-extended
-        // value to frame. Borrow its remaining RCX copy without another load or
-        // register move. General allocation still skips RCX in this tier, and
-        // the next memory access flushes any later change before clobbering it.
-        if let Some(guest) = slot(data) {
-            debug_assert_eq!(POOL[0], HostGpr::Rcx);
-            debug_assert!(self.resident[0].is_none());
-            self.resident[0] = Some(Resident {
+    }
+
+    fn retain_clean_result(&mut self, register: Register, host: HostGpr) {
+        if let Some(guest) = slot(register) {
+            let index = POOL
+                .iter()
+                .position(|&candidate| candidate == host)
+                .unwrap();
+            debug_assert!(self.resident[index].is_none());
+            self.resident[index] = Some(Resident {
                 guest,
                 dirty: false,
             });
-            self.locations[guest] = Location::Host(HostGpr::Rcx);
+            self.locations[guest] = Location::Host(host);
             self.output.stats.peak_resident = self
                 .output
                 .stats
                 .peak_resident
                 .max(self.resident.iter().flatten().count());
         }
-        self.output.stats.clean_loads += 1;
+    }
+
+    fn clean_pair_load(
+        &mut self,
+        transfer: MemoryTransfer,
+        bytes: u8,
+        data: [Register; 2],
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    ) -> Result<(), RegionError> {
+        let mut raw = vec![];
+        super::memory_pair(&mut raw, transfer, bytes, data, base, displacement, mode);
+        let ends = encoding::ordinary_pair_load_ends(
+            &raw,
+            slot(base).expect("eligible X base"),
+            data.map(slot),
+            displacement,
+        )
+        .ok_or(RegionError::ChangedMemoryEncoding)?;
+        let cached_base = self.cached(base);
+        self.settle_before_load(HostGpr::Rcx.mask() | HostGpr::R8.mask(), &data);
+        let mut start = 0;
+        for end in ends {
+            if start == 0
+                && let Some(host) = cached_base
+            {
+                self.emit(|code| encoding::copy(code, HostGpr::Rax, host, Width::X64));
+                self.output.stats.address_cache_hits += 1;
+            } else {
+                self.emit(|code| code.extend_from_slice(&raw[start..end]));
+            }
+            start = end;
+        }
+        // Both accesses precede either destination commit in the unchanged
+        // shared emitter. A second-access fault leaves both old values intact.
+        self.retain_clean_result(data[0], HostGpr::Rcx);
+        self.retain_clean_result(data[1], HostGpr::R8);
+        self.output.stats.pair_loads += 1;
         self.output.stats.commits += 1;
         Ok(())
     }
 
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), RegionError> {
+        self.pinned_hosts = 0;
         self.output
             .source_map
             .push((instruction.pc, self.output.code.len()));
@@ -337,7 +416,7 @@ impl Emitter<'_> {
                 displacement,
                 mode,
             } => {
-                self.clean_byte_load(transfer, bytes, data, base, displacement, mode)?;
+                self.clean_load(transfer, bytes, data, base, displacement, mode)?;
             }
             Operation::Nop => {
                 self.emit(encoding::nop);
@@ -375,6 +454,16 @@ impl Emitter<'_> {
                     }
                 }
                 self.commit(destination, width);
+            }
+            Operation::MemoryPair {
+                transfer,
+                bytes,
+                data,
+                base,
+                displacement,
+                mode,
+            } => {
+                self.clean_pair_load(transfer, bytes, data, base, displacement, mode)?;
             }
             Operation::AddSub {
                 width,
@@ -664,7 +753,7 @@ pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, Regi
     emit_prefix_selected(instructions, false)
 }
 
-/// Private ordinary direct-RAM clean-load tier; pure ALU API stays six-slot.
+/// Ordinary direct-RAM load retention; pure ALU allocation keeps six slots.
 pub fn emit_clean_load_prefix(
     instructions: &[Instruction],
 ) -> Result<OptimizedRegion, RegionError> {
@@ -690,10 +779,12 @@ fn emit_prefix_selected(
         prefix_effects(instructions)
     };
     let contains_load = clean_loads
-        && instructions
-            .iter()
-            .take(effects.len())
-            .any(|instruction| matches!(instruction.operation, Operation::Memory { .. }));
+        && instructions.iter().take(effects.len()).any(|instruction| {
+            matches!(
+                instruction.operation,
+                Operation::Memory { .. } | Operation::MemoryPair { .. }
+            )
+        });
     let consumed = effects.len();
     let entry = instructions.first().map(|instruction| instruction.pc);
     for (index, instruction) in instructions.iter().take(consumed).enumerate() {
@@ -741,7 +832,19 @@ fn emit_prefix_selected(
         #[cfg(test)]
         phase: Phase::BeforeGuestCommit,
         constants: constant::ConstantRegisters::default(),
-        pool_start: usize::from(contains_load),
+        reserved_hosts: if contains_load {
+            HostGpr::Rcx.mask()
+                | if instructions.iter().take(consumed).any(|instruction| {
+                    matches!(instruction.operation, Operation::MemoryPair { .. })
+                }) {
+                    HostGpr::R8.mask()
+                } else {
+                    0
+                }
+        } else {
+            0
+        },
+        pinned_hosts: 0,
     };
     for instruction in instructions.iter().take(consumed) {
         #[cfg(test)]

@@ -1,4 +1,5 @@
 //! Baseline integer encodings. No optional host feature or host flag dependency.
+use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{Logical, Shift, Width};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,12 @@ pub enum HostGpr {
     R9 = 9,
     R10 = 10,
     R11 = 11,
+}
+
+impl HostGpr {
+    pub const fn mask(self) -> u16 {
+        1u16 << self as u8
+    }
 }
 
 pub const RESULT: HostGpr = HostGpr::Rax;
@@ -200,41 +207,104 @@ pub fn invert(code: &mut Vec<u8>, width: Width) {
     ]);
 }
 
-/// Check the exact shared raw-byte-load recipe, including physical clobbers.
-/// This inspects existing emitted bytes; it never emits a second memory engine.
-pub fn ordinary_byte_load_ends(
+const ORDINARY_ADDRESS_BYTES: usize = 17;
+const FRAME_STORE_BYTES: usize = 7;
+const GPR_BYTES: usize = std::mem::size_of::<u64>();
+const ECX_FROM_RAX_MEMORY: u8 = 0x08;
+const FRAME_DISP32_FROM_RCX: u8 = 0x8f;
+const FRAME_DISP32_FROM_R8: u8 = 0x87;
+const R8D_FROM_RAX_DISP8: u8 = 0x40;
+
+fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<Vec<usize>> {
+    const LEA: u8 = 0x8d;
+    const RAX_FROM_FRAME_DISP32: u8 = 0x87;
+    const RDX_FROM_RAX_DISP32: u8 = 0x90;
+    const RAX_FROM_RDX: u8 = 0xd0;
+    if code.get(0..3)? != [REX | REX_W, MOV_LOAD, RAX_FROM_FRAME_DISP32]
+        || code.get(3..7)?
+            != u32::try_from(base.checked_mul(GPR_BYTES)?)
+                .ok()?
+                .to_le_bytes()
+        || code.get(7..10)? != [REX | REX_W, LEA, RDX_FROM_RAX_DISP32]
+        || code.get(10..14)? != displacement.to_le_bytes()
+        || code.get(14..ORDINARY_ADDRESS_BYTES)? != [REX | REX_W, MOV_STORE, RAX_FROM_RDX]
+    {
+        return None;
+    }
+    Some(vec![7, 14, ORDINARY_ADDRESS_BYTES])
+}
+
+fn check_frame_store(code: &[u8], start: usize, guest: usize, rex: u8, modrm: u8) -> Option<usize> {
+    let end = start.checked_add(FRAME_STORE_BYTES)?;
+    if code.get(start..start + 3)? != [rex, MOV_STORE, modrm]
+        || code.get(start + 3..end)?
+            != u32::try_from(guest.checked_mul(GPR_BYTES)?)
+                .ok()?
+                .to_le_bytes()
+    {
+        return None;
+    }
+    Some(end)
+}
+
+/// Inspect the exact shared scalar load, including address, clobbers and commit.
+/// The same memory emitter supplies bytes; this is not a second memory engine.
+pub fn ordinary_load_ends(
     code: &[u8],
+    bytes: u8,
     base: usize,
     data: Option<usize>,
     displacement: i32,
 ) -> Option<Vec<usize>> {
-    const LEA: u8 = 0x8d;
-    const TWO_BYTE_OPCODE: u8 = 0x0f;
     const MOVZX_BYTE: u8 = 0xb6;
-    const RAX_FROM_FRAME_DISP32: u8 = 0x87;
-    const RDX_FROM_RAX_DISP32: u8 = 0x90;
-    const RAX_FROM_RDX: u8 = 0xd0;
-    const ECX_FROM_RAX_MEMORY: u8 = 0x08;
-    const FRAME_DISP32_FROM_RCX: u8 = 0x8f;
-    let expected_length = if data.is_some() { 27 } else { 20 };
-    if code.len() != expected_length
-        || code.get(0..3)? != [REX | REX_W, MOV_LOAD, RAX_FROM_FRAME_DISP32]
-        || code.get(3..7)? != u32::try_from(base.checked_mul(8)?).ok()?.to_le_bytes()
-        || code.get(7..10)? != [REX | REX_W, LEA, RDX_FROM_RAX_DISP32]
-        || code.get(10..14)? != displacement.to_le_bytes()
-        || code.get(14..17)? != [REX | REX_W, MOV_STORE, RAX_FROM_RDX]
-        || code.get(17..20)? != [TWO_BYTE_OPCODE, MOVZX_BYTE, ECX_FROM_RAX_MEMORY]
+    let memory_recipe: &[u8] = match bytes {
+        BYTE_LOAD_BYTES => &[TWO_BYTE_OPCODE, MOVZX_BYTE, ECX_FROM_RAX_MEMORY],
+        WORD_LOAD_BYTES => &[MOV_LOAD, ECX_FROM_RAX_MEMORY],
+        _ => return None,
+    };
+    let mut ends = ordinary_address_ends(code, base, displacement)?;
+    let load_end = ORDINARY_ADDRESS_BYTES + memory_recipe.len();
+    if code.get(ORDINARY_ADDRESS_BYTES..load_end)? != memory_recipe {
+        return None;
+    }
+    ends.push(load_end);
+    let end = if let Some(guest) = data {
+        let end = check_frame_store(code, load_end, guest, REX | REX_W, FRAME_DISP32_FROM_RCX)?;
+        ends.push(end);
+        end
+    } else {
+        load_end
+    };
+    (code.len() == end).then_some(ends)
+}
+
+/// Unsigned W pair recipe: RCX/R8 results, both accesses before either commit.
+/// SP/writeback, signed/X pairs and duplicate destinations are not selected.
+pub fn ordinary_pair_load_ends(
+    code: &[u8],
+    base: usize,
+    data: [Option<usize>; 2],
+    displacement: i32,
+) -> Option<Vec<usize>> {
+    let mut ends = ordinary_address_ends(code, base, displacement)?;
+    let first_end = ORDINARY_ADDRESS_BYTES + 2;
+    let second_end = first_end + 4;
+    if code.get(ORDINARY_ADDRESS_BYTES..first_end)? != [MOV_LOAD, ECX_FROM_RAX_MEMORY]
+        || code.get(first_end..second_end)?
+            != [REX | REX_R, MOV_LOAD, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES]
     {
         return None;
     }
-    let mut ends = vec![7, 14, 17, 20];
-    if let Some(data) = data {
-        if code.get(20..23)? != [REX | REX_W, MOV_STORE, FRAME_DISP32_FROM_RCX]
-            || code.get(23..27)? != u32::try_from(data.checked_mul(8)?).ok()?.to_le_bytes()
-        {
-            return None;
+    ends.extend([first_end, second_end]);
+    let mut end = second_end;
+    for (guest, rex, modrm) in [
+        (data[0], REX | REX_W, FRAME_DISP32_FROM_RCX),
+        (data[1], REX | REX_W | REX_R, FRAME_DISP32_FROM_R8),
+    ] {
+        if let Some(guest) = guest {
+            end = check_frame_store(code, end, guest, rex, modrm)?;
+            ends.push(end);
         }
-        ends.push(27);
     }
-    Some(ends)
+    (code.len() == end).then_some(ends)
 }
