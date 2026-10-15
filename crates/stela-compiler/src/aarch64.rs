@@ -21,6 +21,7 @@ pub mod scalable;
 pub mod simd;
 pub mod sme;
 pub mod sve;
+pub mod system;
 pub mod tag_arithmetic;
 pub mod unprivileged;
 
@@ -208,6 +209,7 @@ pub enum Operation {
     ConditionalCompare(conditional_select::CompareOperand),
     Crc(crc::Operand),
     Flags(flags::Operand),
+    Synchronization(system::synchronization::Operation),
     IntegerMath(integer_math::Operand),
     IntegerMinMax(integer_minmax::Operand),
     TagArithmetic(tag_arithmetic::Operand),
@@ -403,6 +405,15 @@ impl Lifter for Decoder {
             Operation::Return
         } else if word == 0xd503201f {
             Operation::Nop
+        } else if let Some(decoded) = system::synchronization::decode(word).filter(|operation| {
+            matches!(
+                operation,
+                system::synchronization::Operation::Yield
+                    | system::synchronization::Operation::ConsumptionBarrier
+                    | system::synchronization::Operation::SpeculationBarrier
+            )
+        }) {
+            Operation::Synchronization(decoded)
         } else if let Some(_reason) = constrained::decode(word) {
             // Pinned constrained outcomes select NOP under the declared FP-present,
             // unguarded-page/BTYPE=0 profile, before FP enablement or memory effects.
@@ -688,6 +699,58 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn synchronization_admits_only_context_independent_effects() {
+        const YIELD_WORD: u32 = 0xd503_203f;
+        const CSDB_WORD: u32 = 0xd503_229f;
+        const SB_WORD: u32 = 0xd503_30ff;
+        const NOP_WORD: u32 = 0xd503_201f;
+        const CRM_SHIFT: u32 = 8;
+        const CRM_VALUES: u32 = 16;
+        let pc = GuestAddress(0x1000);
+        for word in [YIELD_WORD, CSDB_WORD] {
+            assert!(matches!(
+                Decoder.lift(pc, word).unwrap().operation,
+                Operation::Synchronization(_)
+            ));
+        }
+        for crm in 0..CRM_VALUES {
+            assert_eq!(
+                Decoder
+                    .lift(pc, SB_WORD | crm << CRM_SHIFT)
+                    .unwrap()
+                    .operation,
+                Operation::Synchronization(system::synchronization::Operation::SpeculationBarrier)
+            );
+        }
+        assert_eq!(
+            Decoder.lift(pc, NOP_WORD).unwrap().operation,
+            Operation::Nop
+        );
+        // Existing PAuth block dispatch owns its hints before the ordinary decoder.
+        for (mnemonic, word) in [
+            ("PACIASP", 0xd503_233f),
+            ("PACIBSP", 0xd503_237f),
+            ("DSB", 0xd503_3f9f),
+            ("ISB", 0xd503_3fdf),
+            ("WFE", 0xd503_205f),
+            ("WFI", 0xd503_207f),
+            ("SEV", 0xd503_209f),
+            ("SEVL", 0xd503_20bf),
+            ("BTI", 0xd503_241f),
+            ("ESB", 0xd503_221f),
+            ("TSB", 0xd503_225f),
+            ("reserved HINT", 0xd503_301f),
+            ("SSBB", 0xd503_309f),
+            ("PSSBB", 0xd503_349f),
+        ] {
+            assert!(
+                Decoder.lift(pc, word).is_err(),
+                "unexpected admission: {mnemonic} {word:#x}"
+            );
+        }
+    }
+
     #[test]
     fn consistent_branches_preserve_conditional_branch_operand_semantics() {
         const CONSISTENT_BRANCH_HINT: u32 = 1 << 4;

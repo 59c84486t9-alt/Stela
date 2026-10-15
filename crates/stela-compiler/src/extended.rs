@@ -118,6 +118,7 @@ fn ordinary_permitted(operation: &Operation) -> bool {
             | Operation::BranchBit { .. }
             | Operation::MoveWide { .. }
             | Operation::AddSub { .. }
+            | Operation::Synchronization(_)
             | Operation::Nop
             | Operation::Return
     )

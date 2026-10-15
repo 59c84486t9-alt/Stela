@@ -14,6 +14,18 @@ pub(crate) fn validate_target(
     instruction: &Instruction,
     target: crate::TargetCpu,
 ) -> Result<(), UnsupportedReason> {
+    if let Operation::Synchronization(operation) = &instruction.operation
+        && !matches!(
+            operation,
+            crate::aarch64::system::synchronization::Operation::Yield
+                | crate::aarch64::system::synchronization::Operation::ConsumptionBarrier
+                | crate::aarch64::system::synchronization::Operation::SpeculationBarrier
+        )
+    {
+        return Err(UnsupportedReason::PrivilegedOperation {
+            address: instruction.pc,
+        });
+    }
     if let Operation::Ordered(operand) = &instruction.operation
         && ordered::requires_atomic_load16(operand)
         && !target.supports(crate::TargetCpu::AtomicLoad16)
@@ -56,6 +68,7 @@ mod scalable;
 mod simd;
 pub(crate) mod sme;
 pub(crate) mod sve;
+mod system;
 mod tag_arithmetic;
 mod unprivileged;
 
@@ -334,6 +347,8 @@ pub(crate) fn emit_instruction(
         Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
         Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::Flags(operand) => flags::emit(code, &operand),
+        Operation::Synchronization(operand) => system::synchronization::emit(code, &operand)
+            .expect("decoder admits only context-independent synchronization"),
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
         Operation::IntegerMinMax(operand) => integer_minmax::emit(code, &operand),
         Operation::IntegerUnary(operand) => integer_unary::emit(code, &operand, target),
@@ -643,5 +658,63 @@ impl Emitter {
             code[displacement..displacement + 4].copy_from_slice(&relative.to_le_bytes());
         }
         Ok(block)
+    }
+}
+
+#[cfg(test)]
+mod synchronization_tests {
+    use super::*;
+    use crate::aarch64::system::synchronization::{
+        Operation as Synchronization, Requirement, Scope, WaitKind,
+    };
+
+    #[test]
+    fn constructed_context_operations_return_an_explicit_error() {
+        const BARRIER_OPTION_OSH: u8 = 3;
+        const BARRIER_OPTION_SY: u8 = 15;
+        const BTI_JC_TARGETS: u8 = 3;
+        const RESERVED_HINT_IMMEDIATE: u8 = 127;
+        let pc = GuestAddress(0x1000);
+        for operation in [
+            Synchronization::DataCompletion {
+                option: BARRIER_OPTION_OSH,
+                scope: Scope::OuterShareable,
+                requirement: Requirement::All,
+                nxs: false,
+            },
+            Synchronization::InstructionSynchronization {
+                option: BARRIER_OPTION_SY,
+            },
+            Synchronization::StoreBypassBarrier { physical: false },
+            Synchronization::StoreBypassBarrier { physical: true },
+            Synchronization::BranchTarget {
+                targets: BTI_JC_TARGETS,
+            },
+            Synchronization::Wait {
+                kind: WaitKind::Event,
+                timeout_register: None,
+            },
+            Synchronization::SendEvent { local: false },
+            Synchronization::ErrorSynchronization,
+            Synchronization::TraceSynchronization,
+            Synchronization::OtherHint {
+                immediate: RESERVED_HINT_IMMEDIATE,
+            },
+        ] {
+            let instructions = [
+                Instruction {
+                    pc,
+                    operation: Operation::Nop,
+                },
+                Instruction {
+                    pc: GuestAddress(pc.0 + size_of::<u32>() as u64),
+                    operation: Operation::Synchronization(operation),
+                },
+            ];
+            assert!(
+                matches!(Emitter.emit_for_target(&instructions, crate::TargetCpu::Baseline),
+                Err(UnsupportedReason::PrivilegedOperation { address }) if address == instructions[1].pc)
+            );
+        }
     }
 }

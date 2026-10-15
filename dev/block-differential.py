@@ -670,16 +670,176 @@ def bc_original_native(cli, case_index_path, output_dir):
     return report
 
 
+# Named encoding and observation-layout facts for the narrow synchronization cohort.
+SYNCHRONIZATION_YIELD = 0xd503203f
+SYNCHRONIZATION_CSDB = 0xd503229f
+SYNCHRONIZATION_SB = 0xd50330ff
+SYNCHRONIZATION_SB_MASK = 0xfffff0ff
+SYNCHRONIZATION_RET = 0xd65f03c0
+SYNCHRONIZATION_DIRECT_FUNCTIONS = 3
+SYNCHRONIZATION_FUNCTIONS = 18
+SYNCHRONIZATION_INPUT_STRIDE = 800
+SYNCHRONIZATION_STATE_OFFSET = 8
+SYNCHRONIZATION_GUARD_BYTES = 32
+SYNCHRONIZATION_PAUSE_BODY = bytes.fromhex('f390')
+SYNCHRONIZATION_CPUID_BODY = bytes.fromhex('4989d831c00fa24c89c3')
+SYNCHRONIZATION_UNKNOWN_A64_ESR = 1 << 25
+SYNCHRONIZATION_LEAF_ABI = 'x86_64-sysv-guest-state-v3-direct-ram'
+
+
+def synchronization_original_native(cli, receipt_path, output_dir):
+    """Bridge the integrated compiler to genuine original State observations.
+
+    Nonzero SB CRm selects execute-as-zero here and UNDEF in QEMU. Those frames
+    are reported as policy checks, separately from direct original equality.
+    The unchanged native bodies inherit the prior State/host-ABI mapping proof.
+    """
+    cli, receipt_path = Path(cli).resolve(), Path(receipt_path).resolve()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=False)
+    frozen = {cli: bc_sha(cli), Path(__file__): bc_sha(__file__),
+              ROOT / 'dev/differential.py': bc_sha(ROOT / 'dev/differential.py'),
+              receipt_path: bc_sha(receipt_path)}
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt['passed'] is True
+    assert receipt['kind'] == 'genuine_original_synchronization_full_state_capture'
+    assert receipt['state_bytes'] == ctypes.sizeof(State)
+    original_dir = receipt_path.parent
+    for name, identity in receipt['files'].items():
+        path = original_dir / name
+        assert path.parent == original_dir, 'Oracle files must be local receipt siblings'
+        assert path.stat().st_size == identity['bytes']
+        assert bc_sha(path) == identity['sha256']
+        frozen[path] = identity['sha256']
+    inputs = (original_dir / 'inputs.bin').read_bytes()
+    originals = (original_dir / 'states.bin').read_bytes()
+    cases = json.loads((original_dir / 'cases.json').read_text())
+    assert len(cases) == receipt['cases'] == 320
+    assert len(inputs) == len(cases) * SYNCHRONIZATION_INPUT_STRIDE
+    assert len(originals) == len(cases) * ctypes.sizeof(State)
+    subjects = {row['function_index']: row for row in receipt['subjects']}
+    soft = {row['case_index']: row for row in receipt['observations']['soft_undefined_observations']}
+    artifacts, rows, compiler = {}, [], None
+    selected_flags = set()
+    direct_comparisons = policy_comparisons = 0
+    for index, case in enumerate(cases):
+        function = case['function_index']
+        if function >= SYNCHRONIZATION_FUNCTIONS:
+            continue  # SSBB/PSSBB are deliberately outside this admission.
+        subject = subjects[function]
+        source = bytes.fromhex(subject['canonical_source_hex'])
+        word, trailing_ret = struct.unpack('<II', source)
+        assert trailing_ret == SYNCHRONIZATION_RET
+        assert (word in (SYNCHRONIZATION_YIELD, SYNCHRONIZATION_CSDB)
+                or word & SYNCHRONIZATION_SB_MASK == SYNCHRONIZATION_SB)
+        assert subject['executed_source_hex'].startswith(source[:WORD_BYTES].hex())
+        assert hashlib.sha256(source).hexdigest() == subject['canonical_source_sha256']
+        pc = subject['instruction_pc']
+        assert subject['svc_pc'] == pc + WORD_BYTES
+        assert subject['expected_elr'] == subject['svc_pc'] + WORD_BYTES
+        input_offset = index * SYNCHRONIZATION_INPUT_STRIDE
+        assert struct.unpack_from('<Q', inputs, input_offset)[0] == function
+        initial = inputs[input_offset + SYNCHRONIZATION_STATE_OFFSET:
+                         input_offset + SYNCHRONIZATION_STATE_OFFSET + ctypes.sizeof(State)]
+        original = originals[index * ctypes.sizeof(State):(index + 1) * ctypes.sizeof(State)]
+        assert hashlib.sha256(initial).hexdigest() == case['initial_state_sha256']
+        assert State.from_buffer_copy(initial).nzcv == case['nzcv'] << NZCV_SHIFT
+        assert initial == original, 'Synchronization must preserve complete State'
+        selected_flags.add((function, case['nzcv']))
+        is_direct = function < SYNCHRONIZATION_DIRECT_FUNCTIONS
+        assert (index not in soft) == is_direct
+        if not is_direct:
+            assert soft[index]['word'] == word and soft[index]['elr'] == pc
+            assert soft[index]['esr'] == SYNCHRONIZATION_UNKNOWN_A64_ESR  # EC=unknown, IL=one A64 word.
+        expected_body = (SYNCHRONIZATION_PAUSE_BODY if word == SYNCHRONIZATION_YIELD else SYNCHRONIZATION_CPUID_BODY)
+        for mode in ('leaf', 'block'):
+            key = (function, mode)
+            if key not in artifacts:
+                label = f'synchronization-{function}-{mode}'
+                path = output_dir / (label + '.arm64')
+                path.write_bytes(source if mode == 'leaf' else source[:WORD_BYTES])
+                directory = output_dir / label
+                manifest = json.loads(subprocess.check_output([
+                    str(cli), 'compile-' + mode, str(path), '--guest-base', hex(pc),
+                    '--cpu-target', 'baseline', '--output-dir', str(directory)], timeout=30))
+                native = (directory / 'native.bin').read_bytes()
+                assert manifest['abi'] == (SYNCHRONIZATION_LEAF_ABI if mode == 'leaf' else ABI)
+                assert manifest['source_sha256'] == bc_sha(path)
+                assert manifest['native_sha256'] == hashlib.sha256(native).hexdigest()
+                assert manifest['source_map'] == ([[pc, 0], [pc + WORD_BYTES, len(expected_body)]]
+                                                   if mode == 'leaf' else [[pc, 0]])
+                assert native[:len(expected_body)] == expected_body
+                if mode == 'leaf':
+                    assert native == expected_body + b'\xc3'
+                decoded = list(Cs(CS_ARCH_X86, CS_MODE_64).disasm(native, 0))
+                assert sum(ins.size for ins in decoded) == len(native)
+                if compiler is None:
+                    compiler = manifest['compiler_source_sha256']
+                assert compiler == manifest['compiler_source_sha256']
+                artifacts[key] = (native, manifest, {
+                    'function_index': function, 'mode': mode, 'word': hex(word),
+                    'body_bytes': len(expected_body), 'body_instructions': 1 if word == SYNCHRONIZATION_YIELD else 4,
+                    'native_sha256': manifest['native_sha256'], 'manifest': manifest,
+                    'decoded': [{'mnemonic': ins.mnemonic, 'operands': ins.op_str, 'size': ins.size} for ins in decoded]})
+            native, manifest, _ = artifacts[key]
+            frame = ctypes.create_string_buffer(b'\xa5' * (ctypes.sizeof(State) + 2 * SYNCHRONIZATION_GUARD_BYTES))
+            state = State.from_buffer(frame, SYNCHRONIZATION_GUARD_BYTES)
+            ctypes.memmove(ctypes.byref(state), initial, len(initial))
+            before = bytes(frame)
+            with executable(native) as address:
+                if mode == 'leaf':
+                    ctypes.CFUNCTYPE(None, ctypes.POINTER(State))(address)(ctypes.byref(state))
+                else:
+                    returned = ctypes.CFUNCTYPE(BlockExit, ctypes.POINTER(State))(address)(ctypes.byref(state))
+                    assert (returned.next_pc, returned.kind) == (pc + WORD_BYTES, 0)
+            assert bytes(frame) == before and bytes(state) == original
+            direct_comparisons += is_direct
+            policy_comparisons += not is_direct
+            rows.append({'case_index': index, 'function_index': function, 'mode': mode,
+                         'comparison': 'direct_original' if is_direct else 'permitted_undefined_vs_execute_as_zero',
+                         'state_sha256': hashlib.sha256(bytes(state)).hexdigest(),
+                         'native_sha256': manifest['native_sha256']})
+    assert selected_flags == {(function, flags) for function in range(SYNCHRONIZATION_FUNCTIONS) for flags in range(16)}
+    for path, identity in frozen.items():
+        assert bc_sha(path) == identity, f'Frozen input changed: {path}'
+    report = {'kind': 'arm64_synchronization_original_native_differential', 'passed': True,
+              'compiler_source_sha256': compiler, 'compiler_executable_sha256': frozen[cli],
+              'harness_source_sha256': frozen[Path(__file__)],
+              'shared_sources_sha256': {'dev/differential.py': frozen[ROOT / 'dev/differential.py']},
+              'original_receipt_sha256': frozen[receipt_path], 'target': 'baseline',
+              'state_bytes': ctypes.sizeof(State), 'state_comparisons': len(rows),
+              'direct_original_state_comparisons': direct_comparisons,
+              'soft_undefined_policy_state_comparisons': policy_comparisons,
+              'actual_body_bridges': len(artifacts), 'cases': rows,
+              'artifacts': [row[2] for row in artifacts.values()],
+              'limits': ['Direct original equality covers CSDB/YIELD/SB CRm=0 only.',
+                         'Nonzero SB uses a permitted source policy differing from QEMU UNDEF; no direct equality credit.',
+                         'State observations do not prove speculation suppression; CPUID serialization requires the reviewed host guarantee.',
+                         'Exact body bridges reuse prior host ABI preservation evidence; no application/OS/performance claim.']}
+    (output_dir / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-build', action='store_true')
     parser.add_argument('--cli', type=Path, help='Use an explicitly frozen compiler executable')
+    parser.add_argument('--synchronization-oracle', type=Path, help='Run only CSDB/SB/YIELD from a genuine original receipt')
     parser.add_argument('--bc-oracle', type=Path, help='Run only focused BC originals from this observations index')
     parser.add_argument('--output-dir', type=Path, help='Fresh artifact directory required with --bc-oracle')
     args = parser.parse_args()
+    if args.bc_oracle is not None and args.synchronization_oracle is not None:
+        parser.error('Choose one focused oracle cohort')
     if not args.no_build:
         subprocess.run([str(ROOT / 'dev/cargo'), 'build', '--locked', '-p', 'stela-cli'], check=True)
     cli = (args.cli or ROOT / 'target/debug/stela').resolve()
+    if args.synchronization_oracle is not None:
+        if args.output_dir is None:
+            parser.error('--synchronization-oracle requires a fresh --output-dir')
+        report = synchronization_original_native(cli, args.synchronization_oracle, args.output_dir)
+        write_evidence(ROOT / '.stela/synchronization-differential-report.json', report)
+        print(json.dumps({key: report[key] for key in ('passed', 'direct_original_state_comparisons', 'soft_undefined_policy_state_comparisons', 'actual_body_bridges')}))
+        return
     if args.bc_oracle is not None:
         if args.output_dir is None:
             parser.error('--bc-oracle requires a fresh --output-dir')
