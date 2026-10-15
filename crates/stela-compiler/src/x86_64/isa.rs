@@ -214,6 +214,71 @@ impl SimdOpcode {
     }
 }
 
+/// AVX2 per-element shifts used by fixed 128-bit scalable chunks. The full
+/// unsigned dword/qword count is consumed; logical overflow zeroes the lane and
+/// arithmetic dword overflow sign-fills it. No EFLAGS or MXCSR effects occur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VexShiftOpcode {
+    LeftDword,
+    RightDword,
+    ArithmeticDword,
+    LeftQword,
+    RightQword,
+}
+
+impl VexShiftOpcode {
+    pub(crate) fn register(
+        self,
+        code: &mut Vec<u8>,
+        destination: u8,
+        source: u8,
+        counts: u8,
+        target: TargetCpu,
+    ) {
+        assert!(
+            target.supports(TargetCpu::Avx2),
+            "AVX2 shifts require usable AVX2 state"
+        );
+        assert!(
+            destination < 8 && source < 8 && counts < 8,
+            "AVX2 shift writer requires XMM0..7"
+        );
+        const VEX3: u8 = 0xc4;
+        const MAP_0F38_LOW_REGISTERS: u8 = 0xe2;
+        const PREFIX_66: u8 = 1;
+        const QWORD_W: u8 = 0x80;
+        const REGISTER_DIRECT: u8 = 0xc0;
+        const REGISTER_SHIFT: u8 = 3;
+        let (opcode, width) = match self {
+            Self::LeftDword => (0x47, 0),
+            Self::RightDword => (0x45, 0),
+            Self::ArithmeticDword => (0x46, 0),
+            Self::LeftQword => (0x47, QWORD_W),
+            Self::RightQword => (0x45, QWORD_W),
+        };
+        // VEX.vvvv complements the nondestructive data source. L=0 selects128.
+        let operands = width | ((!source & 15) << REGISTER_SHIFT) | PREFIX_66;
+        code.extend([
+            VEX3,
+            MAP_0F38_LOW_REGISTERS,
+            operands,
+            opcode,
+            REGISTER_DIRECT | (destination << REGISTER_SHIFT) | counts,
+        ]);
+    }
+}
+
+/// Clear caller-volatile upper vector state before an AVX2 body starts mixing
+/// VEX128 arithmetic with its legacy SSE state-access and predication wrapper.
+pub(crate) fn clear_upper_vector_state(code: &mut Vec<u8>, target: TargetCpu) {
+    assert!(
+        target.supports(TargetCpu::Avx2),
+        "VZEROUPPER requires usable AVX state"
+    );
+    const VZEROUPPER: [u8; 3] = [0xc5, 0xf8, 0x77];
+    code.extend(VZEROUPPER);
+}
+
 /// SSE4.2 CRC32 computes Castagnoli, never the IEEE polynomial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CrcOpcode {
@@ -286,6 +351,30 @@ impl CrcTableInstruction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avx2_shift_encodings_keep_data_count_and_destination_fields_distinct() {
+        for (opcode, operation, width) in [
+            (VexShiftOpcode::LeftDword, 0x47, 0),
+            (VexShiftOpcode::RightDword, 0x45, 0),
+            (VexShiftOpcode::ArithmeticDword, 0x46, 0),
+            (VexShiftOpcode::LeftQword, 0x47, 0x80),
+            (VexShiftOpcode::RightQword, 0x45, 0x80),
+        ] {
+            let mut code = Vec::new();
+            opcode.register(&mut code, 3, 6, 7, TargetCpu::Avx2);
+            assert_eq!(code, [0xc4, 0xe2, width | 0x49, operation, 0xdf]);
+            for target in [TargetCpu::Baseline, TargetCpu::Sse42, TargetCpu::Fma] {
+                code.clear();
+                let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    opcode.register(&mut code, 0, 0, 1, target);
+                }));
+                assert!(declined.is_err());
+                assert!(code.is_empty());
+            }
+        }
+    }
+
     #[test]
     fn word_to_qword_widening_requires_checked_sse41() {
         for (opcode, mnemonic, encoding) in [
@@ -318,6 +407,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn signed_byte_widening_requires_checked_sse41() {
         let opcode = SimdOpcode::SignExtendByteToWord;

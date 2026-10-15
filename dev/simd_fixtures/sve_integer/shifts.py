@@ -271,12 +271,19 @@ def cases(vector_bytes):
             left = row['mnemonic'].lower() in {'lsl', 'sqshl', 'uqshl', 'sqshlu', 'sli'}
             amounts = sorted({0 if left else 1, 1, bits // 2, bits - 1 if left else bits}) if immediate else [None]
             for amount in amounts:
-                for destination, source, counts, predicate in ((0, 1, 2, 0), (31, 31, 31, 7)):
+                aliases = ((0, 1, 2, 0), (31, 31, 31, 7))
+                if (not immediate and bits >= 32 and '_zz_' in row['id']
+                        and row['mnemonic'] in {'ASR', 'LSL', 'LSR', 'ASRR', 'LSLR', 'LSRR'}):
+                    # Direct per-element host mappings must snapshot partially
+                    # aliased data/count/destination operands before publication.
+                    aliases += ((0, 0, 2, 0), (0, 1, 0, 0), (0, 1, 1, 0))
+                for destination, source, counts, predicate in aliases:
                     word = encode(row, bits, amount, destination, source, counts, predicate)
                     instruction = decode(word)
                     count_values = (-bits-2, -bits-1, -bits, -1, 0, 1, bits-1,
                                     bits, bits+1, bits+2, 0x100, 0x101,
-                                    0x100000001, -(1 << (bits-1)), (1 << (bits-1))-1)
+                                    0x100000001, -(1 << (bits-1)), (1 << (bits-1))-1,
+                                    1 << (bits-1), (1 << bits)-1)
                     count_bytes = 8 if instruction.wide_counts else bits // BYTE_BITS
                     count_lanes = vector_bytes // count_bytes
                     repetitions = 1 if immediate else (len(count_values) + count_lanes - 1) // count_lanes

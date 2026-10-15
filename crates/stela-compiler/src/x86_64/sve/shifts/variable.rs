@@ -4,9 +4,34 @@ use crate::x86_64::simd::shifts::{
 };
 use crate::{
     TargetCpu,
-    aarch64::{scalable::ElementSize, sve::shifts::Kind},
-    x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
+    aarch64::{
+        scalable::ElementSize,
+        sve::shifts::{Count, Kind},
+    },
+    x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host, VexShiftOpcode},
 };
+
+/// Only complete unsigned per-element counts map directly. Wide counts,
+/// signed bidirectional/rounded shifts and narrower lanes retain their own
+/// recipes. The target-independent DIT profile gate remains conservative.
+pub(super) fn avx2_opcode(
+    kind: Kind,
+    element: ElementSize,
+    count: Count,
+    target: TargetCpu,
+) -> Option<VexShiftOpcode> {
+    if !target.supports(TargetCpu::Avx2) || !matches!(count, Count::Elements(_)) {
+        return None;
+    }
+    match (kind, element) {
+        (Kind::LogicalLeft, ElementSize::Word) => Some(VexShiftOpcode::LeftDword),
+        (Kind::LogicalRight, ElementSize::Word) => Some(VexShiftOpcode::RightDword),
+        (Kind::ArithmeticRight, ElementSize::Word) => Some(VexShiftOpcode::ArithmeticDword),
+        (Kind::LogicalLeft, ElementSize::Doubleword) => Some(VexShiftOpcode::LeftQword),
+        (Kind::LogicalRight, ElementSize::Doubleword) => Some(VexShiftOpcode::RightQword),
+        _ => None,
+    }
+}
 const MOV_RAX_IMM64: [u8; 2] = [0x48, 0xb8];
 const ADJACENT_DWORDS: u8 = 0xb1;
 const HIGH_DWORD_SIGN: u8 = 0xf5;
@@ -166,5 +191,75 @@ pub(super) fn chunk(code: &mut Vec<u8>, kind: Kind, element: ElementSize) {
         packed(code, Host::Xor, 0, 2);
     } else {
         packed(code, Host::And, 0, 2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avx2_route_excludes_different_count_semantics_and_missing_widths() {
+        for (kind, element, count, target) in [
+            (
+                Kind::LogicalLeft,
+                ElementSize::Word,
+                Count::Elements(1),
+                TargetCpu::Baseline,
+            ),
+            (
+                Kind::LogicalLeft,
+                ElementSize::Word,
+                Count::Doublewords(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::LogicalLeft,
+                ElementSize::Word,
+                Count::Immediate(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::LogicalLeft,
+                ElementSize::Byte,
+                Count::Elements(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::LogicalRight,
+                ElementSize::Halfword,
+                Count::Elements(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::ArithmeticRight,
+                ElementSize::Doubleword,
+                Count::Elements(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::RoundingSigned,
+                ElementSize::Word,
+                Count::Elements(1),
+                TargetCpu::Avx2,
+            ),
+            (
+                Kind::SaturatingUnsigned,
+                ElementSize::Word,
+                Count::Elements(1),
+                TargetCpu::Avx2,
+            ),
+        ] {
+            assert_eq!(avx2_opcode(kind, element, count, target), None);
+        }
+        assert_eq!(
+            avx2_opcode(
+                Kind::ArithmeticRight,
+                ElementSize::Word,
+                Count::Elements(1),
+                TargetCpu::Avx2
+            ),
+            Some(VexShiftOpcode::ArithmeticDword),
+        );
     }
 }
