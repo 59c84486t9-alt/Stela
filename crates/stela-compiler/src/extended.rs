@@ -17,7 +17,7 @@ use crate::{
         },
         sme::{integer_dots, integer_vector, length},
         sve::{
-            address, dot, floating_copy, integer_arithmetic, integer_comparison,
+            address, dot, floating_copy, integer_arithmetic, integer_bits, integer_comparison,
             integer_logic::{self, CopySource, Kind},
             integer_predicate_move, integer_products, integer_saturation, predicate_generation,
             predicate_logic, rearrange, rearrange_extract, rearrange_widen, reductions, shifts,
@@ -220,6 +220,7 @@ enum Decoded {
     Ordinary(Instruction),
     Address(address::Operand),
     IntegerDot(dot::Operand),
+    IntegerBits(integer_bits::Operand),
     IntegerLogic(integer_logic::Operand),
     IntegerPredicateMove(integer_predicate_move::Operand),
     IntegerProducts(integer_products::Operand),
@@ -374,6 +375,33 @@ fn decode(
             )));
         }
         return Ok(Decoded::IntegerPredicateMove(operand));
+    }
+    if let Some(decoded) = integer_bits::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming integer-bit encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        if x86_64::sve::integer_bits::requires_declared_dit_zero(operand, profile.length)
+            && profile.required_dit() != Some(false)
+        {
+            return Err(CompileError(format!(
+                "BSR leading counts require a declared DIT=0 profile at {:#x}",
+                pc.0,
+            )));
+        }
+        return Ok(Decoded::IntegerBits(operand));
     }
     if let Some(decoded) = integer_logic::decode(word) {
         let operand = decoded.map_err(|()| {
@@ -786,6 +814,9 @@ fn emit_decoded(
         Decoded::IntegerPredicateMove(operand) => {
             x86_64::sve::integer_predicate_move::emit(code, operand, profile.length, target);
         }
+        Decoded::IntegerBits(operand) => {
+            x86_64::sve::integer_bits::emit(code, operand, profile.length, target);
+        }
         Decoded::IntegerLogic(operand) => {
             x86_64::sve::integer_logic::emit(code, operand, profile.length, target);
         }
@@ -923,6 +954,204 @@ mod integer_dots_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_bits_register_exact_bodies_and_source_maps() {
+        const CANONICAL_WORDS: [u32; 7] = [
+            0x0418_a020, // CLS
+            0x0419_a020, // CLZ
+            0x041a_a020, // CNT
+            0x0527_8020, // RBIT
+            0x0564_8020, // REVB
+            0x05a5_8020, // REVH
+            0x05e6_8020, // REVW
+        ];
+        for word in CANONICAL_WORDS {
+            let operand = integer_bits::decode(word).unwrap().unwrap();
+            assert_eq!(
+                crate::aarch64::sve::decode(word),
+                Some(Ok(crate::aarch64::sve::Operand::IntegerBits(operand)))
+            );
+            for bytes in [16, 32, 64, 128, 256] {
+                for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
+                    let native = compile_for_profile(
+                        &words(&[word, RET_X30]),
+                        GuestAddress(0x1000),
+                        profile(bytes, true),
+                        target,
+                    )
+                    .unwrap();
+                    let mut body = Vec::new();
+                    x86_64::sve::integer_bits::emit(
+                        &mut body,
+                        operand,
+                        VectorLength::from_bytes(bytes).unwrap(),
+                        target,
+                    );
+                    let return_offset = CONTEXT_WRAPPER_BYTES + body.len();
+                    assert_eq!(
+                        native.source_map,
+                        [
+                            (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
+                            (GuestAddress(0x1004), return_offset)
+                        ]
+                    );
+                    assert_eq!(
+                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
+                        context_wrapper()
+                    );
+                    assert_eq!(
+                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES..return_offset],
+                        body
+                    );
+                    assert_eq!(&native.x86_64_code[return_offset..], &[RET]);
+                }
+            }
+            let length = VectorLength::from_bytes(16).unwrap();
+            for streaming in [false, true] {
+                for za in [false, true] {
+                    // Base SME is sufficient; no accidental SME2 requirement.
+                    let selected = ScalableProfile::new_with_features(
+                        length,
+                        ScalableMode::new(streaming, za),
+                        ScalableFeatures::of(ScalableFeature::Sme),
+                        ScalableControls::new(length, false),
+                    )
+                    .unwrap();
+                    let result = compile_for_profile(
+                        &words(&[word, RET_X30]),
+                        GuestAddress(0),
+                        selected,
+                        TargetCpu::Baseline,
+                    );
+                    if streaming {
+                        assert!(result.is_ok());
+                    } else {
+                        assert!(result.unwrap_err().0.contains("streaming mode required"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_bits_reserved_zeroing_and_prefix_inputs_remain_explicit() {
+        const RESERVED_REVERSE_WORDS: [u32; 6] = [
+            0x0524_8020,
+            0x0525_8020,
+            0x0565_8020,
+            0x0526_8020,
+            0x0566_8020,
+            0x05a6_8020,
+        ];
+        for word in RESERVED_REVERSE_WORDS {
+            assert!(
+                compile_for_profile(
+                    &words(&[NOP, word, RET_X30]),
+                    GuestAddress(0),
+                    profile(16, true),
+                    TargetCpu::Baseline
+                )
+                .unwrap_err()
+                .0
+                .contains("reserved streaming integer-bit")
+            );
+        }
+        const ZEROING_WORDS: [u32; 7] = [
+            0x0408_a020,
+            0x0409_a020,
+            0x040a_a020,
+            0x0527_a020,
+            0x0564_a020,
+            0x05a5_a020,
+            0x05e6_a020,
+        ];
+        for word in ZEROING_WORDS {
+            assert!(
+                compile_for_profile(
+                    &words(&[word, RET_X30]),
+                    GuestAddress(0),
+                    profile(16, true),
+                    TargetCpu::Baseline
+                )
+                .is_err()
+            );
+        }
+        const CLS_Z0_B_P0_Z1_B: u32 = 0x0418_a020;
+        assert!(
+            compile_for_profile(
+                &words(&[MOVPRFX_Z0_Z1, CLS_Z0_B_P0_Z1_B, RET_X30]),
+                GuestAddress(0),
+                profile(16, true),
+                TargetCpu::Baseline
+            )
+            .unwrap_err()
+            .0
+            .contains("MOVPRFX pair validation")
+        );
+        assert!(crate::compile(&words(&[CLS_Z0_B_P0_Z1_B, RET_X30]), GuestAddress(0)).is_err());
+    }
+    #[test]
+    fn integer_bits_bsr_recipes_require_declared_dit_zero() {
+        const SIZE_SHIFT: u32 = 22;
+        const LEADING_COUNT_WORDS: [u32; 2] = [0x0418_a020, 0x0419_a020];
+        const VECTOR_BYTES: [usize; 5] = [16, 32, 64, 128, 256];
+        // Independent audited B/H/S/D decisions by ascending supported SVL.
+        const EXPECTED_DIT_REQUIREMENTS: [[bool; 5]; 4] = [
+            [false; 5],
+            [false; 5],
+            [false, false, false, false, true],
+            [true; 5],
+        ];
+        for canonical in LEADING_COUNT_WORDS {
+            for (size, expected_by_length) in EXPECTED_DIT_REQUIREMENTS.into_iter().enumerate() {
+                let word = canonical | ((size as u32) << SIZE_SHIFT);
+                let operand = integer_bits::decode(word).unwrap().unwrap();
+                for (length_index, bytes) in VECTOR_BYTES.into_iter().enumerate() {
+                    let length = VectorLength::from_bytes(bytes).unwrap();
+                    let requires_declared_dit_zero = expected_by_length[length_index];
+                    assert_eq!(
+                        x86_64::sve::integer_bits::requires_declared_dit_zero(operand, length),
+                        requires_declared_dit_zero
+                    );
+                    let declared = ScalableProfile::new_with_features(
+                        length,
+                        ScalableMode::new(true, false),
+                        ScalableFeatures::of(ScalableFeature::Sme),
+                        ScalableControls::new(length, false),
+                    )
+                    .unwrap();
+                    assert_eq!(declared.required_dit(), Some(false));
+                    for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
+                        let positive = compile_for_profile(
+                            &words(&[word, RET_X30]),
+                            GuestAddress(0),
+                            declared,
+                            target,
+                        )
+                        .unwrap();
+                        let mut body = Vec::new();
+                        x86_64::sve::integer_bits::emit(&mut body, operand, length, target);
+                        assert_eq!(
+                            &positive.x86_64_code[CONTEXT_WRAPPER_BYTES..][..body.len()],
+                            body
+                        );
+                        let legacy = compile_for_profile(
+                            &words(&[word, RET_X30]),
+                            GuestAddress(0),
+                            profile(bytes, true),
+                            target,
+                        );
+                        if requires_declared_dit_zero {
+                            assert!(legacy.unwrap_err().0.contains("declared DIT=0"));
+                        } else {
+                            assert_eq!(legacy.unwrap().x86_64_code, positive.x86_64_code);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn feature_admission_declines_with_exact_pc_and_missing_clause_names() {

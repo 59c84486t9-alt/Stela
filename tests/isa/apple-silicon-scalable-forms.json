@@ -45,6 +45,7 @@
     "crates/stela-compiler/src/aarch64/sve/dot.rs",
     "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
+    "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
@@ -74,6 +75,8 @@
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
     "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_logic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products.rs",
@@ -866,6 +869,43 @@
         "actual_cli_checks",
         "original_native_comparisons"
       ]
+    },
+    "sve_integer_bits": {
+      "harness": ".stela/research/coverage-race/integration/bits7/publication-final-1/final-transfer-2.py",
+      "report": ".stela/research/coverage-race/integration/bits7/publication-final-1/transfer/receipt.json",
+      "kind": "sve_integer_bits_final_epoch_transfer",
+      "comparison_field": "preserved_original_native_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/bits.py"
+      ],
+      "required_positive_counts": [
+        "canonical_forms",
+        "preserved_original_native_comparisons",
+        "complete_body_matches",
+        "source_map_matches",
+        "context_entry_native_comparisons"
+      ],
+      "required_measurements": {
+        "canonical_forms": 7,
+        "preserved_original_native_comparisons": 3960,
+        "complete_body_matches": 990,
+        "source_map_matches": 990,
+        "cli_manifest_body_map_matches": 22,
+        "context_entry_native_comparisons": 105,
+        "original_arm_frames": 1320,
+        "mode_reserved_zeroing_rejections": 27,
+        "base_sme_without_sme2_acceptances": 7,
+        "dit_v1_bsr_recipe_declines": 108,
+        "v1_packed_function_matches": 882,
+        "dit_one_declaration_rejections": 1,
+        "dit_missing_declaration_rejections": 1,
+        "maximum_svl_boundary_rejections": 1
+      }
     }
   },
   "forms": [
@@ -46107,6 +46147,462 @@
       ],
       "review": "Exact June decode/semantics, complete snapshots, actual emitted bodies and selected baseline/checked mappings reviewed. Source-bound per-form DIT review preserves compatible V1; no blanket DIT0 restriction.",
       "scope": "SME2 streaming integer groups at SVL16/32/64/128/256, ZA independent; all allocated widths, shifts and register aliases. Preserves NZCV, FPCR/FPSR including QC, untouched banks and RAM. Six pair-N rows retain SVE taxonomy. Non-streaming SVE, full exception delivery, universal host timing certification and application/OS execution are outside this profile."
+    },
+    {
+      "id": "cls_z_p_z_m",
+      "category": "sve",
+      "source_file": "cls_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0418a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "CLS",
+      "source_sha256": "ec4f9cd827f40336b723bed63c606e54efdc5b6ad3d6effd72318191abedf12c",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x0418a020",
+          "expected_mnemonics": [
+            "cls"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0458a020",
+          "expected_mnemonics": [
+            "cls"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0498a020",
+          "expected_mnemonics": [
+            "cls"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d8a020",
+          "expected_mnemonics": [
+            "cls"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0418a020",
+          "svl_bytes": 32,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "clz_z_p_z_m",
+      "category": "sve",
+      "source_file": "clz_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0419a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "CLZ",
+      "source_sha256": "df86f28f6bddfb14bcd9421eff58ac3fd246199a189cb52561344615b65b6c99",
+      "alias": false,
+      "profile": "sme-streaming-v2-sme",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x0419a020",
+          "expected_mnemonics": [
+            "clz"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0459a020",
+          "expected_mnemonics": [
+            "clz"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0499a020",
+          "expected_mnemonics": [
+            "clz"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x04d9a020",
+          "expected_mnemonics": [
+            "clz"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x0419a020",
+          "svl_bytes": 32,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "cnt_z_p_z_m",
+      "category": "sve",
+      "source_file": "cnt_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x041aa000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "CNT",
+      "source_sha256": "000e8dc17a16d96374919aae49bd79816f9b129c8abaf56f2435394d5396b664",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x041aa020",
+          "expected_mnemonics": [
+            "cnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x045aa020",
+          "expected_mnemonics": [
+            "cnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x049aa020",
+          "expected_mnemonics": [
+            "cnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x04daa020",
+          "expected_mnemonics": [
+            "cnt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x041aa020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "rbit_z_p_z_m",
+      "category": "sve",
+      "source_file": "rbit_z_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05278000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "RBIT",
+      "source_sha256": "0e40c70845fb3546afb47333c67151dde2c11e356fa6a192deeaae4bf4422134",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x05278020",
+          "expected_mnemonics": [
+            "rbit"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05678020",
+          "expected_mnemonics": [
+            "rbit"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05a78020",
+          "expected_mnemonics": [
+            "rbit"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05e78020",
+          "expected_mnemonics": [
+            "rbit"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05278020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "revb_z_z_m",
+      "category": "sve",
+      "source_file": "revb_z_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05248000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "REVB",
+      "source_sha256": "5cfc3686da00fc43b320120fc9da5d8a567f40ca3e580368ece718579cd41ab0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x05648020",
+          "expected_mnemonics": [
+            "revb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05a48020",
+          "expected_mnemonics": [
+            "revb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05e48020",
+          "expected_mnemonics": [
+            "revb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05648020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "revh_z_z_m",
+      "category": "sve",
+      "source_file": "revb_z_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05258000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "REVH",
+      "source_sha256": "5cfc3686da00fc43b320120fc9da5d8a567f40ca3e580368ece718579cd41ab0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x05a58020",
+          "expected_mnemonics": [
+            "revh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x05e58020",
+          "expected_mnemonics": [
+            "revh"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05a58020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "revw_z_z_m",
+      "category": "sve",
+      "source_file": "revb_z_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05268000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "mnemonic": "REVW",
+      "source_sha256": "5cfc3686da00fc43b320120fc9da5d8a567f40ca3e580368ece718579cd41ab0",
+      "alias": false,
+      "profile": "apple-sme2-streaming-v1",
+      "status": "implemented",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_bits/scalar.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/context.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_bits"
+      ],
+      "review": "June Arm semantics and pinned x86 candidate mappings reviewed; current-source selected bodies transfer through retained QEMU originals, complete State/scalable effects and fixed per-instruction recipe timings.",
+      "scope": "Enabled base-SME streaming integer bit operations at SVL16/32/64/128/256. All allocated B/H/S/D element widths and Z/P aliases; CLS excludes the sign bit, CNT/RBIT cover the entire element. Predication merges inactive lanes; preserves NZCV, FPCR/FPSR and other state. SM=1 required independently of ZA. General nonstreaming SVE, zeroing forms, MOVPRFX pair execution, disabled-feature traps and full exception delivery remain outside the current profile. Packed fixed-work routes retain V1 admission; selected BSR CLS/CLZ D at all supported SVLs and S at SVL256 require the explicit V2 DIT=0 declaration. No DIT1 guarantee is inferred from measurements or state equality.",
+      "smoke_samples": [
+        {
+          "word": "0x05e68020",
+          "expected_mnemonics": [
+            "revw"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05e68020",
+          "svl_bytes": 16,
+          "svcr": 0,
+          "reason": "streaming mode required"
+        }
+      ]
     }
   ],
   "execution_profiles": {
@@ -46237,6 +46733,31 @@
     "full guest exception delivery",
     "Apple hardware conformance, applications and macOS boot"
   ]
-}
+},
+    "sme-streaming-v2-sme": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 32,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme"
+      ],
+      "description": "Explicit streaming leaf profile with FEAT_SME, SVL=32 bytes, SVCR=3, maximum SVL=256 bytes, ZT0 disabled and DIT=0.",
+      "outside_scope": [
+        "general non-streaming SVE",
+        "implicit later guest ISA features",
+        "DIT=1",
+        "production block/cache context entry",
+        "full guest exception delivery",
+        "Apple hardware conformance, applications and macOS boot"
+      ]
+    }
   }
 }
