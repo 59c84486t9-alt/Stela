@@ -321,6 +321,29 @@
         "owned_integer_dot_full_state_comparisons": 130
       },
       "require_current_executable": true
+    },
+    "streaming_integer_i8mm_dot": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sve-floating/crypto-dot/i8mm-v2-1/current-floor-20261015T003442.424518Z/report.json",
+      "kind": "arm64_scalable_context_differential",
+      "comparison_field": "i8mm_v2_full_snapshot_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/simd_fixtures/sve_integer/dot.py"
+      ],
+      "required_measurements": {
+        "i8mm_v2_full_snapshot_comparisons": 160,
+        "original_full_snapshot_comparisons": 80,
+        "caller_mxcsr_full_snapshot_comparisons": 480,
+        "owned_full_snapshot_comparisons": 150,
+        "minimal_sme_i8mm_owned_comparisons": 120,
+        "full_sme2_i8mm_owned_comparisons": 30,
+        "positive_production_programs": 250,
+        "negative_probe_count": 210
+      },
+      "require_current_executable": true
     }
   },
   "forms": [
@@ -8164,6 +8187,418 @@
           "svcr": 0
         }
       ]
+    },
+    {
+      "id": "sudot_z_zzzi_s",
+      "mnemonic": "SUDOT",
+      "category": "sve",
+      "source_file": "sudot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44a01c00",
+      "features": [
+        {
+          "feature": "(FEAT_SVE || FEAT_SME) && FEAT_I8MM",
+          "name": "((v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)) && (v8Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/sudot_z_zzzi.xml",
+      "source_sha256": "8324b3516a38722b2075cd951f8bd3dc341e438a2eb6f87d9214643a1f705f7c",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme-i8mm",
+      "evidence_groups": [
+        "streaming_integer_i8mm_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "scope": "Explicit SME+I8MM streaming context leaf at SVL16/32/64/128/256 and SM enabled, independently of ZA. All allocated byte operands, destructive aliases and per128-bit indexed segments use modulo32 accumulation; raw FPCR/FPSR/NZCV and unrelated banks are preserved. SME2 and ZT0 are not required. V1 continues to decline all three mixed-sign forms. Caller owns DIT=false, access provenance and storage bounds; no general SVE, block/cache, architectural exception delivery or application/OS claim.",
+      "review": "Independent V2 component review c353e728 approved.110 main whole-entry bridges preserve the measured native mappings;160 native full snapshots join80 unchanged architectural originals under explicit SME+SME2+I8MM/ZT0 controls.150 actual owned-state executions include120 minimal SME+I8MM cases in SM1/SM3 with absent ZT0 and absent ZA in SM1.480 caller-MXCSR checks and210 feature/mode/length declines pass.250 production programs inspected. Actual DIT remains a caller requirement with no original readback; no recapture, timing or new performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21c20",
+          "expected_mnemonics": [
+            "sudot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44a21c20",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44a21c20",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 2
+        }
+      ]
+    },
+    {
+      "id": "usdot_z_zzz_s",
+      "mnemonic": "USDOT",
+      "category": "sve",
+      "source_file": "usdot_z_zzz.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44807800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE || FEAT_SME) && FEAT_I8MM",
+          "name": "((v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)) && (v8Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_z_zzz.xml",
+      "source_sha256": "fb3ba486dda3c8fc11f0c5bb91b208e53a71047ccd6debd7e7ea3f0c8d9cb2e1",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme-i8mm",
+      "evidence_groups": [
+        "streaming_integer_i8mm_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "scope": "Explicit SME+I8MM streaming context leaf at SVL16/32/64/128/256 and SM enabled, independently of ZA. All allocated byte operands, destructive aliases and per128-bit indexed segments use modulo32 accumulation; raw FPCR/FPSR/NZCV and unrelated banks are preserved. SME2 and ZT0 are not required. V1 continues to decline all three mixed-sign forms. Caller owns DIT=false, access provenance and storage bounds; no general SVE, block/cache, architectural exception delivery or application/OS claim.",
+      "review": "Independent V2 component review c353e728 approved.110 main whole-entry bridges preserve the measured native mappings;160 native full snapshots join80 unchanged architectural originals under explicit SME+SME2+I8MM/ZT0 controls.150 actual owned-state executions include120 minimal SME+I8MM cases in SM1/SM3 with absent ZT0 and absent ZA in SM1.480 caller-MXCSR checks and210 feature/mode/length declines pass.250 production programs inspected. Actual DIT remains a caller requirement with no original readback; no recapture, timing or new performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44827820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44827820",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44827820",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 2
+        }
+      ]
+    },
+    {
+      "id": "usdot_z_zzzi_s",
+      "mnemonic": "USDOT",
+      "category": "sve",
+      "source_file": "usdot_z_zzzi.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x44a01800",
+      "features": [
+        {
+          "feature": "(FEAT_SVE || FEAT_SME) && FEAT_I8MM",
+          "name": "((v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)) && (v8Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/usdot_z_zzzi.xml",
+      "source_sha256": "40d7e3ea13b36ae3780c1628e8b57c48f67cb912a9054cd0ef2535f55d83af51",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme-i8mm",
+      "evidence_groups": [
+        "streaming_integer_i8mm_dot"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/dot.rs",
+        "crates/stela-compiler/src/x86_64/sve/dot.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/scalable/features.rs",
+        "crates/stela-compiler/src/aarch64/scalable/profile.rs",
+        "crates/stela-compiler/src/context.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs"
+      ],
+      "scope": "Explicit SME+I8MM streaming context leaf at SVL16/32/64/128/256 and SM enabled, independently of ZA. All allocated byte operands, destructive aliases and per128-bit indexed segments use modulo32 accumulation; raw FPCR/FPSR/NZCV and unrelated banks are preserved. SME2 and ZT0 are not required. V1 continues to decline all three mixed-sign forms. Caller owns DIT=false, access provenance and storage bounds; no general SVE, block/cache, architectural exception delivery or application/OS claim.",
+      "review": "Independent V2 component review c353e728 approved.110 main whole-entry bridges preserve the measured native mappings;160 native full snapshots join80 unchanged architectural originals under explicit SME+SME2+I8MM/ZT0 controls.150 actual owned-state executions include120 minimal SME+I8MM cases in SM1/SM3 with absent ZT0 and absent ZA in SM1.480 caller-MXCSR checks and210 feature/mode/length declines pass.250 production programs inspected. Actual DIT remains a caller requirement with no original readback; no recapture, timing or new performance claim.",
+      "smoke_samples": [
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1
+        },
+        {
+          "word": "0x44a21820",
+          "expected_mnemonics": [
+            "usdot"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x44a21820",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 0
+        },
+        {
+          "word": "0x44a21820",
+          "reason": "streaming mode required",
+          "svl_bytes": 16,
+          "svcr": 2
+        }
+      ]
     }
-  ]
+  ],
+  "execution_profiles": {
+    "sme-streaming-v2-sme-i8mm": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 32,
+      "svcr": 3,
+      "features": [
+        "FEAT_I8MM",
+        "FEAT_SME"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "dit": false,
+      "description": "Explicit SME and I8MM streaming leaf with caller-established DIT=false; SME2 and ZT0 are not required.",
+      "outside_scope": [
+        "general non-streaming SVE",
+        "implicit guest features or controls",
+        "production block/cache context entry",
+        "full guest exception delivery",
+        "actual PSTATE.DIT readback from original fixtures",
+        "Apple hardware conformance, applications and macOS boot"
+      ]
+    }
+  }
 }
