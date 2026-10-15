@@ -144,7 +144,11 @@ pub mod profile_requirements {
     /// Require the fixed named implementation identity above. This is a body
     /// requirement, never a raw access descriptor or a copy of CPU controls.
     pub const SCALABLE_TAG_CHECKS: u32 = 1 << 2;
-    pub const KNOWN: u32 = NATIVE_ACCESS | TAG_GRANULES | SCALABLE_TAG_CHECKS;
+    /// Source-bound EL1 MMU-off staged Device RAM read64. No Normal-WB,
+    /// allocation-tag or host-pointer permission is conferred by this bit.
+    pub const M0_DEVICE_RAM_READ64: u32 = 1 << 3;
+    pub const KNOWN: u32 =
+        NATIVE_ACCESS | TAG_GRANULES | SCALABLE_TAG_CHECKS | M0_DEVICE_RAM_READ64;
 }
 
 /// Explicit runtime outcomes; only Success permits architectural load commits.

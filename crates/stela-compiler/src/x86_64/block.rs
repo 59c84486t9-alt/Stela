@@ -1,5 +1,6 @@
 //! Guest control transfers return to the native dispatcher with canonical state.
 pub(crate) mod checked_memory;
+pub(crate) mod el1_m0;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation, Register, Width},

@@ -1,8 +1,10 @@
 //! Checked GPR scalar transfers; the legacy direct emitter is independent.
 //!
-//! Typed operands come from the existing decoder. The containing checked CPU
-//! profile is EL0/little-endian/LSE2 with A=false and CPA2 disabled; actual policy
-//! privilege/SP/TBI/MTE and host requirements are admitted before native prefix.
+//! Typed operands come from the existing decoder. Legacy checked CPU profiles
+//! are EL0/little-endian/LSE2 with A=false and CPA2 disabled. The separate staged
+//! M0 read profile admits only one unsigned doubleword load and grants no entry.
+//! Its actual source/control/physical/order owner must qualify the operation;
+//! authoritative GuestState commits follow checked completion outside this body.
 use crate::x86_64::{
     load,
     memory_context::{self as service, address},
@@ -18,6 +20,7 @@ use crate::{
     },
 };
 
+const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
 const REQUEST_OFFSET: u32 = 0;
 const DATA_OFFSET: u32 = 32;
 const WRITEBACK_OFFSET: u32 = 40;
@@ -128,6 +131,25 @@ impl Operand {
                 return None;
             }
         }
+        if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged
+            && (operand.bytes != DOUBLEWORD_BYTES
+                || operand.transfer
+                    != (MemoryTransfer::Load {
+                        signed: false,
+                        width: Width::X64,
+                    })
+                || !matches!(operand.base, Register::X(index) if index < 31)
+                || !matches!(
+                    operand.address,
+                    Address::Immediate {
+                        mode: AddressMode::Offset,
+                        ..
+                    }
+                )
+                || operand.unprivileged)
+        {
+            return None;
+        }
         if operand.unprivileged && operand.writeback() {
             return None;
         }
@@ -163,6 +185,19 @@ impl Operand {
 }
 
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
+    if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
+        // Actual runtime preflight enforces the original eight-byte alignment
+        // before the Device transaction. There is no widened snapshot envelope,
+        // allocation-tag plane, source WB or source SCA16 requirement here.
+        return MemoryRequirements {
+            required_address_checks: Default::default(),
+            required_pointer_arithmetic: None,
+            required_flags: flags::TAG_CHECKED,
+            required_host_caps: 0,
+            required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
+            required_sp_alignment: SpAlignmentRequirement::Any,
+        };
+    }
     let write = matches!(operand.transfer, MemoryTransfer::Store);
     let tag_checked = operand.tag_checked();
     MemoryRequirements {

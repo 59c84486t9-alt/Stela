@@ -18,3 +18,4 @@ pub mod scalable_controls;
 pub mod state;
 pub mod timer;
 pub mod translation;
+pub mod translation_controls;

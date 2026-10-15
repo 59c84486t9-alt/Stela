@@ -17,6 +17,8 @@ pub mod monitor;
 pub mod policy;
 mod service;
 pub use service::GuestServiceMemory;
+pub(crate) mod source_ram;
+pub mod stage1;
 mod storage;
 pub mod tag_execution;
 pub mod tag_store;

@@ -10,6 +10,7 @@ mod dyld_entry;
 mod image;
 mod linked_benchmark;
 mod macho;
+mod platform_el1;
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +25,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Execute a declared fresh software EL1 machine through its owned source/PE runtime.
+    RunSoftwareEl1 {
+        input: PathBuf,
+        #[arg(long, default_value = "integer-v1", value_parser = ["direct-branch-v1", "integer-v1", "read64-v1"])]
+        profile: String,
+        #[arg(long, default_value = "baseline", value_parser = parse_cpu_target)]
+        cpu_target: stela_compiler::TargetCpu,
+        #[arg(long)]
+        cache_dir: PathBuf,
+        #[arg(long, value_parser = parse_address)]
+        stop_pc: Option<u64>,
+        #[arg(long, default_value_t = platform_el1::DEFAULT_BLOCK_BUDGET)]
+        block_budget: usize,
+    },
     /// Report detected x86 capabilities and the named SIMD output catalog.
     CpuInfo,
     /// Benchmark the known linked-image fixture in a release build.
@@ -1121,6 +1136,33 @@ fn write_new_report(output: &std::path::Path, report: &mut serde_json::Value) ->
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::RunSoftwareEl1 {
+            input,
+            profile,
+            cpu_target,
+            cache_dir,
+            stop_pc,
+            block_budget,
+        } => {
+            use stela_runtime::blocks::{SoftwareEl1Profile, SoftwareEl1Request};
+            let profile = match profile.as_str() {
+                "direct-branch-v1" => SoftwareEl1Profile::DirectBranchV1,
+                "integer-v1" => SoftwareEl1Profile::IntegerV1,
+                "read64-v1" => SoftwareEl1Profile::Read64V1,
+                _ => anyhow::bail!("unsupported software EL1 profile"),
+            };
+            let report = platform_el1::run(
+                &input,
+                profile,
+                cpu_target,
+                cache_dir,
+                SoftwareEl1Request {
+                    stop_pc: stop_pc.map(stela_compiler::GuestAddress),
+                    block_budget,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::CpuInfo => {
             use stela_compiler::{
                 TargetCpu,

@@ -43,6 +43,7 @@ fn accept_retained_loan<B>(loan: SystemExecutionLoan<'_, B>) -> RetainedResource
 }
 
 pub(crate) mod checked;
+pub(crate) use checked::M0SourceInput;
 mod process;
 mod software_async;
 pub(crate) use process::run_protected_services;

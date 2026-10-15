@@ -16,6 +16,7 @@ enum Phase {
     NativeActive(u64),
     SystemActive(u64),
     Retiring(u64),
+    NativeCommitting,
     RequalificationRequired,
     Indeterminate,
 }
@@ -60,7 +61,10 @@ impl PeExecutionAuthority {
     ) -> Result<(), ()> {
         match self.phase {
             Phase::Ready | Phase::RequalificationRequired | Phase::Indeterminate => Ok(()),
-            Phase::NativeActive(_) | Phase::SystemActive(_) | Phase::Retiring(_) => Err(()),
+            Phase::NativeActive(_)
+            | Phase::SystemActive(_)
+            | Phase::Retiring(_)
+            | Phase::NativeCommitting => Err(()),
         }
     }
 
@@ -197,7 +201,62 @@ impl PeExecutionAuthority {
         Ok(())
     }
 
+    /// Prepare the bounded no-source native commit after every fallible source,
+    /// finalizer, control, domain and proposed-state check has completed. The
+    /// canonical consumer must pair this loan with the ORIGINAL retained
+    /// ThreadState/System/backend/source borrows, candidate and continuation in
+    /// a private commit object with no caller inputs or callback. It stores the
+    /// actual state and PC exactly once before consuming finish. This method
+    /// does not qualify Device effects or implement pending interrupt delivery.
+    pub(crate) fn prepare_native_commit(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<NativeRetirementCommit<'_>, ()> {
+        if !self.native_attempt(attempt) {
+            self.poison();
+            return Err(());
+        }
+        // Distinct from generic Retiring: forgetting this loan must not let a
+        // caller finish via the generic fallible retirement path.
+        self.phase = Phase::NativeCommitting;
+        Ok(NativeRetirementCommit {
+            authority: self,
+            finished: false,
+        })
+    }
+
     pub(crate) fn poison(&mut self) {
         self.phase = Phase::Indeterminate;
+    }
+}
+
+/// Private non-Clone phase loan for an already-qualified bounded native commit.
+/// The exclusive authority borrow prevents all phase changes until settlement.
+/// Dropping or unwinding before finish poisons this PE. Forgetting this loan
+/// cannot reopen entry: its authority remains NativeCommitting, which generic
+/// retirement completion cannot finish.
+pub(crate) struct NativeRetirementCommit<'commit> {
+    authority: &'commit mut PeExecutionAuthority,
+    finished: bool,
+}
+
+impl NativeRetirementCommit<'_> {
+    /// The canonical paired commit has already moved the qualified candidate
+    /// into its ORIGINAL actual register bank and stored actual PC once. No
+    /// fallible work, external callback or source/owner substitution may occur
+    /// between those stores and this infallible phase settlement. Actual closed
+    /// producer/control/source/domain leases remain held for this whole scope.
+    pub(crate) fn finish(mut self, _consumer: &crate::blocks::retirement::ConsumerKey) {
+        self.authority.phase = Phase::Ready;
+        self.finished = true;
+    }
+}
+
+impl Drop for NativeRetirementCommit<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.authority.poison();
+        }
     }
 }

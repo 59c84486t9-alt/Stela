@@ -20,6 +20,10 @@ pub const CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID: &str =
 pub enum CheckedMemoryProfile {
     SpAlignmentEnabled,
     SpAlignmentDisabled,
+    /// One ordinary unsigned 64-bit load, non-SP base and no writeback.
+    /// The state pointer is private staging; authoritative state commits only
+    /// after the canonical M0 parent's checked completion and finalization.
+    M0DeviceRamRead64Staged,
     AddressChecks(CheckedAddressProfile),
 }
 impl CheckedMemoryProfile {
@@ -71,6 +75,9 @@ impl CheckedMemoryProfile {
 
     pub const fn abi(self) -> &'static str {
         match self {
+            Self::M0DeviceRamRead64Staged => {
+                "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-device-ram-read64-staged-v1"
+            }
             Self::AddressChecks(_) => {
                 "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-v4"
             }
@@ -84,6 +91,9 @@ impl CheckedMemoryProfile {
     }
     pub const fn process_helpers_abi(self) -> &'static str {
         match self {
+            Self::M0DeviceRamRead64Staged => {
+                "unadmitted-el1-m0-device-ram-read64-process-helpers-v1"
+            }
             Self::AddressChecks(_) => {
                 "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v2"
             }
@@ -97,6 +107,7 @@ impl CheckedMemoryProfile {
     }
     pub const fn id(self) -> &'static str {
         match self {
+            Self::M0DeviceRamRead64Staged => "el1-m0-device-ram-read64-staged-v1",
             Self::AddressChecks(_) => "checked-memory-address-v4",
             Self::SpAlignmentEnabled => "checked-gpr-memory-sa0-on-normal-wb-v3",
             Self::SpAlignmentDisabled => "checked-gpr-memory-sa0-off-normal-wb-v3",
@@ -104,6 +115,7 @@ impl CheckedMemoryProfile {
     }
     pub const fn sp_requirement(self) -> crate::context::memory::SpAlignmentRequirement {
         match self {
+            Self::M0DeviceRamRead64Staged => crate::context::memory::SpAlignmentRequirement::Any,
             Self::AddressChecks(profile) => profile.sp_requirement(),
             Self::SpAlignmentEnabled => crate::context::memory::SpAlignmentRequirement::Enabled,
             Self::SpAlignmentDisabled => crate::context::memory::SpAlignmentRequirement::Disabled,
@@ -153,6 +165,18 @@ impl CheckedPlan {
         profile: CheckedMemoryProfile,
         process_helpers: bool,
     ) -> Result<Self, CompileError> {
+        if process_helpers && profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
+            return Err(CompileError(
+                "M0 staged read excludes process helpers".into(),
+            ));
+        }
+        if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged
+            && (instructions.len() != 1 || terminal.is_some())
+        {
+            return Err(CompileError(
+                "M0 staged read requires exactly one ordinary source load and no terminator".into(),
+            ));
+        }
         if let Some((_, terminal)) = terminal {
             match terminal {
                 super::Terminator::Branch(_)
@@ -293,6 +317,22 @@ mod tests {
         }
     }
     #[test]
+    fn m0_staged_read_never_combines_with_process_helpers() {
+        let source = 0xf940_0000u32.to_le_bytes();
+        let selected = crate::block::BlockProfile::CheckedMemoryPauthClockThread(
+            CheckedMemoryProfile::M0DeviceRamRead64Staged,
+        );
+        assert!(
+            crate::block::CompilationPlan::new(
+                &source,
+                GuestAddress(0x1000),
+                selected,
+                TargetCpu::Baseline,
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn checked_exclusive_widths_preserve_source_quantity_and_host_requirements() {
         use crate::context::memory::{flags, host_caps, profile_requirements};
         const RET: u32 = 0xd65f_03c0;
@@ -352,5 +392,91 @@ mod tests {
                 assert_eq!(native.native.source_map.len(), 2);
             }
         }
+    }
+    fn m0_plan(words: &[u32]) -> Result<crate::block::CompilationPlan, CompileError> {
+        let source: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+        crate::block::CompilationPlan::new(
+            &source,
+            GuestAddress(0x82eb_408c),
+            crate::block::BlockProfile::CheckedMemory(
+                CheckedMemoryProfile::M0DeviceRamRead64Staged,
+            ),
+            TargetCpu::Baseline,
+        )
+    }
+    #[test]
+    fn m0_read64_plan_retains_source_flags_and_distinct_requirements() {
+        use crate::context::memory::{flags, profile_requirements};
+        for base in [0, 20, 30] {
+            for data in [0, 22, 31] {
+                for displacement in [0, 1, 4095] {
+                    let word = 0xf940_0000 | (displacement << 10) | (base << 5) | data;
+                    let plan = m0_plan(&[word]).unwrap();
+                    let requirements = plan.memory_requirements().unwrap();
+                    assert_eq!(plan.source_bytes(), size_of::<u32>());
+                    assert_eq!(requirements.required_flags, flags::TAG_CHECKED);
+                    assert_eq!(requirements.required_host_caps, 0);
+                    assert_eq!(
+                        requirements.required_profile,
+                        profile_requirements::M0_DEVICE_RAM_READ64
+                    );
+                    assert_eq!(
+                        requirements.required_profile & profile_requirements::NATIVE_ACCESS,
+                        0
+                    );
+                    assert_eq!(
+                        requirements.required_sp_alignment,
+                        crate::context::memory::SpAlignmentRequirement::Any
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn m0_read64_plan_refuses_other_accesses_and_source_prefixes() {
+        for word in [
+            0xf900_0696, // STR X22,[X20,#8]
+            0xb940_0696, // LDR W22,[X20,#4]
+            0xf940_07f6, // SP base
+            0xf840_8696, // post-index writeback
+            0xf840_8e96, // pre-index writeback
+            0xf840_0a96, // unprivileged access
+            0xb980_0696, // LDRSW
+            0xc85f_7d2a, // LDXR X10,[X9]
+            0xa940_0696, // LDP
+            0xd280_0015, // ordinary MOV prefix is not this one-operation profile
+            0xd65f_03c0, // terminator
+        ] {
+            assert!(
+                m0_plan(&[word]).is_err(),
+                "unexpected M0 admission: {word:#010x}"
+            );
+        }
+        assert!(m0_plan(&[0xf940_0696, 0xf940_0a97]).is_err());
+        assert!(m0_plan(&[0xf940_0696, 0xd65f_03c0]).is_err());
+    }
+    #[test]
+    fn m0_identity_does_not_change_legacy_profile_or_context_layout() {
+        assert!(
+            CheckedMemoryProfile::M0DeviceRamRead64Staged
+                .id()
+                .contains("staged")
+        );
+        assert!(
+            !CheckedMemoryProfile::M0DeviceRamRead64Staged
+                .abi()
+                .contains("normal-wb")
+        );
+        assert_eq!(crate::context::memory::MEMORY_CONTEXT_VERSION, 1);
+        assert_eq!(crate::context::memory::MEMORY_CONTEXT_BYTES, 64);
+        assert_eq!(crate::context::memory::MEMORY_REQUEST_BYTES, 32);
+        assert_eq!(
+            CheckedMemoryProfile::SpAlignmentEnabled.id(),
+            "checked-gpr-memory-sa0-on-normal-wb-v3"
+        );
+        assert_eq!(
+            CheckedMemoryProfile::SpAlignmentDisabled.id(),
+            "checked-gpr-memory-sa0-off-normal-wb-v3"
+        );
     }
 }

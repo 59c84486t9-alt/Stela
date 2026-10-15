@@ -111,6 +111,12 @@ impl MemoryProfile {
         {
             return Err(MemoryStatus::InvalidRequest);
         }
+        // The additive staged M0 identity is deliberately not a generic memory
+        // permission. A separate canonical source/control/physical/order loan
+        // must admit it. Existing EL0 Normal-WB entry keeps its exact meaning.
+        if requirements.required_profile & profile_requirements::M0_DEVICE_RAM_READ64 != 0 {
+            return Err(MemoryStatus::Unsupported);
+        }
         if !target.supported()
             || requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
                 && !target.supports(TargetCpu::AtomicLoad16)

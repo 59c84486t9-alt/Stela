@@ -523,6 +523,14 @@ impl Decoded {
         instruction: Instruction,
         profile: crate::block::CheckedMemoryProfile,
     ) -> Result<Self, CompileError> {
+        if profile == crate::block::CheckedMemoryProfile::M0DeviceRamRead64Staged
+            && !matches!(&instruction.operation, Operation::Memory { .. })
+        {
+            return Err(CompileError(format!(
+                "operation outside staged M0 ordinary read64 profile at {:#x}",
+                instruction.pc.0
+            )));
+        }
         if let Operation::Exclusive(operand) = instruction.operation {
             // The existing typed adapter validates every decoded exclusive shape,
             // including constrained register roles, and derives its exact checked

@@ -15,7 +15,7 @@ pub mod scalable;
 pub mod system;
 pub mod thread;
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -44,20 +44,8 @@ fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Identity {
-    pub schema_version: u32,
-    pub source_sha256: String,
-    pub compiler_source_sha256: String,
-    pub guest_base: u64,
-    pub abi: String,
-    pub target_cpu: String,
-    /// Compiler specialization identity; never runtime authority or secret state.
-    /// Absent for old profiles, preserving their exact serialized cache key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_specialization_sha256: Option<String>,
-}
-
+pub(crate) mod artifact;
+pub use artifact::{Identity, Manifest};
 fn memory_specialization_sha256(
     profile: stela_compiler::block::BlockProfile,
     requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
@@ -73,18 +61,6 @@ fn memory_specialization_sha256(
     // Aggregation alone loses the source-role -> access-EL association. Bind the
     // full typed compilation profile as well as every consumed requirement.
     Ok(Some(sha256(&serde_json::to_vec(&(profile, required))?)))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Manifest {
-    pub identity: Identity,
-    pub native_sha256: String,
-    pub native_bytes: usize,
-    pub source_map: Vec<(GuestAddress, usize)>,
-    pub verified: bool,
-    /// None is legacy absent metadata; Some(empty) is a checked pure body.
-    #[serde(default)]
-    pub memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,10 +105,8 @@ fn validate(
         "invalid cached native code size"
     );
     let native = bounded_file(&directory.join("native.bin"), MAX_CACHE_NATIVE_BYTES)?;
-    ensure!(
-        native.len() == manifest.native_bytes && sha256(&native) == manifest.native_sha256,
-        "cached native code checksum mismatch"
-    );
+    artifact::validate_native_snapshot(&manifest, &native)
+        .context("cached native code checksum mismatch")?;
     ensure!(
         !manifest.verified,
         "cache metadata cannot attest to verification"

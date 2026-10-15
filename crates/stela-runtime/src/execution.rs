@@ -7,6 +7,10 @@
 
 pub(crate) mod context;
 pub(crate) mod floating_environment;
+#[cfg(target_arch = "x86_64")]
+mod native_image;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use native_image::ReachedCall as ObservedNativeCall;
 
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 use anyhow::{Context, Result, ensure};
@@ -142,8 +146,9 @@ impl ExecutableLeaf {
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 pub(crate) mod platform {
+    use super::native_image::{ExecutableStorage, NativeImage};
     use anyhow::{Context, Result, ensure};
-    use std::ptr::NonNull;
+    use core::{convert::Infallible, ptr::NonNull};
     use stela_compiler::GuestState;
 
     pub fn ensure_supported() -> Result<()> {
@@ -212,11 +217,13 @@ pub(crate) mod platform {
         }
 
         pub unsafe fn call(&self, state: &mut GuestState) -> Result<()> {
-            // SAFETY: The immutable bytes have the checked System V GuestState
-            // ABI and the caller of execute supplies all execution preconditions.
-            let function: unsafe extern "C" fn(*mut GuestState) =
-                unsafe { std::mem::transmute(self.pointer.as_ptr()) };
-            unsafe { function(state) };
+            // SAFETY: original mapping ownership and caller's exact raw leaf ABI
+            // contract are unchanged. Adopted PEs require their retained Active.
+            let reached = match unsafe { NativeImage::borrow(self).call(state) } {
+                Ok(reached) => reached,
+                Err(never) => match never {},
+            };
+            reached.into_infallible();
             Ok(())
         }
 
@@ -225,14 +232,13 @@ pub(crate) mod platform {
             state: &mut GuestState,
             context: &mut stela_compiler::context::ExecutionContext,
         ) -> Result<stela_compiler::block::BlockExit> {
-            // SAFETY: The owned block checks source/profile/ABI and pins its
-            // borrowed context views for this entire synchronous invocation.
-            let function: unsafe extern "C" fn(
-                *mut GuestState,
-                *mut stela_compiler::context::ExecutionContext,
-            ) -> stela_compiler::block::BlockExit =
-                unsafe { std::mem::transmute(self.pointer.as_ptr()) };
-            Ok(unsafe { function(state, context) })
+            // SAFETY: actual immutable mapping and checked block/context owners
+            // stay borrowed for this synchronous call under canonical Active.
+            let reached = match unsafe { self.call_context_block_observed(state, context) } {
+                Ok(reached) => reached,
+                Err(never) => match never {},
+            };
+            Ok(reached.into_infallible())
         }
 
         /// Invoke the two-argument context-leaf ABI. Architectural failure is
@@ -252,22 +258,75 @@ pub(crate) mod platform {
             Ok(())
         }
 
+        /// Retain the actual reached FFI carrier beside storage's postcheck.
+        /// The outer Err is a typed pre-FFI refusal; current hosted ownership is
+        /// infallible. Fallible protected storage must retain reached carrier too.
+        ///
+        /// # Safety
+        /// Exact source/native/ABI/map/requirements and the original context must
+        /// be bound. An adopted PE may call only under its original canonical
+        /// Active/session retaining full ThreadState/System/backend/source/domain
+        /// through this receipt, whole context finalization, and once-only PC
+        /// settlement. Owned observations grant no completion/Ready or retry.
+        pub(crate) unsafe fn call_context_block_observed(
+            &self,
+            state: &mut GuestState,
+            context: &mut stela_compiler::context::ExecutionContext,
+        ) -> core::result::Result<
+            super::ObservedNativeCall<stela_compiler::block::BlockExit, Infallible>,
+            Infallible,
+        > {
+            // SAFETY: original concrete mapping stays borrowed; caller retains
+            // the actual complete canonical owner/context execution contract.
+            unsafe { NativeImage::borrow(self).call_context_block(state, context) }
+        }
+
+        /// Actual reached carrier/storage observations for the declared ONE
+        /// GuestState-pointer block ABI. The canonical retained Active/session
+        /// must own original full PE/source/System/domain through settlement.
+        pub(crate) unsafe fn call_block_observed(
+            &self,
+            state: &mut GuestState,
+        ) -> core::result::Result<
+            super::ObservedNativeCall<stela_compiler::block::BlockExit, Infallible>,
+            Infallible,
+        > {
+            // SAFETY: exact original source/profile/ABI/map and full retained
+            // canonical owner contract are caller obligations; storage is real.
+            unsafe { NativeImage::borrow(self).call_block(state) }
+        }
+
         pub unsafe fn call_block(
             &self,
             state: &mut GuestState,
         ) -> Result<stela_compiler::block::BlockExit> {
-            // SAFETY: The block loader checks the distinct struct-return ABI;
-            // the runtime caller upholds the trusted direct-RAM contract.
-            let function: unsafe extern "C" fn(
-                *mut GuestState,
-            ) -> stela_compiler::block::BlockExit =
-                unsafe { std::mem::transmute(self.pointer.as_ptr()) };
-            Ok(unsafe { function(state) })
+            // SAFETY: caller retains the original trusted struct-return ABI and
+            // direct-RAM contract; this does not mint adopted-PE admission.
+            let reached = match unsafe { self.call_block_observed(state) } {
+                Ok(reached) => reached,
+                Err(never) => match never {},
+            };
+            Ok(reached.into_infallible())
         }
 
         #[cfg(test)]
         pub fn address(&self) -> usize {
             self.pointer.as_ptr() as usize
+        }
+    }
+
+    // SAFETY: Mapping::new exclusively owns fresh initialized mmap storage,
+    // atomically transitioned to RX. Its pointer never escapes. All calls borrow
+    // self; no unmap or writable alias can coexist through safe runtime APIs.
+    // Host ownership is infallible to retain, so no fallible frame postcheck is
+    // invented for this implementation. Guest ABI/PE admission stays at callsite.
+    unsafe impl ExecutableStorage for Mapping {
+        type Error = Infallible;
+        fn entry(&self) -> NonNull<u8> {
+            self.pointer
+        }
+        fn revalidate(&self) -> core::result::Result<(), Self::Error> {
+            Ok(())
         }
     }
 

@@ -31,6 +31,7 @@ pub(super) fn qualify(
     memory: &mut MemoryThread<MemoryControls>,
     endpoint: &EventEndpoint,
 ) -> anyhow::Result<()> {
+    let requirements = bound.memory_requirements()?;
     let ids = fp.identification_snapshot();
     let absent = NoSme::from_snapshot(ids)
         .map_err(|error| anyhow::anyhow!("actual SME subset: {error:?}"))?;
@@ -54,7 +55,7 @@ pub(super) fn qualify(
                     .prepare_profile_with_low128(
                         &bound.entry,
                         bound.memory_profile()?,
-                        bound.requirements,
+                        requirements,
                         system,
                         debug,
                         context,
@@ -90,6 +91,7 @@ pub(super) fn call(
         execution.has_supported_header(),
         "unsupported actual checked context"
     );
+    let requirements = bound.memory_requirements()?;
     let ids = fp.identification_snapshot();
     let absent = match NoSme::from_snapshot(ids) {
         Ok(absent) => absent,
@@ -111,12 +113,12 @@ pub(super) fn call(
         |mut access| {
             access.with_guest(|context, actual_guest| {
                 let prepared = match controls.prepare_profile_with_low128(&bound.entry,
-                    profile, bound.requirements, system, debug, context, actual_guest, memory, Some(endpoint)) {
+                    profile, requirements, system, debug, context, actual_guest, memory, Some(endpoint)) {
                     Ok(prepared) => prepared,
                     Err(error) => return NativeObservation::CpuDeclined(format!("actual low128 preparation: {error:?}")),
                 };
                 if prepared.profile_id() != profile.process_memory_profile_id()
-                    || prepared.requirements() != bound.requirements {
+                    || prepared.requirements() != requirements {
                     return NativeObservation::UnqualifiedCallFailure("typed entry/body requirements differ".into());
                 }
                 let mut callback_started = false;

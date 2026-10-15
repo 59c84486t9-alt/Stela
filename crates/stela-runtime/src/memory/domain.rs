@@ -24,6 +24,10 @@ pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
 
 #[path = "domain/exclusive.rs"]
 mod exclusive;
+#[path = "domain/m0_read.rs"]
+pub(crate) mod m0_read;
+#[path = "domain/physical.rs"]
+pub(crate) mod physical;
 
 use crate::system::events::{EventEndpoint, EventProducer};
 use std::collections::HashMap;
@@ -153,6 +157,9 @@ pub struct MemorySystem {
     reservations: Arc<ReservationDomain>,
     mappings: Mutex<MappingRegistry>,
     failed: AtomicBool,
+    // Serialize qualified DeviceRAM transactions in this same machine. This
+    // gate alone grants no source attributes, physical interpretation or PE.
+    device_ram_order: Mutex<()>,
 }
 
 impl MemorySystem {
@@ -164,6 +171,7 @@ impl MemorySystem {
             reservations,
             mappings: Mutex::new(HashMap::new()),
             failed: AtomicBool::new(false),
+            device_ram_order: Mutex::new(()),
         }))
     }
 
@@ -190,10 +198,17 @@ impl MemorySystem {
     }
 }
 
-/// Immutable address-space snapshot. Replacement/reprotection requires a new
-/// snapshot and explicit retirement; host mapping rights remain pinned by the
-/// unsafe backing contract throughout every native invocation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DomainRole {
+    NormalWb,
+    SourcePhysicalRam,
+}
+
+/// Canonical current mappings and invocation/service exclusion. The immutable
+/// role survives every snapshot publication; physical RAM never acquires the
+/// generic Normal-WB callback contract from its host layout.
 pub struct MemoryDomain {
+    role: DomainRole,
     state: Mutex<DomainState>,
     #[cfg(test)]
     admission_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
@@ -208,7 +223,7 @@ impl MemoryDomain {
         views: Vec<(Arc<MemoryView>, MappingAttributes)>,
         target: TargetCpu,
     ) -> Result<Arc<Self>, MemoryStatus> {
-        Self::construct(None, system, views, target)
+        Self::construct(None, system, views, target, DomainRole::NormalWb)
     }
 
     /// Bind this snapshot to its real process address-space identity.
@@ -218,7 +233,40 @@ impl MemoryDomain {
         views: Vec<(Arc<MemoryView>, MappingAttributes)>,
         target: TargetCpu,
     ) -> Result<Arc<Self>, MemoryStatus> {
-        Self::construct(Some(address_space), system, views, target)
+        Self::construct(
+            Some(address_space),
+            system,
+            views,
+            target,
+            DomainRole::NormalWb,
+        )
+    }
+
+    pub(in crate::memory) fn new_source_physical_ram(
+        address_space: u64,
+        system: Arc<MemorySystem>,
+        views: Vec<(Arc<MemoryView>, MappingAttributes)>,
+        target: TargetCpu,
+    ) -> Result<Arc<Self>, MemoryStatus> {
+        Self::construct(
+            Some(address_space),
+            system,
+            views,
+            target,
+            DomainRole::SourcePhysicalRam,
+        )
+    }
+
+    pub(in crate::memory) fn is_source_physical_ram(&self) -> bool {
+        self.role == DomainRole::SourcePhysicalRam
+    }
+
+    fn check_data_execution(&self) -> Result<(), MemoryStatus> {
+        self.check_execution()?;
+        if self.is_source_physical_ram() {
+            return Err(MemoryStatus::Unsupported);
+        }
+        Ok(())
     }
 
     fn construct(
@@ -226,6 +274,7 @@ impl MemoryDomain {
         system: Arc<MemorySystem>,
         mut views: Vec<(Arc<MemoryView>, MappingAttributes)>,
         target: TargetCpu,
+        role: DomainRole,
     ) -> Result<Arc<Self>, MemoryStatus> {
         if !target.supported() {
             return Err(MemoryStatus::Unsupported);
@@ -248,6 +297,7 @@ impl MemoryDomain {
             })
             .collect::<Result<_, MemoryStatus>>()?;
         Ok(Arc::new(Self {
+            role,
             state: Mutex::new(DomainState {
                 snapshot: DomainSnapshot {
                     views,
@@ -275,6 +325,7 @@ impl MemoryDomain {
     }
 
     pub fn profile(&self) -> Result<MemoryProfile, MemoryStatus> {
+        self.check_data_execution()?;
         Ok(self
             .state
             .lock()
@@ -359,6 +410,30 @@ impl MemoryDomain {
     }
 
     fn resolve(
+        &self,
+        address: u64,
+        bytes: usize,
+        kind: AccessKind,
+    ) -> Result<PhysicalAccess, MemoryStatus> {
+        self.check_data_execution()?;
+        self.resolve_spans(address, bytes, kind)
+    }
+
+    fn resolve_source_physical(
+        self: &Arc<Self>,
+        execution: &MemoryExecutionLoan,
+        address: u64,
+        bytes: usize,
+        kind: AccessKind,
+    ) -> Result<PhysicalAccess, MemoryStatus> {
+        execution.check_domain(self)?;
+        if !self.is_source_physical_ram() {
+            return Err(MemoryStatus::Unsupported);
+        }
+        self.resolve_spans(address, bytes, kind)
+    }
+
+    fn resolve_spans(
         &self,
         address: u64,
         bytes: usize,
@@ -525,7 +600,7 @@ impl<P: DataPolicy> MemoryThread<P> {
     }
     /// Native entry must validate effective controls before executing an instruction.
     pub fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus> {
-        self.domain.check_execution()?;
+        self.domain.check_data_execution()?;
         self.policy.validate_execution(required_flags)?;
         for (flag, class) in [
             (flags::ATOMIC, MemoryOperationClass::Atomic),
@@ -616,6 +691,9 @@ impl<P: DataPolicy> MemoryThread<P> {
     pub unsafe fn with_view<R>(&mut self, callback: impl FnOnce(&mut MemoryContextView) -> R) -> R {
         // Legacy low-level contract: callers cannot infer successful finalization
         // from R. Owned checked execution must use with_checked_view instead.
+        self.domain
+            .check_data_execution()
+            .expect("supported legacy memory role");
         let _loan = self
             .execution_loan()
             .expect("serialized legacy memory invocation");
@@ -635,6 +713,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
         // SAFETY: the caller retains the same owner and native invocation loan.
+        self.domain.check_data_execution()?;
         let _loan = self.execution_loan()?;
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
         finalization.map(|()| result)

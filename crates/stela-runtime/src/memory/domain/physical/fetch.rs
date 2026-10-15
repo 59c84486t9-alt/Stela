@@ -1,0 +1,314 @@
+//! Exact instruction fetch through the existing physical domain and backing.
+//!
+//! This private leaf supplies no virtual translation or cache/control state.
+//! Its caller first performs canonical stage1 Fetch and instruction-address
+//! alignment checks, retaining their architectural provenance.
+
+use super::PhysicalAddressSpace;
+use crate::memory::{
+    backing::{AccessKind, MemoryBacking, MemoryView},
+    domain::{MemoryExecutionLoan, PhysicalAccess, access},
+    stage1,
+};
+use std::sync::Arc;
+
+const INSTRUCTION_BYTES: usize = size_of::<u32>();
+const INSTRUCTION_ALIGNMENT_MASK: u64 = INSTRUCTION_BYTES as u64 - 1;
+
+/// Retained canonical storage with a stronger immutable-code producer contract.
+/// This wraps the real backing/lifetime owner, never a caller-created ID token.
+pub(crate) struct ImmutableCodeBacking {
+    backing: Arc<MemoryBacking>,
+}
+
+impl ImmutableCodeBacking {
+    /// Adopt existing owned immutable code storage without changing its identity.
+    ///
+    /// # Safety
+    /// The real native storage owner has finalized the complete physical extent
+    /// as readable, coherent Normal-WB RAM with no host-writable mapping/alias.
+    /// It pins those rights and bytes until the last retained backing is dropped.
+    /// No guest, host publisher, DMA, firmware, NMI or external agent may modify
+    /// any byte through another alias/address space. There are no surviving Rust
+    /// references to these bytes. Every physical alias uses this same canonical
+    /// backing and machine. Retention alone does not establish immutability:
+    /// the caller must own the actual native allocation/protection authority.
+    /// Guest Execute is permission to read original instruction bytes, never
+    /// native execute permission for these ARM bytes.
+    pub(crate) unsafe fn adopt(backing: Arc<MemoryBacking>) -> Result<Self, &'static str> {
+        let maximum = backing.maximum_permissions();
+        if maximum.writable || !maximum.executable {
+            return Err("immutable code backing must deny writes and permit guest fetch");
+        }
+        Ok(Self { backing })
+    }
+
+    pub(crate) fn backing(&self) -> &Arc<MemoryBacking> {
+        &self.backing
+    }
+}
+
+/// One actually reached instruction and every physical generation it used.
+/// The existing CodeRegion will own this binding beside its source bytes.
+/// It creates neither a second source cache nor another identity/generation.
+pub(crate) struct BoundPhysicalInstruction {
+    raw_pc: u64,
+    physical_address: u64,
+    word: u32,
+    reached: PhysicalAccess,
+}
+
+impl BoundPhysicalInstruction {
+    pub(crate) fn raw_pc(&self) -> u64 {
+        self.raw_pc
+    }
+
+    pub(crate) fn physical_address(&self) -> u64 {
+        self.physical_address
+    }
+
+    pub(crate) fn word(&self) -> u32 {
+        self.word
+    }
+
+    pub(crate) fn backing(&self) -> &Arc<MemoryBacking> {
+        self.reached.first().view().backing()
+    }
+
+    pub(crate) fn backing_offset(&self) -> usize {
+        self.reached.first().backing_offset()
+    }
+
+    pub(crate) fn views(&self) -> impl Iterator<Item = &Arc<MemoryView>> {
+        std::iter::once(self.reached.first().view())
+            .chain(self.reached._remaining.iter().map(|span| span.view()))
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        self.views().all(|view| view.is_current())
+    }
+
+    /// Equal actual storage and all reached mapping generations, not just bytes.
+    pub(crate) fn same_source(&self, other: &Self) -> bool {
+        self.raw_pc == other.raw_pc
+            && self.physical_address == other.physical_address
+            && self.word == other.word
+            && Arc::ptr_eq(self.backing(), other.backing())
+            && self.backing_offset() == other.backing_offset()
+            && self.views().count() == other.views().count()
+            && self
+                .views()
+                .zip(other.views())
+                .all(|(first, next)| Arc::ptr_eq(first, next))
+    }
+}
+
+impl PhysicalAddressSpace {
+    /// Legacy control-owner fetch, outside the canonical M0 Active path.
+    /// M0 WT/NC exists only through the actual closed control execution scope.
+    /// No caller-supplied Translation or Boolean permit enters this path. The
+    /// real scope derives current controls and uses this identical PA owner.
+    pub(crate) fn fetch_control_instruction(
+        &self,
+        raw_pc: u64,
+        scope: &crate::blocks::ControlCodeScope<'_>,
+        state: &crate::system::state::SystemState,
+    ) -> Result<BoundPhysicalInstruction, crate::system::translation_controls::FetchFailure> {
+        use crate::system::translation_controls::FetchFailure;
+        if !scope.same_physical_owner(self) {
+            return Err(FetchFailure::Unavailable(
+                "control fetch uses a different physical owner",
+            ));
+        }
+        let translation = scope.canonical_fetch(state, raw_pc)?;
+        scope
+            .check_fetch_policy(&translation, raw_pc, state)
+            .map_err(FetchFailure::Unavailable)?;
+        let reached = self
+            .read_legacy_instruction(&translation, raw_pc, scope.immutable_sources())
+            .map_err(FetchFailure::Platform)?;
+        scope
+            .check_source_word(raw_pc, reached.word())
+            .map_err(FetchFailure::Unavailable)?;
+        Ok(reached)
+    }
+
+    /// Separately admitted single ordinary LDR64 instruction fetch under the
+    /// genuine factored installed owner. The legacy control whitelist remains
+    /// unchanged. This reads immutable original instruction bytes with guest
+    /// Execute rights; it performs no Device data access or native invocation.
+    /// Current qualification/revalidation borrows the exact retained Active
+    /// outer. Fresh construction supplies its single pre-PE construction loan.
+    pub(crate) fn fetch_m0_instruction(
+        &self,
+        execution: &MemoryExecutionLoan,
+        controls: &crate::system::translation_controls::TranslationControls,
+        scope: &crate::blocks::InstalledM0SourceScope<'_>,
+        state: &crate::system::state::SystemState,
+        raw_pc: u64,
+    ) -> Result<BoundPhysicalInstruction, crate::system::translation_controls::FetchFailure> {
+        use crate::system::translation_controls::FetchFailure;
+        if !std::ptr::eq(self, scope.physical_space()) {
+            return Err(FetchFailure::Unavailable(
+                "M0 fetch uses a different physical owner",
+            ));
+        }
+        self.check_execution_loan(execution)
+            .map_err(|_| FetchFailure::Unavailable("M0 fetch execution loan is unavailable"))?;
+        let translation = scope.canonical_fetch(controls, state, raw_pc)?;
+        scope
+            .check_fetch_policy(&translation, raw_pc, state)
+            .map_err(FetchFailure::Unavailable)?;
+        let reached = self
+            .read_instruction(execution, &translation, raw_pc, scope.immutable_sources())
+            .map_err(FetchFailure::Platform)?;
+        scope
+            .check_source_word(raw_pc, reached.word())
+            .map_err(FetchFailure::Unavailable)?;
+        Ok(reached)
+    }
+
+    /// One exact typed EL1 direct-B source fetch under the ORIGINAL installed
+    /// source and SAME retained outer. This performs no branch/native execution.
+    pub(crate) fn fetch_el1_instruction(
+        &self,
+        execution: &MemoryExecutionLoan,
+        controls: &crate::system::translation_controls::TranslationControls,
+        scope: &crate::blocks::InstalledEl1SourceScope<'_>,
+        state: &crate::system::state::SystemState,
+        raw_pc: u64,
+    ) -> Result<BoundPhysicalInstruction, crate::system::translation_controls::FetchFailure> {
+        use crate::system::translation_controls::FetchFailure;
+        if !std::ptr::eq(self, scope.physical_space()) {
+            return Err(FetchFailure::Unavailable(
+                "branch fetch uses a different physical owner",
+            ));
+        }
+        self.check_execution_loan(execution)
+            .map_err(|_| FetchFailure::Unavailable("branch fetch execution loan is unavailable"))?;
+        let translation = scope.canonical_fetch(controls, state, raw_pc)?;
+        scope
+            .check_fetch_policy(&translation, raw_pc, state)
+            .map_err(FetchFailure::Unavailable)?;
+        let reached = self
+            .read_instruction(execution, &translation, raw_pc, scope.immutable_sources())
+            .map_err(FetchFailure::Platform)?;
+        scope
+            .check_source_word(raw_pc, reached.word())
+            .map_err(FetchFailure::Unavailable)?;
+        Ok(reached)
+    }
+
+    pub(crate) fn memory_system(&self) -> &Arc<crate::memory::domain::MemorySystem> {
+        &self.domain.system
+    }
+
+    pub(crate) fn check_fetch_execution(&self) -> Result<(), &'static str> {
+        self.check_source_binding()
+            .map_err(|_| "physical fetch source binding is unavailable")
+    }
+
+    // Unjoined legacy owners own this first local loan. Canonical M0 source
+    // qualification never routes here and never mints a replacement outer.
+    fn read_legacy_instruction(
+        &self,
+        translation: &stage1::Translation,
+        raw_pc: u64,
+        immutable_sources: &[ImmutableCodeBacking],
+    ) -> Result<BoundPhysicalInstruction, &'static str> {
+        let execution = self
+            .domain
+            .execution_loan()
+            .map_err(|_| "legacy physical fetch domain is unavailable")?;
+        self.read_instruction(&execution, translation, raw_pc, immutable_sources)
+    }
+
+    fn read_instruction(
+        &self,
+        execution: &MemoryExecutionLoan,
+        translation: &stage1::Translation,
+        raw_pc: u64,
+        immutable_sources: &[ImmutableCodeBacking],
+    ) -> Result<BoundPhysicalInstruction, &'static str> {
+        let access = translation.access();
+        if access.kind != stage1::AccessKind::Fetch || access.raw_virtual_address != raw_pc {
+            return Err("canonical translation does not describe this instruction fetch");
+        }
+        if raw_pc & INSTRUCTION_ALIGNMENT_MASK != 0
+            || translation.physical_address() & INSTRUCTION_ALIGNMENT_MASK != 0
+        {
+            return Err("canonical instruction-address alignment check is required");
+        }
+        if translation.contiguous_bytes() < INSTRUCTION_BYTES as u64 {
+            return Err("instruction fetch crosses an unresolved translation leaf");
+        }
+        self.check_execution_loan(execution)
+            .map_err(|_| "physical fetch source binding is unavailable")?;
+        let reached = self
+            .domain
+            .resolve_source_physical(
+                execution,
+                translation.physical_address(),
+                INSTRUCTION_BYTES,
+                AccessKind::Execute,
+            )
+            .map_err(|_| "physical fetch mapping is unavailable or denies execute")?;
+        self.check_reached(&reached)
+            .map_err(|_| "physical fetch source generation is unavailable")?;
+        let first = reached.first();
+        if !immutable_sources
+            .iter()
+            .any(|source| Arc::ptr_eq(source.backing(), first.view().backing()))
+        {
+            return Err("physical fetch has no retained immutable code owner");
+        }
+        let pointer = first.host_ptr().as_ptr();
+        let (address, bytes) =
+            access::read_footprint(pointer as usize, INSTRUCTION_BYTES, self.domain.target)
+                .map_err(|_| "physical fetch native read recipe is unavailable")?;
+        if address != pointer as usize || bytes != INSTRUCTION_BYTES {
+            return Err("physical fetch would require an unauthorized read envelope");
+        }
+        // Execute construction's host contract guarantees native instruction-byte
+        // readability even for a guest execute-only physical view. No guest data
+        // Read permission or host Execute right is invented here.
+        first
+            .view()
+            .backing()
+            .host_pointer(
+                first.backing_offset(),
+                INSTRUCTION_BYTES,
+                AccessKind::Execute,
+            )
+            .map_err(|_| "physical instruction storage extent is unavailable")?;
+        if !first.view().is_current()
+            || reached
+                ._remaining
+                .iter()
+                .any(|span| !span.view().is_current())
+        {
+            return Err("physical instruction view has been retired");
+        }
+        // SAFETY: the canonical immutable owner pins coherent readable native
+        // storage and excludes every byte writer/reference alias. Resolution
+        // checks Execute on all reached views and retains their generations.
+        // The caller's actual same-domain execution loan remains borrowed
+        // through this read and subsequent source registration/revalidation.
+        // The actual recipe has the exact authorized four-byte footprint.
+        let word = unsafe { access::read_part(pointer, INSTRUCTION_BYTES, self.domain.target) }
+            .map_err(|_| "physical instruction read is unavailable")? as u32;
+        let binding = BoundPhysicalInstruction {
+            raw_pc,
+            physical_address: translation.physical_address(),
+            word,
+            reached,
+        };
+        if !binding.is_current() {
+            return Err("physical instruction view retired during fetch");
+        }
+        self.domain
+            .check_execution()
+            .map_err(|_| "physical fetch domain failed after the reached read")?;
+        Ok(binding)
+    }
+}

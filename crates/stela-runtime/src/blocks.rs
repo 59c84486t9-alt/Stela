@@ -2,6 +2,12 @@
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
 pub(crate) mod retirement;
+pub use retirement::checked::software_el1::{
+    OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config, SoftwareEl1InitialRam, SoftwareEl1Machine,
+    SoftwareEl1Profile, SoftwareEl1Report, SoftwareEl1Request, SourceRamDeclaration,
+    SourceRamPermissions,
+};
+
 pub(crate) mod scalable;
 
 use crate::{
@@ -217,9 +223,17 @@ pub struct RunOutcome {
     pub thread_register_events: Vec<ThreadRegisterEvent>,
 }
 
+#[path = "blocks/translation.rs"]
+mod translation;
+pub(crate) use translation::{ControlCodeScope, InstalledEl1SourceScope, InstalledM0SourceScope};
+pub(in crate::blocks) use translation::{
+    InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
+};
+
 #[derive(Debug)]
 struct CodeRegion {
     source: Box<[u8]>,
+    physical_binding: Option<translation::PhysicalCodeBinding>,
     end: u64,
     generation: u64,
 }
@@ -229,7 +243,7 @@ struct LoadedBlock {
     region_base: u64,
     generation: u64,
     source_bytes: usize,
-    prepared: Prepared,
+    prepared: crate::artifact::LoadedArtifact,
     mapping: platform::Mapping,
 }
 
@@ -471,6 +485,7 @@ impl BlockRuntime {
             base.0,
             CodeRegion {
                 source: source.into_boxed_slice(),
+                physical_binding: None,
                 end,
                 generation,
             },
@@ -525,7 +540,7 @@ impl BlockRuntime {
                 && manifest.identity.source_sha256 == sha256(&window[..prepared.source_bytes]),
             "block compiler/source identity mismatch"
         );
-        validate_source_map(&prepared.prepared, pc, prepared.source_bytes)?;
+        validate_source_map(&prepared.prepared.manifest, pc, prepared.source_bytes)?;
         ensure!(
             manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
             "invalid block native size"
@@ -659,15 +674,12 @@ impl BlockRuntime {
         let generation = prepared.generation;
         let source_bytes = prepared.analysis.source_bytes;
         let prepared = prepared.prepared;
-        let manifest = &prepared.manifest;
         let mut native = Vec::new();
         std::fs::File::open(prepared.directory.join("native.bin"))?
             .take((MAX_NATIVE_BYTES + 1) as u64)
             .read_to_end(&mut native)?;
-        ensure!(
-            native.len() == manifest.native_bytes && sha256(&native) == manifest.native_sha256,
-            "block native snapshot checksum mismatch"
-        );
+        let loaded_artifact = crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)
+            .context("block native snapshot checksum mismatch")?;
         ensure!(
             self.target.supported(),
             "host CPU lacks generated-code requirements {}",
@@ -686,7 +698,7 @@ impl BlockRuntime {
                 region_base: base,
                 generation,
                 source_bytes,
-                prepared,
+                prepared: loaded_artifact,
                 mapping,
             },
         );
@@ -975,6 +987,13 @@ impl BlockRuntime {
         block_budget: usize,
         services: RuntimeServices<'_>,
     ) -> Result<RunOutcome> {
+        ensure!(
+            !matches!(
+                self.profile,
+                BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+            ),
+            "EL1 direct branch requires its original canonical retained owner"
+        );
         let RuntimeServices {
             pointer_authentication: mut pauth_execution,
             clock: mut clock_context,
@@ -1924,36 +1943,19 @@ fn validate_trap_exit(
     decode_trap(exit, word)?.context("trap exit does not identify a reviewed instruction")
 }
 
-fn validate_source_map(prepared: &Prepared, base: GuestAddress, source_bytes: usize) -> Result<()> {
-    let manifest = &prepared.manifest;
-    ensure!(
-        !manifest.verified && manifest.source_map.len() == source_bytes / 4,
-        "invalid block source map length or verification claim"
-    );
-    let mut prior = None;
-    for (index, &(guest, native)) in manifest.source_map.iter().enumerate() {
-        ensure!(
-            guest.0
-                == base
-                    .0
-                    .checked_add(index as u64 * 4)
-                    .context("source map address overflow")?,
-            "block source map guest mismatch"
-        );
-        ensure!(
-            native < manifest.native_bytes
-                && prior.is_none_or(|old| native > old)
-                && (index != 0
-                    || native
-                        == if manifest.memory_requirements.is_some() {
-                            stela_compiler::extended::CONTEXT_WRAPPER_BYTES
-                        } else {
-                            0
-                        }),
-            "invalid block native source map offset"
-        );
-        prior = Some(native);
-    }
+fn validate_source_map(
+    manifest: &crate::Manifest,
+    base: GuestAddress,
+    source_bytes: usize,
+) -> Result<()> {
+    let first_native_offset = if manifest.memory_requirements.is_some()
+        || manifest.identity.abi == stela_compiler::block::EL1_M0_INTEGER_BLOCK_ABI
+    {
+        stela_compiler::extended::CONTEXT_WRAPPER_BYTES
+    } else {
+        0
+    };
+    crate::artifact::validate_source_map(manifest, base, source_bytes, first_native_offset)?;
     Ok(())
 }
 

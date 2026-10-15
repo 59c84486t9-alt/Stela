@@ -1,5 +1,6 @@
 //! Exact admitted source, compiler plan and carrier validation; no public mint.
 mod conditional;
+mod el1_m0;
 use super::super::super::{
     validate_clock_exit, validate_pauth_exit, validate_source_map, validate_thread_register_exit,
     validate_trap_exit,
@@ -10,8 +11,9 @@ use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Operation},
     block::{
-        BlockAnalysis, BlockExit, ClockInstruction, CompilationPlan, DynamicEdgeKind, ExitKind,
-        PointerAuthentication, SynchronousTrap, ThreadRegisterInstruction, analyze_with_profile,
+        BlockAnalysis, BlockExit, BlockProfile, ClockInstruction, CompilationPlan, DynamicEdgeKind,
+        ExitKind, PointerAuthentication, SuccessorKind, SynchronousTrap, ThreadRegisterInstruction,
+        analyze_with_profile,
     },
     context::memory::{MemoryRequirements, MemoryStatus},
 };
@@ -21,7 +23,7 @@ pub(crate) struct BoundSource<'code> {
     pub(super) block: &'code LoadedBlock,
     pub(super) entry: EntryBoundary,
     pub(super) source: &'code [u8],
-    pub(super) requirements: MemoryRequirements,
+    requirements: Option<MemoryRequirements>,
     analysis: BlockAnalysis,
 }
 
@@ -61,6 +63,40 @@ impl<'code> BoundSource<'code> {
 
     pub(super) fn trap(&self) -> Option<SynchronousTrap> {
         self.analysis.trap
+    }
+
+    /// Old checked-memory/M0/FP routes must demand the ORIGINAL actual Some.
+    /// A branch's real None can never turn into default memory permission.
+    pub(super) fn memory_requirements(&self) -> anyhow::Result<MemoryRequirements> {
+        self.requirements
+            .ok_or_else(|| anyhow::anyhow!("actual source has no checked memory requirements"))
+    }
+
+    /// Exact typed source-derived direct target; output is intent, not a grant.
+    pub(super) fn direct_branch_target(&self) -> anyhow::Result<GuestAddress> {
+        self.recheck()?;
+        let analysis = &self.analysis;
+        anyhow::ensure!(
+            self.runtime.profile() == BlockProfile::El1DirectBranchV1
+                && self.requirements.is_none()
+                && self.source.len() == size_of::<u32>()
+                && analysis.source_bytes == self.source.len()
+                && analysis.terminator_pc == Some(self.entry.entry())
+                && analysis.static_successors.len() == 1
+                && analysis.dynamic_edge.is_none()
+                && analysis.trap.is_none()
+                && analysis.system_instruction.is_none()
+                && analysis.pointer_authentication.is_none()
+                && analysis.clock_instruction.is_none()
+                && analysis.thread_register_instruction.is_none(),
+            "actual source is not exact typed direct B"
+        );
+        let edge = &analysis.static_successors[0];
+        anyhow::ensure!(
+            edge.kind == SuccessorKind::Direct,
+            "actual branch edge is not Direct"
+        );
+        Ok(edge.target)
     }
 
     pub(super) fn pauth(&self) -> Option<PointerAuthentication> {
@@ -158,18 +194,30 @@ impl<'code> BoundSource<'code> {
                 && identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "actual source/compiler/profile/target differs"
         );
-        validate_source_map(&block.prepared, pc, block.source_bytes)?;
+        validate_source_map(&block.prepared.manifest, pc, block.source_bytes)?;
         // Parse-only canonical producer: no emission, fallback plan or copied
         // requirements. Compare the actual original plan with the loaded token.
         let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
-        let requirements = plan
-            .memory_requirements()
-            .ok_or_else(|| anyhow::anyhow!("checked plan requirements absent"))?;
+        let requirements = plan.memory_requirements();
+        match runtime.profile {
+            BlockProfile::El1M0IntegerV1 => anyhow::ensure!(
+                plan.el1_m0_intent().is_some(),
+                "EL1 integer source plan intent absent"
+            ),
+            BlockProfile::El1DirectBranchV1 => anyhow::ensure!(
+                requirements.is_none(),
+                "direct branch plan unexpectedly requires memory"
+            ),
+            _ => anyhow::ensure!(
+                runtime.profile.checked_memory().is_some() && requirements.is_some(),
+                "checked plan requirements absent"
+            ),
+        }
         anyhow::ensure!(
             plan.source_bytes() == block.source_bytes
-                && manifest.memory_requirements == Some(requirements)
+                && manifest.memory_requirements == requirements
                 && identity.memory_specialization_sha256
-                    == crate::memory_specialization_sha256(runtime.profile, Some(requirements))?,
+                    == crate::memory_specialization_sha256(runtime.profile, requirements)?,
             "loaded requirements differ from exact original plan"
         );
         let analysis = analyze_with_profile(source, pc, runtime.profile)?;
@@ -400,3 +448,6 @@ impl<'code> BoundSource<'code> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

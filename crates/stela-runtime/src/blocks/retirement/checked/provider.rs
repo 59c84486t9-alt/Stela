@@ -1,5 +1,10 @@
 //! Concrete fresh-software EL0 checked-memory/PAC/clock/TSD owner. No blanket
 //! provider, stored Dispatcher, caller callback, second CPU or copied System.
+mod m0_owner;
+mod resources;
+pub(crate) use m0_owner::M0Owner;
+pub(crate) use resources::{El1ExecutionResources, M0ExecutionResources};
+
 use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
 use super::super::software_async::NoAsyncSources;
 use super::NativeObservation;
@@ -160,7 +165,10 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 )?;
             }
         }
-        if bound.requirements.required_flags & stela_compiler::context::memory::flags::ASIMD != 0 {
+        if bound.memory_requirements()?.required_flags
+            & stela_compiler::context::memory::flags::ASIMD
+            != 0
+        {
             let fp = self
                 .fp
                 .ok_or_else(|| anyhow::anyhow!("actual low128 FP owner unavailable"))?;
@@ -182,7 +190,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
             .prepare_profile(
                 &bound.entry,
                 bound.memory_profile()?,
-                bound.requirements,
+                bound.memory_requirements()?,
                 system,
                 self.execution.debug_controls(),
                 registers,
@@ -202,6 +210,15 @@ impl sealed::Concrete for CheckedProcessOwner<'_> {}
 /// Only this source module can implement the canonical consumer's backend.
 pub(crate) trait Owner: sealed::Concrete {
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan>;
+    fn prepare_source(
+        &mut self,
+        _runtime: &mut crate::blocks::BlockRuntime,
+        _system: &SystemState,
+        _pc: GuestAddress,
+        _outer: &MemoryExecutionLoan,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn qualify(
         &mut self,
         bound: &BoundSource<'_>,
@@ -209,6 +226,20 @@ pub(crate) trait Owner: sealed::Concrete {
         registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()>;
+    /// One disjoint loan of this concrete backend's ORIGINAL fields. No
+    /// caller/resource tuple, context clone or second backend can supply it.
+    /// The canonical Active retains this through real source/control mint,
+    /// no-read preparation, FFI/finalization and once-only PC settlement.
+    fn split_m0_resources(&mut self) -> anyhow::Result<M0ExecutionResources<'_>> {
+        anyhow::bail!("actual M0 backend resources are unavailable")
+    }
+
+    /// Only the SAME concrete installed owner in its exact B cohort can lend
+    /// these original fields. All other sealed owners refuse before FFI.
+    fn split_el1_resources(&mut self) -> anyhow::Result<El1ExecutionResources<'_>> {
+        anyhow::bail!("actual installed branch backend resources are unavailable")
+    }
+
     fn invoke(
         &mut self,
         bound: &BoundSource<'_>,
@@ -263,7 +294,10 @@ impl Owner for CheckedProcessOwner<'_> {
         system: &mut SystemState,
         registers: &mut GuestState,
     ) -> anyhow::Result<NativeObservation> {
-        if bound.requirements.required_flags & stela_compiler::context::memory::flags::ASIMD != 0 {
+        if bound.memory_requirements()?.required_flags
+            & stela_compiler::context::memory::flags::ASIMD
+            != 0
+        {
             let fp = self
                 .fp
                 .ok_or_else(|| anyhow::anyhow!("actual low128 FP owner unavailable"))?;
@@ -298,7 +332,7 @@ impl Owner for CheckedProcessOwner<'_> {
                 bound.source,
                 &bound.block.prepared.manifest.source_map,
                 bound.memory_profile()?.process_memory_profile_id(),
-                bound.requirements,
+                bound.memory_requirements()?,
                 &bound.block.mapping,
                 registers,
                 self.context,
@@ -546,7 +580,9 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
                 self.bound
                     .memory_profile()
                     .map_err(|error| Failure::Backend(error.to_string()))?,
-                self.bound.requirements,
+                self.bound
+                    .memory_requirements()
+                    .map_err(|error| Failure::Backend(error.to_string()))?,
                 self.system,
                 self.debug,
                 registers,
@@ -564,7 +600,12 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
         registers: &GuestState,
     ) -> Result<PreparedProcessMemory<'run>, Failure> {
         self.validate_entry(boundary, source, registers)?;
-        if requirements != self.bound.requirements {
+        if requirements
+            != self
+                .bound
+                .memory_requirements()
+                .map_err(|error| Failure::Backend(error.to_string()))?
+        {
             return Err(Failure::Unsupported("source requirements mismatch"));
         }
         self.controls

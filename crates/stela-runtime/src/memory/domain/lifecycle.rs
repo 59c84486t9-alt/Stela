@@ -23,7 +23,52 @@ impl MemoryExecutionLoan {
     pub(crate) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
         Arc::ptr_eq(&self.domain, domain)
     }
+    /// Check membership in the supplied thread's actual domain, not Thread/PE
+    /// identity. A loan retains a domain and counted invocation, not its acquirer.
+    /// Equal address-space numbers or a shared machine do not prove membership.
+    pub fn check_thread_domain<P: DataPolicy>(
+        &self,
+        thread: &MemoryThread<P>,
+    ) -> Result<(), MemoryStatus> {
+        self.check_domain(&thread.domain)
+    }
+
+    /// Check the actual physical coherence owner without exposing it or
+    /// minting another invocation, source witness or mapping capability.
+    pub fn check_memory_system(&self, system: &Arc<MemorySystem>) -> Result<(), MemoryStatus> {
+        if !Arc::ptr_eq(&self.domain.system, system) {
+            return Err(MemoryStatus::Domain);
+        }
+        self.check_domain(&self.domain)
+    }
+
+    /// Borrow the actual machine's order serializer through this retained loan.
+    /// This is only lock/lifetime exclusion, not CPU, PA, Thread or PE authority.
+    pub(super) fn device_ram_order(&self) -> Result<std::sync::MutexGuard<'_, ()>, MemoryStatus> {
+        self.check_domain(&self.domain)?;
+        let order = self
+            .domain
+            .system
+            .device_ram_order
+            .try_lock()
+            .map_err(|_| MemoryStatus::Domain)?;
+        self.check_domain(&self.domain)?;
+        Ok(order)
+    }
+
+    pub(super) fn check_domain(&self, domain: &Arc<MemoryDomain>) -> Result<(), MemoryStatus> {
+        if !Arc::ptr_eq(&self.domain, domain) {
+            return Err(MemoryStatus::Domain);
+        }
+        let state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
+        self.domain.check_execution()?;
+        if state.servicing || state.native_loans == 0 {
+            return Err(MemoryStatus::Domain);
+        }
+        Ok(())
+    }
 }
+
 impl Drop for MemoryExecutionLoan {
     fn drop(&mut self) {
         match self.domain.state.lock() {
@@ -254,6 +299,97 @@ impl MemoryServiceLoan {
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_execution_membership_requires_same_domain_system_and_health() {
+        use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
+        let system = MemorySystem::new(16, 8).unwrap();
+        let domain = MemoryDomain::new_for_address_space(
+            7,
+            Arc::clone(&system),
+            Vec::new(),
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        let other_domain = MemoryDomain::new_for_address_space(
+            7,
+            Arc::clone(&system),
+            Vec::new(),
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        let policy = MemoryControls::new(
+            LowerAddressProfile::new(44, false).unwrap(),
+            false,
+            false,
+            false,
+            TagCheckFaultMode::Ignore,
+            false,
+        );
+        let thread = domain.thread(policy);
+        let same_domain_thread = domain.thread(policy);
+        let other_thread = other_domain.thread(policy);
+        let other_system = MemorySystem::new(16, 8).unwrap();
+        let execution = thread.execution_loan().unwrap();
+        assert_eq!(execution.check_thread_domain(&thread), Ok(()));
+        assert_eq!(execution.check_thread_domain(&same_domain_thread), Ok(()));
+        assert_eq!(execution.check_memory_system(&system), Ok(()));
+        assert_eq!(
+            execution.check_thread_domain(&other_thread),
+            Err(MemoryStatus::Domain)
+        );
+        assert_eq!(
+            execution.check_memory_system(&other_system),
+            Err(MemoryStatus::Domain)
+        );
+        assert_eq!(domain.state.lock().unwrap().native_loans, 1);
+        assert!(thread.observation_loan().is_err());
+        // A retained identity is not a health bypass after the actual owner
+        // publishes failure; checking does not change the invocation count.
+        system.failed.store(true, Ordering::Release);
+        assert_eq!(
+            execution.check_thread_domain(&thread),
+            Err(MemoryStatus::Domain)
+        );
+        assert_eq!(
+            execution.check_memory_system(&system),
+            Err(MemoryStatus::Domain)
+        );
+        assert_eq!(domain.state.lock().unwrap().native_loans, 1);
+        drop(execution);
+        assert_eq!(domain.state.lock().unwrap().native_loans, 0);
+    }
+
+    #[test]
+    fn retained_execution_order_serializes_same_machine_across_domains() {
+        let system = MemorySystem::new(16, 8).unwrap();
+        let first =
+            MemoryDomain::new(Arc::clone(&system), Vec::new(), TargetCpu::Baseline).unwrap();
+        let second =
+            MemoryDomain::new(Arc::clone(&system), Vec::new(), TargetCpu::Baseline).unwrap();
+        let first_execution = first.execution_loan().unwrap();
+        let second_execution = second.execution_loan().unwrap();
+        let first_order = first_execution.device_ram_order().unwrap();
+        assert!(matches!(
+            second_execution.device_ram_order(),
+            Err(MemoryStatus::Domain)
+        ));
+        assert!(first.observation_loan().is_err());
+        drop(first_order);
+        let second_order = second_execution.device_ram_order().unwrap();
+        assert!(matches!(
+            first_execution.device_ram_order(),
+            Err(MemoryStatus::Domain)
+        ));
+        drop(second_order);
+        system.failed.store(true, Ordering::Release);
+        assert!(matches!(
+            first_execution.device_ram_order(),
+            Err(MemoryStatus::Domain)
+        ));
+        assert_eq!(first.state.lock().unwrap().native_loans, 1);
+        assert_eq!(second.state.lock().unwrap().native_loans, 1);
+    }
 
     #[test]
     fn failed_service_cannot_admit_prechecked_waiting_native_or_service_loan() {

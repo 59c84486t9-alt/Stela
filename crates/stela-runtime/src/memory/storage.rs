@@ -87,6 +87,75 @@ impl std::fmt::Debug for NativeStorage {
 }
 
 impl NativeStorage {
+    /// Initialize private loader RAM before publishing any backing/view. Final
+    /// host permissions never include Execute; guest source fetch uses Read.
+    pub(super) fn initialized_ram(
+        initial: &[u8],
+        leading: usize,
+        bytes: usize,
+        readable: bool,
+        writable: bool,
+    ) -> std::io::Result<Arc<Self>> {
+        let page =
+            super::host_page_size().map_err(|error| std::io::Error::other(error.to_string()))?;
+        if initial.is_empty()
+            || bytes == 0
+            || !bytes.is_multiple_of(page)
+            || bytes > isize::MAX as usize
+            || leading
+                .checked_add(initial.len())
+                .is_none_or(|end| end > bytes)
+            || writable && !readable
+        {
+            return Err(std::io::Error::other(
+                "invalid private source RAM allocation",
+            ));
+        }
+        // SAFETY: OS-selected fresh private anonymous storage, never MAP_FIXED
+        // or an alias. No reference into this allocation escapes initialization.
+        let raw = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if raw == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let Some(base) = NonNull::new(raw.cast::<u8>()) else {
+            // SAFETY: mmap succeeded at zero; NonNull cannot represent its owner.
+            unsafe { libc::munmap(raw, bytes) };
+            return Err(std::io::Error::other("source RAM allocation has null base"));
+        };
+        // SAFETY: mmap returned this complete checked page-aligned extent. The
+        // mapping owner now owns its sole unmap obligation on every error path.
+        let mapping = unsafe { NativeMapping::adopt(base, bytes) };
+        // SAFETY: validated destination extent, private mapping and independent
+        // input bytes; no native access or source binding has been published.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                initial.as_ptr(),
+                base.as_ptr().add(leading),
+                initial.len(),
+            )
+        };
+        let protection = if readable {
+            libc::PROT_READ
+        } else {
+            libc::PROT_NONE
+        } | if writable { libc::PROT_WRITE } else { 0 };
+        // SAFETY: factory exclusively owns the complete allocation. Final host
+        // RO is established before immutable-code or physical binding publication.
+        if unsafe { libc::mprotect(base.as_ptr().cast(), bytes, protection) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self::anonymous(mapping))
+    }
+
     pub(super) fn anonymous(primary: NativeMapping) -> Arc<Self> {
         Arc::new(Self {
             primary,

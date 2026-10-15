@@ -3,11 +3,14 @@
 
 mod darwin_services;
 mod diagnostics;
+mod el1_registers;
 mod entry_controls;
 mod low128_call;
+mod m0;
 mod pauth_lr;
 mod pauth_policy;
 mod provider;
+pub(crate) mod software_el1;
 mod source;
 
 use super::{ConsumerKey, RetainedResources, SystemExecutionLoan, accept_retained_loan};
@@ -16,9 +19,13 @@ use crate::{
     memory::domain::MemoryExecutionLoan,
 };
 pub(crate) use entry_controls::ProcessEntryControls;
+pub(crate) use m0::M0SourceInput;
 pub(crate) use provider::CheckedProcessOwner;
 use source::{BoundSource, ReturnedTerminal};
-use stela_compiler::GuestAddress;
+use stela_compiler::{
+    GuestAddress,
+    block::{BlockProfile, CheckedMemoryProfile},
+};
 
 pub(crate) struct OwnedRunRequest {
     pub stop_pc: Option<GuestAddress>,
@@ -52,6 +59,8 @@ pub(crate) struct OwnedRunOutcome {
     pub accounting: RunOutcome,
     pub actual_pc: GuestAddress,
     pub last_native_observation: Option<NativeObservation>,
+    pub last_m0_observation: Option<m0::M0Observation>,
+    pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
 }
@@ -142,6 +151,8 @@ impl BlockRuntime {
         let mut pe = accept_retained_loan(loan);
         let mut accounting = empty_accounting();
         let mut last_native_observation = None;
+        let mut last_m0_observation = None;
+        let mut last_el1_register_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
@@ -164,10 +175,16 @@ impl BlockRuntime {
                 crate::execution::platform::ensure_supported()?;
                 anyhow::ensure!(self.target_cpu().supported(), "host target unsupported");
                 anyhow::ensure!(
-                    self.profile.checked_memory().is_some(),
+                    self.profile.checked_memory().is_some()
+                        || matches!(
+                            self.profile,
+                            BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+                        ),
                     "checked profile required"
                 );
                 anyhow::ensure!(pe.thread.pc.0.is_multiple_of(4), "unaligned actual PC");
+                pe.backend
+                    .prepare_source(self, pe.system, pe.thread.pc, &outer)?;
                 self.load(pe.thread.pc, &mut accounting)?;
                 Ok(())
             })();
@@ -194,6 +211,54 @@ impl BlockRuntime {
                 attempt,
                 closed: false,
             };
+            if matches!(
+                self.profile,
+                BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+            ) && bound.el1_register_intent().is_ok()
+            {
+                match active.execute_el1_registers(
+                    &bound,
+                    &mut accounting,
+                    &mut last_el1_register_observation,
+                    &mut settled_prefixes,
+                ) {
+                    Ok(()) => continue,
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
+            // The immutable typed source profile selects the concrete consumer;
+            // it grants no CPU/domain access. The sealed M0 backend still must
+            // lend its original resources and genuine control/source witnesses.
+            if self.profile == BlockProfile::El1M0IntegerV1
+                || self.profile
+                    == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
+            {
+                match active.execute_m0_read64(
+                    &bound,
+                    &mut accounting,
+                    &mut last_m0_observation,
+                    &mut settled_prefixes,
+                ) {
+                    Ok(m0::M0Step::Committed) => continue,
+                    Ok(m0::M0Step::SourceResourcesBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 original resource loan unavailable".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::SourceControlBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 source/control fault remains blocked".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::PreparationBlocked) => {
+                        break OwnedStop::Indeterminate("M0 no-read preparation failed".into());
+                    }
+                    Ok(m0::M0Step::Indeterminate(detail)) => {
+                        break OwnedStop::Indeterminate(detail);
+                    }
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
             match active.execute(
                 &bound,
                 &mut accounting,
@@ -234,6 +299,8 @@ impl BlockRuntime {
             accounting,
             actual_pc: pe.thread.pc,
             last_native_observation,
+            last_m0_observation,
+            last_el1_register_observation,
             settled_prefixes,
             service_events,
         }

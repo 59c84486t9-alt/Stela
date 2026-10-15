@@ -155,6 +155,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/system/synchronization.rs"),
     include_str!("block.rs"),
     include_str!("block/memory.rs"),
+    include_str!("block/el1_m0.rs"),
+    include_str!("x86_64/block/el1_m0.rs"),
     include_str!("block/memory/address.rs"),
     include_str!("block/memory/address/tests.rs"),
     include_str!("block/memory/pointer.rs"),
