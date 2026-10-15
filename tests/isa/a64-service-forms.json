@@ -30,6 +30,12 @@
     }
   ],
   "compiler_fingerprint_sources": [
+    "crates/stela-compiler/src/x86_64/region.rs",
+    "crates/stela-compiler/src/x86_64/region/analysis.rs",
+    "crates/stela-compiler/src/x86_64/region/constant.rs",
+    "crates/stela-compiler/src/x86_64/region/encoding.rs",
+    "crates/stela-compiler/src/x86_64/region/recovery.rs",
+    "crates/stela-compiler/src/x86_64/region/tests.rs",
     "crates/stela-compiler/src/lib.rs",
     "crates/stela-compiler/src/aarch64/sme/fp_matrix.rs",
     "crates/stela-compiler/src/aarch64/sme/fp_vector.rs",

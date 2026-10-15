@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 
 /// Bind cached code and evidence to compiler implementation and dependencies.
 pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
+    include_str!("x86_64/region.rs"),
+    include_str!("x86_64/region/analysis.rs"),
+    include_str!("x86_64/region/constant.rs"),
+    include_str!("x86_64/region/encoding.rs"),
+    include_str!("x86_64/region/recovery.rs"),
+    include_str!("x86_64/region/tests.rs"),
     include_str!("lib.rs"),
     include_str!("aarch64/sme/fp_matrix.rs"),
     include_str!("aarch64/sme/fp_vector.rs"),

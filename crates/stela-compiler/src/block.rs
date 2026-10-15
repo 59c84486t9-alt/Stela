@@ -901,6 +901,7 @@ pub struct CompilationPlan {
     parsed: ParsedBlock,
     checked: Option<memory::CheckedPlan>,
     target: crate::TargetCpu,
+    ordinary_regions: bool,
 }
 impl CompilationPlan {
     pub fn new(
@@ -928,6 +929,7 @@ impl CompilationPlan {
             parsed,
             checked,
             target,
+            ordinary_regions: profile == BlockProfile::Ordinary,
         })
     }
     pub fn source_bytes(&self) -> usize {
@@ -943,6 +945,13 @@ impl CompilationPlan {
                 self.parsed.next_pc,
                 self.target,
             )?
+        } else if self.ordinary_regions {
+            crate::x86_64::block::emit_ordinary_for_target(
+                &self.parsed.instructions,
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+                self.target,
+            )
         } else {
             crate::x86_64::block::emit_for_target(
                 &self.parsed.instructions,

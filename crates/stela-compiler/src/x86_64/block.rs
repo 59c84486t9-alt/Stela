@@ -50,11 +50,30 @@ fn emit(
     )
 }
 
+pub(crate) fn emit_ordinary_for_target(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+) -> NativeBlock {
+    emit_selected(instructions, terminal, fallthrough, target, true)
+}
+
 pub(crate) fn emit_for_target(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
+) -> NativeBlock {
+    emit_selected(instructions, terminal, fallthrough, target, false)
+}
+
+fn emit_selected(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+    optimize_regions: bool,
 ) -> NativeBlock {
     let mut block = NativeBlock {
         x86_64_code: vec![],
@@ -62,13 +81,54 @@ pub(crate) fn emit_for_target(
     };
     let code = &mut block.x86_64_code;
     let mut fixups = vec![];
-    for instruction in instructions {
+    let mut cursor = 0;
+    while cursor < instructions.len() {
+        if optimize_regions
+            && let Ok(region) = super::region::emit_clean_load_prefix(&instructions[cursor..])
+            && region.consumed_instructions != 0
+        {
+            let count = region.consumed_instructions;
+            let mut baseline_code = vec![];
+            let mut baseline_map = vec![];
+            let mut baseline_fixups = vec![];
+            for instruction in &instructions[cursor..cursor + count] {
+                baseline_map.push((instruction.pc, baseline_code.len()));
+                super::emit_instruction(
+                    &mut baseline_code,
+                    instruction,
+                    &mut baseline_fixups,
+                    target,
+                );
+            }
+            debug_assert!(baseline_fixups.is_empty());
+            let offset = code.len();
+            if super::region::admits_ordinary(&region, &baseline_code) {
+                block
+                    .source_map
+                    .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                code.extend(region.code);
+            } else {
+                // Reject the complete eligible chunk. Rescanning its suffix
+                // could bypass the measured cost gate with a different shape.
+                block
+                    .source_map
+                    .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                code.extend(baseline_code);
+            }
+            // Every admitted region settled the complete canonical frame.
+            // Memory, numerical helpers, baseline fallback and terminal exits
+            // therefore observe the same ordinary direct-RAM ABI as before.
+            cursor += count;
+            continue;
+        }
+        let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
         if let Operation::FloatingPoint(operand) = &instruction.operation {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
         } else {
             super::emit_instruction(code, instruction, &mut fixups, target);
         }
+        cursor += 1;
     }
     debug_assert!(
         fixups.is_empty(),

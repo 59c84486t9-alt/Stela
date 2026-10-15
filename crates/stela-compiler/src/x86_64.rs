@@ -70,6 +70,7 @@ mod non_temporal;
 mod ordered;
 mod pc_relative;
 mod prefetch;
+mod region;
 mod register_offset;
 mod scalable;
 mod scalable_matrix;
