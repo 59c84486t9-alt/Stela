@@ -10,8 +10,10 @@ pub mod integer_products;
 pub mod integer_saturation;
 pub mod predicate_generation;
 pub mod predicate_logic;
+pub mod rearrange;
 pub mod rearrange_extract;
 pub mod rearrange_widen;
+pub mod reductions;
 pub mod sign;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,8 +27,10 @@ pub enum Operand {
     IntegerSaturation(integer_saturation::Operand),
     PredicateGeneration(predicate_generation::Operand),
     PredicateLogic(predicate_logic::Operand),
+    Rearrange(rearrange::Operand),
     RearrangeExtract(rearrange_extract::Operand),
     RearrangeWiden(rearrange_widen::Operand),
+    Reductions(reductions::Operand),
     Sign(sign::Operand),
 }
 
@@ -58,6 +62,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .or_else(|| {
             rearrange_widen::decode(word).map(|operand| operand.map(Operand::RearrangeWiden))
         })
+        .or_else(|| rearrange::decode(word).map(|operand| operand.map(Operand::Rearrange)))
+        .or_else(|| reductions::decode(word).map(|operand| operand.map(Operand::Reductions)))
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
         .or_else(|| floating_copy::decode(word).map(|operand| operand.map(Operand::FloatingCopy)))
 }

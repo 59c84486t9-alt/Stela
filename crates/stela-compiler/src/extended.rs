@@ -19,8 +19,8 @@ use crate::{
         sve::{
             address, dot, floating_copy, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, predicate_generation, predicate_logic,
-            rearrange_extract, rearrange_widen, sign,
+            integer_products, integer_saturation, predicate_generation, predicate_logic, rearrange,
+            rearrange_extract, rearrange_widen, reductions, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -222,8 +222,10 @@ enum Decoded {
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
+    Rearrange(rearrange::Operand),
     RearrangeExtract(rearrange_extract::Operand),
     RearrangeWiden(rearrange_widen::Operand),
+    Reductions(reductions::Operand),
     Sign(sign::Operand),
     FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
@@ -550,6 +552,70 @@ fn decode(
         profile.require_features(FeatureRequirement::all(features), pc)?;
         return Ok(Decoded::PredicateLogic(operand));
     }
+    if let Some(decoded) = reductions::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming integer reduction encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if operand.output == reductions::Output::Quadword {
+            profile.require_features(
+                FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme2p1)),
+                pc,
+            )?;
+        }
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        return Ok(Decoded::Reductions(operand));
+    }
+    if let Some(decoded) = rearrange::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming rearrangement encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if matches!(
+            operand,
+            rearrange::Operand::Interleave { segment: true, .. }
+                | rearrange::Operand::Extract { segment: true, .. }
+                | rearrange::Operand::Table { segment: true, .. }
+                | rearrange::Operand::DuplicateSegment { .. }
+        ) {
+            profile.require_features(
+                FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme2p1)),
+                pc,
+            )?;
+        }
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        if x86_64::sve::rearrange::requires_explicit_dit_zero(operand, profile.length, target)
+            && profile.required_dit() != Some(false)
+        {
+            return Err(CompileError(format!(
+                "scalar table lookup requires explicitly declared DIT=0 at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::Rearrange(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -637,6 +703,12 @@ fn emit_decoded(
         }
         Decoded::PredicateLogic(operand) => {
             x86_64::sve::predicate_logic::emit(code, &operand, profile.length, target);
+        }
+        Decoded::Reductions(operand) => {
+            x86_64::sve::reductions::emit(code, operand, profile.length, target);
+        }
+        Decoded::Rearrange(operand) => {
+            x86_64::sve::rearrange::emit(code, operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -1933,3 +2005,15 @@ mod predicate_generation_tests;
 #[cfg(test)]
 #[path = "extended/predicate_logic_tests.rs"]
 mod predicate_logic_tests;
+
+#[cfg(test)]
+#[path = "extended/rearrange_tests.rs"]
+mod rearrange_tests;
+
+#[cfg(test)]
+#[path = "extended/reductions_tests.rs"]
+mod reductions_tests;
+
+#[cfg(test)]
+#[path = "extended/sme2p1_tests.rs"]
+mod sme2p1_tests;
