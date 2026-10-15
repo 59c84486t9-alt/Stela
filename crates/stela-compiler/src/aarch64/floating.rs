@@ -3,6 +3,7 @@
 pub mod bfloat16;
 pub mod comparison;
 pub mod complex;
+pub mod dot;
 pub mod estimate;
 pub mod features;
 pub mod fused;
@@ -11,6 +12,7 @@ pub mod minmax;
 pub mod precision;
 pub mod refinement;
 pub mod rounding;
+pub mod sign;
 pub mod sqrt;
 pub mod widening;
 

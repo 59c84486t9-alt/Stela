@@ -52,6 +52,7 @@ mod tests {
     const FADD_SINGLE: u32 = 0x6580_8000;
     const BFADD: u32 = 0x6500_8000;
     const SME_MATRIX: u32 = 0xc1a0_1c00;
+    const SME_VECTOR: u32 = 0xc1a8_e000;
     const SVL_BYTES: [usize; 5] = [16, 32, 64, 128, 256];
 
     fn source(words: &[u32]) -> Vec<u8> {
@@ -70,14 +71,14 @@ mod tests {
 
     #[test]
     fn recovery_uses_exact_interior_source_pc_and_word() {
-        let bytes = source(&[RET, NOP, FADD_SINGLE, FADD_SINGLE, RET]);
+        let bytes = source(&[RET, NOP, FADD_SINGLE, SME_VECTOR, SME_MATRIX, RET]);
         let before = bytes.clone();
         for length in SVL_BYTES {
             let profile = ScalableProfile::new(
                 VectorLength::from_bytes(length).unwrap(),
-                ScalableMode::new(true, false),
+                ScalableMode::new(true, true),
             );
-            for index in [2, 3] {
+            for (index, word) in [(2, FADD_SINGLE), (3, SME_VECTOR), (4, SME_MATRIX)] {
                 let pc = GuestAddress(BASE + index * INSTRUCTION_BYTES);
                 let proof = validate_scalable_numerical_exit(
                     GuestAddress(BASE + INSTRUCTION_BYTES),
@@ -91,7 +92,7 @@ mod tests {
                 .unwrap();
                 assert_eq!(proof.instruction_pc(), pc);
                 assert_eq!(proof.next_pc(), GuestAddress(pc.0 + INSTRUCTION_BYTES));
-                assert_eq!(proof.word(), FADD_SINGLE);
+                assert_eq!(proof.word(), word);
                 assert_eq!(proof.profile(), profile);
                 assert_eq!(proof.numerical_features(), NumericalFeatures::default());
             }
@@ -137,14 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_sve_admission_requires_streaming_and_declines_future_families() {
+    fn selected_numerical_admission_requires_exact_streaming_and_matrix_za() {
         let sme = ScalableFeatures::of(Feature::Sme);
         let sme2 = sme.with(Feature::Sme2);
         for length in SVL_BYTES {
             for streaming in [false, true] {
                 for za in [false, true] {
                     let profile = profile(length, ScalableMode::new(streaming, za), sme2);
-                    for word in [FADD_SINGLE, SME_MATRIX] {
+                    for word in [FADD_SINGLE, SME_VECTOR, SME_MATRIX] {
                         let bytes = source(&[word]);
                         let admitted = validate_scalable_numerical_exit(
                             GuestAddress(BASE),
@@ -155,7 +156,7 @@ mod tests {
                             profile,
                             NumericalFeatures::default(),
                         );
-                        assert_eq!(admitted.is_ok(), streaming && word == FADD_SINGLE);
+                        assert_eq!(admitted.is_ok(), streaming && (word != SME_MATRIX || za));
                     }
                 }
             }

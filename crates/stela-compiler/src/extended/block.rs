@@ -219,15 +219,18 @@ pub fn compile_for_profile(
         Some(Terminal::Numerical(instruction)) => {
             let pc = instruction.instruction_pc();
             source_map.push((pc, code.len()));
-            let ScalableNumericalOperation::Sve(operation) = *instruction.operation();
-            let emitted = x86_64::sve::floating::emit(
-                &mut code,
-                operation,
-                profile.scalable.vector_length(),
-                profile.numerical_features,
-                pc,
-                target,
-            )?;
+            let emitted = match *instruction.operation() {
+                ScalableNumericalOperation::Sve(operation) => x86_64::sve::floating::emit(
+                    &mut code,
+                    operation,
+                    profile.scalable.vector_length(),
+                    profile.numerical_features,
+                    pc,
+                    target,
+                )?,
+                ScalableNumericalOperation::SmeVector(_)
+                | ScalableNumericalOperation::SmeMatrix(_) => false,
+            };
             if emitted {
                 // The guarded family mapping owns the exact-PC cold exit.
                 // Only its committed fast path reaches the continuation.

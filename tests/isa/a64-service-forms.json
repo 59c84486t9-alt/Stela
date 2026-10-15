@@ -31,6 +31,12 @@
   ],
   "compiler_fingerprint_sources": [
     "crates/stela-compiler/src/lib.rs",
+    "crates/stela-compiler/src/aarch64/sme/fp_matrix.rs",
+    "crates/stela-compiler/src/aarch64/sme/fp_vector.rs",
+    "crates/stela-compiler/src/aarch64/floating/bfloat16/arithmetic.rs",
+    "crates/stela-compiler/src/aarch64/floating/bfloat16/extended_dot.rs",
+    "crates/stela-compiler/src/aarch64/floating/dot.rs",
+    "crates/stela-compiler/src/aarch64/floating/sign.rs",
     "crates/stela-compiler/src/aarch64/floating/features.rs",
     "crates/stela-compiler/src/aarch64/sve/floating.rs",
     "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",

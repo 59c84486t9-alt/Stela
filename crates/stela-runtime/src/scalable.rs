@@ -4,16 +4,18 @@ use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{
-        LOOKUP_TABLE_BYTES, PREDICATE_REGISTER_COUNT, STREAMING_RESET_FPSR, ScalableMode,
-        VECTOR_CHUNK_BYTES, VECTOR_REGISTER_COUNT, VectorLength, is_predicate_register,
-        is_z_register,
+        ElementSize, LOOKUP_TABLE_BYTES, PREDICATE_REGISTER_COUNT, STREAMING_RESET_FPSR,
+        ScalableMode, VECTOR_CHUNK_BYTES, VECTOR_REGISTER_COUNT, VectorLength,
+        is_predicate_register, is_z_register,
     },
     context::ScalableStateView,
 };
 
+const MIN_NUMERICAL_ZA_ELEMENT_BYTES: usize = ElementSize::Halfword.bytes();
+
 /// Owns one guest thread's scalable state, without duplicating GuestState.v.
 /// Controls exist before either of the independently lazy buffers is allocated.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ScalableState {
     length: VectorLength,
     sme2: bool,
@@ -22,6 +24,23 @@ pub struct ScalableState {
     fpmr: u64,
     vectors: Option<Vec<u8>>,
     matrices: Option<Vec<u8>>,
+    za_scratch: Option<Vec<u8>>,
+}
+
+impl Clone for ScalableState {
+    fn clone(&self) -> Self {
+        Self {
+            length: self.length,
+            sme2: self.sme2,
+            mode: self.mode,
+            tpidr2_el0: self.tpidr2_el0,
+            fpmr: self.fpmr,
+            vectors: self.vectors.clone(),
+            matrices: self.matrices.clone(),
+            // Scratch is operational storage, including while a loan is active.
+            za_scratch: Some(Vec::new()),
+        }
+    }
 }
 
 impl ScalableState {
@@ -34,7 +53,46 @@ impl ScalableState {
             fpmr: 0,
             vectors: None,
             matrices: None,
+            za_scratch: Some(Vec::new()),
         }
+    }
+
+    /// Borrow reusable staging for affected numerical ZA rows, bounded by the
+    /// largest Half tile. The callback owns evaluation and architectural commit;
+    /// this loan does not roll back writes the callback chooses to perform.
+    /// Contents are unspecified: initialize every staged row before evaluation.
+    /// Initialized high-water storage is retained without repeated zeroing after
+    /// success, errors and unwinding. Nested loans on this owner are rejected.
+    pub fn with_za_row_scratch<R, E>(
+        &mut self,
+        rows: usize,
+        operation: impl FnOnce(&mut Self, &mut [u8]) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<anyhow::Error>,
+    {
+        let maximum_rows = self.length.bytes() / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+        if rows == 0 || rows > maximum_rows {
+            return Err(anyhow::anyhow!("ZA scratch row count exceeds a numerical tile").into());
+        }
+        let storage = self
+            .za_scratch
+            .take()
+            .ok_or_else(|| E::from(anyhow::anyhow!("ZA scratch is already borrowed")))?;
+        let mut loan = ZaRowScratchLoan {
+            state: self,
+            storage,
+        };
+        // Validated architectural lengths and row counts bound this to 32KiB.
+        let bytes = rows * loan.state.length.bytes();
+        if bytes > loan.storage.len() {
+            loan.storage
+                .try_reserve_exact(bytes - loan.storage.len())
+                .map_err(anyhow::Error::from)
+                .map_err(E::from)?;
+            loan.storage.resize(bytes, 0);
+        }
+        operation(loan.state, &mut loan.storage[..bytes])
     }
 
     pub fn vector_length(&self) -> VectorLength {
@@ -343,6 +401,18 @@ impl ScalableState {
     }
 }
 
+/// Return the detached buffer even when allocation/evaluation fails or unwinds.
+struct ZaRowScratchLoan<'a> {
+    state: &'a mut ScalableState,
+    storage: Vec<u8>,
+}
+
+impl Drop for ZaRowScratchLoan<'_> {
+    fn drop(&mut self) {
+        self.state.za_scratch = Some(std::mem::take(&mut self.storage));
+    }
+}
+
 fn zeroed_buffer(bytes: usize) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     buffer.try_reserve_exact(bytes)?;
@@ -501,6 +571,81 @@ mod tests {
         assert_eq!(state.fpmr(), 222);
         let without_sme2 = ScalableState::new(length(16), false);
         assert!(without_sme2.read_zt0(0, &mut byte).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn za_scratch_reuses_high_water_capacity_on_success_error_and_unwind() -> Result<()> {
+        for bytes in (VECTOR_CHUNK_BYTES..=MAX_VECTOR_BYTES).filter(|bytes| bytes.is_power_of_two())
+        {
+            let mut state = ScalableState::new(length(bytes), true);
+            let mut registers = GuestState::default();
+            state.apply_mode(&mut registers, ScalableMode::new(true, true))?;
+            state.set_tpidr2_el0(123);
+            state.set_fpmr(456);
+            let original = state.clone();
+            let rows = bytes / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+            let pointer = state.with_za_row_scratch(rows, |_, scratch| -> Result<_> {
+                assert_eq!(scratch.len(), rows * bytes);
+                assert!(scratch.iter().all(|byte| *byte == 0));
+                scratch.fill(0xa5);
+                Ok(scratch.as_ptr() as usize)
+            })?;
+            let capacity = state.za_scratch.as_ref().unwrap().capacity();
+            assert_eq!(state.za_scratch.as_ref().unwrap().len(), rows * bytes);
+            let error: Result<()> = state.with_za_row_scratch(1, |_, scratch| {
+                assert_eq!(scratch.as_ptr() as usize, pointer);
+                assert_eq!(scratch.len(), bytes);
+                assert!(scratch.iter().all(|byte| *byte == 0xa5));
+                scratch.fill(0x5a);
+                Err(anyhow::anyhow!("directed evaluation error"))
+            });
+            assert!(error.is_err());
+            assert_eq!(state.za_scratch.as_ref().unwrap().capacity(), capacity);
+            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _: Result<()> = state.with_za_row_scratch(rows, |_, scratch| {
+                    assert_eq!(scratch.as_ptr() as usize, pointer);
+                    assert!(scratch[..bytes].iter().all(|byte| *byte == 0x5a));
+                    assert!(scratch[bytes..].iter().all(|byte| *byte == 0xa5));
+                    panic!("directed evaluation unwind");
+                });
+            }));
+            assert!(unwind.is_err());
+            assert_eq!(state.za_scratch.as_ref().unwrap().capacity(), capacity);
+            assert_eq!(state.vectors, original.vectors);
+            assert_eq!(state.matrices, original.matrices);
+            assert_eq!(state.mode, original.mode);
+            assert_eq!(state.tpidr2_el0(), original.tpidr2_el0());
+            assert_eq!(state.fpmr(), original.fpmr());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn za_scratch_bounds_reentrancy_and_clone_are_independent() -> Result<()> {
+        let mut state = ScalableState::new(length(32), true);
+        let maximum_rows = state.vector_length().bytes() / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+        for invalid in [0, maximum_rows + 1, usize::MAX] {
+            let result: Result<()> =
+                state.with_za_row_scratch(invalid, |_, _| panic!("invalid loan entered callback"));
+            assert!(result.is_err());
+            assert_eq!(state.za_scratch.as_ref().unwrap().capacity(), 0);
+        }
+        state.with_za_row_scratch(maximum_rows, |owner, scratch| -> Result<()> {
+            let nested: Result<()> =
+                owner.with_za_row_scratch(1, |_, _| panic!("nested loan entered callback"));
+            assert!(nested.is_err());
+            let mut cloned = owner.clone();
+            assert_eq!(cloned.za_scratch.as_ref().unwrap().capacity(), 0);
+            cloned.with_za_row_scratch(1, |_, independent| -> Result<()> {
+                assert_ne!(scratch.as_ptr(), independent.as_ptr());
+                independent.fill(0x5a);
+                Ok(())
+            })?;
+            assert!(scratch.iter().all(|byte| *byte == 0));
+            Ok(())
+        })?;
+        assert!(state.za_scratch.is_some());
         Ok(())
     }
 }

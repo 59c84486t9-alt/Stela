@@ -5,7 +5,8 @@ use crate::{
     CompileError, GuestAddress,
     aarch64::{
         floating::features::NumericalFeatures,
-        scalable::features::{FeatureRequirement, ScalableFeature},
+        scalable::features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
+        sme::{fp_matrix, fp_vector},
         sve::floating,
     },
     extended::ScalableProfile,
@@ -16,6 +17,8 @@ const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalableNumericalOperation {
     Sve(floating::Operation),
+    SmeVector(fp_vector::Operand),
+    SmeMatrix(fp_matrix::Operand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +68,36 @@ impl ScalableNumericalOperation {
         self,
         numerical_features: NumericalFeatures,
     ) -> FeatureRequirement {
+        use ScalableFeature as Feature;
+        let sme = ScalableFeatures::of(Feature::Sme);
+        let sme2 = sme.with(Feature::Sme2);
         match self {
             Self::Sve(operation) => operation.required_streaming_features(numerical_features),
+            Self::SmeVector(operand) => FeatureRequirement::all(match operand.feature {
+                fp_vector::Feature::Sme2 => sme2,
+                fp_vector::Feature::Sme2SveB16B16 => sme2.with(Feature::SveB16B16),
+                fp_vector::Feature::SmeF16F16 => sme.with(Feature::SmeF16F16),
+            }),
+            Self::SmeMatrix(operand) => match operand.required_feature() {
+                fp_matrix::RequiredFeature::Sme => FeatureRequirement::all(sme),
+                fp_matrix::RequiredFeature::Sme2 => FeatureRequirement::all(sme2),
+                fp_matrix::RequiredFeature::F16F16 => {
+                    FeatureRequirement::all(sme.with(Feature::SmeF16F16))
+                }
+                fp_matrix::RequiredFeature::F64F64 => {
+                    FeatureRequirement::all(sme.with(Feature::SmeF64F64))
+                }
+                fp_matrix::RequiredFeature::B16B16 => {
+                    FeatureRequirement::all(sme.with(Feature::SmeB16B16))
+                }
+                fp_matrix::RequiredFeature::F16F16OrF8F16 => FeatureRequirement::all_and_any(
+                    sme,
+                    ScalableFeatures::of(Feature::SmeF16F16).with(Feature::SmeF8F16),
+                ),
+                fp_matrix::RequiredFeature::Sme2AndF64F64 => {
+                    FeatureRequirement::all(sme2.with(Feature::SmeF64F64))
+                }
+            },
         }
     }
 }
@@ -86,7 +117,12 @@ pub fn admit_scalable_numerical_instruction(
         ));
     }
     let mode = profile.mode();
-    if !mode.streaming() {
+    if !mode.streaming()
+        || (matches!(
+            instruction.operation,
+            ScalableNumericalOperation::SmeMatrix(_)
+        ) && !mode.za_enabled())
+    {
         return Err(CompileError(format!(
             "scalable numerical mode unavailable at {:#x}",
             instruction.instruction_pc.0
@@ -129,6 +165,10 @@ pub fn decode_scalable_numerical_instruction(
             return Ok(None);
         }
         ScalableNumericalOperation::Sve(operand)
+    } else if let Some(operand) = fp_vector::decode(word) {
+        ScalableNumericalOperation::SmeVector(operand)
+    } else if let Some(operand) = fp_matrix::decode(word) {
+        ScalableNumericalOperation::SmeMatrix(operand)
     } else {
         return Ok(None);
     };
@@ -179,3 +219,6 @@ mod tests {
 
 #[cfg(test)]
 mod numerical22_scope_tests;
+
+#[cfg(test)]
+mod sme_matrix_tests;

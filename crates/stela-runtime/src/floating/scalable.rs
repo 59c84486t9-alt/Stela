@@ -2,6 +2,8 @@
 mod arithmetic;
 mod comparison;
 mod conversion;
+mod sme_matrix;
+mod sme_vector;
 
 use stela_compiler::{
     GuestState,
@@ -101,6 +103,12 @@ pub(crate) fn complete(
                 conversion::complete(state, scalable, operand, controls)
             }
         },
+        ScalableNumericalOperation::SmeVector(operand) => {
+            sme_vector::complete(state, scalable, operand, controls)
+        }
+        ScalableNumericalOperation::SmeMatrix(operand) => {
+            sme_matrix::complete(state, scalable, operand, controls)
+        }
     }
 }
 
@@ -126,3 +134,6 @@ mod tests {
         assert_eq!(state.fpcr, u32::MAX);
     }
 }
+
+#[cfg(test)]
+mod sme_vector_tests;

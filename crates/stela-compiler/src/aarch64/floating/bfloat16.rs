@@ -1,5 +1,7 @@
 //! BF16 conversion and Single fused arithmetic in the standard BF16 profile.
+pub mod arithmetic;
 mod dot;
+pub mod extended_dot;
 
 pub use dot::dot_add;
 

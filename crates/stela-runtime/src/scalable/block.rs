@@ -248,3 +248,6 @@ impl PreparedScalableBlock {
 
 #[cfg(test)]
 mod numerical22_tests;
+
+#[cfg(test)]
+mod sme_completion_tests;

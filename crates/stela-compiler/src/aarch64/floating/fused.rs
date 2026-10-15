@@ -66,7 +66,13 @@ fn nan(
     })
 }
 
-fn tiny<F: Float>(addend: F, left: F, right: F, result: StatusAnd<F>, control: Control) -> bool {
+pub(super) fn tiny<F: Float>(
+    addend: F,
+    left: F,
+    right: F,
+    result: StatusAnd<F>,
+    control: Control,
+) -> bool {
     let minimum = F::smallest_normalized();
     if result.value.abs() < minimum {
         return !result.value.is_zero() || result.status.contains(Status::INEXACT);
