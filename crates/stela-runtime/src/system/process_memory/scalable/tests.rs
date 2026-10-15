@@ -10,6 +10,8 @@ use stela_compiler::{TargetCpu, aarch64::scalable::ScalableMode, context::memory
 
 #[path = "tests/fixture.rs"]
 mod fixture;
+#[path = "originals.rs"]
+mod originals;
 #[path = "tests/retained.rs"]
 mod retained;
 #[path = "stores.rs"]
@@ -506,3 +508,9 @@ fn qualified_finalization_failure_preserves_effects_and_blocks_reentry() {
         assert_eq!(f.storage.bytes(), ram);
     }
 }
+
+#[path = "tests/pn.rs"]
+mod pn;
+
+#[path = "tests/structure.rs"]
+mod structure;

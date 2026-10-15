@@ -11,7 +11,7 @@ const DEADLINE_BATCH: u64 = 64;
 const MARKER: &str = "STELA_STORE_OBSERVATION=";
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct Frame {
+pub(super) struct Frame {
     x: Vec<u64>,
     sp: u64,
     nzcv: u32,
@@ -25,6 +25,117 @@ struct Frame {
     zt0: Vec<u8>,
     tpidr2: u64,
     fpmr: u64,
+}
+
+#[test]
+#[ignore = "emit-only body dump bound to already executed success14 identities"]
+fn emitted_success14_bodies_match_executed_prepared_identity() {
+    let cases = cases();
+    assert_eq!(cases.len(), 14);
+    let observations = std::env::var("STELA_STORE_EXECUTED_OBSERVATIONS").unwrap();
+    let observations = std::fs::read_to_string(observations).unwrap();
+    let rows: Vec<serde_json::Value> = observations
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let output = std::env::var("STELA_STORE_EMITTED_OUTPUT").unwrap();
+    let output = Path::new(&output);
+    std::fs::create_dir(output).expect("fresh immutable emit-only result directory required");
+    let mut ledger = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output.join("bodies.jsonl"))
+        .unwrap();
+    for (index, case) in cases.iter().enumerate() {
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                row["name"] == case.name
+                    && row["exit"]["kind"] == "completed"
+                    && row.get("artifact").is_some()
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "{} exactly one executed identity required",
+            case.name
+        );
+        let observed = matches[0];
+        let fixture = make_fixture(case);
+        let identity = fixture.prepared.identity();
+        let target = if case.compiler_cx16 {
+            TargetCpu::Cx16
+        } else {
+            TargetCpu::Baseline
+        };
+        let emitted = stela_compiler::extended::prepare_leaf(
+            fixture.prepared.source(),
+            identity.guest_base,
+            identity.profile,
+            target,
+        )
+        .unwrap();
+        let native_sha256 = stela_core::sha256(&emitted.native.x86_64_code);
+        assert_eq!(native_sha256, identity.native_sha256);
+        assert_eq!(observed["artifact"]["native_sha256"], native_sha256);
+        assert_eq!(
+            observed["artifact"]["source_sha256"],
+            identity.source_sha256
+        );
+        assert_eq!(
+            observed["artifact"]["compiler_source_sha256"],
+            identity.compiler_source_sha256
+        );
+        assert_eq!(
+            emitted.native.source_map.as_slice(),
+            fixture.prepared.source_map()
+        );
+        assert_eq!(emitted.memory_requirements, identity.memory_requirements);
+        assert_eq!(
+            emitted.execution_requirements,
+            identity.execution_requirements
+        );
+        assert_eq!(
+            observed["artifact"]["memory_requirements"],
+            format!("{:?}", emitted.memory_requirements)
+        );
+        assert_eq!(
+            observed["artifact"]["per_pc_execution_requirements"],
+            format!("{:?}", emitted.execution_requirements)
+        );
+        assert_eq!(
+            observed["artifact"]["execution_requirements_version"],
+            identity.execution_requirements_version
+        );
+        let source_map: Vec<_> = emitted
+            .native
+            .source_map
+            .iter()
+            .map(|(pc, offset)| (pc.0, *offset))
+            .collect();
+        assert_eq!(
+            observed["artifact"]["source_map"],
+            serde_json::to_value(&source_map).unwrap()
+        );
+        let filename = format!("{index:02}.bin");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output.join(&filename))
+            .unwrap();
+        file.write_all(&emitted.native.x86_64_code).unwrap();
+        file.sync_all().unwrap();
+        serde_json::to_writer(&mut ledger, &serde_json::json!({"name":case.name,
+            "native_file":filename,"native_sha256":native_sha256,
+            "native_bytes":emitted.native.x86_64_code.len(),"source_map":source_map,
+            "source_sha256":identity.source_sha256,"compiler_source_sha256":identity.compiler_source_sha256,
+            "executed_identity":observed["artifact"],"native_entries":0,
+            "memory_requirements":format!("{:?}",emitted.memory_requirements),
+            "per_pc_execution_requirements":format!("{:?}",emitted.execution_requirements)})).unwrap();
+        ledger.write_all(b"\n").unwrap();
+        ledger.sync_all().unwrap();
+    }
 }
 #[derive(Deserialize)]
 struct Case {
@@ -45,7 +156,7 @@ struct Case {
     projection: Option<String>,
 }
 impl Frame {
-    fn import(&self, fixture: &mut Fixture) {
+    pub(super) fn import(&self, fixture: &mut Fixture) {
         assert_eq!(self.x.len(), fixture.registers.x.len());
         fixture.registers.x.copy_from_slice(&self.x);
         fixture.registers.sp = self.sp;
@@ -71,7 +182,7 @@ impl Frame {
         fixture.registers.fpcr = self.fpcr;
         fixture.registers.fpsr = self.fpsr;
     }
-    fn observe(fixture: &Fixture) -> Self {
+    pub(super) fn observe(fixture: &Fixture) -> Self {
         let length = fixture.scalable.vector_length().bytes();
         let mut z = vec![vec![0; length]; 32];
         for (index, bytes) in z.iter_mut().enumerate() {

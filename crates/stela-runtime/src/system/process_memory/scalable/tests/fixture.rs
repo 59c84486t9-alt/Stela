@@ -37,6 +37,7 @@ pub(super) const RAM: u64 = 0x1400_74000;
 pub(super) const VL: usize = VECTOR_CHUNK_BYTES;
 pub(super) const DATA_BYTES: usize = 8192;
 pub(super) const CODE_PAGE_BYTES: usize = 4096;
+const OBSERVER_SVC: u32 = 0xd400_2461;
 pub(super) const ST2Q_Z1_P0_X5: u32 = 0xe440_00a1;
 pub(super) const LDR_ZA_W12_X5: u32 = 0xe100_00a0;
 pub(super) const STR_ZA_W12_X5: u32 = 0xe120_00a0;
@@ -73,8 +74,12 @@ unsafe impl Send for Storage {}
 // SAFETY: tests serialize native entry and all observations of the raw bytes.
 unsafe impl Sync for Storage {}
 impl Storage {
-    fn new(source: &[u8]) -> Arc<Self> {
-        assert!(source.len() <= CODE_PAGE_BYTES);
+    fn new(source: &[u8], code_offset: usize, original_code_page: Option<&[u8]>) -> Arc<Self> {
+        assert!(
+            code_offset
+                .checked_add(source.len())
+                .is_some_and(|end| end <= CODE_PAGE_BYTES)
+        );
         let layout = Layout::from_size_align(STORAGE_BYTES, VL).unwrap();
         // SAFETY: valid allocation and matching deallocation in Drop.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
@@ -82,11 +87,34 @@ impl Storage {
             // SAFETY: exclusive allocation before publication into any domain.
             unsafe { pointer.as_ptr().add(offset).write((offset & 255) as u8) };
         }
+        if let Some(page) = original_code_page {
+            assert_eq!(page.len(), CODE_PAGE_BYTES);
+            assert_eq!(source.len(), 2 * size_of::<u32>());
+            assert_eq!(
+                &page[code_offset..code_offset + size_of::<u32>()],
+                &source[..size_of::<u32>()]
+            );
+            assert_eq!(
+                &page[code_offset + size_of::<u32>()..code_offset + 2 * size_of::<u32>()],
+                OBSERVER_SVC.to_le_bytes()
+            );
+            assert_eq!(&source[size_of::<u32>()..], RET_X30.to_le_bytes());
+            // SAFETY: complete captured code page initializes fresh exclusive
+            // storage before backing/domain/source publication. The source copy
+            // below preserves the subject and changes only observer SVC to RET.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    page.as_ptr(),
+                    pointer.as_ptr().add(DATA_BYTES),
+                    CODE_PAGE_BYTES,
+                )
+            };
+        }
         // SAFETY: source fits the separate code page, before publication.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 source.as_ptr(),
-                pointer.as_ptr().add(DATA_BYTES),
+                pointer.as_ptr().add(DATA_BYTES + code_offset),
                 source.len(),
             )
         };
@@ -95,6 +123,14 @@ impl Storage {
     pub(super) fn bytes(&self) -> Vec<u8> {
         // SAFETY: callers observe only between synchronous invocations.
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), DATA_BYTES).to_vec() }
+    }
+    pub(super) fn code_page(&self) -> Vec<u8> {
+        // SAFETY: callers observe only between synchronous invocations, using
+        // the retained allocation; the published guest code view is read-only.
+        unsafe {
+            std::slice::from_raw_parts(self.pointer.as_ptr().add(DATA_BYTES), CODE_PAGE_BYTES)
+                .to_vec()
+        }
     }
     /// Initialize retained fixture bytes before the first domain operation.
     /// Caller must exclude all live reservations, readers and competing writers.
@@ -140,6 +176,15 @@ pub(super) fn fixed(
     domain: &Arc<MemoryDomain>,
     sa0: bool,
 ) -> Result<FixedProcessMemoryControls, ProcessMemoryError> {
+    fixed_with_lower_bits(ids, domain, sa0, LOWER_BITS)
+}
+
+fn fixed_with_lower_bits(
+    ids: Arc<Snapshot>,
+    domain: &Arc<MemoryDomain>,
+    sa0: bool,
+    lower_bits: u8,
+) -> Result<FixedProcessMemoryControls, ProcessMemoryError> {
     // SAFETY: this fixture explicitly declares the actual data and code views
     // Normal-WB with matching source/native rights. No second memory domain or
     // external raw writer participates in native invocation.
@@ -148,8 +193,8 @@ pub(super) fn fixed(
     FixedProcessMemoryControls::new_with_identification(
         ids,
         SCTLR_NATIVE_NORMAL_WB | if sa0 { SCTLR_SP_ALIGNMENT_EL0 } else { 0 },
-        64 - u64::from(LOWER_BITS),
-        LOWER_BITS,
+        64 - u64::from(lower_bits),
+        lower_bits,
         source,
     )
 }
@@ -301,12 +346,127 @@ impl Fixture {
         sme_version: u64,
         mode: ScalableMode,
     ) -> Self {
+        Self::new_program_at_with_lower_bits(
+            words,
+            guest_base,
+            ram_base,
+            svl_bytes,
+            compiler_target,
+            domain_target,
+            split,
+            sme_version,
+            mode,
+            LOWER_BITS,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_program_at_with_lower_bits(
+        words: &[u32],
+        guest_base: u64,
+        ram_base: u64,
+        svl_bytes: usize,
+        compiler_target: TargetCpu,
+        domain_target: TargetCpu,
+        split: Option<(usize, bool)>,
+        sme_version: u64,
+        mode: ScalableMode,
+        lower_bits: u8,
+    ) -> Self {
+        Self::new_program_at_with_lower_bits_and_data_rights(
+            words,
+            guest_base,
+            ram_base,
+            svl_bytes,
+            compiler_target,
+            domain_target,
+            split,
+            sme_version,
+            mode,
+            lower_bits,
+            DATA_RIGHTS,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_program_at_with_lower_bits_and_data_rights(
+        words: &[u32],
+        guest_base: u64,
+        ram_base: u64,
+        svl_bytes: usize,
+        compiler_target: TargetCpu,
+        domain_target: TargetCpu,
+        split: Option<(usize, bool)>,
+        sme_version: u64,
+        mode: ScalableMode,
+        lower_bits: u8,
+        data_rights: AccessPermissions,
+    ) -> Self {
+        Self::new_program_at_with_source_code_page(
+            words,
+            guest_base,
+            ram_base,
+            svl_bytes,
+            compiler_target,
+            domain_target,
+            split,
+            sme_version,
+            mode,
+            lower_bits,
+            data_rights,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_program_at_with_original_code_page(
+        words: &[u32],
+        guest_base: u64,
+        ram_base: u64,
+        svl_bytes: usize,
+        compiler_target: TargetCpu,
+        domain_target: TargetCpu,
+        split: Option<(usize, bool)>,
+        sme_version: u64,
+        mode: ScalableMode,
+        lower_bits: u8,
+        original_code_page: &[u8],
+    ) -> Self {
+        Self::new_program_at_with_source_code_page(
+            words,
+            guest_base,
+            ram_base,
+            svl_bytes,
+            compiler_target,
+            domain_target,
+            split,
+            sme_version,
+            mode,
+            lower_bits,
+            DATA_RIGHTS,
+            Some(original_code_page),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn new_program_at_with_source_code_page(
+        words: &[u32],
+        guest_base: u64,
+        ram_base: u64,
+        svl_bytes: usize,
+        compiler_target: TargetCpu,
+        domain_target: TargetCpu,
+        split: Option<(usize, bool)>,
+        sme_version: u64,
+        mode: ScalableMode,
+        lower_bits: u8,
+        data_rights: AccessPermissions,
+        original_code_page: Option<&[u8]>,
+    ) -> Self {
         assert!(
             compiler_target.supported(),
             "actual host lacks required native test recipe"
         );
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let storage = Storage::new(&source);
+        let code_offset = guest_base as usize & (CODE_PAGE_BYTES - 1);
+        let code_page = guest_base - code_offset as u64;
+        let storage = Storage::new(&source, code_offset, original_code_page);
         // SAFETY: raw storage is pinned, owned, disjoint and never accessed
         // concurrently with the single domain's synchronous native invocation.
         let backing = unsafe {
@@ -325,7 +485,7 @@ impl Fixture {
         if let Some((boundary, translation)) = split {
             assert!((1..DATA_BYTES).contains(&boundary));
             views.push(
-                MemoryView::new(Arc::clone(&backing), ram_base, 0, boundary, DATA_RIGHTS).unwrap(),
+                MemoryView::new(Arc::clone(&backing), ram_base, 0, boundary, data_rights).unwrap(),
             );
             if !translation {
                 views.push(
@@ -345,14 +505,14 @@ impl Fixture {
             }
         } else {
             views.push(
-                MemoryView::new(Arc::clone(&backing), ram_base, 0, DATA_BYTES, DATA_RIGHTS)
+                MemoryView::new(Arc::clone(&backing), ram_base, 0, DATA_BYTES, data_rights)
                     .unwrap(),
             );
         }
         views.push(
             MemoryView::new(
                 backing,
-                guest_base,
+                code_page,
                 DATA_BYTES,
                 CODE_PAGE_BYTES,
                 AccessPermissions {
@@ -382,9 +542,9 @@ impl Fixture {
         )
         .unwrap();
         let ids = snapshot(true, sme_version);
-        let controls = fixed(Arc::clone(&ids), &domain, true).unwrap();
+        let controls = fixed_with_lower_bits(Arc::clone(&ids), &domain, true, lower_bits).unwrap();
         let memory = domain.thread(MemoryControls::new(
-            LowerAddressProfile::new(LOWER_BITS, false).unwrap(),
+            LowerAddressProfile::new(lower_bits, false).unwrap(),
             false,
             false,
             false,
