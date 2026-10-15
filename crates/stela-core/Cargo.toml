@@ -7,10 +7,21 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["hosted"]
+hosted = [
+    "dep:anyhow",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tempfile",
+    "sha2/std",
+    "hex/std",
+]
+
 [dependencies]
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
-tempfile.workspace = true
+anyhow = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+tempfile = { workspace = true, optional = true }
