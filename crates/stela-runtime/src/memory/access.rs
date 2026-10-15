@@ -147,37 +147,91 @@ pub(super) unsafe fn write_part(
     }
     #[cfg(target_arch = "x86_64")]
     // SAFETY: caller supplies stable prevalidated coherent RAM and actual host
-    // capabilities. Memory XCHG is implicitly locked at every scalar width.
+    // capabilities. Scalar exchange supplies explicit strong WB ordering.
     unsafe {
-        match bytes {
-            BYTE_BYTES => std::arch::asm!(
-                "xchg byte ptr [{pointer}], {value}",
-                pointer = in(reg) pointer,
-                value = inout(reg_byte) value as u8 => _,
-                options(nostack, preserves_flags),
-            ),
-            HALFWORD_BYTES => std::arch::asm!(
-                "xchg word ptr [{pointer}], {value:x}",
-                pointer = in(reg) pointer,
-                value = inout(reg) value as u64 => _,
-                options(nostack, preserves_flags),
-            ),
-            WORD_BYTES => std::arch::asm!(
-                "xchg dword ptr [{pointer}], {value:e}",
-                pointer = in(reg) pointer,
-                value = inout(reg) value as u64 => _,
-                options(nostack, preserves_flags),
-            ),
-            DOUBLEWORD_BYTES => std::arch::asm!(
-                "xchg qword ptr [{pointer}], {value}",
-                pointer = in(reg) pointer,
-                value = inout(reg) value as u64 => _,
-                options(nostack, preserves_flags),
-            ),
-            QUADWORD_BYTES => write_quadword(pointer, value),
-            _ => unreachable!("validated write width"),
+        if bytes == QUADWORD_BYTES {
+            write_quadword(pointer, value);
+            Ok(())
+        } else {
+            exchange_part(pointer, bytes, value).map(|_| ())
         }
-        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = value;
+        Err(AccessError::UnsupportedHost)
+    }
+}
+
+/// Exchange one exact scalar part with full coherent-WB memory ordering.
+/// This strong operation is independent of any future ordinary-store recipe.
+///
+/// # Safety
+/// The exact 1/2/4/8-byte part is live readable/writable coherent Normal-WB RAM,
+/// pinned through this call and disjoint from Rust references. Caller owns
+/// source permission/tag checks, writer participation and guest ordering intent.
+/// Unexpected host faults require a separate resumable adapter.
+#[inline]
+pub(super) unsafe fn exchange_part(
+    pointer: *mut u8,
+    bytes: usize,
+    value: u128,
+) -> Result<u128, AccessError> {
+    if !matches!(
+        bytes,
+        BYTE_BYTES | HALFWORD_BYTES | WORD_BYTES | DOUBLEWORD_BYTES
+    ) {
+        return Err(AccessError::InvalidWidth);
+    }
+    validate_part(pointer as usize, bytes)?;
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: validated exact-width part; memory XCHG is implicitly locked and
+    // its default asm memory clobber also prevents compiler memory reordering.
+    unsafe {
+        let old = match bytes {
+            BYTE_BYTES => {
+                let mut old = value as u8;
+                std::arch::asm!(
+                    "xchg byte ptr [{pointer}], {value}",
+                    pointer = in(reg) pointer,
+                    value = inout(reg_byte) old,
+                    options(nostack, preserves_flags),
+                );
+                u64::from(old)
+            }
+            HALFWORD_BYTES => {
+                let mut old = value as u64;
+                std::arch::asm!(
+                    "xchg word ptr [{pointer}], {value:x}",
+                    pointer = in(reg) pointer,
+                    value = inout(reg) old,
+                    options(nostack, preserves_flags),
+                );
+                old & u64::from(u16::MAX)
+            }
+            WORD_BYTES => {
+                let mut old = value as u64;
+                std::arch::asm!(
+                    "xchg dword ptr [{pointer}], {value:e}",
+                    pointer = in(reg) pointer,
+                    value = inout(reg) old,
+                    options(nostack, preserves_flags),
+                );
+                old & u64::from(u32::MAX)
+            }
+            DOUBLEWORD_BYTES => {
+                let mut old = value as u64;
+                std::arch::asm!(
+                    "xchg qword ptr [{pointer}], {value}",
+                    pointer = in(reg) pointer,
+                    value = inout(reg) old,
+                    options(nostack, preserves_flags),
+                );
+                old
+            }
+            _ => unreachable!("validated scalar exchange width"),
+        };
+        Ok(u128::from(old))
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -317,6 +371,44 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+    #[test]
+    fn scalar_exchange_declines_invalid_widths_and_sca_crossings_before_access() {
+        for bytes in [0, 3, 5, QUADWORD_BYTES, usize::MAX] {
+            // Invalid shape must decline without reaching native memory.
+            assert_eq!(
+                unsafe { exchange_part(std::ptr::null_mut(), bytes, 0) },
+                Err(AccessError::InvalidWidth)
+            );
+        }
+        assert_eq!(
+            unsafe { exchange_part((SCA_BYTES - 1) as *mut u8, HALFWORD_BYTES, 0) },
+            Err(AccessError::CrossesScaQuantity)
+        );
+    }
+
+    #[test]
+    fn scalar_exchange_returns_normalized_old_and_preserves_neighbors() {
+        let original = std::array::from_fn(|index| u8::MAX - index as u8);
+        let replacement = 0xfedc_ba98_7654_3210_1234_5678_9abc_def0_u128;
+        for (bytes, offset) in [
+            (BYTE_BYTES, DOUBLEWORD_BYTES - 1),
+            (HALFWORD_BYTES, DOUBLEWORD_BYTES - 1),
+            (WORD_BYTES, DOUBLEWORD_BYTES - 1),
+            (DOUBLEWORD_BYTES, DOUBLEWORD_BYTES - 1),
+        ] {
+            let mut memory = Quantity(original);
+            let pointer = memory.0.as_mut_ptr().wrapping_add(offset);
+            let mut expected_old = [0_u8; QUADWORD_BYTES];
+            expected_old[..bytes].copy_from_slice(&original[offset..offset + bytes]);
+            // SAFETY: exact private live storage, no simultaneous aliases or
+            // observers; the scalar part stays within one aligned SCA quantity.
+            let old = unsafe { exchange_part(pointer, bytes, replacement) }.unwrap();
+            assert_eq!(old, u128::from_le_bytes(expected_old));
+            let mut expected = original;
+            expected[offset..offset + bytes].copy_from_slice(&replacement.to_le_bytes()[..bytes]);
+            assert_eq!(memory.0, expected, "width={bytes} offset={offset}");
         }
     }
 }
