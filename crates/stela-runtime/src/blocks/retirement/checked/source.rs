@@ -348,21 +348,25 @@ impl<'code> BoundSource<'code> {
             Operation::Simd(stela_compiler::aarch64::simd::Operand::MemoryRegisterOffset(
                 operand,
             )) => u64::from(operand.bytes),
-            Operation::MemoryNonTemporal(operand)
-                if matches!(
-                    operand.data,
-                    stela_compiler::aarch64::non_temporal::Data::Vector(_)
-                ) =>
-            {
-                2 * u64::from(operand.bytes)
-            }
-            // This first native recipe admits scalar32 exclusive only. CLREX
-            // cannot raise a reached memory fault and therefore is excluded.
+            // Both decoded GPR and SIMD non-temporal forms perform one whole
+            // two-element quantity. Their reached SP/permission faults retain
+            // the same source-defined maximum; no raw access is authorized here.
+            Operation::MemoryNonTemporal(operand) => 2 * u64::from(operand.bytes),
+            // The decoder supplies only valid element sizes and scalar/pair
+            // shapes. CLREX is not a reached memory operation and stays excluded.
             Operation::Exclusive(stela_compiler::aarch64::exclusive::Operand::Transfer {
-                element_bytes: 4,
-                data: stela_compiler::aarch64::exclusive::Data::Scalar(_),
+                element_bytes,
+                data,
                 ..
-            }) => 4,
+            }) => {
+                u64::from(element_bytes)
+                    * match data {
+                        stela_compiler::aarch64::exclusive::Data::Scalar(_) => 1,
+                        stela_compiler::aarch64::exclusive::Data::Pair(registers) => {
+                            registers.len() as u64
+                        }
+                    }
+            }
             _ => anyhow::bail!("fault source is not a bounded checked memory operation"),
         };
         anyhow::ensure!(

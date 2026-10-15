@@ -501,8 +501,6 @@ impl Decoded {
     }
 }
 
-const CHECKED_EXCLUSIVE_SCALAR_BYTES: u8 = size_of::<u32>() as u8;
-
 impl Decoded {
     /// Reuse the already decoded ordinary block instruction. Effects receive a
     /// typed checked variant; unmigrated writers never fall back to direct RAM.
@@ -511,21 +509,9 @@ impl Decoded {
         profile: crate::block::CheckedMemoryProfile,
     ) -> Result<Self, CompileError> {
         if let Operation::Exclusive(operand) = instruction.operation {
-            use crate::aarch64::exclusive::{Data, Operand};
-            if !matches!(
-                operand,
-                Operand::Clear
-                    | Operand::Transfer {
-                        element_bytes: CHECKED_EXCLUSIVE_SCALAR_BYTES,
-                        data: Data::Scalar(_),
-                        ..
-                    }
-            ) {
-                return Err(CompileError(format!(
-                    "exclusive width/pair outside checked scalar32 scope at {:#x}",
-                    instruction.pc.0
-                )));
-            }
+            // The existing typed adapter validates every decoded exclusive shape,
+            // including constrained register roles, and derives its exact checked
+            // quantity, ordering and host requirements. No raw memory fallback.
             return Ok(Self::Exclusive(
                 crate::x86_64::exclusive::CheckedOperand::new(operand, profile)?,
             ));

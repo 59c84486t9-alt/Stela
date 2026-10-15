@@ -404,6 +404,18 @@
         "guest exception delivery for MTE faults; full CPU-profile/OS compatibility",
         "asynchronous ordinary tag-check completion; successful fallback for unsupported platform requirements"
       ]
+    },
+    "checked-gpr-memory-sa0-off-normal-wb-v3": {
+      "id": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "compiler_mode": "service",
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3",
+      "description": "Actual retained fresh EL0 NormalWB checked-memory owner, SA0 off, canonical same-PE source/monitor/finalizer and complete producer registry. Each individually reviewed row declares its admitted instruction/category scope; this shared profile alone grants no form.",
+      "outside_scope": [
+        "MTE-present original-CPU adoption, CPA/SPE-present execution or full original/native CPU feature equivalence",
+        "Instructions and category/width combinations outside individually reviewed published rows",
+        "Enabled-SA0, fault delivery/retry, arbitrary mutable controls or external memory writers, full process/OS acceptance",
+        "Debug register bank, raw producer, alternate PE/provider or fabricated native permission"
+      ]
     }
   },
   "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
@@ -545,6 +557,37 @@
         "crates/stela-runtime/src/system/execution/tests/event_corpus/backend.rs",
         "crates/stela-runtime/src/system/execution/tests/event_corpus/provenance.rs",
         "crates/stela-runtime/src/system/execution/tests/event_corpus/source_inventory.rs"
+      ]
+    },
+    "checked_exclusive20_current": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/scalar-system/exclusives/current055-allwidth20-1/run-transfer.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/scalar-system/exclusives/current055-allwidth20-1/evidence.json",
+      "kind": "checked_exclusive20_current_body_transfer",
+      "comparison_field": "transferred_original_state_memory_comparisons",
+      "required_positive_counts": [
+        "current_body_transfers",
+        "transferred_original_state_memory_comparisons",
+        "transferred_model_fault_comparisons"
+      ],
+      "required_measurements": {
+        "current_body_transfers": 206,
+        "transferred_original_state_memory_comparisons": 160,
+        "transferred_model_fault_comparisons": 46,
+        "fresh_native_guest_executions": 0,
+        "fresh_original_executions": 0
+      },
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3",
+      "required_shared_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
       ]
     }
   },
@@ -2851,6 +2894,746 @@
             "sev"
           ],
           "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LDAXP_LP32_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "ldaxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88608000",
+      "source_sha256": "1bb86aeaf97c0a1a89498a208734fcce626efddc6a54c874b0aca18fbe75a6c1",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x887fb52a",
+          "expected_mnemonics": [
+            "ldaxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDAXP_LP64_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "ldaxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8608000",
+      "source_sha256": "1bb86aeaf97c0a1a89498a208734fcce626efddc6a54c874b0aca18fbe75a6c1",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc87fb52a",
+          "expected_mnemonics": [
+            "ldaxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDAXRB_LR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldaxrb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08408000",
+      "source_sha256": "1288f94df6ece12b137e04da0abab936d8c441eea92c8852e50004aea85745c7",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x085ffd2a",
+          "expected_mnemonics": [
+            "ldaxrb"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDAXRH_LR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldaxrh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48408000",
+      "source_sha256": "5b39282dc1b19be71a3072495c2d110aad551ebdc955d9c703913a4193e3dd74",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x485ffd2a",
+          "expected_mnemonics": [
+            "ldaxrh"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDAXR_LR64_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldaxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8408000",
+      "source_sha256": "743291b9689fdeaaa0bc70f27f21ce6f43f3bde77acaf990e9a51826b5c58edf",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc85ffd2a",
+          "expected_mnemonics": [
+            "ldaxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXP_LP32_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "ldxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88600000",
+      "source_sha256": "4cd8989c10236d7ae77aea6641c1ffa3011cb6c589fcaa7fea8845ff7605b1a3",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x887f352a",
+          "expected_mnemonics": [
+            "ldxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXP_LP64_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "ldxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8600000",
+      "source_sha256": "4cd8989c10236d7ae77aea6641c1ffa3011cb6c589fcaa7fea8845ff7605b1a3",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc87f352a",
+          "expected_mnemonics": [
+            "ldxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXRB_LR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldxrb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08400000",
+      "source_sha256": "b82e23cd6475a7694910d1fe28a7b6250e959d4ab5fe07266604892a21a685cf",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x085f7d2a",
+          "expected_mnemonics": [
+            "ldxrb"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXRH_LR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldxrh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48400000",
+      "source_sha256": "5e95ec8600611a92d231419afbed381341f48c5aa5d1029bc88e84230ec2ef81",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x485f7d2a",
+          "expected_mnemonics": [
+            "ldxrh"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "LDXR_LR64_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "ldxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8400000",
+      "source_sha256": "03fc0f17e72228000b25c0ed7e3ea556933af33627485c30af2b275ed6fd8a54",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc85f7d2a",
+          "expected_mnemonics": [
+            "ldxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXP_SP32_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "stlxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88208000",
+      "source_sha256": "7196bbfe0d2c3717d90ac003940e84bc479ccffcb118d5c1f42ac48b7e1e5534",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x883fb92c",
+          "expected_mnemonics": [
+            "stlxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXP_SP64_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "stlxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8208000",
+      "source_sha256": "7196bbfe0d2c3717d90ac003940e84bc479ccffcb118d5c1f42ac48b7e1e5534",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc83fb92c",
+          "expected_mnemonics": [
+            "stlxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXRB_SR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stlxrb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08008000",
+      "source_sha256": "fb5d20b6826c16dc69e6543f57bed832c82843eea60ecd0f1e891c3547cbc068",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x081ffd2c",
+          "expected_mnemonics": [
+            "stlxrb"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXRH_SR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stlxrh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48008000",
+      "source_sha256": "b1b557b282be5a31d19ba64fa5e431d97eeb1c36c8b5d292775465e8319320f2",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x481ffd2c",
+          "expected_mnemonics": [
+            "stlxrh"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STLXR_SR64_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stlxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8008000",
+      "source_sha256": "3d88fb5c27d25312a266ef3a4f71039cf58bc539e9c43646c6617473dea20bc0",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc81ffd2c",
+          "expected_mnemonics": [
+            "stlxr"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXP_SP32_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "stxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x88200000",
+      "source_sha256": "2c928774ab14e8503cc7468bd513f2bb170d5ae00c6bf04020b865cdb26786d9",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x883f392c",
+          "expected_mnemonics": [
+            "stxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXP_SP64_ldstexclp",
+      "category": "base_integer_system",
+      "source_file": "stxp.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8200000",
+      "source_sha256": "2c928774ab14e8503cc7468bd513f2bb170d5ae00c6bf04020b865cdb26786d9",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc83f392c",
+          "expected_mnemonics": [
+            "stxp"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXRB_SR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stxrb.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x08000000",
+      "source_sha256": "0906de280466ab376bd4ac7e5a1e707cf9b56bd34111b35f4543a4f28e2245a6",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x081f7d2c",
+          "expected_mnemonics": [
+            "stxrb"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXRH_SR32_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stxrh.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0x48000000",
+      "source_sha256": "b3735c8e6085f391ef96a931893b949643cad7f56f54c63aca27c6f7083a4281",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0x481f7d2c",
+          "expected_mnemonics": [
+            "stxrh"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "STXR_SR64_ldstexclr",
+      "category": "base_integer_system",
+      "source_file": "stxr.xml",
+      "encoding_mask": "0xffe08000",
+      "encoding_value": "0xc8000000",
+      "source_sha256": "cf26b89bdb8ccb7f159628ad202855272137431a2f9dd7caa1881e0955a817f7",
+      "alias": false,
+      "profile": "checked-gpr-memory-sa0-off-normal-wb-v3",
+      "status": "implemented",
+      "review": "Pinned June2026 canonical semantics and existing typed mapping reviewed; original160 complete784-byte CPU/8192-byte RAM comparisons and separate model fault46 transferred through206 actual current-producer whole-body/source-map/ABI/requirements equality checks. No fresh original/native execution or timing relabeled.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/memory.rs",
+        "crates/stela-compiler/src/aarch64/exclusive.rs",
+        "crates/stela-compiler/src/x86_64/exclusive.rs",
+        "crates/stela-compiler/src/context/memory/exclusive.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/source.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/observation.rs",
+        "crates/stela-runtime/src/memory/domain.rs",
+        "crates/stela-runtime/src/memory/monitor.rs"
+      ],
+      "evidence_groups": [
+        "checked_exclusive20_current"
+      ],
+      "scope": "Complete canonical form through the existing typed checked-exclusive adapter and authoritative retained fresh EL0 Normal-WB MTE0 owner, SA0 off. Decoded scalar/pair quantities, constrained register roles, status/discard behavior, acquire/release ordering and host-capability requirements are preserved. Original positive full-State/RAM comparisons use captured MTE1 controls separately from declared fresh native MTE0; no original-CPU adoption equality. Separate SA0/SCA16 and unmapped-load faults are software-model evidence, with blocked same-owner retry; no architectural fault delivery, contention, external writers or full OS/profile claim.",
+      "smoke_samples": [
+        {
+          "word": "0xc81f7d2c",
+          "expected_mnemonics": [
+            "stxr"
+          ],
+          "consumed_source_bytes": 8
         }
       ]
     }

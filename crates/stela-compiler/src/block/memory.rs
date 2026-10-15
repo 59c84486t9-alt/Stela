@@ -166,35 +166,63 @@ mod tests {
         }
     }
     #[test]
-    fn checked_plan_rejects_unqualified_exclusive_widths_and_pairs() {
+    fn checked_exclusive_widths_preserve_source_quantity_and_host_requirements() {
+        use crate::context::memory::{flags, host_caps, profile_requirements};
         const RET: u32 = 0xd65f_03c0;
-        // Canonical scalar loads B/H/X and pair loads W/X, all valid allocated
-        // encodings. The source decoder accepts them; this entry recipe declines.
-        for word in [
-            0x085f_7d2au32,
-            0x485f_7d2a,
-            0xc85f_7d2a,
-            0x887f_2d2a,
-            0xc87f_2d2a,
+        // Existing source decoder/emitter shapes, all with non-SP base X9.
+        for (word, element_bytes, members, required_caps) in [
+            (0x085f_7d2a_u32, 1, 1, 0),
+            (0x485f_7d2a, 2, 1, host_caps::ATOMIC_LOAD16),
+            (0x885f_7d2a, 4, 1, host_caps::ATOMIC_LOAD16),
+            (0xc85f_7d2a, 8, 1, host_caps::ATOMIC_LOAD16),
+            (0x887f_2d2a, 4, 2, host_caps::ATOMIC_LOAD16),
+            (0xc87f_2d2a, 8, 2, host_caps::ATOMIC_LOAD16),
         ] {
-            assert!(matches!(
-                crate::aarch64::exclusive::decode(word),
-                Some(Ok(_))
-            ));
+            let operand = crate::aarch64::exclusive::decode(word).unwrap().unwrap();
+            let crate::aarch64::exclusive::Operand::Transfer {
+                element_bytes: actual,
+                data,
+                ..
+            } = operand
+            else {
+                panic!("expected transfer");
+            };
+            assert_eq!(actual, element_bytes);
+            assert_eq!(
+                match data {
+                    crate::aarch64::exclusive::Data::Scalar(_) => 1,
+                    crate::aarch64::exclusive::Data::Pair(registers) => registers.len(),
+                },
+                members
+            );
             let source: Vec<u8> = [word, RET].into_iter().flat_map(u32::to_le_bytes).collect();
             for recipe in [
                 CheckedMemoryProfile::SpAlignmentEnabled,
                 CheckedMemoryProfile::SpAlignmentDisabled,
             ] {
-                let error = crate::block::CompilationPlan::new(
+                let plan = crate::block::CompilationPlan::new(
                     &source,
                     GuestAddress(0x1000),
                     crate::block::BlockProfile::CheckedMemory(recipe),
                     TargetCpu::Baseline,
                 )
-                .err()
-                .expect("unqualified valid exclusive must decline");
-                assert!(error.to_string().contains("outside checked scalar32 scope"));
+                .unwrap();
+                let requirements = plan
+                    .memory_requirements()
+                    .expect("checked body requirements");
+                assert_eq!(requirements.required_host_caps, required_caps);
+                assert_eq!(
+                    requirements.required_flags,
+                    flags::EXCLUSIVE | flags::TAG_CHECKED
+                );
+                assert_eq!(
+                    requirements.required_profile,
+                    profile_requirements::NATIVE_ACCESS | profile_requirements::TAG_GRANULES
+                );
+                // Actual emission must preserve the same consumed plan and source map.
+                let native = plan.compile().unwrap();
+                assert!(!native.native.x86_64_code.is_empty());
+                assert_eq!(native.native.source_map.len(), 2);
             }
         }
     }
