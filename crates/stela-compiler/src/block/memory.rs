@@ -166,6 +166,41 @@ mod tests {
         }
     }
     #[test]
+    fn checked_fixed_simd_load_store_routes_through_exact_plan_requirements() {
+        use crate::context::memory::{SpAlignmentRequirement, flags, host_caps};
+        for profile in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            for (word, write) in [(0xfd47_b520u32, false), (0xfc19_83a0, true)] {
+                let source: Vec<_> = [word, 0xd65f_03c0]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect();
+                let plan = crate::block::CompilationPlan::new(
+                    &source,
+                    GuestAddress(0x1000),
+                    crate::block::BlockProfile::CheckedMemoryPauthClockThread(profile),
+                    TargetCpu::Baseline,
+                )
+                .unwrap();
+                let required = plan.memory_requirements().unwrap();
+                assert_eq!(required.required_flags & flags::ASIMD, flags::ASIMD);
+                assert_eq!(
+                    required.required_flags & flags::WRITE,
+                    if write { flags::WRITE } else { 0 }
+                );
+                assert_eq!(required.required_sp_alignment, SpAlignmentRequirement::Any);
+                assert_eq!(
+                    required.required_host_caps,
+                    if write { 0 } else { host_caps::ATOMIC_LOAD16 }
+                );
+                let native = plan.compile().unwrap();
+                assert_eq!(native.native.source_map.len(), 2);
+            }
+        }
+    }
+    #[test]
     fn checked_exclusive_widths_preserve_source_quantity_and_host_requirements() {
         use crate::context::memory::{flags, host_caps, profile_requirements};
         const RET: u32 = 0xd65f_03c0;

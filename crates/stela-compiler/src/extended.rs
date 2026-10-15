@@ -234,6 +234,8 @@ impl ScalableProfile {
 pub(crate) enum Decoded {
     Exclusive(crate::x86_64::exclusive::CheckedOperand),
     MemoryScalar(crate::x86_64::memory_store::checked_scalar::Operand),
+    MemoryPair(crate::x86_64::memory_store::checked_pair::Operand),
+    MemoryFixed(crate::x86_64::CheckedFixedMemoryOperand),
     Ordinary(Instruction),
     Address(address::Operand),
     IntegerDot(dot::Operand),
@@ -273,7 +275,9 @@ impl Decoded {
     fn execution_access_requirements(&self) -> ScalableAccessRequirements {
         match self {
             Self::Exclusive(_) => ScalableAccessRequirements::Unqualified,
-            Self::MemoryScalar(_) => ScalableAccessRequirements::Unqualified,
+            Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
+                ScalableAccessRequirements::Unqualified
+            }
             Self::MemoryLoad(_) => {
                 ScalableAccessRequirements::Known(Box::new([ScalableAccessCheck::SveEnabled]))
             }
@@ -326,7 +330,9 @@ impl Decoded {
     const fn guest_memory_quantity(&self) -> GuestMemoryQuantity {
         match self {
             Self::Exclusive(_) => GuestMemoryQuantity::Unqualified,
-            Self::MemoryScalar(_) => GuestMemoryQuantity::Unqualified,
+            Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
+                GuestMemoryQuantity::Unqualified
+            }
             Self::MemoryLoad(operand) => GuestMemoryQuantity::Maximum(operand.memory_element),
             Self::MemoryMulti(operand) => memory_multi::guest_memory_quantity(operand),
             Self::MemoryStore(operand) => memory_store::guest_memory_quantity(operand),
@@ -374,6 +380,10 @@ impl Decoded {
             Self::MemoryScalar(operand) => {
                 crate::x86_64::memory_store::checked_scalar::requirements(operand)
             }
+            Self::MemoryPair(operand) => {
+                crate::x86_64::memory_store::checked_pair::requirements(operand)
+            }
+            Self::MemoryFixed(operand) => operand.requirements(),
             Self::Exclusive(operand) => crate::x86_64::exclusive::requirements(operand),
             Self::MemoryLoad(operand) => x86_64::sve::memory_load::requirements(*operand),
             Self::SmeMemory(operand) => x86_64::sme::memory::requirements(operand),
@@ -418,7 +428,10 @@ impl Decoded {
         original_word: u32,
     ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
         match self {
-            Self::Exclusive(_) | Self::MemoryScalar(_) => Ok(None),
+            Self::Exclusive(_)
+            | Self::MemoryScalar(_)
+            | Self::MemoryPair(_)
+            | Self::MemoryFixed(_) => Ok(None),
             Self::MemoryLoad(_)
             | Self::MemoryMulti(_)
             | Self::MemoryStore(_)
@@ -469,6 +482,8 @@ impl Decoded {
             | Self::IntegerArithmetic(_) => Ok(()),
             Self::Exclusive(_)
             | Self::MemoryScalar(_)
+            | Self::MemoryPair(_)
+            | Self::MemoryFixed(_)
             | Self::MemoryLoad(_)
             | Self::MemoryMulti(_)
             | Self::MemoryStore(_)
@@ -522,6 +537,18 @@ impl Decoded {
         ) {
             return Ok(Self::MemoryScalar(operand));
         }
+        if let Some(operand) = crate::x86_64::memory_store::checked_pair::Operand::from_operation(
+            &instruction.operation,
+            profile,
+        ) {
+            return Ok(Self::MemoryPair(operand));
+        }
+        if let Some(operand) = crate::x86_64::CheckedFixedMemoryOperand::from_operation(
+            &instruction.operation,
+            profile,
+        ) {
+            return Ok(Self::MemoryFixed(operand));
+        }
         if !ordinary_permitted(&instruction.operation) {
             return Err(CompileError(format!(
                 "operation outside checked GPR memory profile at {:#x}",
@@ -547,6 +574,10 @@ impl Decoded {
             Self::MemoryScalar(operand) => {
                 crate::x86_64::memory_store::checked_scalar::emit_context(code, operand, pc.0)
             }
+            Self::MemoryPair(operand) => {
+                crate::x86_64::memory_store::checked_pair::emit_context(code, operand, pc.0)
+            }
+            Self::MemoryFixed(operand) => operand.emit_context(code, pc.0),
             Self::Exclusive(operand) => {
                 crate::x86_64::exclusive::emit_context(code, operand, pc.0)?
             }
@@ -1482,6 +1513,11 @@ fn emit_decoded(
         Decoded::MemoryScalar(_) => {
             return Err(CompileError(
                 "checked scalar service was not requested by scalable profile".into(),
+            ));
+        }
+        Decoded::MemoryPair(_) | Decoded::MemoryFixed(_) => {
+            return Err(CompileError(
+                "checked fixed-width memory service was not requested by scalable profile".into(),
             ));
         }
         Decoded::Address(operand) => {
@@ -4312,3 +4348,7 @@ mod memory_structure_tests;
 #[cfg(test)]
 #[path = "extended/sme_memory_tests.rs"]
 mod sme_memory_tests;
+
+#[cfg(test)]
+#[path = "extended/checked_pair_tests.rs"]
+mod checked_pair_tests;

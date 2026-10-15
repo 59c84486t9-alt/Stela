@@ -75,6 +75,7 @@ mod register_offset;
 mod scalable;
 mod scalable_matrix;
 mod simd;
+pub(crate) use simd::memory_checked::CheckedOperand as CheckedFixedMemoryOperand;
 pub(crate) mod sme;
 pub(crate) mod sve;
 mod system;

@@ -22,6 +22,7 @@ mod immediates;
 mod integer_conversion;
 mod lut;
 pub(super) mod memory;
+pub(crate) mod memory_checked;
 mod minmax;
 pub(in crate::x86_64) mod numerical;
 pub(in crate::x86_64) mod precision;
