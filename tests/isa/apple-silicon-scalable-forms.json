@@ -63,6 +63,7 @@
     "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
     "crates/stela-compiler/src/aarch64/sme/integer_vector.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
+    "crates/stela-compiler/src/aarch64/sme/movement.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
     "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
     "crates/stela-compiler/src/x86_64/scalable/predicate.rs",
@@ -104,6 +105,7 @@
     "crates/stela-compiler/src/x86_64/sme/integer_products.rs",
     "crates/stela-compiler/src/x86_64/sme/integer_vector.rs",
     "crates/stela-compiler/src/x86_64/sme/length.rs",
+    "crates/stela-compiler/src/x86_64/sme/movement.rs",
     "crates/stela-compiler/src/target.rs",
     "crates/stela-compiler/src/aarch64.rs",
     "crates/stela-compiler/src/aarch64/system.rs",
@@ -910,6 +912,19 @@
         "dit_one_declaration_rejections": 1,
         "dit_missing_declaration_rejections": 1,
         "maximum_svl_boundary_rejections": 1
+      }
+    },
+    "sme_movement": {
+      "harness": ".stela/research/coverage-race/sme/za_movement/production-integration/check_cli.py",
+      "report": ".stela/research/coverage-race/sme/za_movement/production-integration/final-publication-ldra-1/body-transfer-1/receipt.json",
+      "kind": "scalable_historical_semantics_current_body_transfer",
+      "comparison_field": "historical_state_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "required_measurements": {
+        "actual_bodies": 1632,
+        "historical_state_comparisons": 220,
+        "fresh_semantic_replays": 0
       }
     }
   },
@@ -46608,6 +46623,2756 @@
           "reason": "streaming mode required"
         }
       ]
+    },
+    {
+      "id": "mova_mz2_za_b1",
+      "instruction_id": "mova_mz2_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0060000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz2_za.xml",
+      "source_sha256": "3393b7d3c1d58d0664381542c068220e3be68985ef3ab6334f883ef924a7d94e",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc006e0fe",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz2_za_d1",
+      "instruction_id": "mova_mz2_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0c60000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz2_za.xml",
+      "source_sha256": "3393b7d3c1d58d0664381542c068220e3be68985ef3ab6334f883ef924a7d94e",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c60000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c6e0fe",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz2_za_h1",
+      "instruction_id": "mova_mz2_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0460000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz2_za.xml",
+      "source_sha256": "3393b7d3c1d58d0664381542c068220e3be68985ef3ab6334f883ef924a7d94e",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0460000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc046e0fe",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz2_za_w1",
+      "instruction_id": "mova_mz2_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0860000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz2_za.xml",
+      "source_sha256": "3393b7d3c1d58d0664381542c068220e3be68985ef3ab6334f883ef924a7d94e",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0860000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc086e0fe",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz4_za_b1",
+      "instruction_id": "mova_mz4_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0060400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz4_za.xml",
+      "source_sha256": "0822127856e7bb61955155c9dd4897709af833463bb3d3ad368d53315c102766",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc006e47c",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz4_za_d1",
+      "instruction_id": "mova_mz4_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz4_za.xml",
+      "encoding_mask": "0xffff1f03",
+      "encoding_value": "0xc0c60400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz4_za.xml",
+      "source_sha256": "0822127856e7bb61955155c9dd4897709af833463bb3d3ad368d53315c102766",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c60400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c6e4fc",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 32 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz4_za_h1",
+      "instruction_id": "mova_mz4_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0460400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz4_za.xml",
+      "source_sha256": "0822127856e7bb61955155c9dd4897709af833463bb3d3ad368d53315c102766",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0460400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc046e47c",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz4_za_w1",
+      "instruction_id": "mova_mz4_za",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0860400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz4_za.xml",
+      "source_sha256": "0822127856e7bb61955155c9dd4897709af833463bb3d3ad368d53315c102766",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0860400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc086e47c",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz_za2_1",
+      "instruction_id": "mova_mz_za2",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz_za2.xml",
+      "encoding_mask": "0xffff9f01",
+      "encoding_value": "0xc0060800",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz_za2.xml",
+      "source_sha256": "03e2cdb694092111b47edab356d1607644d7c930fa22db5a69e5a8b10818bbff",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060800",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00668fe",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_mz_za4_1",
+      "instruction_id": "mova_mz_za4",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_mz_za4.xml",
+      "encoding_mask": "0xffff9f03",
+      "encoding_value": "0xc0060c00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_mz_za4.xml",
+      "source_sha256": "312789484cfc9fff3f547d3f66da0b805757b9a14e4cd0f8c22e7379fcd95e5e",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060c00",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0066cfc",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_z_p_rza_b",
+      "instruction_id": "mova_z_p_rza",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_z_p_rza.xml",
+      "encoding_mask": "0xffff0200",
+      "encoding_value": "0xc0020000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_z_p_rza.xml",
+      "source_sha256": "a44f991cf6ebd869e050174912e34a6364d939f6e5667029fa25edcfb328cd63",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0020000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc002fdff",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_z_p_rza_d",
+      "instruction_id": "mova_z_p_rza",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_z_p_rza.xml",
+      "encoding_mask": "0xffff0200",
+      "encoding_value": "0xc0c20000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_z_p_rza.xml",
+      "source_sha256": "a44f991cf6ebd869e050174912e34a6364d939f6e5667029fa25edcfb328cd63",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c20000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c2fdff",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_z_p_rza_h",
+      "instruction_id": "mova_z_p_rza",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_z_p_rza.xml",
+      "encoding_mask": "0xffff0200",
+      "encoding_value": "0xc0420000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_z_p_rza.xml",
+      "source_sha256": "a44f991cf6ebd869e050174912e34a6364d939f6e5667029fa25edcfb328cd63",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0420000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc042fdff",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_z_p_rza_q",
+      "instruction_id": "mova_z_p_rza",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_z_p_rza.xml",
+      "encoding_mask": "0xffff0200",
+      "encoding_value": "0xc0c30000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_z_p_rza.xml",
+      "source_sha256": "a44f991cf6ebd869e050174912e34a6364d939f6e5667029fa25edcfb328cd63",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c30000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c3fdff",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_z_p_rza_w",
+      "instruction_id": "mova_z_p_rza",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_z_p_rza.xml",
+      "encoding_mask": "0xffff0200",
+      "encoding_value": "0xc0820000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_z_p_rza.xml",
+      "source_sha256": "a44f991cf6ebd869e050174912e34a6364d939f6e5667029fa25edcfb328cd63",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0820000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc082fdff",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za2_z_b1",
+      "instruction_id": "mova_za2_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za2_z.xml",
+      "encoding_mask": "0xffff1c38",
+      "encoding_value": "0xc0040000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za2_z.xml",
+      "source_sha256": "79b79c7194d01b8f9a5b17be27d81e993d45d157fae270c941a8eedbb0572326",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0040000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc004e3c7",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za2_z_d1",
+      "instruction_id": "mova_za2_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za2_z.xml",
+      "encoding_mask": "0xffff1c38",
+      "encoding_value": "0xc0c40000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za2_z.xml",
+      "source_sha256": "79b79c7194d01b8f9a5b17be27d81e993d45d157fae270c941a8eedbb0572326",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c40000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c4e3c7",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za2_z_h1",
+      "instruction_id": "mova_za2_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za2_z.xml",
+      "encoding_mask": "0xffff1c38",
+      "encoding_value": "0xc0440000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za2_z.xml",
+      "source_sha256": "79b79c7194d01b8f9a5b17be27d81e993d45d157fae270c941a8eedbb0572326",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0440000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc044e3c7",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za2_z_w1",
+      "instruction_id": "mova_za2_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za2_z.xml",
+      "encoding_mask": "0xffff1c38",
+      "encoding_value": "0xc0840000",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za2_z.xml",
+      "source_sha256": "79b79c7194d01b8f9a5b17be27d81e993d45d157fae270c941a8eedbb0572326",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0840000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc084e3c7",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za4_z_b1",
+      "instruction_id": "mova_za4_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za4_z.xml",
+      "encoding_mask": "0xffff1c7c",
+      "encoding_value": "0xc0040400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za4_z.xml",
+      "source_sha256": "af7905bca770f32d4b43b4ef95e55f6b799dba0bed392588b3d19528694ed47c",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0040400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc004e783",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za4_z_d1",
+      "instruction_id": "mova_za4_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za4_z.xml",
+      "encoding_mask": "0xffff1c78",
+      "encoding_value": "0xc0c40400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za4_z.xml",
+      "source_sha256": "af7905bca770f32d4b43b4ef95e55f6b799dba0bed392588b3d19528694ed47c",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c40400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c4e787",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 32 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za4_z_h1",
+      "instruction_id": "mova_za4_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za4_z.xml",
+      "encoding_mask": "0xffff1c7c",
+      "encoding_value": "0xc0440400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za4_z.xml",
+      "source_sha256": "af7905bca770f32d4b43b4ef95e55f6b799dba0bed392588b3d19528694ed47c",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0440400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc044e783",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za4_z_w1",
+      "instruction_id": "mova_za4_z",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za4_z.xml",
+      "encoding_mask": "0xffff1c7c",
+      "encoding_value": "0xc0840400",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za4_z.xml",
+      "source_sha256": "af7905bca770f32d4b43b4ef95e55f6b799dba0bed392588b3d19528694ed47c",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0840400",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc084e783",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_mz2_1",
+      "instruction_id": "mova_za_mz2",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_mz2.xml",
+      "encoding_mask": "0xffff9c38",
+      "encoding_value": "0xc0040800",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_mz2.xml",
+      "source_sha256": "1281f1a9f0dfc498e392ce724a7f3b56e1f3381c6819117b88eac5e8df9d0bfc",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0040800",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0046bc7",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_mz4_1",
+      "instruction_id": "mova_za_mz4",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_mz4.xml",
+      "encoding_mask": "0xffff9c78",
+      "encoding_value": "0xc0040c00",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_mz4.xml",
+      "source_sha256": "9eac51810187e79267e3533fd783928b1a80beccdbc05a0560a14bad15c499d7",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0040c00",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0046f87",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_p_rz_b",
+      "instruction_id": "mova_za_p_rz",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_p_rz.xml",
+      "encoding_mask": "0xffff0010",
+      "encoding_value": "0xc0000000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_p_rz.xml",
+      "source_sha256": "2adf53fb961bb3683a371a0da52d260f94ff6fac1720e790a1010f8bcedfb7b5",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0000000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc000ffef",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_p_rz_d",
+      "instruction_id": "mova_za_p_rz",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_p_rz.xml",
+      "encoding_mask": "0xffff0010",
+      "encoding_value": "0xc0c00000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_p_rz.xml",
+      "source_sha256": "2adf53fb961bb3683a371a0da52d260f94ff6fac1720e790a1010f8bcedfb7b5",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c00000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c0ffef",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_p_rz_h",
+      "instruction_id": "mova_za_p_rz",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_p_rz.xml",
+      "encoding_mask": "0xffff0010",
+      "encoding_value": "0xc0400000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_p_rz.xml",
+      "source_sha256": "2adf53fb961bb3683a371a0da52d260f94ff6fac1720e790a1010f8bcedfb7b5",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0400000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc040ffef",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_p_rz_q",
+      "instruction_id": "mova_za_p_rz",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_p_rz.xml",
+      "encoding_mask": "0xffff0010",
+      "encoding_value": "0xc0c10000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_p_rz.xml",
+      "source_sha256": "2adf53fb961bb3683a371a0da52d260f94ff6fac1720e790a1010f8bcedfb7b5",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c10000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c1ffef",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "mova_za_p_rz_w",
+      "instruction_id": "mova_za_p_rz",
+      "mnemonic": "MOVA",
+      "category": "sme",
+      "source_file": "mova_za_p_rz.xml",
+      "encoding_mask": "0xffff0010",
+      "encoding_value": "0xc0800000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/mova_za_p_rz.xml",
+      "source_sha256": "2adf53fb961bb3683a371a0da52d260f94ff6fac1720e790a1010f8bcedfb7b5",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0800000",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc080ffef",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz2_za_b1",
+      "instruction_id": "movaz_mz2_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0060200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz2_za.xml",
+      "source_sha256": "eae8e56e872ab4d0d11372e79d22cce61d07f53b9202ec4c51ebc0e7a56d93e8",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc006e2fe",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz2_za_d1",
+      "instruction_id": "movaz_mz2_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0c60200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz2_za.xml",
+      "source_sha256": "eae8e56e872ab4d0d11372e79d22cce61d07f53b9202ec4c51ebc0e7a56d93e8",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c60200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c6e2fe",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz2_za_h1",
+      "instruction_id": "movaz_mz2_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0460200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz2_za.xml",
+      "source_sha256": "eae8e56e872ab4d0d11372e79d22cce61d07f53b9202ec4c51ebc0e7a56d93e8",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0460200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc046e2fe",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz2_za_w1",
+      "instruction_id": "movaz_mz2_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz2_za.xml",
+      "encoding_mask": "0xffff1f01",
+      "encoding_value": "0xc0860200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz2_za.xml",
+      "source_sha256": "eae8e56e872ab4d0d11372e79d22cce61d07f53b9202ec4c51ebc0e7a56d93e8",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0860200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc086e2fe",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz4_za_b1",
+      "instruction_id": "movaz_mz4_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0060600",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz4_za.xml",
+      "source_sha256": "6d92bcbff89d564de1c9320b053e21b8da5d413ae23575b4563c64b4a833700f",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060600",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc006e67c",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz4_za_d1",
+      "instruction_id": "movaz_mz4_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz4_za.xml",
+      "encoding_mask": "0xffff1f03",
+      "encoding_value": "0xc0c60600",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz4_za.xml",
+      "source_sha256": "6d92bcbff89d564de1c9320b053e21b8da5d413ae23575b4563c64b4a833700f",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c60600",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c6e6fc",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 32 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz4_za_h1",
+      "instruction_id": "movaz_mz4_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0460600",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz4_za.xml",
+      "source_sha256": "6d92bcbff89d564de1c9320b053e21b8da5d413ae23575b4563c64b4a833700f",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0460600",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc046e67c",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz4_za_w1",
+      "instruction_id": "movaz_mz4_za",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz4_za.xml",
+      "encoding_mask": "0xffff1f83",
+      "encoding_value": "0xc0860600",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz4_za.xml",
+      "source_sha256": "6d92bcbff89d564de1c9320b053e21b8da5d413ae23575b4563c64b4a833700f",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0860600",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc086e67c",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz_za2_1",
+      "instruction_id": "movaz_mz_za2",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz_za2.xml",
+      "encoding_mask": "0xffff9f01",
+      "encoding_value": "0xc0060a00",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz_za2.xml",
+      "source_sha256": "152a3450d7735a9c15679bb6de9d05a032615196ce21311927755721e2b4e7be",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060a00",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0066afe",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_mz_za4_1",
+      "instruction_id": "movaz_mz_za4",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_mz_za4.xml",
+      "encoding_mask": "0xffff9f03",
+      "encoding_value": "0xc0060e00",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_mz_za4.xml",
+      "source_sha256": "8da74e7cd679e3ec1247b6ad7de1051709aeb5d68625934d4c67889c9192fc5a",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0060e00",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0066efc",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_z_rza_b",
+      "instruction_id": "movaz_z_rza",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_z_rza.xml",
+      "encoding_mask": "0xffff1e00",
+      "encoding_value": "0xc0020200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_z_rza.xml",
+      "source_sha256": "a046aec207ba6101e7c4157e4ecb9a6c01d4a4834d2f1f9101d1ad796c034da0",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0020200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc002e3ff",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_z_rza_d",
+      "instruction_id": "movaz_z_rza",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_z_rza.xml",
+      "encoding_mask": "0xffff1e00",
+      "encoding_value": "0xc0c20200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_z_rza.xml",
+      "source_sha256": "a046aec207ba6101e7c4157e4ecb9a6c01d4a4834d2f1f9101d1ad796c034da0",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c20200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c2e3ff",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_z_rza_h",
+      "instruction_id": "movaz_z_rza",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_z_rza.xml",
+      "encoding_mask": "0xffff1e00",
+      "encoding_value": "0xc0420200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_z_rza.xml",
+      "source_sha256": "a046aec207ba6101e7c4157e4ecb9a6c01d4a4834d2f1f9101d1ad796c034da0",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0420200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc042e3ff",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_z_rza_q",
+      "instruction_id": "movaz_z_rza",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_z_rza.xml",
+      "encoding_mask": "0xffff1e00",
+      "encoding_value": "0xc0c30200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_z_rza.xml",
+      "source_sha256": "a046aec207ba6101e7c4157e4ecb9a6c01d4a4834d2f1f9101d1ad796c034da0",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0c30200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0c3e3ff",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "movaz_z_rza_w",
+      "instruction_id": "movaz_z_rza",
+      "mnemonic": "MOVAZ",
+      "category": "sme",
+      "source_file": "movaz_z_rza.xml",
+      "encoding_mask": "0xffff1e00",
+      "encoding_value": "0xc0820200",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movaz_z_rza.xml",
+      "source_sha256": "a046aec207ba6101e7c4157e4ecb9a6c01d4a4834d2f1f9101d1ad796c034da0",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0820200",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc082e3ff",
+          "expected_mnemonics": [
+            "movaz"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za1_ri_2",
+      "instruction_id": "zero_za1_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za1_ri.xml",
+      "encoding_mask": "0xffff9ff8",
+      "encoding_value": "0xc00c0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za1_ri.xml",
+      "source_sha256": "485bc6e7d2493c7a6f53419ee600e5246e771d3b8ed060a1c2f8191082e46f6a",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00c0000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00c6007",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za1_ri_4",
+      "instruction_id": "zero_za1_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za1_ri.xml",
+      "encoding_mask": "0xffff9ff8",
+      "encoding_value": "0xc00e0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za1_ri.xml",
+      "source_sha256": "485bc6e7d2493c7a6f53419ee600e5246e771d3b8ed060a1c2f8191082e46f6a",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00e0000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00e6007",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za2_ri_1",
+      "instruction_id": "zero_za2_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za2_ri.xml",
+      "encoding_mask": "0xffff9ff8",
+      "encoding_value": "0xc00c8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za2_ri.xml",
+      "source_sha256": "9601704d77381d32cee0e151580323395368cd88d9140b7902e565520a9089e3",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00c8000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00ce007",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za2_ri_2",
+      "instruction_id": "zero_za2_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za2_ri.xml",
+      "encoding_mask": "0xffff9ffc",
+      "encoding_value": "0xc00d0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za2_ri.xml",
+      "source_sha256": "9601704d77381d32cee0e151580323395368cd88d9140b7902e565520a9089e3",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00d0000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00d6003",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za2_ri_4",
+      "instruction_id": "zero_za2_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za2_ri.xml",
+      "encoding_mask": "0xffff9ffc",
+      "encoding_value": "0xc00d8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za2_ri.xml",
+      "source_sha256": "9601704d77381d32cee0e151580323395368cd88d9140b7902e565520a9089e3",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00d8000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00de003",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za4_ri_1",
+      "instruction_id": "zero_za4_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za4_ri.xml",
+      "encoding_mask": "0xffff9ffc",
+      "encoding_value": "0xc00e8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za4_ri.xml",
+      "source_sha256": "5f700f3b22c29b9b27b55fd31e48998c9300bdfe6e830ff2d90016af9706a52d",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00e8000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00ee003",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za4_ri_2",
+      "instruction_id": "zero_za4_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za4_ri.xml",
+      "encoding_mask": "0xffff9ffe",
+      "encoding_value": "0xc00f0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za4_ri.xml",
+      "source_sha256": "5f700f3b22c29b9b27b55fd31e48998c9300bdfe6e830ff2d90016af9706a52d",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00f0000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00f6001",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za4_ri_4",
+      "instruction_id": "zero_za4_ri",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za4_ri.xml",
+      "encoding_mask": "0xffff9ffe",
+      "encoding_value": "0xc00f8000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1",
+          "name": "v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za4_ri.xml",
+      "source_sha256": "5f700f3b22c29b9b27b55fd31e48998c9300bdfe6e830ff2d90016af9706a52d",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc00f8000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00fe001",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2p1 and ZA, SM enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_za_i_",
+      "instruction_id": "zero_za_i",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_za_i.xml",
+      "encoding_mask": "0xffffff00",
+      "encoding_value": "0xc0080000",
+      "features": [
+        {
+          "feature": "FEAT_SME",
+          "name": "v9Ap2 && PROFILE_A"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_za_i.xml",
+      "source_sha256": "51bab453cb122a75e2f3d52c87a01734e4801b42d9201d771b1925598b54ad7c",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0080000",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc00800ff",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME and ZA enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
+    },
+    {
+      "id": "zero_zt_i_",
+      "instruction_id": "zero_zt_i",
+      "mnemonic": "ZERO",
+      "category": "sme",
+      "source_file": "zero_zt_i.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xc0480001",
+      "features": [
+        {
+          "feature": "FEAT_SME2",
+          "name": "v9Ap3"
+        }
+      ],
+      "status": "implemented",
+      "alias": false,
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/zero_zt_i.xml",
+      "source_sha256": "23635f58dc82e2afc50bba390ba50e8a08d3764fc9af550fe75c616a55b12c9f",
+      "profile": "sme2p1-zt0-v2",
+      "evidence_groups": [
+        "sme_movement"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/aarch64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/sme/movement.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable_matrix.rs"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc0480001",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc0480001",
+          "expected_mnemonics": [
+            "zero"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        }
+      ],
+      "review": "Independent semantic/mapping and production review; actual CLI bodies, source maps, profile guards and full original/native state comparisons pass.",
+      "scope": "All allocated operands at supported SVLs of 16, 32, 64, 128, 256 bytes with FEAT_SME2 and ZA, EZT0 enabled. Maximum implemented SVL is at least 16 bytes. Predication, merging, aliases and destructive zeroing apply as encoded; unrelated primary and active banks, NZCV/FP state and SVCR/TPIDR2 are preserved. Immutable context leaf profile only."
     }
   ],
   "execution_profiles": {
@@ -46762,6 +49527,32 @@
         "production block/cache context entry",
         "full guest exception delivery",
         "Apple hardware conformance, applications and macOS boot"
+      ]
+    },
+    "sme2p1-zt0-v2": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 64,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME2p1"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": true,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme2",
+        "+sme2p1"
+      ],
+      "description": "Explicit SME, SME2 and SME2p1 availability with enabled ZT0, maximum SVL256 and DIT0. Samples declare current SVL and SM/ZA; halted-debug execution is outside this normal profile.",
+      "outside_scope": [
+        "General nonstreaming SVE or mutable vector-length transitions",
+        "Production block/cache entry and guest exception delivery",
+        "Halted-debug MOVT execution",
+        "Apple hardware conformance,application/macOS acceptance or application performance"
       ]
     }
   }

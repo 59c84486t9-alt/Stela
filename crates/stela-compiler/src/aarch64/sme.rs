@@ -3,16 +3,21 @@
 pub mod integer_dots;
 pub mod integer_vector;
 pub mod length;
+pub mod movement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     IntegerDots(integer_dots::Operand),
     IntegerVector(integer_vector::Operand),
     Length(length::Operand),
+    Movement(movement::Operand),
 }
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(operand) = movement::decode(word) {
+        return Some(Ok(Operand::Movement(operand)));
+    }
     if let Some(operand) = integer_vector::decode(word) {
         return Some(operand.map(Operand::IntegerVector));
     }

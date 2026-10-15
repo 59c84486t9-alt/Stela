@@ -1,8 +1,8 @@
 //! Context-backed leaf compilation with immutable scalable specialization.
 //!
-//! The profile admits streaming integer logic, arithmetic, saturation and dot
-//! products, SME length arithmetic, floating sign operations and existing pure
-//! GPR/control mappings. Other effects remain explicit declines.
+//! Declared scalable mappings and existing pure GPR/control mappings are
+//! admitted after guest feature and execution-mode checks. Unsupported
+//! effects remain explicit declines.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +15,7 @@ use crate::{
             features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
             profile::ScalableControls,
         },
-        sme::{integer_dots, integer_vector, length},
+        sme::{integer_dots, integer_vector, length, movement},
         sve::{
             address, dot, floating_copy, integer_arithmetic, integer_bits, integer_comparison,
             integer_logic::{self, CopySource, Kind},
@@ -238,6 +238,7 @@ enum Decoded {
     PredicateGeneration(predicate_generation::Operand),
     PredicateLogic(predicate_logic::Operand),
     Length(length::Operand),
+    SmeMovement(movement::Operand),
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
 }
@@ -756,6 +757,51 @@ fn decode(
         }
         return Ok(Decoded::Rearrange(operand));
     }
+    if let Some(operand) = movement::decode(word) {
+        let requirements = operand.requirements;
+        if requirements.halted {
+            return Err(CompileError(format!(
+                "halted debug execution required at {:#x}",
+                pc.0
+            )));
+        }
+        let feature = match requirements.feature {
+            movement::Feature::Sme => ScalableFeature::Sme,
+            movement::Feature::Sme2 => ScalableFeature::Sme2,
+            movement::Feature::Sme2p1 => ScalableFeature::Sme2p1,
+        };
+        profile.require_features(FeatureRequirement::all(ScalableFeatures::of(feature)), pc)?;
+        if requirements.za && !profile.mode.za_enabled() {
+            return Err(CompileError(format!("ZA state required at {:#x}", pc.0)));
+        }
+        if requirements.streaming && !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        if requirements.zt0 && !profile.controls().zt0_enabled() {
+            return Err(CompileError(format!(
+                "ZT0 enabled state required at {:#x}",
+                pc.0
+            )));
+        }
+        if profile.controls().max_vector_length().bits()
+            < usize::from(requirements.minimum_implemented_svl_bits)
+        {
+            return Err(CompileError(format!(
+                "maximum streaming vector length is too small at {:#x}",
+                pc.0
+            )));
+        }
+        if profile.length.bits() < usize::from(requirements.minimum_current_svl_bits) {
+            return Err(CompileError(format!(
+                "current streaming vector length is too small at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::SmeMovement(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -868,6 +914,10 @@ fn emit_decoded(
         Decoded::SmeIntegerVector(operand) => {
             x86_64::sme::integer_vector::emit(code, &operand, profile.vector_length(), target);
         }
+        Decoded::SmeMovement(operand) => {
+            x86_64::sme::movement::emit(code, &operand, profile.length, target)
+                .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+        }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
         }
@@ -950,6 +1000,9 @@ pub fn compile_for_profile(
 #[cfg(test)]
 #[path = "extended/integer_dots_tests.rs"]
 mod integer_dots_tests;
+
+#[cfg(test)]
+mod movement_tests;
 
 #[cfg(test)]
 mod tests {
