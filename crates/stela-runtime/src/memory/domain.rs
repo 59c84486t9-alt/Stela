@@ -17,19 +17,22 @@ mod profile;
 mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
 
+#[path = "domain/exclusive.rs"]
+mod exclusive;
+
+use crate::system::events::{EventEndpoint, EventProducer};
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::system::events::{EventEndpoint, EventProducer};
-
 use stela_compiler::{
     TargetCpu,
     context::memory::{
-        MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView, MemoryRequest,
-        MemoryRequirements, MemoryStatus, flags,
+        MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView,
+        MemoryImplementationProfile, MemoryOperationClass, MemoryRequest, MemoryRequirements,
+        MemoryStatus, SpAlignmentRequirement, flags, profile_requirements,
     },
 };
 
@@ -51,8 +54,32 @@ pub struct MappingAttributes {
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
 /// Policy callbacks must not reenter or retire this domain while an access is active.
 pub trait DataPolicy {
+    /// Typed service classes require actual CPU-owner admission.
+    fn validate_operation_execution(
+        &self,
+        _class: MemoryOperationClass,
+    ) -> Result<(), MemoryStatus> {
+        Err(MemoryStatus::Unsupported)
+    }
     /// Reject unavailable effective-control profiles before any guest effect.
     fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus>;
+    /// Check the body's original-SP specialization against authoritative
+    /// effective controls. An arbitrary policy cannot silently prove a control.
+    fn validate_sp_alignment(&self, required: SpAlignmentRequirement) -> Result<(), MemoryStatus> {
+        if required == SpAlignmentRequirement::Any {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
+    /// Check the source-bound implementation identity selected by the body.
+    /// An unproven CPU implementation must decline rather than assume a choice.
+    fn validate_implementation_profile(
+        &self,
+        _required: MemoryImplementationProfile,
+    ) -> Result<(), MemoryStatus> {
+        Err(MemoryStatus::Unsupported)
+    }
     fn translate(&self, raw_address: u64) -> Result<u64, MemoryStatus>;
     fn check(&mut self, access: DataAccess<'_>) -> Result<(), MemoryStatus>;
 }
@@ -211,6 +238,8 @@ impl MemoryDomain {
             domain: Arc::clone(self),
             reservation: self.system.reservations.thread(),
             policy,
+            #[cfg(test)]
+            post_body_failure_once: false,
         }
     }
 
@@ -225,19 +254,40 @@ impl MemoryDomain {
     }
 
     /// Retire all matching generations before releasing/changing native rights.
-    /// The address-space owner must also exclude in-flight native accesses.
+    /// The lifecycle owner serializes this shared mapping generation across all
+    /// snapshots/address spaces retaining its Arc and excludes in-flight native
+    /// accesses before native rights changes or unmapping.
     pub fn retire(&self, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
         let registered = self
             .views
             .iter()
             .find(|registered| Arc::ptr_eq(&registered.view, view))
             .ok_or(MemoryStatus::InvalidRequest)?;
+        // Lifecycle transitions for this shared generation are serialized by its owner.
+        // Repeating a retired generation must not clear fresh alias reservations.
+        if !registered.view.is_current() {
+            return Err(MemoryStatus::InvalidRequest);
+        }
+        let range = monitor::WriteRange::new(
+            Arc::clone(registered.view.backing()),
+            registered.view.backing_offset() as u64,
+            registered.view.bytes() as u64,
+        )
+        .map_err(|_| MemoryStatus::Domain)?;
         self.system
             .reservations
             .revoke_mapping(&registered.monitor)
             .map_err(|_| MemoryStatus::Domain)?;
         registered.view.retire();
-        Ok(())
+        // Finite lifecycle invalidation, not a committed byte store. It also
+        // reaches reservations whose first mapping is another joined view.
+        self.system
+            .reservations
+            .with_writer(&range, monitor::Invalidation::BeforeAttempt, || {
+                Ok::<_, MemoryStatus>(())
+            })
+            .map_err(|_| MemoryStatus::Domain)?;
+        self.check_execution()
     }
 
     fn resolve(
@@ -316,6 +366,17 @@ impl PhysicalAccess {
         &self.first
     }
 
+    /// Invoked under the real monitor gate before reserved native access.
+    fn check_current(&self) -> Result<(), MemoryStatus> {
+        if self.first.view().is_current()
+            && self._remaining.iter().all(|span| span.view().is_current())
+        {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Domain)
+        }
+    }
+
     fn data(&self, raw_address: u64, bytes: usize, flags: u32) -> DataAccess<'_> {
         let first = self.first();
         DataAccess {
@@ -335,9 +396,17 @@ pub struct MemoryThread<P> {
     domain: Arc<MemoryDomain>,
     reservation: ReservationThread,
     policy: P,
+    #[cfg(test)]
+    post_body_failure_once: bool,
 }
 
 impl<P: DataPolicy> MemoryThread<P> {
+    /// Match the exact immutable snapshot retained by a source attribute witness.
+    /// Identity alone does not establish effective ARM memory attributes.
+    pub(crate) fn has_domain(&self, domain: &Arc<MemoryDomain>) -> bool {
+        Arc::ptr_eq(&self.domain, domain)
+    }
+
     pub fn address_space(&self) -> Option<u64> {
         self.domain.address_space()
     }
@@ -357,13 +426,40 @@ impl<P: DataPolicy> MemoryThread<P> {
                 .domain
                 .profile
                 .validate(requirements, owner.domain.target)?;
-            owner.policy.validate_execution(requirements.required_flags)
+            owner.validate_execution(requirements.required_flags)?;
+            owner
+                .policy
+                .validate_sp_alignment(requirements.required_sp_alignment)?;
+            if requirements.required_profile & profile_requirements::SCALABLE_TAG_CHECKS != 0 {
+                owner.policy.validate_implementation_profile(
+                    MemoryImplementationProfile::ScalableTagChecks,
+                )?;
+            }
+            Ok(())
         })
     }
     /// Native entry must validate effective controls before executing an instruction.
     pub fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus> {
         self.domain.check_execution()?;
-        self.policy.validate_execution(required_flags)
+        self.policy.validate_execution(required_flags)?;
+        for (flag, class) in [
+            (flags::ATOMIC, MemoryOperationClass::Atomic),
+            (flags::ORDERED, MemoryOperationClass::Ordered),
+            (flags::EXCLUSIVE, MemoryOperationClass::Exclusive),
+        ] {
+            if required_flags & flag != 0 {
+                self.policy.validate_operation_execution(class)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Test-only injection at the provider's real post-body finalization boundary.
+    /// The next returned body consumes the flag and fails the actual shared
+    /// MemorySystem; callers must retain fault/native-execution provenance.
+    #[cfg(test)]
+    pub(crate) fn inject_post_body_failure_once_for_test(&mut self) {
+        self.post_body_failure_once = true;
     }
 
     pub fn policy_mut(&mut self) -> &mut P {
@@ -473,6 +569,10 @@ impl<P: DataPolicy> MemoryThread<P> {
             reserved_tail: 0,
         };
         let result = callback(&mut view);
+        #[cfg(test)]
+        if std::mem::take(&mut self.post_body_failure_once) {
+            self.domain.system.failed.store(true, Ordering::Release);
+        }
         let finalization = MemoryStatus::from_code(view.fault_kind)
             .ok_or(MemoryStatus::Domain)
             .and_then(|status| self.settle_fault(status))
@@ -485,12 +585,13 @@ impl<P: DataPolicy> MemoryThread<P> {
         view: &mut MemoryContextView,
         request: &MemoryRequest,
     ) -> Result<(), (MemoryStatus, u64)> {
+        if request.flags & flags::EXCLUSIVE != 0 {
+            // SAFETY: category-specific staging contract is inherited from dispatch.
+            return unsafe { self.transfer_exclusive(view, request) };
+        }
         self.validate_execution(request.flags)
             .map_err(|status| (status, request.address))?;
-        if request.data.is_null()
-            || request.flags & !flags::KNOWN != 0
-            || !matches!(request.bytes, 1 | 2 | 4 | 8 | 16)
-        {
+        if request.data.is_null() || !request.has_supported_ordinary_shape() {
             return Err((MemoryStatus::InvalidRequest, request.address));
         }
         let translated = self
@@ -566,7 +667,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                     .reservations
                     .with_writer(&range, policy, || {
                         self.policy
-                            .check(physical.data(raw, part.bytes, request.flags))?;
+                            .check(physical.data(raw, part.bytes, part.flags))?;
                         // SAFETY: exact resolved spans pin stable rights/lifetime;
                         // staging never aliases guest bytes; checked target is owned.
                         unsafe { access::write_part(pointer, part.bytes, value, target) }
@@ -583,7 +684,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                     })?;
             } else {
                 self.policy
-                    .check(physical.data(raw, part.bytes, request.flags))
+                    .check(physical.data(raw, part.bytes, part.flags))
                     .map_err(|status| (status, raw))?;
                 let (host_address, footprint) =
                     access::read_footprint(pointer as usize, part.bytes, self.domain.target)
@@ -625,6 +726,7 @@ fn is_guest_fault(status: u32) -> bool {
         MemoryStatus::Translation,
         MemoryStatus::Permission,
         MemoryStatus::Alignment,
+        MemoryStatus::StackAlignment,
         MemoryStatus::TagCheck,
     ]
     .into_iter()
@@ -680,6 +782,7 @@ struct AccessPart {
     address: u64,
     offset: usize,
     bytes: usize,
+    flags: u32,
 }
 
 struct AccessParts {
@@ -687,27 +790,48 @@ struct AccessParts {
     bytes: usize,
     offset: usize,
     part_bytes: usize,
+    flags: u32,
 }
 
 impl AccessParts {
     fn new(address: u64, bytes: usize, descriptor: u32) -> Self {
         let residue = address as usize & (SCA_BYTES - 1);
-        let part_bytes = if residue + bytes <= SCA_BYTES {
-            bytes
-        } else if bytes == SCA_BYTES
-            && residue == HALF_SCA_BYTES
-            && descriptor & flags::SME == 0
-            && descriptor & (flags::SVE_PREDICATED | flags::ASIMD) != 0
+        let asimd = descriptor & flags::ASIMD != 0 && descriptor & flags::SME == 0;
+        let pair = descriptor & flags::PAIR != 0;
+        let half = bytes / 2;
+        // Exact Mem order for Normal-WB/LSE2/SCA16, LS64WB disabled and no
+        // highest-address-first access. ASIMD wide cases precede LSE2; the
+        // SVE-predicated 16B case follows it. Pair alignment uses half-width.
+        let (part_bytes, clear_pair) = if asimd
+            && bytes == SCA_BYTES
+            && address.is_multiple_of(HALF_SCA_BYTES as u64)
         {
-            HALF_SCA_BYTES
+            (HALF_SCA_BYTES, false)
+        } else if asimd && bytes == SCA_BYTES * 2 && address.is_multiple_of(HALF_SCA_BYTES as u64) {
+            (HALF_SCA_BYTES, true)
+        } else if residue + bytes <= SCA_BYTES {
+            (bytes, false)
+        } else if pair && half != 0 && address.is_multiple_of(half as u64)
+            || descriptor & flags::SME == 0
+                && descriptor & flags::SVE_PREDICATED != 0
+                && bytes == SCA_BYTES
+                && address.is_multiple_of(HALF_SCA_BYTES as u64)
+        {
+            (half, true)
         } else {
-            1
+            (1, false)
+        };
+        let flags = if clear_pair {
+            descriptor & !flags::PAIR
+        } else {
+            descriptor
         };
         Self {
             address,
             bytes,
             offset: 0,
             part_bytes,
+            flags,
         }
     }
 }
@@ -722,6 +846,7 @@ impl Iterator for AccessParts {
             address: self.address.wrapping_add(self.offset as u64),
             offset: self.offset,
             bytes: self.part_bytes,
+            flags: self.flags,
         };
         self.offset += self.part_bytes;
         Some(part)

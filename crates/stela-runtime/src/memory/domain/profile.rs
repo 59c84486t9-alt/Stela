@@ -8,7 +8,8 @@ use std::sync::Arc;
 use stela_compiler::{
     TargetCpu,
     context::memory::{
-        MemoryContextView, MemoryRequirements, MemoryStatus, flags, host_caps, profile_requirements,
+        MemoryContextView, MemoryImplementationProfile, MemoryRequirements, MemoryStatus, flags,
+        host_caps, profile_requirements,
     },
 };
 
@@ -19,6 +20,7 @@ use stela_compiler::{
 /// retain original-SP checks independently.
 pub struct MemoryProfile {
     native_congruent: bool,
+    reservation_congruent: bool,
     native_fragments: bool,
     tag_fragments: bool,
     writable_host_readable: bool,
@@ -30,6 +32,7 @@ impl MemoryProfile {
     pub(super) fn inspect(views: &[(Arc<MemoryView>, MappingAttributes)]) -> Self {
         let mut profile = Self {
             native_congruent: cfg!(target_arch = "x86_64"),
+            reservation_congruent: true,
             native_fragments: fragments_compatible(views, SCA_BYTES),
             tag_fragments: fragments_compatible(views, TAG_GRANULE_BYTES),
             writable_host_readable: true,
@@ -50,6 +53,10 @@ impl MemoryProfile {
                 },
             );
             if view.permissions().readable || view.permissions().writable {
+                // Monitor ERGs are backing-relative and at least 16 bytes.
+                // Source SCA16 containment must imply one relative granule.
+                profile.reservation_congruent &= view.guest_base() as usize & (SCA_BYTES - 1)
+                    == view.backing_offset() & (SCA_BYTES - 1);
                 profile.native_congruent &= pointer.is_ok_and(|pointer| {
                     pointer.as_ptr() as usize & (SCA_BYTES - 1)
                         == view.guest_base() as usize & (SCA_BYTES - 1)
@@ -117,6 +124,12 @@ impl MemoryProfile {
                 || requirements.required_flags & flags::WRITE != 0 && !self.writable_host_readable
                 || requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
                     && !self.read_envelopes)
+        {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if requirements.required_flags & flags::EXCLUSIVE != 0
+            && requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0
+            && !self.reservation_congruent
         {
             return Err(MemoryStatus::Unsupported);
         }
@@ -205,6 +218,13 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
         privileged: bool,
     ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
         self.prepare_with(|owner| {
+            // Dedicated allocation-tag admission cannot authorize another
+            // typed service through its tag-storage-specific preflight rules.
+            if requirements.required_flags & (flags::ATOMIC | flags::ORDERED | flags::EXCLUSIVE)
+                != 0
+            {
+                return Err(MemoryStatus::InvalidRequest);
+            }
             owner.domain.check_execution()?;
             owner.policy.validate_privilege(privileged)?;
             let mut data_requirements = requirements;
@@ -216,6 +236,14 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
             owner
                 .policy
                 .validate_execution(requirements.required_flags)?;
+            owner
+                .policy
+                .validate_sp_alignment(requirements.required_sp_alignment)?;
+            if requirements.required_profile & profile_requirements::SCALABLE_TAG_CHECKS != 0 {
+                owner.policy.validate_implementation_profile(
+                    MemoryImplementationProfile::ScalableTagChecks,
+                )?;
+            }
             if requirements.required_profile & profile_requirements::TAG_GRANULES != 0 {
                 // Even suppressed tag storage still performs exact granule
                 // translation/rights resolution through this representation.

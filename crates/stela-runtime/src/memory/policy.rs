@@ -7,7 +7,9 @@
 use super::domain::{AllocationTagPolicy, DataAccess, DataPolicy, MappingAttributes};
 use super::tag_store::TagStoreError;
 use super::tags::{AllocationTag, TAG_GRANULE_BYTES};
-use stela_compiler::context::memory::{MemoryStatus, flags};
+use stela_compiler::context::memory::{
+    MemoryImplementationProfile, MemoryOperationClass, MemoryStatus, SpAlignmentRequirement, flags,
+};
 
 const MIN_ADDRESS_BITS: u8 = 16;
 const MAX_ADDRESS_BITS: u8 = 52;
@@ -64,6 +66,14 @@ pub enum TagCheckFaultMode {
     Asymmetric,
 }
 
+/// Typed operation admission installed only by the checked process policy loan.
+/// It is not a guest feature/control bit and cannot be selected by a loose flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationScope {
+    Unbound,
+    FixedEl0ProcessExclusive,
+}
+
 /// A per-thread snapshot of effective controls, supplied by the common CPU owner.
 /// `allocation_tags_enabled` is IsMTEEnabled(el), including effective ATA and
 /// higher-level controls. TCO and the selected region's TCMA remain independent.
@@ -75,6 +85,9 @@ pub struct MemoryControls {
     tag_check_override: bool,
     tag_check_fault_mode: TagCheckFaultMode,
     tag_check_mask: bool,
+    effective_sp_alignment: Option<bool>,
+    memory_implementation_profile: Option<MemoryImplementationProfile>,
+    operation_scope: OperationScope,
 }
 
 impl MemoryControls {
@@ -93,7 +106,39 @@ impl MemoryControls {
             tag_check_override,
             tag_check_fault_mode,
             tag_check_mask,
+            effective_sp_alignment: None,
+            memory_implementation_profile: None,
+            operation_scope: OperationScope::Unbound,
         }
+    }
+
+    /// Build the temporary snapshot from the retained checked CPU authority.
+    /// Only the process owner's same-thread loan may install this snapshot; its
+    /// opaque native scope retains the controls, SystemState and event endpoint,
+    /// and restores the previous policy on every return, decline or unwind.
+    pub(crate) fn for_exclusive_authority(
+        authority: &crate::system::process_memory::ExclusiveProcessMemoryAuthorization<'_>,
+    ) -> Self {
+        let mut controls = authority.memory_controls();
+        controls.operation_scope = OperationScope::FixedEl0ProcessExclusive;
+        controls
+    }
+
+    /// Bind the actual current-EL selected SA0/SA effect from the CPU owner.
+    /// This is resolved control state, not a duplicate raw SCTLR register.
+    pub const fn with_effective_sp_alignment(mut self, enabled: bool) -> Self {
+        self.effective_sp_alignment = Some(enabled);
+        self
+    }
+
+    /// Bind the CPU owner's combined SVE/SME memory implementation choice.
+    /// An unknown or different choice cannot authorize the compiled contract.
+    pub const fn with_implementation_profile(
+        mut self,
+        profile: MemoryImplementationProfile,
+    ) -> Self {
+        self.memory_implementation_profile = Some(profile);
+        self
     }
 
     pub fn translate_address(&self, raw_address: u64) -> Result<u64, MemoryStatus> {
@@ -155,6 +200,40 @@ impl MemoryControls {
 }
 
 impl DataPolicy for MemoryControls {
+    fn validate_operation_execution(
+        &self,
+        class: MemoryOperationClass,
+    ) -> Result<(), MemoryStatus> {
+        match (class, self.operation_scope) {
+            (MemoryOperationClass::Exclusive, OperationScope::FixedEl0ProcessExclusive) => Ok(()),
+            _ => Err(MemoryStatus::Unsupported),
+        }
+    }
+
+    fn validate_implementation_profile(
+        &self,
+        required: MemoryImplementationProfile,
+    ) -> Result<(), MemoryStatus> {
+        match (required, self.memory_implementation_profile) {
+            (
+                MemoryImplementationProfile::ScalableTagChecks,
+                Some(MemoryImplementationProfile::ScalableTagChecks),
+            ) => Ok(()),
+            // The compiler implements the checking contract only. A known
+            // suppression choice is explicit incompatibility, not authorization.
+            _ => Err(MemoryStatus::Unsupported),
+        }
+    }
+
+    fn validate_sp_alignment(&self, required: SpAlignmentRequirement) -> Result<(), MemoryStatus> {
+        match (required, self.effective_sp_alignment) {
+            (SpAlignmentRequirement::Any, _)
+            | (SpAlignmentRequirement::Enabled, Some(true))
+            | (SpAlignmentRequirement::Disabled, Some(false)) => Ok(()),
+            _ => Err(MemoryStatus::Unsupported),
+        }
+    }
+
     fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus> {
         if required_flags & !flags::KNOWN != 0 {
             return Err(MemoryStatus::InvalidRequest);
@@ -668,5 +747,168 @@ mod tests {
             policy.check(request(&backing, backing.bytes() - 1, 1, 0)),
             Err(MemoryStatus::Unsupported)
         );
+    }
+
+    #[test]
+    fn sp_alignment_requirements_match_only_resolved_effective_controls() {
+        for privileged in [false, true] {
+            for effective in [None, Some(false), Some(true)] {
+                let mut policy = MemoryControls::new(
+                    LowerAddressProfile::new(ADDRESS_BITS, true).unwrap(),
+                    privileged,
+                    true,
+                    false,
+                    TagCheckFaultMode::Synchronous,
+                    false,
+                );
+                if let Some(enabled) = effective {
+                    policy = policy.with_effective_sp_alignment(enabled);
+                }
+                for required in [
+                    SpAlignmentRequirement::Any,
+                    SpAlignmentRequirement::Enabled,
+                    SpAlignmentRequirement::Disabled,
+                ] {
+                    let expected = match required {
+                        SpAlignmentRequirement::Any => Ok(()),
+                        SpAlignmentRequirement::Enabled if effective == Some(true) => Ok(()),
+                        SpAlignmentRequirement::Disabled if effective == Some(false) => Ok(()),
+                        _ => Err(MemoryStatus::Unsupported),
+                    };
+                    assert_eq!(policy.validate_sp_alignment(required), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effective_sp_control_refresh_replaces_the_previous_snapshot() {
+        let original = controls(TagCheckFaultMode::Synchronous);
+        let enabled = original.with_effective_sp_alignment(true);
+        let disabled = enabled.with_effective_sp_alignment(false);
+        assert_eq!(
+            original.validate_sp_alignment(SpAlignmentRequirement::Any),
+            Ok(())
+        );
+        assert_eq!(
+            original.validate_sp_alignment(SpAlignmentRequirement::Enabled),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            enabled.validate_sp_alignment(SpAlignmentRequirement::Enabled),
+            Ok(())
+        );
+        assert_eq!(
+            enabled.validate_sp_alignment(SpAlignmentRequirement::Disabled),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            disabled.validate_sp_alignment(SpAlignmentRequirement::Disabled),
+            Ok(())
+        );
+        assert_eq!(
+            disabled.validate_sp_alignment(SpAlignmentRequirement::Enabled),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            original.translate_address(GUEST_ADDRESS),
+            disabled.translate_address(GUEST_ADDRESS)
+        );
+    }
+
+    #[test]
+    fn scalable_contract_requires_the_known_supported_implementation() {
+        for actual in [
+            None,
+            Some(MemoryImplementationProfile::ScalableTagChecks),
+            Some(MemoryImplementationProfile::StreamingSveTagSuppression),
+            Some(MemoryImplementationProfile::SmeTagSuppression),
+        ] {
+            let mut policy = controls(TagCheckFaultMode::Synchronous);
+            if let Some(profile) = actual {
+                policy = policy.with_implementation_profile(profile);
+            }
+            let expected = if actual == Some(MemoryImplementationProfile::ScalableTagChecks) {
+                Ok(())
+            } else {
+                Err(MemoryStatus::Unsupported)
+            };
+            assert_eq!(
+                policy.validate_implementation_profile(
+                    MemoryImplementationProfile::ScalableTagChecks
+                ),
+                expected
+            );
+            assert_eq!(
+                policy.validate_implementation_profile(
+                    MemoryImplementationProfile::StreamingSveTagSuppression
+                ),
+                Err(MemoryStatus::Unsupported)
+            );
+            assert_eq!(
+                policy.validate_implementation_profile(
+                    MemoryImplementationProfile::SmeTagSuppression
+                ),
+                Err(MemoryStatus::Unsupported)
+            );
+            assert_eq!(
+                policy.validate_sp_alignment(SpAlignmentRequirement::Any),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn implementation_profile_refresh_replaces_the_previous_named_choice() {
+        let original = controls(TagCheckFaultMode::Synchronous).with_effective_sp_alignment(true);
+        let checks =
+            original.with_implementation_profile(MemoryImplementationProfile::ScalableTagChecks);
+        let suppression = checks
+            .with_implementation_profile(MemoryImplementationProfile::StreamingSveTagSuppression);
+        assert_eq!(
+            checks.validate_implementation_profile(MemoryImplementationProfile::ScalableTagChecks),
+            Ok(())
+        );
+        assert_eq!(
+            suppression
+                .validate_implementation_profile(MemoryImplementationProfile::ScalableTagChecks),
+            Err(MemoryStatus::Unsupported)
+        );
+        assert_eq!(
+            suppression.validate_sp_alignment(SpAlignmentRequirement::Enabled),
+            Ok(())
+        );
+        assert_eq!(
+            original.translate_address(GUEST_ADDRESS),
+            suppression.translate_address(GUEST_ADDRESS)
+        );
+    }
+
+    #[test]
+    fn ordinary_cpu_snapshots_never_authorize_typed_operations() {
+        for mode in [
+            TagCheckFaultMode::Ignore,
+            TagCheckFaultMode::Synchronous,
+            TagCheckFaultMode::Asynchronous,
+            TagCheckFaultMode::Asymmetric,
+        ] {
+            for policy in [
+                controls(mode),
+                controls(mode).with_effective_sp_alignment(true),
+                controls(mode)
+                    .with_implementation_profile(MemoryImplementationProfile::ScalableTagChecks),
+            ] {
+                for class in [
+                    MemoryOperationClass::Atomic,
+                    MemoryOperationClass::Ordered,
+                    MemoryOperationClass::Exclusive,
+                ] {
+                    assert_eq!(
+                        policy.validate_operation_execution(class),
+                        Err(MemoryStatus::Unsupported)
+                    );
+                }
+            }
+        }
     }
 }

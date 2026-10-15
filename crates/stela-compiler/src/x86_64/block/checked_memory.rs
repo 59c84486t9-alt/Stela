@@ -1,0 +1,36 @@
+//! Checked context block emission from the same source-derived decoded plan.
+use crate::{
+    CompileError, GuestAddress, NativeBlock, TargetCpu,
+    block::Terminator,
+    extended::{self, Decoded},
+};
+
+pub(crate) fn emit(
+    instructions: &[(GuestAddress, Decoded)],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
+    let mut block = NativeBlock {
+        x86_64_code: extended::context_wrapper(),
+        source_map: Vec::new(),
+    };
+    let mut fixups = Vec::new();
+    for (pc, instruction) in instructions {
+        block.source_map.push((*pc, block.x86_64_code.len()));
+        instruction.emit_checked_ordinary(&mut block.x86_64_code, *pc, target, &mut fixups)?;
+    }
+    if !fixups.is_empty() {
+        return Err(CompileError(
+            "checked GPR prefix unexpectedly branches".into(),
+        ));
+    }
+    super::emit_terminal(
+        &mut block.x86_64_code,
+        &mut block.source_map,
+        terminal,
+        fallthrough,
+        target,
+    );
+    Ok(block)
+}

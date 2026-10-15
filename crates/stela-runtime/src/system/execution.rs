@@ -21,7 +21,7 @@ use stela_compiler::{
     GuestAddress, GuestState,
     aarch64::{system::exception::Operation, tag_memory::Operand},
     block::system::{SystemInstruction, SystemOperation},
-    context::memory::MemoryStatus,
+    context::memory::{MemoryRequirements, MemoryStatus},
 };
 
 /// Immutable source identity at the next native entry. The runtime validates
@@ -217,6 +217,18 @@ pub trait Dispatcher {
         source: &[u8],
         registers: &GuestState,
     ) -> Result<(), Failure>;
+    /// Source-derived memory eligibility under the same CPU/backend owner.
+    fn prepare_memory_entry<'run>(
+        &'run mut self,
+        _boundary: &EntryBoundary,
+        _source: &[u8],
+        _requirements: MemoryRequirements,
+        _registers: &GuestState,
+    ) -> Result<super::process_memory::PreparedProcessMemory<'run>, Failure> {
+        Err(Failure::Unsupported(
+            "checked process memory authority unavailable",
+        ))
+    }
     fn complete(
         &mut self,
         boundary: Boundary,
@@ -290,6 +302,17 @@ pub trait Backend: ExceptionServices<Error = String> {
         system: &SystemState,
         registers: &GuestState,
     ) -> Result<(), String>;
+    /// One opaque scoped loan from actual controls/SystemState and same thread.
+    fn prepare_process_memory<'run>(
+        &'run mut self,
+        _boundary: &EntryBoundary,
+        _source: &[u8],
+        _requirements: MemoryRequirements,
+        _system: &'run SystemState,
+        _registers: &GuestState,
+    ) -> Result<super::process_memory::PreparedProcessMemory<'run>, String> {
+        Err("checked process memory authority unavailable".into())
+    }
     fn entry_snapshot(
         &mut self,
         boundary: &Boundary,
@@ -513,6 +536,23 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             .map_err(Failure::Backend)
     }
 
+    fn prepare_memory_entry<'run>(
+        &'run mut self,
+        boundary: &EntryBoundary,
+        source: &[u8],
+        requirements: MemoryRequirements,
+        registers: &GuestState,
+    ) -> Result<super::process_memory::PreparedProcessMemory<'run>, Failure> {
+        if boundary.address_space != self.address_space {
+            return Err(Failure::WrongAddressSpace);
+        }
+        if self.system.pstate(registers) & PSTATE_IL_MASK != 0 {
+            return Err(Failure::IllegalExecutionState);
+        }
+        self.backend
+            .prepare_process_memory(boundary, source, requirements, self.system, registers)
+            .map_err(Failure::Backend)
+    }
     fn complete(
         &mut self,
         boundary: Boundary,

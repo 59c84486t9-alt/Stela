@@ -9,6 +9,7 @@ pub mod fixed_controls;
 pub mod fixed_execution;
 pub mod identification;
 pub mod interrupt;
+pub mod process_memory;
 pub mod profile;
 pub mod pstate;
 pub mod state;

@@ -64,6 +64,7 @@ fn requirements(profile: u32, caps: u32, flags: u32) -> MemoryRequirements {
         required_flags: flags,
         required_host_caps: caps,
         required_profile: profile,
+        ..MemoryRequirements::default()
     }
 }
 #[test]

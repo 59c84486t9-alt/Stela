@@ -14,12 +14,16 @@ use crate::{
 };
 use serde::Serialize;
 
+pub mod memory;
 pub mod pauth_memory;
+pub use memory::{CheckedMemoryProfile, ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID};
 pub mod system;
 pub use system::{SystemInstruction, decode_system_instruction};
 pub mod scalable;
 mod thread;
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
+
+const NOP_ENCODING: u32 = 0xd503_201f;
 
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
@@ -48,6 +52,7 @@ pub const SYSTEM_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-system
 pub enum BlockProfile {
     #[default]
     Ordinary,
+    CheckedMemory(CheckedMemoryProfile),
     SystemV1,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
@@ -60,12 +65,20 @@ impl BlockProfile {
     pub const fn abi(self) -> &'static str {
         match self {
             Self::Ordinary => BLOCK_ABI,
+            Self::CheckedMemory(profile) => profile.abi(),
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
             Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthThreadV1 => PAUTH_THREAD_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockThreadV1 => CLOCK_THREAD_BLOCK_ABI,
+        }
+    }
+
+    pub const fn checked_memory(self) -> Option<CheckedMemoryProfile> {
+        match self {
+            Self::CheckedMemory(profile) => Some(profile),
+            _ => None,
         }
     }
 
@@ -798,6 +811,15 @@ fn parse(
             pc,
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
+        if profile.checked_memory().is_some()
+            && instruction.operation == Operation::Nop
+            && word != NOP_ENCODING
+        {
+            return Err(BlockAnalysisError {
+                pc,
+                detail: "unadmitted original NOP provenance in checked memory profile".into(),
+            });
+        }
         if profile.supports_system() && !crate::extended::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
@@ -842,9 +864,11 @@ pub fn source_bytes_with_profile(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<usize, CompileError> {
-    Ok(parse(source, base, profile)
-        .map_err(|error| CompileError(error.detail))?
-        .source_bytes)
+    let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+    if let Some(selected) = profile.checked_memory() {
+        memory::CheckedPlan::new(&parsed.instructions, parsed.terminal.as_ref(), selected)?;
+    }
+    Ok(parsed.source_bytes)
 }
 
 /// Compile through the first transfer, trap or unconditional runtime helper,
@@ -868,21 +892,70 @@ pub fn compile_for_target(
     profile: BlockProfile,
     target: crate::TargetCpu,
 ) -> Result<CompiledBlock, CompileError> {
-    let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
-    for instruction in &parsed.instructions {
-        crate::x86_64::validate_target(instruction, target)
-            .map_err(|error| CompileError(format!("{error:?}")))?;
+    CompilationPlan::new(source, base, profile, target)?.compile()
+}
+
+/// One immutable parsed consumed vector shared by cache requirements and emission.
+/// A cache hit may avoid emission; it still derives exact requirements from source.
+pub struct CompilationPlan {
+    parsed: ParsedBlock,
+    checked: Option<memory::CheckedPlan>,
+    target: crate::TargetCpu,
+}
+impl CompilationPlan {
+    pub fn new(
+        source: &[u8],
+        base: GuestAddress,
+        profile: BlockProfile,
+        target: crate::TargetCpu,
+    ) -> Result<Self, CompileError> {
+        let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+        for instruction in &parsed.instructions {
+            if !matches!(instruction.operation, Operation::Exclusive(_))
+                || profile.checked_memory().is_none()
+            {
+                crate::x86_64::validate_target(instruction, target)
+                    .map_err(|error| CompileError(format!("{error:?}")))?;
+            }
+        }
+        let checked = profile
+            .checked_memory()
+            .map(|selected| {
+                memory::CheckedPlan::new(&parsed.instructions, parsed.terminal.as_ref(), selected)
+            })
+            .transpose()?;
+        Ok(Self {
+            parsed,
+            checked,
+            target,
+        })
     }
-    let native = crate::x86_64::block::emit_for_target(
-        &parsed.instructions,
-        parsed.terminal.as_ref(),
-        parsed.next_pc,
-        target,
-    );
-    Ok(CompiledBlock {
-        native,
-        source_bytes: parsed.source_bytes,
-    })
+    pub fn source_bytes(&self) -> usize {
+        self.parsed.source_bytes
+    }
+    pub fn memory_requirements(&self) -> Option<crate::context::memory::MemoryRequirements> {
+        self.checked.as_ref().map(memory::CheckedPlan::requirements)
+    }
+    pub fn compile(self) -> Result<CompiledBlock, CompileError> {
+        let native = if let Some(checked) = self.checked {
+            checked.emit(
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+                self.target,
+            )?
+        } else {
+            crate::x86_64::block::emit_for_target(
+                &self.parsed.instructions,
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+                self.target,
+            )
+        };
+        Ok(CompiledBlock {
+            native,
+            source_bytes: self.parsed.source_bytes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1147,13 +1220,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<BlockExit>(), 16);
         assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..=ExitKind::FloatingPoint as u64 {
+        for kind in 0..=ExitKind::System as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(
-            ExitKind::try_from(ExitKind::FloatingPoint as u64 + 1),
-            Err(())
-        );
+        assert_eq!(ExitKind::try_from(ExitKind::System as u64 + 1), Err(()));
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
     }
 

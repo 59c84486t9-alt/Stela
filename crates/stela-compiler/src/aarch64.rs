@@ -5,6 +5,7 @@ pub mod bitfield;
 pub mod conditional_select;
 pub mod constrained;
 pub mod crc;
+pub mod exclusive;
 pub mod flags;
 pub mod floating;
 pub mod fp_register;
@@ -201,6 +202,7 @@ impl From<simd::refinement::Operand> for FloatingPointOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
+    Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),
     Simd(simd::Operand),
@@ -415,6 +417,8 @@ impl Lifter for Decoder {
             )
         }) {
             Operation::Synchronization(decoded)
+        } else if let Some(decoded) = exclusive::decode(word) {
+            Operation::Exclusive(decoded.map_err(|_| unsupported())?)
         } else if let Some(_reason) = constrained::decode(word) {
             // Pinned constrained outcomes select NOP under the declared FP-present,
             // unguarded-page/BTYPE=0 profile, before FP enablement or memory effects.

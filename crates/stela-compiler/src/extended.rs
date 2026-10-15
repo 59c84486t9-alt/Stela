@@ -220,7 +220,9 @@ impl ScalableProfile {
     }
 }
 
-enum Decoded {
+pub(crate) enum Decoded {
+    Exclusive(crate::x86_64::exclusive::CheckedOperand),
+    MemoryScalar(crate::x86_64::memory_store::checked_scalar::Operand),
     Ordinary(Instruction),
     Address(address::Operand),
     IntegerDot(dot::Operand),
@@ -250,8 +252,12 @@ enum Decoded {
 }
 
 impl Decoded {
-    fn memory_requirements(&self) -> crate::context::memory::MemoryRequirements {
+    pub(crate) fn memory_requirements(&self) -> crate::context::memory::MemoryRequirements {
         match self {
+            Self::MemoryScalar(operand) => {
+                crate::x86_64::memory_store::checked_scalar::requirements(operand)
+            }
+            Self::Exclusive(operand) => crate::x86_64::exclusive::requirements(operand),
             Self::Ordinary(_) => Default::default(),
             Self::Address(_) => Default::default(),
             Self::IntegerDot(_) => Default::default(),
@@ -288,6 +294,7 @@ impl Decoded {
         original_word: u32,
     ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
         match self {
+            Self::Exclusive(_) | Self::MemoryScalar(_) => Ok(None),
             Self::Ordinary(_) => Ok(None),
             Self::Address(_) => Ok(None),
             Self::IntegerDot(_) => Ok(None),
@@ -329,7 +336,9 @@ impl Decoded {
             | Self::RearrangeWiden(_)
             | Self::Reductions(_)
             | Self::IntegerArithmetic(_) => Ok(()),
-            Self::Ordinary(_)
+            Self::Exclusive(_)
+            | Self::MemoryScalar(_)
+            | Self::Ordinary(_)
             | Self::Address(_)
             | Self::IntegerDot(_)
             | Self::IntegerBits(_)
@@ -351,6 +360,103 @@ impl Decoded {
                 pc.0
             ))),
         }
+    }
+}
+
+const CHECKED_EXCLUSIVE_SCALAR_BYTES: u8 = size_of::<u32>() as u8;
+
+impl Decoded {
+    /// Reuse the already decoded ordinary block instruction. Effects receive a
+    /// typed checked variant; unmigrated writers never fall back to direct RAM.
+    pub(crate) fn checked_ordinary(
+        instruction: Instruction,
+        profile: crate::block::CheckedMemoryProfile,
+    ) -> Result<Self, CompileError> {
+        if let Operation::Exclusive(operand) = instruction.operation {
+            use crate::aarch64::exclusive::{Data, Operand};
+            if !matches!(
+                operand,
+                Operand::Clear
+                    | Operand::Transfer {
+                        element_bytes: CHECKED_EXCLUSIVE_SCALAR_BYTES,
+                        data: Data::Scalar(_),
+                        ..
+                    }
+            ) {
+                return Err(CompileError(format!(
+                    "exclusive width/pair outside checked scalar32 scope at {:#x}",
+                    instruction.pc.0
+                )));
+            }
+            return Ok(Self::Exclusive(
+                crate::x86_64::exclusive::CheckedOperand::new(operand, profile)?,
+            ));
+        }
+        if let Some(operand) = crate::x86_64::memory_store::checked_scalar::Operand::from_operation(
+            &instruction.operation,
+            profile,
+        ) {
+            return Ok(Self::MemoryScalar(operand));
+        }
+        if !ordinary_permitted(&instruction.operation) {
+            return Err(CompileError(format!(
+                "operation outside checked GPR memory profile at {:#x}",
+                instruction.pc.0
+            )));
+        }
+        Ok(Self::Ordinary(instruction))
+    }
+    pub(crate) fn emit_checked_ordinary(
+        &self,
+        code: &mut Vec<u8>,
+        pc: GuestAddress,
+        target: TargetCpu,
+        fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
+    ) -> Result<(), CompileError> {
+        match self {
+            Self::Ordinary(instruction) => {
+                if instruction.pc != pc {
+                    return Err(CompileError("checked instruction PC differs".into()));
+                }
+                x86_64::emit_instruction(code, instruction, fixups, target);
+            }
+            Self::MemoryScalar(operand) => {
+                crate::x86_64::memory_store::checked_scalar::emit_context(code, operand, pc.0)
+            }
+            Self::Exclusive(operand) => {
+                crate::x86_64::exclusive::emit_context(code, operand, pc.0)?
+            }
+            Self::Address(_)
+            | Self::SmeTables(_)
+            | Self::SmeMovement(_)
+            | Self::IntegerBits(_)
+            | Self::IntegerPredicateMove(_)
+            | Self::Rearrange(_)
+            | Self::Reductions(_)
+            | Self::Shifts(_)
+            | Self::ShiftsNarrow(_)
+            | Self::IntegerComparison(_)
+            | Self::PredicateGeneration(_)
+            | Self::PredicateLogic(_)
+            | Self::SmeIntegerVector(_)
+            | Self::IntegerDot(_)
+            | Self::IntegerLogic(_)
+            | Self::IntegerProducts(_)
+            | Self::IntegerSaturation(_)
+            | Self::RearrangeExtract(_)
+            | Self::RearrangeWiden(_)
+            | Self::Sign(_)
+            | Self::FloatingCopy(_)
+            | Self::IntegerArithmetic(_)
+            | Self::Length(_)
+            | Self::SmeIntegerDots(_)
+            | Self::SmeIntegerMatrix(_) => {
+                return Err(CompileError(
+                    "unrequested scalable operation in checked GPR memory profile".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -990,7 +1096,7 @@ fn decode(
     Ok(Decoded::Ordinary(instruction))
 }
 
-fn context_wrapper() -> Vec<u8> {
+pub(crate) fn context_wrapper() -> Vec<u8> {
     let mut code = Vec::with_capacity(CONTEXT_WRAPPER_BYTES);
     code.extend(PUSH_R15);
     code.extend(MOV_R15_RSI);
@@ -1010,6 +1116,16 @@ fn emit_decoded(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) -> Result<(), CompileError> {
     match instruction {
+        Decoded::Exclusive(_) => {
+            return Err(CompileError(
+                "exclusive service was not requested by scalable profile".into(),
+            ));
+        }
+        Decoded::MemoryScalar(_) => {
+            return Err(CompileError(
+                "checked scalar service was not requested by scalable profile".into(),
+            ));
+        }
         Decoded::Address(operand) => {
             x86_64::sve::address::emit(code, &operand, profile.length, target);
         }

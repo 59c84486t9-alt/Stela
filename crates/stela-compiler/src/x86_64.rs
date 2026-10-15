@@ -14,6 +14,11 @@ pub(crate) fn validate_target(
     instruction: &Instruction,
     target: crate::TargetCpu,
 ) -> Result<(), UnsupportedReason> {
+    if matches!(instruction.operation, Operation::Exclusive(_)) {
+        return Err(UnsupportedReason::PrivilegedOperation {
+            address: instruction.pc,
+        });
+    }
     if let Operation::Synchronization(operation) = &instruction.operation
         && !matches!(
             operation,
@@ -51,6 +56,7 @@ mod bitfield;
 pub(crate) mod block;
 mod conditional_select;
 mod crc;
+pub(crate) mod exclusive;
 mod flags;
 mod fp_register;
 mod integer_math;
@@ -58,7 +64,8 @@ mod integer_minmax;
 mod integer_unary;
 pub mod isa;
 mod literal;
-mod memory_store;
+pub(crate) mod memory_context;
+pub(crate) mod memory_store;
 mod non_temporal;
 mod ordered;
 mod pc_relative;
@@ -568,6 +575,7 @@ pub(crate) fn emit_instruction(
             } // AND clears host CF/OF, matching ARM C/V=0.
         }
         Operation::Return => code.push(0xc3),
+        Operation::Exclusive(_) => unreachable!("exclusive requires checked context emitter"),
         Operation::Nop => code.push(0x90),
         Operation::MoveWide {
             width,

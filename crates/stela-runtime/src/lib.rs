@@ -53,6 +53,9 @@ pub struct Manifest {
     pub native_bytes: usize,
     pub source_map: Vec<(GuestAddress, usize)>,
     pub verified: bool,
+    /// None is legacy absent metadata; Some(empty) is a checked pure body.
+    #[serde(default)]
+    pub memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,7 +66,11 @@ pub struct Prepared {
     pub manifest: Manifest,
 }
 
-fn validate(directory: &Path, identity: &Identity) -> Result<Manifest> {
+fn validate(
+    directory: &Path,
+    identity: &Identity,
+    memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
+) -> Result<Manifest> {
     let manifest_bytes = bounded_file(&directory.join("manifest.json"), MAX_CACHE_MANIFEST_BYTES)?;
     let expected: String = serde_json::from_slice(&bounded_file(
         &directory.join("manifest.sha256.json"),
@@ -74,6 +81,10 @@ fn validate(directory: &Path, identity: &Identity) -> Result<Manifest> {
         "cached manifest checksum mismatch"
     );
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
+    ensure!(
+        manifest.memory_requirements == memory_requirements,
+        "cached memory requirements differ from freshly decoded source"
+    );
     ensure!(
         manifest.identity == *identity,
         "cached source/compiler/ABI identity mismatch"
@@ -111,7 +122,7 @@ pub fn prepare_leaf_for_target(
         abi: NATIVE_ABI.into(),
         target_cpu: target.id(),
     };
-    prepare(identity, root, || {
+    prepare(identity, root, None, || {
         stela_compiler::compile_for_target(source, base, target)
     })
 }
@@ -157,7 +168,9 @@ pub fn prepare_block_for_target(
     target: stela_compiler::TargetCpu,
 ) -> Result<PreparedBlock> {
     use stela_compiler::block;
-    let source_bytes = block::source_bytes_with_profile(source, base, profile)?;
+    let plan = block::CompilationPlan::new(source, base, profile, target)?;
+    let source_bytes = plan.source_bytes();
+    let memory_requirements = plan.memory_requirements();
     let prefix = &source[..source_bytes];
     let identity = Identity {
         schema_version: 1,
@@ -167,8 +180,8 @@ pub fn prepare_block_for_target(
         abi: profile.abi().into(),
         target_cpu: target.id(),
     };
-    let prepared = prepare(identity, root, || {
-        block::compile_for_target(prefix, base, profile, target).map(|b| b.native)
+    let prepared = prepare(identity, root, memory_requirements, || {
+        plan.compile().map(|b| b.native)
     })?;
     Ok(PreparedBlock {
         source_bytes,
@@ -179,6 +192,7 @@ pub fn prepare_block_for_target(
 fn prepare(
     identity: Identity,
     root: &Path,
+    memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
     generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
 ) -> Result<Prepared> {
     let key = sha256(&serde_json::to_vec(&identity)?);
@@ -186,7 +200,7 @@ fn prepare(
     let root = root.canonicalize()?;
     let directory = root.join(&key);
     if directory.exists() {
-        let manifest = validate(&directory, &identity)
+        let manifest = validate(&directory, &identity, memory_requirements)
             .context("refusing invalid cached translation; remove this cache entry to rebuild")?;
         return Ok(Prepared {
             key,
@@ -211,6 +225,7 @@ fn prepare(
         native_bytes: x86_64_code.len(),
         source_map,
         verified: false,
+        memory_requirements,
     };
     let path = pending.path().join("native.bin");
     std::fs::write(&path, &x86_64_code)?;
@@ -226,7 +241,7 @@ fn prepare(
             manifest,
         }),
         Err(error) if directory.exists() => {
-            let manifest = validate(&directory, &identity)
+            let manifest = validate(&directory, &identity, memory_requirements)
                 .with_context(|| format!("concurrent cache publication failed: {error}"))?;
             Ok(Prepared {
                 key,

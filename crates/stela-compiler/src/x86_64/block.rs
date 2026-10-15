@@ -1,4 +1,5 @@
 //! Guest control transfers return to the native dispatcher with canonical state.
+pub(crate) mod checked_memory;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation, Register, Width},
@@ -73,8 +74,18 @@ pub(crate) fn emit_for_target(
         fixups.is_empty(),
         "ordinary instruction prefix cannot branch"
     );
+    emit_terminal(code, &mut block.source_map, terminal, fallthrough, target);
+    block
+}
+fn emit_terminal(
+    code: &mut Vec<u8>,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+) {
     if let Some((pc, terminal)) = terminal {
-        block.source_map.push((*pc, code.len()));
+        source_map.push((*pc, code.len()));
         match terminal {
             Terminator::FloatingPoint(operand) => {
                 super::simd::emit_numerical(code, operand, *pc, target);
@@ -166,7 +177,6 @@ pub(crate) fn emit_for_target(
     } else {
         direct_exit(code, fallthrough, ExitKind::Fallthrough);
     }
-    block
 }
 
 #[cfg(test)]
