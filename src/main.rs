@@ -135,6 +135,9 @@ enum Command {
         /// Prepare guest TPIDRRO_EL0 reads without supplying a thread context.
         #[arg(long)]
         thread_registers: bool,
+        /// Prepare source-bound System exits without supplying a CPU/service backend.
+        #[arg(long, conflicts_with_all = ["software_pauth", "software_clock", "thread_registers"])]
+        system_boundaries: bool,
     },
     /// Execute trusted raw code through bounded native block dispatch.
     #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
@@ -1357,12 +1360,17 @@ fn run() -> Result<()> {
             software_pauth,
             software_clock,
             thread_registers,
+            system_boundaries,
         } => {
             let source = std::fs::read(&input)?;
             let window = &source[..source
                 .len()
                 .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-            let profile = block_profile(software_pauth, software_clock, thread_registers);
+            let profile = if system_boundaries {
+                stela_compiler::block::BlockProfile::SystemV1
+            } else {
+                block_profile(software_pauth, software_clock, thread_registers)
+            };
             let compiled = stela_compiler::block::compile_for_target(
                 window,
                 stela_compiler::GuestAddress(guest_base),
@@ -2679,6 +2687,38 @@ mod clock_cli_tests {
         assert_eq!(
             block_profile(false, false, false),
             stela_compiler::block::BlockProfile::Ordinary
+        );
+    }
+
+    #[test]
+    fn system_boundary_preparation_is_explicit_and_compile_only() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "stela",
+                "compile-block",
+                "code",
+                "--output-dir",
+                "out",
+                "--system-boundaries",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(matches!(
+            parse(&[]).unwrap().command,
+            Command::CompileBlock {
+                system_boundaries: true,
+                ..
+            }
+        ));
+        for flag in ["--software-pauth", "--software-clock", "--thread-registers"] {
+            assert!(parse(&[flag]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["stela", "run-blocks", "code", "--system-boundaries"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["stela", "discover-code", "code", "--system-boundaries"]).is_err()
         );
     }
 

@@ -21,6 +21,20 @@ STATUSES = ('implemented', 'partial', 'unsupported')
 RET = 0xd65f03c0
 BLOCK_ABI = 'x86_64-sysv-guest-state-v2-block-exit-direct-ram'
 SERVICE_ABI = BLOCK_ABI + '-apple-arm64e-software-pauth-clock-v1'
+SERVICE_PROFILE = 'apple-arm64e-software-pauth-clock-v1'
+SYSTEM_PROFILE = 'system-v1'
+BASELINE_CPU_TARGET = 'x86_64-baseline'
+SYSTEM_ABI = 'x86_64-sysv-guest-state-v2-block-exit-system-v1'
+SYSTEM_EXIT_KIND = 11
+MOVABS_RAX_IMM64 = b'\x48\xb8'
+MOV_EDX_IMM32 = b'\xba'
+X86_RET = b'\xc3'
+SYSTEM_DECODER_MATTRS = ('+mte',)
+SYSTEM_GUEST_BASE = 0x10000000
+SERVICE_BINDINGS = {
+    SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
+    SYSTEM_PROFILE: (SYSTEM_ABI, ('--system-boundaries', '--cpu-target', BASELINE_CPU_TARGET)),
+}
 SCALABLE_PROFILE = 'apple-sme2-streaming-v1'
 DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'
 SCALABLE_PROFILE_IDS = (SCALABLE_PROFILE, DECLARED_SCALABLE_PROFILE)
@@ -32,7 +46,6 @@ SCALABLE_FEATURES = (
 )
 SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
-BASELINE_CPU_TARGET = 'x86_64-baseline'
 MAX_CPU_TARGET_LENGTH = 256
 CONTEXT_ENTRY_PREFIX_BYTES = 13
 SCALABLE_VECTOR_BYTES = (16, 32, 64, 128, 256)
@@ -242,6 +255,27 @@ def validate_registry_preservation(base_path, candidate_path, *, owned_form_ids,
             'registry_version_changed': metadata_changed('registry_version')}
 
 
+def validate_service_profiles(default, additional=None):
+    """Bounded service contracts; the existing default retains its own rows."""
+    if default.get('id') != SERVICE_PROFILE:
+        raise ValueError('Service registry must retain its PAuth/clock default')
+    if additional is not None and not isinstance(additional, dict):
+        raise ValueError('Service execution profiles must be a mapping')
+    profiles = {default['id']: default}
+    for identity, contract in (additional or {}).items():
+        if identity in profiles or not isinstance(contract, dict) or contract.get('id') != identity:
+            raise ValueError('Duplicate or mismatched service profile identity')
+        profiles[identity] = contract
+    for identity, contract in profiles.items():
+        if identity not in SERVICE_BINDINGS:
+            raise ValueError('Unknown service execution profile')
+        if (contract.get('compiler_mode') != 'service'
+                or contract.get('abi') != SERVICE_BINDINGS[identity][0]
+                or not contract.get('outside_scope')):
+            raise ValueError('Service profile ABI/scope mismatch')
+    return profiles
+
+
 def validate_registry(registry):
     if registry.get('schema_version') != 2 or registry.get('kind') != 'reviewed_apple_silicon_instruction_forms':
         raise ValueError('Unsupported Apple-silicon reviewed-form registry')
@@ -257,8 +291,12 @@ def validate_registry(registry):
     if not profile or not registry.get('profile', {}).get('outside_scope'):
         raise ValueError('Support needs an explicit bounded execution profile')
     scalable_profiles = None
-    if profile in SCALABLE_PROFILE_IDS or 'execution_profiles' in registry:
+    service_profiles = None
+    if registry['profile'].get('compiler_mode') == 'service':
+        service_profiles = validate_service_profiles(registry['profile'], registry.get('execution_profiles'))
+    elif profile in SCALABLE_PROFILE_IDS or 'execution_profiles' in registry:
         scalable_profiles = validate_scalable_profiles(registry['profile'], registry.get('execution_profiles'))
+    declared_profiles = scalable_profiles or service_profiles or {profile: registry['profile']}
     evidence = registry.get('evidence_groups', {})
     rows = {}
     for row in registry.get('forms', []):
@@ -276,8 +314,7 @@ def validate_registry(registry):
         if row.get('status') not in STATUSES:
             raise ValueError('Unknown support status')
         if (not row.get('scope') or not isinstance(row.get('profile'), str)
-                or (row.get('profile') not in scalable_profiles
-                if scalable_profiles is not None else row.get('profile') != profile)):
+                or row['profile'] not in declared_profiles):
             raise ValueError('Form support scope/profile missing')
         row_contract = scalable_profiles[row['profile']] if scalable_profiles is not None else None
         if row_contract is None and any('cpu_target' in sample for sample in
@@ -434,6 +471,7 @@ def validate_cpu_target(value):
     return value
 
 
+
 def validate_scalable_sample(sample, contract):
     allowed = {'word', 'expected_mnemonics', 'consumed_source_bytes', 'svl_bytes', 'svcr', 'reason', 'cpu_target'}
     if set(sample) - allowed:
@@ -478,7 +516,7 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
                   expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
-                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None):
+                  features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8):
@@ -490,13 +528,18 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
                                             max_svl_bytes, zt0_enabled, dit, cpu_target)):
         raise ValueError('Scalable configuration requires the context compiler lane')
+    if service_profile is not None and mode != 'service':
+        raise ValueError('Service profile requires the service compiler lane')
+    selected_service = service_profile or SERVICE_PROFILE
+    if mode == 'service' and selected_service not in SERVICE_BINDINGS:
+        raise ValueError('Unknown service compiler profile')
     source = directory / 'source.arm64'
     source.write_bytes(struct.pack('<II', word, RET))
     output = directory / 'native'
     compiler_mode = 'leaf' if mode == 'scalable' else 'block' if mode == 'service' else mode
     command = [str(cli), 'compile-' + compiler_mode, str(source), '--output-dir', str(output)]
     if mode != 'leaf':
-        command.extend(['--guest-base', '0x10000000'])
+        command.extend(['--guest-base', hex(SYSTEM_GUEST_BASE)])
     if mode == 'scalable':
         command.extend(['--guest-profile', guest_profile, '--svl-bytes', str(svl_bytes),
                         '--svcr', str(svcr), '--cpu-target', cpu_target])
@@ -506,7 +549,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
             command.extend(['--max-svl-bytes', str(max_svl_bytes),
                             '--zt0-enabled', str(zt0_enabled).lower()])
     if mode == 'service':
-        command.extend(['--software-pauth', '--software-clock'])
+        command.extend(SERVICE_BINDINGS[selected_service][1])
     process = run(command,
                   capture_output=True, text=True, timeout=30)
     if expect_failure:
@@ -518,7 +561,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     manifest = json.loads(process.stdout)
     source_data = source.read_bytes()
     if mode in ('block', 'service'):
-        if manifest.get('abi') != (SERVICE_ABI if mode == 'service' else BLOCK_ABI):
+        if manifest.get('abi') != (SERVICE_BINDINGS[selected_service][0] if mode == 'service' else BLOCK_ABI):
             raise ValueError('Compiler block probe ABI mismatch')
         consumed = manifest.get('source_bytes')
         if type(consumed) is not int or consumed != expected_source_bytes:
@@ -529,6 +572,12 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     native = output / 'native.bin'
     if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
         raise ValueError('Compiler probe native output identity mismatch')
+    if mode == 'service' and selected_service == SYSTEM_PROFILE:
+        expected_native = (MOVABS_RAX_IMM64 + struct.pack('<Q', SYSTEM_GUEST_BASE)
+                           + MOV_EDX_IMM32 + struct.pack('<I', SYSTEM_EXIT_KIND) + X86_RET)
+        if (native.read_bytes() != expected_native or manifest.get('target_cpu') != BASELINE_CPU_TARGET
+                or manifest.get('source_map') != [[SYSTEM_GUEST_BASE, 0]] or consumed != 4):
+            raise ValueError('System probe must preserve the exact source-bound baseline System exit')
     if mode == 'scalable':
         validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,
             guest_profile, expected_target_cpu=cpu_target, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
@@ -572,10 +621,16 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_ro
 def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None,
                 execution_profiles=None, canonical_catalog=None, arm_archive=None):
     profiles = validate_scalable_profiles(profile or {}, execution_profiles) if mode == 'scalable' else {}
+    service_profiles = validate_service_profiles(profile, execution_profiles) if mode == 'service' and profile else {}
     def contract(row=None):
         return profiles[profile['id'] if row is None else row['profile']]
     def options(sample=None, row=None):
         result = {'mode': mode} if mode != 'leaf' else {}
+        if mode == 'service':
+            selected = (profile or {}).get('id', SERVICE_PROFILE) if row is None else row['profile']
+            if service_profiles and selected not in service_profiles:
+                raise ValueError('Service row uses undeclared execution profile')
+            result['service_profile'] = selected
         if mode == 'scalable':
             declaration = contract(row)
             configuration = declaration if sample is None else sample
@@ -589,6 +644,16 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
     results = []
     independent_receipts = {}
     preferred_aliases = None
+    if mode == 'service':
+        import a64_disassembly
+        declined = sorted({validate_sample(forms[identity], sample)
+            for identity, row in overrides.items()
+            if row['status'] != 'unsupported' and row['profile'] == SYSTEM_PROFILE
+            for sample in row['smoke_samples']
+            if next(decoder.disasm(struct.pack('<I', validate_sample(forms[identity], sample)), 0), None) is None})
+        if declined:
+            independent_receipts[SYSTEM_DECODER_MATTRS] = a64_disassembly.decode_words(
+                declined, directory / 'llvm-system-decoding', mattrs=SYSTEM_DECODER_MATTRS)
     if mode == 'scalable':
         import a64_disassembly
         declined = {}
@@ -629,6 +694,10 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             if mode == 'scalable':
                 attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
                 independent_receipt = independent_receipts.get(attrs)
+                if independent_receipt is not None:
+                    independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
+            elif mode == 'service' and row['profile'] == SYSTEM_PROFILE:
+                independent_receipt = independent_receipts.get(SYSTEM_DECODER_MATTRS)
                 if independent_receipt is not None:
                     independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
             mnemonic, assembly, basis = smoke_decoding(
@@ -739,6 +808,13 @@ def validate_evidence(registry, overrides, compiler, root=ROOT, executable_hash=
                 value = value.get(part) if isinstance(value, dict) else None
             if type(value) is not int or value != expected:
                 raise ValueError(f'Differential evidence missing required measurement {key}')
+        if group.get('require_runtime_executable'):
+            runtime_path = repository_path(report.get('runtime_executable_path'))
+            runtime_hash = report.get('runtime_executable_sha256')
+            if sha256(root / runtime_path) != runtime_hash:
+                raise ValueError('Stale runtime test executable evidence')
+            results[name]['runtime_executable_path'] = str(runtime_path)
+            results[name]['runtime_executable_sha256'] = runtime_hash
         if group.get('require_current_executable') and report.get('compiler_executable_sha256') != executable_hash:
             raise ValueError('Stale service runtime executable evidence')
         if group['kind'] == 'arm64_block_control_flow_differential':
@@ -1264,7 +1340,9 @@ def main():
         service_directory = Path(temporary) / 'services'
         service_directory.mkdir()
         service_compiler, service_probes = smoke_forms(args.cli, service_rows, service_rows, service_directory,
-                                                     mode='service', canonical_facts=canonical_facts)
+                                                     mode='service', canonical_facts=canonical_facts,
+                                                     profile=service_registry['profile'],
+                                                     execution_profiles=service_registry.get('execution_profiles'))
         scalable_directory = Path(temporary) / 'scalable'
         scalable_directory.mkdir()
         scalable_compiler, scalable_probes = smoke_forms(
@@ -1328,7 +1406,11 @@ def main():
               'apple_specific_extensions': {'tracked': len(apple['extensions']),
                   'implemented': sum(r['status'] == 'implemented' for r in apple['extensions']),
                   'inventory_complete': False},
-              'service_profile_evidence': {'registry_sha256': hashlib.sha256(service_data).hexdigest(),
+              'service_profile_evidence': {'profile': service_registry['profile'],
+                  'execution_profiles': service_registry.get('execution_profiles', {}),
+                  'reviewed_forms': [{'id': identity, 'profile': row['profile'], 'status': row['status'], 'scope': row['scope']}
+                                     for identity, row in service_rows.items()],
+                  'registry_sha256': hashlib.sha256(service_data).hexdigest(),
                   'native_differential_evidence': service_evidence, 'compiler_sources_sha256': service_sources,
                   'compiler_smoke_probes': service_probes},
               'scalable_profile_evidence': {

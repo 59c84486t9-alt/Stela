@@ -273,6 +273,20 @@
       "all system-register/barrier operations except admitted clock forms"
     ]
   },
+  "execution_profiles": {
+    "system-v1": {
+      "id": "system-v1",
+      "compiler_mode": "service",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-system-v1",
+      "description": "Immutable source-bound System exits completed by checked typed CPU/platform services. Trusted CPU/platform owner supplies current feature/access/control snapshots; each row declares its supported effects and controls.",
+      "outside_scope": [
+        "ordinary RAM/exclusive/FP/context-dependent prefixes",
+        "raw SCTLR/MMU register-bank or page-table emulation",
+        "guest exception delivery for MTE faults; full CPU-profile/OS compatibility",
+        "asynchronous ordinary tag-check completion; successful fallback for unsupported platform requirements"
+      ]
+    }
+  },
   "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
   "evidence_groups": {
     "software_services": {
@@ -345,6 +359,37 @@
         "policy_counts.constrained_unpredictable_original_choice": 48,
         "policy_counts.qemu_sp_alignment_check_omission": 384
       }
+    },
+    "tag_memory_system": {
+      "harness": "crates/stela-runtime/tests/blocks/tag_memory_corpus.rs",
+      "report": ".stela/mte-original-corpus-report.json",
+      "kind": "tag_memory_original_corpus",
+      "comparison_field": "fresh_exact_original_comparisons",
+      "required_positive_counts": [
+        "fresh_native_blocks_executed"
+      ],
+      "required_measurements": {
+        "historical_full_bridge.provenance_distinct_original_frames": 21658,
+        "historical_full_bridge.exact_original_comparisons": 21423,
+        "historical_full_bridge.counts.IRG_exact_original_State_RGSR_GCR": 9936,
+        "historical_full_bridge.counts.exact_original_State_RAM_tags": 11487,
+        "historical_full_bridge.counts.SP_oracle_policy_excluded": 208,
+        "historical_full_bridge.counts.allowed_unknown_prefix_different_from_original_choice": 27,
+        "current_body_identity_bridge.emitted_PC_word_entries": 810,
+        "current_body_identity_bridge.unique_original_words": 698
+      },
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-system-v1",
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-runtime/tests/blocks/tag_memory_corpus.rs",
+        "crates/stela-runtime/tests/blocks/tag_memory_corpus/provenance.rs",
+        "crates/stela-runtime/tests/blocks/tag_memory_corpus/backend.rs",
+        "crates/stela-runtime/tests/blocks.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs"
+      ]
     }
   },
   "forms": [
@@ -1818,6 +1863,766 @@
           "expected_mnemonics": [
             "ldrab"
           ]
+        }
+      ]
+    },
+    {
+      "id": "IRG_64I_dp_2src",
+      "category": "base_integer_system",
+      "source_file": "irg.xml",
+      "encoding_mask": "0xffe0fc00",
+      "encoding_value": "0x9ac01000",
+      "alias": false,
+      "source_sha256": "2cd230b370789ac8e1c7a26ba60b5cfdb5ba510da4c0fe70e4476127b063744c",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. IRG admission uses authoritative GCR/RGSR with deterministic RRND=0 and no memory thread, RAM or Cx16 requirement. RRND1 kernel-entropy behavior has separate source/unit evidence, not random-byte equality from the original cohort. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0x9ac21020",
+          "expected_mnemonics": [
+            "irg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LDGM_64bulk_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "ldgm.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd9e00000",
+      "alias": false,
+      "source_sha256": "1470c5e29eedc8d298e444c6a3afc8f8b0adbe615d8999eb9c0a6b51863800f8",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9e00020",
+          "expected_mnemonics": [
+            "ldgm"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LDG_64Loffset_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "ldg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9600000",
+      "alias": false,
+      "source_sha256": "5543a3f8b9526302a3c079044c1e9b7cbeabf4fb689a8ff58a6c1986685c3452",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9600020",
+          "expected_mnemonics": [
+            "ldg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "ST2G_64Soffset_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "st2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9a00800",
+      "alias": false,
+      "source_sha256": "4eec148ed6d0c63e857edbfea7a5cb051b33f8165aa2227dd9d29c261f1c1951",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9a00820",
+          "expected_mnemonics": [
+            "st2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "ST2G_64Spost_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "st2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9a00400",
+      "alias": false,
+      "source_sha256": "4eec148ed6d0c63e857edbfea7a5cb051b33f8165aa2227dd9d29c261f1c1951",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9a01420",
+          "expected_mnemonics": [
+            "st2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "ST2G_64Spre_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "st2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9a00c00",
+      "alias": false,
+      "source_sha256": "4eec148ed6d0c63e857edbfea7a5cb051b33f8165aa2227dd9d29c261f1c1951",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9a01c20",
+          "expected_mnemonics": [
+            "st2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STGM_64bulk_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stgm.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd9a00000",
+      "alias": false,
+      "source_sha256": "acc74b584f5b12f752f950a25fb9b80d08dce50db091dd36418ca5cc90dec5c6",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9a00020",
+          "expected_mnemonics": [
+            "stgm"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STGP_64_ldstpair_off",
+      "category": "base_integer_system",
+      "source_file": "stgp.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x69000000",
+      "alias": false,
+      "source_sha256": "c39aa9a91542bac68e9f5eda3d43ff5c4f23a55b89aa281908d893b3f58ad625",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0x69008820",
+          "expected_mnemonics": [
+            "stgp"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STGP_64_ldstpair_post",
+      "category": "base_integer_system",
+      "source_file": "stgp.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x68800000",
+      "alias": false,
+      "source_sha256": "c39aa9a91542bac68e9f5eda3d43ff5c4f23a55b89aa281908d893b3f58ad625",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0x68808820",
+          "expected_mnemonics": [
+            "stgp"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STGP_64_ldstpair_pre",
+      "category": "base_integer_system",
+      "source_file": "stgp.xml",
+      "encoding_mask": "0xffc00000",
+      "encoding_value": "0x69800000",
+      "alias": false,
+      "source_sha256": "c39aa9a91542bac68e9f5eda3d43ff5c4f23a55b89aa281908d893b3f58ad625",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0x69808820",
+          "expected_mnemonics": [
+            "stgp"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STG_64Soffset_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9200800",
+      "alias": false,
+      "source_sha256": "3de2b16cb07b9148bd40c888f42ea0025617f4ddb2dd0e204283a719d1da29c3",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9200820",
+          "expected_mnemonics": [
+            "stg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STG_64Spost_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9200400",
+      "alias": false,
+      "source_sha256": "3de2b16cb07b9148bd40c888f42ea0025617f4ddb2dd0e204283a719d1da29c3",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9201420",
+          "expected_mnemonics": [
+            "stg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STG_64Spre_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9200c00",
+      "alias": false,
+      "source_sha256": "3de2b16cb07b9148bd40c888f42ea0025617f4ddb2dd0e204283a719d1da29c3",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Dedicated tag-only service requires no Cx16; physical tag-plane eligibility is conditional on effective allocation access, and rights still apply when disabled. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9201c20",
+          "expected_mnemonics": [
+            "stg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZ2G_64Soffset_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stz2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9e00800",
+      "alias": false,
+      "source_sha256": "33e428ae2e8b26f8231e4a4b3b2987187e1c95aeb6df78dd42c3c7836a976de6",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9e00820",
+          "expected_mnemonics": [
+            "stz2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZ2G_64Spost_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stz2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9e00400",
+      "alias": false,
+      "source_sha256": "33e428ae2e8b26f8231e4a4b3b2987187e1c95aeb6df78dd42c3c7836a976de6",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9e01420",
+          "expected_mnemonics": [
+            "stz2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZ2G_64Spre_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stz2g.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9e00c00",
+      "alias": false,
+      "source_sha256": "33e428ae2e8b26f8231e4a4b3b2987187e1c95aeb6df78dd42c3c7836a976de6",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9e01c20",
+          "expected_mnemonics": [
+            "stz2g"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZGM_64bulk_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stzgm.xml",
+      "encoding_mask": "0xfffffc00",
+      "encoding_value": "0xd9200000",
+      "alias": false,
+      "source_sha256": "73a547d72d5b291ba28d912fbc77b2fb14b531acd57e2bf4e38ffb59d145e5f6",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9200020",
+          "expected_mnemonics": [
+            "stzgm"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZG_64Soffset_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stzg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9600800",
+      "alias": false,
+      "source_sha256": "47b4ae3f2b34d12cd51a62c5b2d77d1d05fa7f9bd2bc97f02535ffb3207257e0",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9600820",
+          "expected_mnemonics": [
+            "stzg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZG_64Spost_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stzg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9600400",
+      "alias": false,
+      "source_sha256": "47b4ae3f2b34d12cd51a62c5b2d77d1d05fa7f9bd2bc97f02535ffb3207257e0",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9601420",
+          "expected_mnemonics": [
+            "stzg"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "STZG_64Spre_ldsttags",
+      "category": "base_integer_system",
+      "source_file": "stzg.xml",
+      "encoding_mask": "0xffe00c00",
+      "encoding_value": "0xd9600c00",
+      "alias": false,
+      "source_sha256": "47b4ae3f2b34d12cd51a62c5b2d77d1d05fa7f9bd2bc97f02535ffb3207257e0",
+      "profile": "system-v1",
+      "status": "implemented",
+      "review": "Pinned June2026 source/constraints reviewed; actual original-vs-production BlockRuntime System11 plus Execution service bridge, full State/RAM/tag/RGSR effects and explicitly classified oracle/UNKNOWN limits.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/tag_memory.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/x86_64/block.rs",
+        "crates/stela-runtime/src/blocks.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/state.rs",
+        "crates/stela-runtime/src/memory/tag_execution.rs",
+        "crates/stela-runtime/src/memory/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/tag_transfer.rs",
+        "crates/stela-runtime/src/memory/domain/profile.rs"
+      ],
+      "evidence_groups": [
+        "tag_memory_system"
+      ],
+      "scope": "Complete canonical form in declared MTE2-or-later feature/access profile through SystemV1. CPU owner supplies applicable effective controls: SA/SA0 for SP address bases and GMID/DCZID for bulk operations. Data16 service requires checked Cx16/native/physical granule eligibility; EL0 bulk Undefined is selected before memory/capability requirements. Emitted System exit target is baseline x86_64. No full CPU/OS or guest exception-delivery claim.",
+      "smoke_samples": [
+        {
+          "word": "0xd9601c20",
+          "expected_mnemonics": [
+            "stzg"
+          ],
+          "consumed_source_bytes": 4
         }
       ]
     }

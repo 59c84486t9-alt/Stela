@@ -651,7 +651,7 @@ class ScalableProgressTests(unittest.TestCase):
                     if mode == 'block':
                         registry['profile'].update(id='block', compiler_command='compile-block', abi=progress.BLOCK_ABI)
                     elif mode == 'service':
-                        registry['profile'].update(id='service', compiler_mode='service', abi=progress.SERVICE_ABI)
+                        registry['profile'].update(id=progress.SERVICE_PROFILE, compiler_mode='service', abi=progress.SERVICE_ABI)
                     elif mode == 'scalable':
                         registry['profile'] = self.profile()
                     path = root / (mode + '.json')
@@ -1310,6 +1310,62 @@ class EvidenceTests(unittest.TestCase):
             progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
 
 
+    def test_fresh_comparisons_cannot_substitute_for_required_historical_and_body_partitions(self):
+        group = self.registry['evidence_groups']['carry']
+        group.update(comparison_field='fresh_exact_original_comparisons',
+                     required_positive_counts=['fresh_native_blocks_executed'],
+                     required_measurements={
+                         'historical_full_bridge.provenance_distinct_original_frames': 21658,
+                         'historical_full_bridge.exact_original_comparisons': 21423,
+                         'historical_full_bridge.counts.IRG_exact_original_State_RGSR_GCR': 9936,
+                         'historical_full_bridge.counts.exact_original_State_RAM_tags': 11487,
+                         'historical_full_bridge.counts.SP_oracle_policy_excluded': 208,
+                         'historical_full_bridge.counts.allowed_unknown_prefix_different_from_original_choice': 27,
+                         'current_body_identity_bridge.emitted_PC_word_entries': 810,
+                         'current_body_identity_bridge.unique_original_words': 698})
+        self.report.update(fresh_exact_original_comparisons=3, fresh_native_blocks_executed=4,
+            historical_full_bridge={'provenance_distinct_original_frames': 21658,
+                'exact_original_comparisons': 21423,
+                'counts': {'IRG_exact_original_State_RGSR_GCR': 9936,
+                          'exact_original_State_RAM_tags': 11487,
+                          'SP_oracle_policy_excluded': 208,
+                          'allowed_unknown_prefix_different_from_original_choice': 27}},
+            current_body_identity_bridge={'emitted_PC_word_entries': 810, 'unique_original_words': 698})
+        self.write_report()
+        evidence, _ = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.assertEqual(evidence['carry']['native_comparisons'], 3)
+        current = copy.deepcopy(self.report)
+        for key in group['required_measurements']:
+            self.report = copy.deepcopy(current)
+            target = self.report
+            parts = key.split('.')
+            for part in parts[:-1]:
+                target = target[part]
+            target[parts[-1]] -= 1
+            self.write_report()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+        self.report = current
+        self.report['fresh_native_blocks_executed'] = 0
+        self.write_report()
+        with self.assertRaises(ValueError):
+            progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+
+
+    def test_runtime_test_executable_is_distinct_from_cli_smoke_evidence(self):
+        runtime = self.root / 'runtime-test'
+        runtime.write_bytes(b'actual separately retained test executable')
+        self.registry['evidence_groups']['carry']['require_runtime_executable'] = True
+        self.report.update(runtime_executable_path='runtime-test', runtime_executable_sha256=progress.sha256(runtime))
+        self.write_report()
+        evidence, _ = progress.validate_evidence(self.registry, self.rows, COMPILER, self.root,
+                                                executable_hash='d' * 64)
+        self.assertEqual(evidence['carry']['runtime_executable_sha256'], progress.sha256(runtime))
+        runtime.write_bytes(b'changed executable')
+        with self.assertRaisesRegex(ValueError, 'runtime test executable'):
+            progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
+
+
     def test_block_evidence_requires_current_compiler_and_runtime_sources(self):
         self.registry['evidence_groups']['carry'].update(
             kind='arm64_block_control_flow_differential', abi=progress.BLOCK_ABI,
@@ -1889,6 +1945,102 @@ class SampleHostTargetTests(unittest.TestCase):
             progress.validate_scalable_profile(profile)
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, 'context compiler lane'):
             progress.compile_probe('cli', progress.RET, Path(directory), cpu_target='x86_64-baseline+cx16')
+
+
+class SystemServiceProfileTests(unittest.TestCase):
+    def contracts(self):
+        default = {'id': progress.SERVICE_PROFILE, 'compiler_mode': 'service',
+                   'abi': progress.SERVICE_ABI, 'outside_scope': ['System services']}
+        system = {'id': progress.SYSTEM_PROFILE, 'compiler_mode': 'service',
+                  'abi': progress.SYSTEM_ABI, 'outside_scope': ['Full CPU/OS']}
+        return default, {progress.SYSTEM_PROFILE: system}
+
+    def test_default_and_system_profiles_are_separate_and_bounded(self):
+        default, additional = self.contracts()
+        self.assertEqual(set(progress.validate_service_profiles(default, additional)),
+                         {progress.SERVICE_PROFILE, progress.SYSTEM_PROFILE})
+        for mutation in ({'abi': progress.SERVICE_ABI}, {'compiler_mode': 'leaf'}, {'id': 'unknown'}):
+            changed = copy.deepcopy(additional)
+            changed[progress.SYSTEM_PROFILE].update(mutation)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                progress.validate_service_profiles(default, changed)
+        with self.assertRaises(ValueError):
+            progress.validate_service_profiles(default, {default['id']: default})
+
+    def test_mixed_service_rows_select_their_own_profile_without_new_lane(self):
+        default, additional = self.contracts()
+        registry = fixtures()
+        registry['profile'] = default
+        registry['execution_profiles'] = additional
+        registry['forms'] = [registry['forms'][0]]
+        registry['forms'][0]['profile'] = progress.SERVICE_PROFILE
+        system = copy.deepcopy(registry['forms'][0])
+        system.update(id='IRG_64I_dp_2src', profile=progress.SYSTEM_PROFILE,
+                      encoding_mask='0xffe0fc00', encoding_value='0x9ac01000',
+                      smoke_samples=[{'word': '0x9ac21020', 'expected_mnemonics': ['irg']}])
+        registry['forms'].append(system)
+        rows = progress.validate_registry(registry)
+        with tempfile.TemporaryDirectory() as directory, patch.object(progress, 'compile_probe',
+                return_value={'compiler_source_sha256': COMPILER}) as compile_probe:
+            progress.smoke_forms('cli', rows, rows, Path(directory), mode='service',
+                                 profile=default, execution_profiles=additional)
+        self.assertEqual([call.kwargs['service_profile'] for call in compile_probe.call_args_list],
+                         [progress.SERVICE_PROFILE, progress.SYSTEM_PROFILE])
+        system['profile'] = 'undeclared-system'
+        with self.assertRaises(ValueError):
+            progress.validate_registry(registry)
+
+    def fake_compiler(self, mutation=None):
+        def run(command, **_kwargs):
+            self.command = command
+            source = Path(command[2])
+            output = Path(command[command.index('--output-dir') + 1])
+            output.mkdir()
+            native = bytes.fromhex('48b80000001000000000ba0b000000c3')
+            manifest = {'source_sha256': hashlib.sha256(source.read_bytes()[:4]).hexdigest(),
+                        'source_bytes': 4, 'abi': progress.SYSTEM_ABI,
+                        'compiler_source_sha256': COMPILER,
+                        'target_cpu': 'x86_64-baseline', 'source_map': [[progress.SYSTEM_GUEST_BASE, 0]]}
+            if mutation:
+                native = mutation(manifest, native)
+            (output / 'native.bin').write_bytes(native)
+            manifest['native_sha256'] = progress.sha256(output / 'native.bin')
+            return subprocess.CompletedProcess(command, 0, json.dumps(manifest), '')
+        return run
+
+    def test_system_probe_uses_explicit_baseline_system_flags_and_abi(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = progress.compile_probe('cli', 0x9ac21020, Path(directory), mode='service',
+                service_profile=progress.SYSTEM_PROFILE, run=self.fake_compiler())
+        self.assertIn('--system-boundaries', self.command)
+        self.assertNotIn('--software-pauth', self.command)
+        self.assertNotIn('--software-clock', self.command)
+        self.assertEqual(self.command[self.command.index('--cpu-target') + 1], progress.BASELINE_CPU_TARGET)
+        self.assertEqual((result['abi'], result['source_bytes'], result['native_bytes']),
+                         (progress.SYSTEM_ABI, 4, 16))
+
+    def test_system_probe_rejects_wrong_pc_exit_target_or_map(self):
+        def wrong_exit(_manifest, native):
+            return native[:11] + bytes([12]) + native[12:]
+        def wrong_pc(_manifest, native):
+            return native[:2] + bytes([4]) + native[3:]
+        def wrong_target(manifest, native):
+            manifest['target_cpu'] = 'x86_64-baseline+cx16'
+            return native
+        def wrong_map(manifest, native):
+            manifest['source_map'] = [[progress.SYSTEM_GUEST_BASE + 4, 0]]
+            return native
+        for mutation in (wrong_exit, wrong_pc, wrong_target, wrong_map):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                progress.compile_probe('cli', 0x9ac21020, Path(directory), mode='service',
+                    service_profile=progress.SYSTEM_PROFILE, run=self.fake_compiler(mutation))
+
+    def test_service_profile_cannot_leak_into_leaf_or_unknown_lane(self):
+        for mode, profile in [('leaf', progress.SYSTEM_PROFILE), ('service', 'unknown')]:
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                progress.compile_probe('cli', progress.RET, Path(directory), mode=mode,
+                    service_profile=profile, run=lambda *_args, **_kwargs: self.fail('must not compile'))
+
 
 
 if __name__ == '__main__':
