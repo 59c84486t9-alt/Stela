@@ -878,15 +878,39 @@ class DeclaredScalableProgressTests(unittest.TestCase):
         self.assertEqual(probe.call_args_list[-1].kwargs, {'mode': 'scalable',
             'guest_profile': 'sme-streaming-v2', 'svl_bytes': 16, 'svcr': 3, **self.declaration()})
 
+    def test_distinct_explicit_svl_contracts_coexist(self):
+        default = ScalableProgressTests().profile()
+        contracts = {'svl16': self.profile(), 'svl32': {**self.profile(), 'svl_bytes': 32}}
+        original = copy.deepcopy(contracts)
+        profiles = progress.validate_scalable_profiles(default, contracts)
+        self.assertEqual(profiles['svl16']['svl_bytes'], 16)
+        self.assertEqual(profiles['svl32']['svl_bytes'], 32)
+        self.assertEqual(contracts, original)
+        self.assertEqual(profiles[default['id']], default)
+
+    def test_distinct_explicit_svcr_contracts_coexist(self):
+        contracts = {'sm': {**self.profile(), 'svcr': 1}, 'sm-za': self.profile()}
+        profiles = progress.validate_scalable_profiles(ScalableProgressTests().profile(), contracts)
+        self.assertEqual(profiles['sm']['svcr'], 1)
+        self.assertEqual(profiles['sm-za']['svcr'], 3)
+
+    def test_identical_execution_contract_keys_still_decline(self):
+        first = self.profile()
+        # Feature order and descriptions do not create a new execution identity.
+        same = {**self.profile(), 'features': list(reversed(first['features'])),
+                'description': 'Another description', 'outside_scope': ['Other wording']}
+        with self.assertRaisesRegex(ValueError, 'Duplicate semantic execution-profile'):
+            progress.validate_scalable_profiles(ScalableProgressTests().profile(), {'first': first, 'same': same})
+
     def test_ambiguous_duplicate_unknown_and_undeclared_profiles_fail(self):
-        for value in ([], {}, {'alias': self.profile(), 'same': {**self.profile(), 'svl_bytes': 32}},
+        for value in ([], {}, {'alias': self.profile(), 'same': self.profile()},
                       {'': self.profile()}, {progress.SCALABLE_PROFILE: self.profile()},
                       {'bad': {**self.profile(), 'id': 'future-v3'}},
                       {'bad': {**self.profile(), 'ezt0': True}}):
             registry = self.registry()
             registry['execution_profiles'] = value
             with self.subTest(value=value), self.assertRaises(ValueError):
-                progress.validate_registry(registry)
+                progress.validate_scalable_profiles(registry['profile'], value)
         for key in ('sme-streaming-v2', 'undeclared', None, []):
             registry = self.registry()
             registry['forms'][1]['profile'] = key

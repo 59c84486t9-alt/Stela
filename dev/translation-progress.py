@@ -398,8 +398,7 @@ def validate_scalable_profile(profile):
 def validate_scalable_profiles(default_profile, execution_profiles=None):
     default = validate_scalable_profile(default_profile)
     profiles = {default_profile['id']: default_profile}
-    identities = {json.dumps({key: value for key, value in default.items() if key not in ('svl_bytes', 'svcr')},
-                             sort_keys=True)}
+    identities = {json.dumps(default, sort_keys=True)}
     if execution_profiles is not None:
         if not isinstance(execution_profiles, dict) or not execution_profiles:
             raise ValueError('Execution profiles must be a nonempty specialization-key mapping')
@@ -409,8 +408,7 @@ def validate_scalable_profiles(default_profile, execution_profiles=None):
             execution = validate_scalable_profile(contract)
             if not contract.get('outside_scope'):
                 raise ValueError('Execution profile specialization needs explicit scope limits')
-            identity = json.dumps({name: value for name, value in execution.items()
-                                   if name not in ('svl_bytes', 'svcr')}, sort_keys=True)
+            identity = json.dumps(execution, sort_keys=True)
             if identity in identities:
                 raise ValueError('Duplicate semantic execution-profile contract')
             identities.add(identity)
