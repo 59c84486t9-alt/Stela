@@ -4,6 +4,10 @@
 //! `Resolution::NotHandled` is only a family dispatch miss. The caller's complete
 //! allocation table owns the final unallocated versus unsupported distinction.
 
+pub(crate) mod drps;
+pub(crate) mod halted;
+pub(crate) mod halting;
+
 const DEBUG_OP0: u8 = 2;
 const DEBUG_EL1_OP1: u8 = 0;
 const BANK_SIZE: u8 = 16;

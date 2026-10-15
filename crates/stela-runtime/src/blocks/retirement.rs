@@ -19,6 +19,7 @@ pub(crate) struct RetainedResources<'pe, B> {
     thread: &'pe mut ThreadState,
     system: &'pe mut SystemState,
     backend: &'pe mut B,
+    debug: &'pe mut Option<crate::system::debug::halted::DebugMachine>,
 }
 
 impl<'pe, B> RetainedResources<'pe, B> {
@@ -28,12 +29,14 @@ impl<'pe, B> RetainedResources<'pe, B> {
         thread: &'pe mut ThreadState,
         system: &'pe mut SystemState,
         backend: &'pe mut B,
+        debug: &'pe mut Option<crate::system::debug::halted::DebugMachine>,
     ) -> Self {
         Self {
             authority,
             thread,
             system,
             backend,
+            debug,
         }
     }
 }

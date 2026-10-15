@@ -222,6 +222,58 @@ impl Snapshot {
             .map_err(Unsupported::EntryProfile)
     }
 
+    /// The same exact optional-effect facts, independently of EL availability.
+    /// Higher-EL owners must additionally validate their actual EL/security and
+    /// execution-state controls; this method never relaxes check_el10_regime.
+    pub(crate) fn base_entry_effect_profile(&self) -> Result<EntryProfile, Unsupported> {
+        self.check_base_optional_entry_effects()?;
+        let scalable = ScalableEntryAbsence::from_id_registers(
+            self.read(Register::IdAa64Pfr0El1)?,
+            self.read(Register::IdAa64Pfr1El1)?,
+        )
+        .map_err(Unsupported::EntryProfile)?;
+        EntryProfile::base(SystemEntryFeatures::declared_absent(), scalable)
+            .map_err(Unsupported::EntryProfile)
+    }
+
+    /// Same optional system-state effects for a debug lifecycle which may retain
+    /// actual SME storage. This grants no scalable access or exception entry.
+    pub(crate) fn check_base_optional_entry_effects(&self) -> Result<(), Unsupported> {
+        for &field in REQUIRED_ABSENCES {
+            self.require_zero(field)?;
+        }
+        // DF2=0 does not establish DoubleFault absence: PFR0.RAS>=2 identifies it.
+        let ras = self.field(Field {
+            register: Register::IdAa64Pfr0El1,
+            name: "RAS",
+            shift: RAS_SHIFT,
+        })?;
+        if ras > RAS_BASE_VERSION {
+            return Err(Unsupported::Field {
+                register: Register::IdAa64Pfr0El1,
+                field: "RAS",
+                value: ras,
+            });
+        }
+        let isar1 = self.read(Register::IdAa64Isar1El1)?;
+        let isar2 = self.read(Register::IdAa64Isar2El1)?;
+        let apa = ((isar1 >> APA_SHIFT) & FIELD_MASK) as u8;
+        let api = ((isar1 >> API_SHIFT) & FIELD_MASK) as u8;
+        let apa3 = ((isar2 >> APA3_SHIFT) & FIELD_MASK) as u8;
+        // This narrow source-reviewed PAuth_LR-absence path supports the current
+        // Classic/Auth2 algorithm tuples or all algorithms absent. Other tuples decline;
+        // it never mistakes PAuth_LR absence for general PAuth absence.
+        if !matches!(
+            (apa, api, apa3),
+            (FEATURE_ABSENT, FEATURE_ABSENT, FEATURE_ABSENT)
+                | (APA_QARMA5_CLASSIC, FEATURE_ABSENT, FEATURE_ABSENT)
+                | (APA_QARMA5_FAULTING_COMBINED, FEATURE_ABSENT, FEATURE_ABSENT)
+        ) {
+            return Err(Unsupported::PauthLrTuple { apa, api, apa3 });
+        }
+        Ok(())
+    }
+
     pub fn check_entry_profile(&self, profile: EntryProfile) -> Result<(), Unsupported> {
         if self.entry_profile()? != profile {
             return Err(Unsupported::EntryProfileMismatch);

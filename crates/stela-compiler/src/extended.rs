@@ -5,6 +5,7 @@
 //! effects remain explicit declines.
 
 pub mod block;
+pub mod debug_movement;
 
 mod prefix;
 

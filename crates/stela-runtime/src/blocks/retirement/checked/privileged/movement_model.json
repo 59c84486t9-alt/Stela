@@ -1,0 +1,368 @@
+{
+  "kind": "deduplicated_literal_model_outputs_for_actual_halted_native_probe",
+  "source_corpus_sha256": "54cf0a0a4c3399b2b050a4a1b1525aab71cfefa2d10339d28775a7d8cb6d03b3",
+  "model_sha256": "ca406d88718a27881167f7c90f9af7f4e9373084503e3165490b46b5e9f33970",
+  "limits": "No ARM/debug original oracle. Matching model X/ZT0/SP/NZCV/FPCR/FPSR and modes; unaffected Z/P/FFR/ZA get separate actual-owner preservation probes, not the historical hashed input bytes. 48 literal word outcomes x5 SVL x2 SM=480 intended native/model comparisons, not yet executed.",
+  "before": {
+    "x": [
+      18437378006102193432,
+      18219519621274811392,
+      18292130286789863176,
+      18074271901425610288,
+      18146891363303166264,
+      17929015386023401504,
+      18001643643458159400,
+      17783767941320542800,
+      17856387402929671512,
+      17638529017565443136,
+      17711139683076308808,
+      17493281298248918640,
+      17565900759589611896,
+      17348024782305644640,
+      17420653040277281640,
+      17220791736116462224,
+      17293411197725590936,
+      17075552812898208896,
+      17148163478413293448,
+      16930305093049040560,
+      17002924554926596536,
+      16785189315143575712,
+      16857817572578333608,
+      16639941870440717008,
+      16712561332049845720,
+      16494702950980551872,
+      16567313616499806152,
+      16349455231672448752,
+      16422074693013142008,
+      16204198715729174752,
+      16276826973700811752
+    ],
+    "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0",
+    "sp": 1161981756646125696,
+    "nzcv": 2684354560,
+    "fpcr": 4194304,
+    "fpsr": 134217759
+  },
+  "cases": [
+    {
+      "word": "c04c03e0",
+      "x_changes": [
+        [
+          0,
+          9832873453884610051
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c03fe",
+      "x_changes": [
+        [
+          30,
+          9832873453884610051
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c03ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c13e0",
+      "x_changes": [
+        [
+          0,
+          2309778057524784795
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c13fe",
+      "x_changes": [
+        [
+          30,
+          2309778057524784795
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c13ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c23e0",
+      "x_changes": [
+        [
+          0,
+          13305201750112290355
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c23fe",
+      "x_changes": [
+        [
+          30,
+          13305201750112290355
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c23ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c33e0",
+      "x_changes": [
+        [
+          0,
+          5781823774969159371
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c33fe",
+      "x_changes": [
+        [
+          30,
+          5781823774969159371
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c33ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c43e0",
+      "x_changes": [
+        [
+          0,
+          16777530046339970659
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c43fe",
+      "x_changes": [
+        [
+          30,
+          16777530046339970659
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c43ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c53e0",
+      "x_changes": [
+        [
+          0,
+          9254152071179996923
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c53fe",
+      "x_changes": [
+        [
+          30,
+          9254152071179996923
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c53ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c63e0",
+      "x_changes": [
+        [
+          0,
+          1731056674820171411
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c63fe",
+      "x_changes": [
+        [
+          30,
+          1731056674820171411
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c63ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c73e0",
+      "x_changes": [
+        [
+          0,
+          12726480367407676971
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c73fe",
+      "x_changes": [
+        [
+          30,
+          12726480367407676971
+        ]
+      ],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04c73ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e03e0",
+      "x_changes": [],
+      "zt0": "183552739cb9deff9baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e03fe",
+      "x_changes": [],
+      "zt0": "e8ebeeede4e7e2e19baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e03ff",
+      "x_changes": [],
+      "zt0": "00000000000000009baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e13e0",
+      "x_changes": [],
+      "zt0": "0316293c4f627588183552739cb9deff3346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e13fe",
+      "x_changes": [],
+      "zt0": "0316293c4f627588e8ebeeede4e7e2e13346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e13ff",
+      "x_changes": [],
+      "zt0": "0316293c4f62758800000000000000003346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e23e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d20183552739cb9deffcbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e23fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d20e8ebeeede4e7e2e1cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e23ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d200000000000000000cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e33e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8183552739cb9deff6376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e33fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8e8ebeeede4e7e2e16376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e33ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b800000000000000006376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e43e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d50183552739cb9defffb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e43fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d50e8ebeeede4e7e2e1fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e43ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d500000000000000000fb0e2134475a6d8093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e53e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8183552739cb9deff93a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e53fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8e8ebeeede4e7e2e193a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e53ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8000000000000000093a6b9ccdff205182b3e5164778a9db0"
+    },
+    {
+      "word": "c04e63e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d80183552739cb9deff2b3e5164778a9db0"
+    },
+    {
+      "word": "c04e63fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d80e8ebeeede4e7e2e12b3e5164778a9db0"
+    },
+    {
+      "word": "c04e63ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8000000000000000002b3e5164778a9db0"
+    },
+    {
+      "word": "c04e73e0",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff20518183552739cb9deff"
+    },
+    {
+      "word": "c04e73fe",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff20518e8ebeeede4e7e2e1"
+    },
+    {
+      "word": "c04e73ff",
+      "x_changes": [],
+      "zt0": "0316293c4f6275889baec1d4e7fa0d203346596c7f92a5b8cbdef104172a3d506376899cafc2d5e8fb0e2134475a6d8093a6b9ccdff205180000000000000000"
+    }
+  ]
+}

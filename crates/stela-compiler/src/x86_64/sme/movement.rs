@@ -243,6 +243,81 @@ pub(crate) fn emit(
     Ok(())
 }
 
+/// Only the separate halted-ITR compiler entry calls this mapping. The normal
+/// movement emitter above retains its explicit TableGpr rejection unchanged.
+pub(crate) fn emit_debug_table_gpr(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    recipe: crate::extended::debug_movement::Recipe,
+) -> Result<(), &'static str> {
+    use crate::extended::debug_movement::Recipe;
+    const ZERO_REGISTER: u8 = 31;
+    const TABLE_LANES: u8 = 8;
+    const MOV_RAX_STATE_DISP32: &[u8] = &[0x48, 0x8b, 0x87];
+    const MOV_STATE_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x87];
+    const MOV_RAX_R8_DISP8: &[u8] = &[0x49, 0x8b, 0x40];
+    const MOV_R8_DISP8_RAX: &[u8] = &[0x49, 0x89, 0x40];
+    const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+    const MOVQ_XMM0_STATE_DISP32: &[u8] = &[0xf3, 0x0f, 0x7e, 0x87];
+    const MOVQ_STATE_DISP32_XMM0: &[u8] = &[0x66, 0x0f, 0xd6, 0x87];
+    const MOVQ_XMM0_R8_DISP8: &[u8] = &[0xf3, 0x41, 0x0f, 0x7e, 0x40];
+    const MOVQ_R8_DISP8_XMM0: &[u8] = &[0x66, 0x41, 0x0f, 0xd6, 0x40];
+    const PXOR_XMM0_XMM0: &[u8] = &[0x66, 0x0f, 0xef, 0xc0];
+    let Kind::TableGpr {
+        direction,
+        register,
+        lane,
+    } = operand.kind
+    else {
+        return Err("halted MOVT emitter requires TableGpr operands");
+    };
+    if register > ZERO_REGISTER || lane >= TABLE_LANES {
+        return Err("invalid halted MOVT operands");
+    }
+    if direction == Direction::FromZa && register == ZERO_REGISTER {
+        return Ok(());
+    }
+    pointer(code, SCALABLE_ZT0_OFFSET);
+    let state_offset =
+        (std::mem::offset_of!(GuestState, x) + usize::from(register) * GPR_BYTES) as u32;
+    let lane_offset = lane * GPR_BYTES as u8;
+    match (direction, recipe) {
+        (Direction::ToZa, Recipe::Scalar) => {
+            if register == ZERO_REGISTER {
+                code.extend(XOR_EAX_EAX);
+            } else {
+                code.extend(MOV_RAX_STATE_DISP32);
+                code.extend(state_offset.to_le_bytes());
+            }
+            code.extend(MOV_R8_DISP8_RAX);
+            code.push(lane_offset);
+        }
+        (Direction::FromZa, Recipe::Scalar) => {
+            code.extend(MOV_RAX_R8_DISP8);
+            code.push(lane_offset);
+            code.extend(MOV_STATE_DISP32_RAX);
+            code.extend(state_offset.to_le_bytes());
+        }
+        (Direction::ToZa, Recipe::Sse2Comparison) => {
+            if register == ZERO_REGISTER {
+                code.extend(PXOR_XMM0_XMM0);
+            } else {
+                code.extend(MOVQ_XMM0_STATE_DISP32);
+                code.extend(state_offset.to_le_bytes());
+            }
+            code.extend(MOVQ_R8_DISP8_XMM0);
+            code.push(lane_offset);
+        }
+        (Direction::FromZa, Recipe::Sse2Comparison) => {
+            code.extend(MOVQ_XMM0_R8_DISP8);
+            code.push(lane_offset);
+            code.extend(MOVQ_STATE_DISP32_XMM0);
+            code.extend(state_offset.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
 fn pointer(code: &mut Vec<u8>, field: u32) {
     code.extend(MOV_R8_CONTEXT_DISP8);
     code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);

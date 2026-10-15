@@ -5,12 +5,18 @@ mod darwin_services;
 mod diagnostics;
 mod el1_registers;
 mod entry_controls;
+mod halted;
 mod low128_call;
 mod m0;
 mod pauth_lr;
 mod pauth_policy;
+mod privileged;
+mod privileged_debug;
 mod provider;
+pub(crate) use halted::{OwnedDebugOutcome, run_halted_owned};
+pub(crate) use privileged::PrivilegedOwner;
 pub(crate) mod software_el1;
+pub(crate) mod software_privileged;
 mod source;
 
 use super::{ConsumerKey, RetainedResources, SystemExecutionLoan, accept_retained_loan};
@@ -37,6 +43,9 @@ pub(crate) enum OwnedStop {
     BudgetExhausted,
     EntryDeclined(String),
     HelperRefused(String),
+    Halted {
+        instruction_pc: GuestAddress,
+    },
     PointerAuthenticationFault {
         instruction: stela_compiler::block::PointerAuthentication,
         code: u8,
@@ -175,11 +184,7 @@ impl BlockRuntime {
                 crate::execution::platform::ensure_supported()?;
                 anyhow::ensure!(self.target_cpu().supported(), "host target unsupported");
                 anyhow::ensure!(
-                    self.profile.checked_memory().is_some()
-                        || matches!(
-                            self.profile,
-                            BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
-                        ),
+                    pe.backend.supports_profile(self.profile),
                     "checked profile required"
                 );
                 anyhow::ensure!(pe.thread.pc.0.is_multiple_of(4), "unaligned actual PC");
@@ -195,9 +200,13 @@ impl BlockRuntime {
                 Ok(bound) => bound,
                 Err(error) => break OwnedStop::EntryDeclined(error.to_string()),
             };
-            if let Err(error) =
-                pe.backend
-                    .qualify(&bound, pe.system, &mut pe.thread.registers, &outer)
+            if let Err(error) = pe
+                .backend
+                .qualify_debug_lifecycle(pe.debug.as_ref(), pe.system)
+                .and_then(|()| {
+                    pe.backend
+                        .qualify(&bound, pe.system, &mut pe.thread.registers, &outer)
+                })
             {
                 break OwnedStop::EntryDeclined(error.to_string());
             }
@@ -272,6 +281,9 @@ impl BlockRuntime {
             }
         };
         accounting.reason = match &stop {
+            OwnedStop::Halted { instruction_pc } => StopReason::Halted {
+                instruction_pc: *instruction_pc,
+            },
             OwnedStop::StopAddress => StopReason::StopAddress,
             OwnedStop::BudgetExhausted => StopReason::BudgetExhausted,
             OwnedStop::PointerAuthenticationPoisonedTransfer {
@@ -402,6 +414,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     ReturnedTerminal::Ordinary(_) => None,
                     ReturnedTerminal::Helper(helper) => Some(helper.pc()),
                     ReturnedTerminal::Trap(trap) => Some(trap.instruction_pc),
+                    ReturnedTerminal::System(boundary) => {
+                        Some(boundary.instruction().instruction_pc)
+                    }
                 };
                 prefixes.push(bound.prefix(stopped_before, 0)?);
                 accounting.blocks_executed += 1;
@@ -566,6 +581,105 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                         instruction,
                                         target,
                                     }
+                                }))
+                            }
+                        }
+                    }
+                    ReturnedTerminal::System(boundary) => {
+                        self.pe.thread.pc = boundary.instruction().instruction_pc;
+                        self.pe
+                            .authority
+                            .enter_system(&ConsumerKey(()), self.attempt)
+                            .map_err(|()| anyhow::anyhow!("System entry authority failed"))?;
+                        let outcome = self.pe.backend.complete_system(
+                            bound,
+                            &boundary,
+                            self.pe.system,
+                            &mut self.pe.thread.registers,
+                            self.pe.debug.as_mut(),
+                            self.outer
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("System outer unavailable"))?,
+                        );
+                        match outcome {
+                            privileged::SystemOutcome::NoEffect(error) => {
+                                self.pe.backend.qualify_debug_lifecycle(
+                                    self.pe.debug.as_ref(),
+                                    self.pe.system,
+                                )?;
+                                self.pe.backend.qualify(
+                                    bound,
+                                    self.pe.system,
+                                    &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("System outer unavailable")
+                                    })?,
+                                )?;
+                                self.pe
+                                    .authority
+                                    .finish_refusal(&ConsumerKey(()), self.attempt)
+                                    .map_err(|()| {
+                                        anyhow::anyhow!("System refusal authority failed")
+                                    })?;
+                                self.closed = true;
+                                Ok(Some(OwnedStop::HelperRefused(error.to_string())))
+                            }
+                            privileged::SystemOutcome::Indeterminate { committed, error } => Err(
+                                anyhow::anyhow!("System effects through {committed:?}: {error}"),
+                            ),
+                            privileged::SystemOutcome::Entry { target } => {
+                                self.pe
+                                    .authority
+                                    .start_retirement(&ConsumerKey(()), self.attempt)
+                                    .map_err(|()| {
+                                        anyhow::anyhow!("System retirement authority failed")
+                                    })?;
+                                self.pe.thread.pc = target;
+                                let target_source = BoundSource::new(bound.runtime, target)?;
+                                self.pe.backend.qualify(
+                                    &target_source,
+                                    self.pe.system,
+                                    &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("actual target outer unavailable")
+                                    })?,
+                                )?;
+                                self.pe.backend.post_retirement(
+                                    bound,
+                                    self.pe.system,
+                                    &mut self.pe.thread.registers,
+                                    self.outer.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("System outer unavailable")
+                                    })?,
+                                )?;
+                                self.pe.backend.qualify_debug_lifecycle(
+                                    self.pe.debug.as_ref(),
+                                    self.pe.system,
+                                )?;
+                                self.finish_retirement(false)?;
+                                Ok(None)
+                            }
+                            privileged::SystemOutcome::Halted { source_pc } => {
+                                anyhow::ensure!(
+                                    self.pe.thread.pc == source_pc,
+                                    "Halt source PC changed"
+                                );
+                                let debug =
+                                    self.pe.debug.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("Halt lifecycle unavailable")
+                                    })?;
+                                debug
+                                    .qualify_halted_boundary()
+                                    .map_err(|e| anyhow::anyhow!("Halt gate: {e:?}"))?;
+                                // EndOfInstruction(Exception): the actual instruction PC remains
+                                // the restart source, and the sole phase becomes Halted. No Ready.
+                                self.pe
+                                    .authority
+                                    .finish_halt(&ConsumerKey(()), self.attempt)
+                                    .map_err(|()| anyhow::anyhow!("Halt authority failed"))?;
+                                self.closed = true;
+                                Ok(Some(OwnedStop::Halted {
+                                    instruction_pc: source_pc,
                                 }))
                             }
                         }

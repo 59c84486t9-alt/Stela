@@ -57,6 +57,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("context.rs"),
     include_str!("context/memory.rs"),
     include_str!("extended.rs"),
+    include_str!("extended/debug_movement.rs"),
     include_str!("extended/prefix.rs"),
     include_str!("aarch64/scalable.rs"),
     include_str!("aarch64/scalable/features.rs"),

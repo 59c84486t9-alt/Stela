@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "kind": "declared_software_privileged_component_qualification",
+  "coverage_credit": false,
+  "forms": [
+    {
+      "id": "HVC_EX_exception",
+      "source_file": "hvc.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4000002",
+      "source_sha256": "fee051357cec882a83c6bc3e4092156c9ab51006bbed8a8826d0f71acebecfc3",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "EL1 to actual optional EL2; preloaded HLT handler"
+    },
+    {
+      "id": "SMC_EX_exception",
+      "source_file": "smc.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4000003",
+      "source_sha256": "d797d5d0228f81005b86a13360b9c42c4f6726c8fa57e301ee387255b38d8f47",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "EL1 to actual optional EL3 or reviewed EL2 trap route; preloaded HLT handler"
+    },
+    {
+      "id": "HLT_EX_exception",
+      "source_file": "hlt.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4400000",
+      "source_sha256": "5a7f1c9374f726156e82a414de453007b684da3d6432f425b0ce93fc123e0e45",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Running to Halted with actual original registered software CTI output"
+    },
+    {
+      "id": "DCPS1_DC_exception",
+      "source_file": "dcps1.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4a00001",
+      "source_sha256": "af079c20f5c6d150f3d5464b6ee3dbac739cfde3f641b14c00634d7d36f9ecf9",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted EDITR; requested EL1 retains higher source EL"
+    },
+    {
+      "id": "DCPS2_DC_exception",
+      "source_file": "dcps2.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4a00002",
+      "source_sha256": "3607531939409ff412e8f7f557f8829f0d94626c89db56f9ef4695058a9d7240",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted EDITR; actual EL2 storage required"
+    },
+    {
+      "id": "DCPS3_DC_exception",
+      "source_file": "dcps3.xml",
+      "encoding_mask": "0xffe0001f",
+      "encoding_value": "0xd4a00003",
+      "source_sha256": "3491b01f90d4e1838949bc8a048c1b4f9137f980ad12e14d225c160718be57c1",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted EDITR; actual EL3 storage and controls required"
+    },
+    {
+      "id": "DRPS_64E_branch_reg",
+      "source_file": "drps.xml",
+      "encoding_mask": "0xffffffff",
+      "encoding_value": "0xd6bf03e0",
+      "source_sha256": "c585db65b550258a6d32b13c346783512d2f34b49c781e07c90b5ad5e227a279",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted base EL1 saved-state restore; remains Halted, no branch/resume"
+    },
+    {
+      "id": "movt_r_zt_",
+      "source_file": "movt_r_zt.xml",
+      "encoding_mask": "0xffff8fe0",
+      "encoding_value": "0xc04c03e0",
+      "source_sha256": "28fbb1a1997f562b12a2b61ea4ff58f657dde0190e85a263a858f52d953055b7",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted SME2/ZT0, 64-bit lane to GPR/XZR"
+    },
+    {
+      "id": "movt_zt_r_",
+      "source_file": "movt_zt_r.xml",
+      "encoding_mask": "0xffff8fe0",
+      "encoding_value": "0xc04e03e0",
+      "source_sha256": "7df980e83090fbcab3217a27af1a71897f589dac0739781ee8658f4dacf6625f",
+      "canonical_admission_status": "unsupported",
+      "bounded_implementation_scope": "Actual Halted SME2/ZT0, GPR/XZR to 64-bit lane"
+    }
+  ],
+  "compiler_source_sha256": "f7c36179ef0eb757506f8106ddffb3e206624bd0b8643ef195fab3c75848fd41",
+  "compiler_recipe_inputs": 368,
+  "native_counts": {
+    "literal_movt_cases": 480,
+    "extra_factory_movt": 1,
+    "system_carriers": 5,
+    "raw_rows": 977,
+    "raw_blobs": 331,
+    "distinct_scalar_capsules": 41,
+    "focused_new_module_tests": 34
+  },
+  "positive_originals": 0,
+  "physical_halted_oracles": 0,
+  "actual_mapping": "Scalar only; complete capsule counts include R15 wrapper/RET: discardedXZRread1B/1instruction,XZRwrite22B/8,other27B/8",
+  "mapping_candidates": {
+    "selected": "Baseline integer MOV plus actual context/ZT0 pointer loads; scalar source/body/state qualified",
+    "comparison": "SSE2 MOVQ/PXOR source/compiler tests only; no actual native/timing comparison",
+    "rejected": "MMX state/EMMS dependency, VM calls and hostHLT do not implement guest banks/lifecycle",
+    "optimality": "Unmeasured; fewer bytes/instructions alone do not establish faster performance"
+  },
+  "saved_proof": {
+    "qualification_receipt": ".stela/research/crash-recovery-2026-10-15/privileged-completion/coherent-preflight-8/native-gate-8/qualification-receipt.json",
+    "qualification_sha256": "e49c08d0d94cdc4657383c8ca88f33f01f153a3b2b51856b6fd66dcced3120b4",
+    "runtime_executable_sha256": "68e4d0b6267d21f9cfbc8bc046c4749205b808235185562d9c7ffd7e53d2ea7e",
+    "cli_sha256": "806435d42a676aad0c179337c95f2155b993a6c227dc20bcc2bbb7b734b2acb5",
+    "native_report_sha256": "9b50025b24027377c7578a18beca3bf6e618ec3765f244e96a1a26ace93a42c1",
+    "independent_raw_audit_sha256": "b14cc80bfffb574958da0e2b83790f8087d667e24960fb91039d43591f4f1f68",
+    "ownership_qualification_sha256": "9d0a66dfb03a476ce847850ef765025f76f04c102fd7a5d8baf9888226d08776",
+    "compiler_isa_qualification_sha256": "11e760d0a5f93b0fdfbcbcb6fa95bf04ea422ec661a2e05cfff3dbbd183f7891"
+  },
+  "limits": [
+    "Source/model/native correspondence only; no physical halted/positive ARM originals",
+    "SM1 mode setup FPSRreset precedes actual before-state; no claim historical fullinput bytes match",
+    "Full Z/P/FFR only allocatedSM1; fullallocatedarchbanks exclude operational scratch",
+    "No SSE2 actualnative/timing/optimality proof",
+    "No injected native/context-finalizer failure proof or dedicated raw negativecase dumps",
+    "No mixed IRQ/FIQ/SError/deadline registry or generalized Undefined/fetch-fault delivery/hardware adoption",
+    "No complete instructioncoverage/macOSboot/application acceptance claim"
+  ]
+}

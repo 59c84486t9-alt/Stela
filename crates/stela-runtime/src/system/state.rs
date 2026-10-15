@@ -1,4 +1,4 @@
-//! Owned A64 EL0/EL1 state, with flags and the active stack in `GuestState`.
+//! Owned A64 state with explicit optional higher-EL banks, with flags and the active stack in `GuestState`.
 //!
 //! This owner validates storage transitions. Access traps, exception sequencing,
 //! memory permissions and externally visible effects belong to their resolvers.
@@ -11,12 +11,24 @@ use stela_compiler::GuestState;
 #[path = "state/pacm.rs"]
 mod pacm;
 pub use pacm::{PSTATE_PACM_MASK, PSTATE_PACM_SHIFT, Pacm, PacmStateFeature};
+#[path = "state/higher_el.rs"]
+pub mod higher_el;
+#[path = "state/stacks.rs"]
+mod stacks;
+use super::identification_snapshot::Snapshot;
+use higher_el::{HigherElState, Initialization as HigherElInitialization};
+use stacks::InactiveStacks;
+use std::sync::Arc;
 
 pub const PSTATE_MODE_MASK: u64 = 0x1f;
 pub const PSTATE_EL_SHIFT: u32 = 2;
 pub const PSTATE_EL0T: u64 = 0;
 pub const PSTATE_EL1T: u64 = 1 << PSTATE_EL_SHIFT;
 pub const PSTATE_EL1H: u64 = PSTATE_EL1T | SP_SELECT_MASK;
+pub const PSTATE_EL2T: u64 = 2 << PSTATE_EL_SHIFT;
+pub const PSTATE_EL2H: u64 = PSTATE_EL2T | SP_SELECT_MASK;
+pub const PSTATE_EL3T: u64 = 3 << PSTATE_EL_SHIFT;
+pub const PSTATE_EL3H: u64 = PSTATE_EL3T | SP_SELECT_MASK;
 pub const PSTATE_SS_MASK: u64 = 1 << 21;
 pub const PSTATE_IL_MASK: u64 = 1 << 20;
 const BASE_MISC_MASK: u64 = PSTATE_MODE_MASK | DAIF_MASK | PSTATE_SS_MASK | PSTATE_IL_MASK;
@@ -25,6 +37,18 @@ const BASE_MISC_MASK: u64 = PSTATE_MODE_MASK | DAIF_MASK | PSTATE_SS_MASK | PSTA
 pub enum StackBank {
     El0,
     El1,
+    El2,
+    El3,
+}
+impl StackBank {
+    const fn index(self) -> usize {
+        match self {
+            Self::El0 => 0,
+            Self::El1 => 1,
+            Self::El2 => 2,
+            Self::El3 => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +60,11 @@ pub enum StateError {
     ActiveSpEl0,
     UnsupportedMteProfile,
     UnsupportedPacmProfile,
+    UnavailableStack(StackBank),
+    StackOwnership,
+    StackSelectionLevel,
+    UnavailableExceptionLevel(ExceptionLevel),
+    HigherEl(higher_el::InitializationError),
 }
 
 /// Architectural storage only. Register-specific write masks and use-time
@@ -145,15 +174,16 @@ impl MteState {
     }
 }
 
-/// Exactly one inactive stack value. The selected bank and current EL derive
-/// from checked PSTATE; flags and the active stack are never copied here.
+/// Inactive stack slots and implemented exception banks. Current EL/selected
+/// stack derive from PSTATE; active SP and NZCV exist only in GuestState.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemState {
     pstate_misc: u64,
-    inactive_sp: u64,
+    inactive_stacks: InactiveStacks,
     el1_registers: El1Registers,
     mte: Option<MteState>,
     pacm_feature: PacmStateFeature,
+    higher_el: Option<HigherElState>,
 }
 
 impl SystemState {
@@ -214,14 +244,62 @@ impl SystemState {
         mte: Option<MteState>,
         pacm_feature: PacmStateFeature,
     ) -> Result<Self, StateError> {
-        validate_misc(pstate_misc, mte.is_some(), pacm_feature)?;
+        validate_misc(pstate_misc, mte.is_some(), pacm_feature, None)?;
         Ok(Self {
             pstate_misc,
-            inactive_sp,
+            inactive_stacks: InactiveStacks::lower(stack_bank(pstate_misc), inactive_sp),
             el1_registers,
             mte,
             pacm_feature,
+            higher_el: None,
         })
+    }
+
+    /// Initialize new actual higher-EL storage on a fresh lower-EL software PE.
+    /// The same immutable Snapshot must be retained by the executable consumer.
+    /// Explicit initialization is not admission of an external CPU or a grant to
+    /// execute; no initialized bank or existing live PE is replaced here.
+    pub fn new_with_higher_el(
+        pstate_misc: u64,
+        inactive_sp: u64,
+        el1_registers: El1Registers,
+        snapshot: Arc<Snapshot>,
+        initial: HigherElInitialization,
+    ) -> Result<Self, StateError> {
+        let mut state = Self::new(pstate_misc, inactive_sp, el1_registers)?;
+        let (higher, sp2, sp3) =
+            HigherElState::initialized(snapshot, initial).map_err(StateError::HigherEl)?;
+        state.inactive_stacks.initialize_higher(sp2, sp3);
+        state.higher_el = Some(higher);
+        Ok(state)
+    }
+
+    pub fn higher_el(&self) -> Option<&HigherElState> {
+        self.higher_el.as_ref()
+    }
+
+    /// Actual saved destination bank, not a diagnostic copy. The canonical
+    /// consumer separately owns source/phase/control qualification for effects.
+    pub fn exception_registers(&self, level: ExceptionLevel) -> Result<&El1Registers, StateError> {
+        if level == ExceptionLevel::El1 {
+            return Ok(&self.el1_registers);
+        }
+        self.higher_el
+            .as_ref()
+            .ok_or(StateError::UnavailableExceptionLevel(level))?
+            .exception(level)
+    }
+    pub fn exception_registers_mut(
+        &mut self,
+        level: ExceptionLevel,
+    ) -> Result<&mut El1Registers, StateError> {
+        if level == ExceptionLevel::El1 {
+            return Ok(&mut self.el1_registers);
+        }
+        self.higher_el
+            .as_mut()
+            .ok_or(StateError::UnavailableExceptionLevel(level))?
+            .exception_mut(level)
     }
 
     /// PSTATE bits owned here; NZCV remains authoritative in GuestState.
@@ -238,6 +316,8 @@ impl SystemState {
         match self.pstate_misc & PSTATE_MODE_MASK {
             PSTATE_EL0T => ExceptionLevel::El0,
             PSTATE_EL1T | PSTATE_EL1H => ExceptionLevel::El1,
+            PSTATE_EL2T | PSTATE_EL2H => ExceptionLevel::El2,
+            PSTATE_EL3T | PSTATE_EL3H => ExceptionLevel::El3,
             _ => unreachable!("PSTATE mode is checked before storage"),
         }
     }
@@ -246,12 +326,21 @@ impl SystemState {
         stack_bank(self.pstate_misc)
     }
 
+    /// Legacy infallible access for implemented stack banks. Lower banks always
+    /// exist. Runtime target selection must use the fallible read below so that
+    /// an absent higher bank is an explicit refusal before effects.
     pub fn stack_pointer(&self, bank: StackBank, registers: &GuestState) -> u64 {
-        if bank == self.active_stack_bank() {
-            registers.sp
-        } else {
-            self.inactive_sp
-        }
+        self.read_stack_pointer(bank, registers)
+            .expect("requested stack bank is implemented")
+    }
+
+    pub fn read_stack_pointer(
+        &self,
+        bank: StackBank,
+        registers: &GuestState,
+    ) -> Result<u64, StateError> {
+        self.inactive_stacks
+            .read(self.active_stack_bank(), bank, registers)
     }
 
     /// The resolver must perform privilege and trap checks before calling this.
@@ -259,7 +348,8 @@ impl SystemState {
         if self.active_stack_bank() == StackBank::El0 {
             return Err(StateError::ActiveSpEl0);
         }
-        Ok(self.inactive_sp)
+        self.inactive_stacks
+            .read_inactive(self.active_stack_bank(), StackBank::El0)
     }
 
     /// The resolver must perform privilege and trap checks before calling this.
@@ -267,8 +357,8 @@ impl SystemState {
         if self.active_stack_bank() == StackBank::El0 {
             return Err(StateError::ActiveSpEl0);
         }
-        self.inactive_sp = value;
-        Ok(())
+        self.inactive_stacks
+            .write_inactive(self.active_stack_bank(), StackBank::El0, value)
     }
 
     pub fn set_spsel(
@@ -276,15 +366,17 @@ impl SystemState {
         registers: &mut GuestState,
         bank: StackBank,
     ) -> Result<(), StateError> {
-        if self.current_el() != ExceptionLevel::El1 {
+        if self.current_el() == ExceptionLevel::El0 {
             return Err(StateError::El0StackSelection);
         }
-        let selected = match bank {
-            StackBank::El0 => 0,
-            StackBank::El1 => SP_SELECT_MASK,
+        let selected = match (self.current_el(), bank) {
+            (_, StackBank::El0) => 0,
+            (ExceptionLevel::El1, StackBank::El1)
+            | (ExceptionLevel::El2, StackBank::El2)
+            | (ExceptionLevel::El3, StackBank::El3) => SP_SELECT_MASK,
+            _ => return Err(StateError::StackSelectionLevel),
         };
-        self.replace_misc(registers, (self.pstate_misc & !SP_SELECT_MASK) | selected);
-        Ok(())
+        self.replace_misc(registers, (self.pstate_misc & !SP_SELECT_MASK) | selected)
     }
 
     /// Apply an already authorized state transition. No mutation occurs until
@@ -296,17 +388,22 @@ impl SystemState {
         psr: u64,
     ) -> Result<(), StateError> {
         let misc = psr & !NZCV_MASK;
-        validate_misc(misc, self.mte.is_some(), self.pacm_feature)?;
-        self.replace_misc(registers, misc);
+        validate_misc(
+            misc,
+            self.mte.is_some(),
+            self.pacm_feature,
+            self.higher_el.as_ref(),
+        )?;
+        self.replace_misc(registers, misc)?;
         registers.nzcv = (psr & NZCV_MASK) as u32;
         Ok(())
     }
 
-    fn replace_misc(&mut self, registers: &mut GuestState, misc: u64) {
-        if stack_bank(misc) != self.active_stack_bank() {
-            std::mem::swap(&mut registers.sp, &mut self.inactive_sp);
-        }
+    fn replace_misc(&mut self, registers: &mut GuestState, misc: u64) -> Result<(), StateError> {
+        self.inactive_stacks
+            .select(self.active_stack_bank(), stack_bank(misc), registers)?;
         self.pstate_misc = misc;
+        Ok(())
     }
 
     pub const fn el1_registers(&self) -> &El1Registers {
@@ -350,11 +447,21 @@ fn stack_bank(misc: u64) -> StackBank {
     if misc & SP_SELECT_MASK == 0 {
         StackBank::El0
     } else {
-        StackBank::El1
+        match misc & PSTATE_MODE_MASK {
+            PSTATE_EL1H => StackBank::El1,
+            PSTATE_EL2H => StackBank::El2,
+            PSTATE_EL3H => StackBank::El3,
+            _ => unreachable!("checked A64 SPx mode"),
+        }
     }
 }
 
-fn validate_misc(misc: u64, mte: bool, pacm: PacmStateFeature) -> Result<(), StateError> {
+fn validate_misc(
+    misc: u64,
+    mte: bool,
+    pacm: PacmStateFeature,
+    higher: Option<&HigherElState>,
+) -> Result<(), StateError> {
     if misc & NZCV_MASK != 0 {
         return Err(StateError::FlagsInMiscPstate);
     }
@@ -371,6 +478,16 @@ fn validate_misc(misc: u64, mte: bool, pacm: PacmStateFeature) -> Result<(), Sta
     }
     match misc & PSTATE_MODE_MASK {
         PSTATE_EL0T | PSTATE_EL1T | PSTATE_EL1H => Ok(()),
+        PSTATE_EL2T | PSTATE_EL2H
+            if higher.is_some_and(|banks| banks.present(ExceptionLevel::El2)) =>
+        {
+            Ok(())
+        }
+        PSTATE_EL3T | PSTATE_EL3H
+            if higher.is_some_and(|banks| banks.present(ExceptionLevel::El3)) =>
+        {
+            Ok(())
+        }
         mode => Err(StateError::UnsupportedMode(mode)),
     }
 }

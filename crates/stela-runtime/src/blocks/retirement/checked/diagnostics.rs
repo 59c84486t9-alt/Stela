@@ -10,6 +10,10 @@ impl fmt::Debug for OwnedStop {
             Self::StopAddress => f.write_str("StopAddress"),
             Self::BudgetExhausted => f.write_str("BudgetExhausted"),
             Self::EntryDeclined(value) => f.debug_tuple("EntryDeclined").field(value).finish(),
+            Self::Halted { instruction_pc } => f
+                .debug_struct("Halted")
+                .field("instruction_pc", instruction_pc)
+                .finish(),
             Self::HelperRefused(value) => f.debug_tuple("HelperRefused").field(value).finish(),
             Self::PointerAuthenticationFault { instruction, code } => f
                 .debug_struct("PointerAuthenticationFault")

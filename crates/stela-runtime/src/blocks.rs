@@ -8,6 +8,13 @@ pub use retirement::checked::software_el1::{
     SourceRamPermissions,
 };
 
+pub use retirement::checked::software_privileged::{
+    DeclaredDebugExtendedHaltSyndrome, DeclaredDebugExternalControls, DeclaredDebugInitialization,
+    DeclaredHigherElInitialization, DeclaredPrivilegedCode, DeclaredPrivilegedConfig,
+    DeclaredPrivilegedReceipt, DeclaredPrivilegedReport, DeclaredPrivilegedRequest,
+    DeclaredPrivilegedScalable, TrapSmcWithoutEl3, run_declared_privileged,
+};
+
 pub(crate) mod scalable;
 
 use crate::{
@@ -56,6 +63,9 @@ pub struct ThreadState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StopReason {
+    Halted {
+        instruction_pc: GuestAddress,
+    },
     StopAddress,
     BudgetExhausted,
     UnmappedTarget,

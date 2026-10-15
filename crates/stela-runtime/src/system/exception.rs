@@ -5,6 +5,8 @@
 //! whole instruction. The caller establishes fetch/decode and synchronous fault
 //! priority before constructing an event. Fetching the returned PC is subsequent.
 
+pub(crate) mod higher_el;
+
 use super::access::{ExceptionLevel, Profile, Request, SecurityState};
 use super::debug::DebugControls;
 use super::profile::{EntryProfile, EntryProfileError};

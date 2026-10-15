@@ -48321,6 +48321,7 @@
     "crates/stela-compiler/src/context.rs",
     "crates/stela-compiler/src/context/memory.rs",
     "crates/stela-compiler/src/extended.rs",
+    "crates/stela-compiler/src/extended/debug_movement.rs",
     "crates/stela-compiler/src/extended/prefix.rs",
     "crates/stela-compiler/src/aarch64/scalable.rs",
     "crates/stela-compiler/src/aarch64/scalable/features.rs",

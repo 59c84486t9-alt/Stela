@@ -2,8 +2,8 @@
 mod conditional;
 mod el1_m0;
 use super::super::super::{
-    validate_clock_exit, validate_pauth_exit, validate_source_map, validate_thread_register_exit,
-    validate_trap_exit,
+    validate_clock_exit, validate_pauth_exit, validate_source_map, validate_system_exit,
+    validate_thread_register_exit, validate_trap_exit,
 };
 use crate::blocks::{BlockRuntime, LoadedBlock};
 use crate::system::execution::EntryBoundary;
@@ -49,9 +49,27 @@ pub(super) enum ReturnedTerminal {
     Ordinary(GuestAddress),
     Helper(Helper),
     Trap(SynchronousTrap),
+    System(crate::system::execution::Boundary),
 }
 
 impl<'code> BoundSource<'code> {
+    pub(super) fn system_instruction(
+        &self,
+    ) -> anyhow::Result<stela_compiler::block::SystemInstruction> {
+        self.recheck()?;
+        anyhow::ensure!(
+            self.runtime.profile() == BlockProfile::SystemV1
+                && self.requirements.is_none()
+                && self.source.len() == size_of::<u32>()
+                && self.analysis.source_bytes == self.source.len()
+                && self.analysis.terminator_pc == Some(self.entry.entry()),
+            "not original one-word SystemV1 source"
+        );
+        self.analysis
+            .system_instruction
+            .ok_or_else(|| anyhow::anyhow!("original System instruction absent"))
+    }
+
     pub(super) fn memory_profile(
         &self,
     ) -> anyhow::Result<stela_compiler::block::CheckedMemoryProfile> {
@@ -204,6 +222,10 @@ impl<'code> BoundSource<'code> {
                 plan.el1_m0_intent().is_some(),
                 "EL1 integer source plan intent absent"
             ),
+            BlockProfile::SystemV1 => anyhow::ensure!(
+                requirements.is_none() && source.len() == size_of::<u32>(),
+                "SystemV1 requires one original no-context source word"
+            ),
             BlockProfile::El1DirectBranchV1 => anyhow::ensure!(
                 requirements.is_none(),
                 "direct branch plan unexpectedly requires memory"
@@ -284,6 +306,26 @@ impl<'code> BoundSource<'code> {
                 ReturnedTerminal::Helper(Helper::Thread(validate_thread_register_exit(
                     args.0, args.1, args.2, args.3, args.4,
                 )?))
+            }
+            ExitKind::System if self.analysis.system_instruction.is_some() => {
+                let instruction = validate_system_exit(args.0, args.1, args.2, args.3, args.4)?;
+                anyhow::ensure!(
+                    self.analysis.system_instruction == Some(instruction)
+                        && self.analysis.terminator_pc == Some(instruction.instruction_pc),
+                    "System carrier differs from original compiler terminal"
+                );
+                ReturnedTerminal::System(crate::system::execution::Boundary::new(
+                    EntryBoundary::new(
+                        self.entry.address_space(),
+                        self.entry.generation(),
+                        self.entry.entry(),
+                        self.entry.region_base(),
+                        self.entry.source_bytes(),
+                        self.entry.word(),
+                    ),
+                    self.block.source_bytes,
+                    instruction,
+                ))
             }
             ExitKind::Trap if self.analysis.trap.is_some() => {
                 ReturnedTerminal::Trap(validate_trap_exit(args.0, args.1, args.2, args.3, args.4)?)

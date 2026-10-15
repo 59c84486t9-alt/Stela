@@ -16,20 +16,40 @@ enum SourceClass {
     Debug,
 }
 
-#[cfg(test)]
 struct SourceKey {
     domain: Arc<()>,
     id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    #[cfg(test)]
+    Unqualified,
+    Editr {
+        word: u32,
+        sequence: u64,
+    },
+    CrossHalt {
+        sequence: u64,
+    },
+}
 struct PendingEvent {
     source: u64,
+    kind: PendingKind,
+}
+#[derive(Debug)]
+struct CrossHaltOutput {
+    source: u64,
+    sequence: u64,
+    targets: Vec<u64>,
 }
 
 pub(super) struct SoftwareAsyncDomain {
     identity: Arc<()>,
-    #[cfg(test)]
     next_source: u64,
+    next_event: u64,
+    cross_halt_sequence: u64,
+    cross_halt_outputs: Vec<CrossHaltOutput>,
     registered: BTreeMap<u64, SourceClass>,
     pending: VecDeque<PendingEvent>,
 }
@@ -39,8 +59,10 @@ pub(super) enum AsyncError {
     RegisteredProducer,
     PendingEvent,
     WrongProducer,
-    #[cfg(test)]
     SequenceExhausted,
+    Capacity,
+    UnsupportedPending,
+    SourceChanged,
 }
 
 impl SoftwareAsyncDomain {
@@ -55,14 +77,15 @@ impl SoftwareAsyncDomain {
     pub(super) unsafe fn fresh_software_pe() -> Self {
         Self {
             identity: Arc::new(()),
-            #[cfg(test)]
             next_source: 0,
+            next_event: 0,
+            cross_halt_sequence: 0,
+            cross_halt_outputs: Vec::new(),
             registered: BTreeMap::new(),
             pending: VecDeque::new(),
         }
     }
 
-    #[cfg(test)]
     fn register(&mut self, class: SourceClass) -> Result<SourceKey, AsyncError> {
         let id = self
             .next_source
@@ -81,7 +104,10 @@ impl SoftwareAsyncDomain {
         if !Arc::ptr_eq(&self.identity, &key.domain) || !self.registered.contains_key(&key.id) {
             return Err(AsyncError::WrongProducer);
         }
-        self.pending.push_back(PendingEvent { source: key.id });
+        self.pending.push_back(PendingEvent {
+            source: key.id,
+            kind: PendingKind::Unqualified,
+        });
         Ok(())
     }
 
@@ -151,3 +177,6 @@ impl NoAsyncSources<'_> {
 
 #[cfg(test)]
 mod tests;
+
+mod debug;
+pub(super) use debug::{CtiRoute, DebugSources, EditrSource};

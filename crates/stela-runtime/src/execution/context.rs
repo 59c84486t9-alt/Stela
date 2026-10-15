@@ -16,10 +16,6 @@ impl<'a> ContextLoan<'a> {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Canonical constructor also serves the separately registered scalable leaf graph"
-    )]
     pub(crate) fn scalable(
         context: &'a mut ExecutionContext,
         view: &mut ScalableStateView,

@@ -202,13 +202,41 @@ impl<'pe> CheckedProcessOwner<'pe> {
     }
 }
 
-mod sealed {
+pub(super) mod sealed {
     pub(crate) trait Concrete {}
 }
 impl sealed::Concrete for CheckedProcessOwner<'_> {}
 
 /// Only this source module can implement the canonical consumer's backend.
 pub(crate) trait Owner: sealed::Concrete {
+    fn supports_profile(&self, profile: stela_compiler::block::BlockProfile) -> bool {
+        profile.checked_memory().is_some()
+            || matches!(
+                profile,
+                stela_compiler::block::BlockProfile::El1DirectBranchV1
+                    | stela_compiler::block::BlockProfile::El1M0IntegerV1
+            )
+    }
+    fn qualify_debug_lifecycle(
+        &self,
+        debug: Option<&crate::system::debug::halted::DebugMachine>,
+        _system: &SystemState,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(debug.is_none(), "backend has no actual lifecycle consumer");
+        Ok(())
+    }
+    fn complete_system(
+        &mut self,
+        _bound: &BoundSource<'_>,
+        _boundary: &Boundary,
+        _system: &mut SystemState,
+        _registers: &mut GuestState,
+        _debug: Option<&mut crate::system::debug::halted::DebugMachine>,
+        _outer: &MemoryExecutionLoan,
+    ) -> super::privileged::SystemOutcome {
+        super::privileged::SystemOutcome::NoEffect(anyhow::anyhow!("System owner unavailable"))
+    }
+
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan>;
     fn prepare_source(
         &mut self,

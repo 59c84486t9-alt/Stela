@@ -15,6 +15,8 @@ enum Phase {
     Ready,
     NativeActive(u64),
     SystemActive(u64),
+    Halted,
+    DebugActive(u64),
     Retiring(u64),
     NativeCommitting,
     RequalificationRequired,
@@ -43,6 +45,15 @@ impl PeExecutionAuthority {
         }
     }
 
+    /// Fresh owner only, after actual lifecycle STATUS/ITR validation. This is
+    /// the same PE authority allocation with its explicit initial halted phase,
+    /// never an adoption/reset API for an existing or poisoned processor.
+    pub(crate) unsafe fn new_pe_halted() -> Self {
+        let mut authority = unsafe { Self::new_pe() };
+        authority.phase = Phase::Halted;
+        authority
+    }
+
     pub fn identity(&self) -> PeIdentity {
         self.identity.clone()
     }
@@ -60,9 +71,13 @@ impl PeExecutionAuthority {
         _consumer: &crate::blocks::retirement::ConsumerKey,
     ) -> Result<(), ()> {
         match self.phase {
-            Phase::Ready | Phase::RequalificationRequired | Phase::Indeterminate => Ok(()),
+            Phase::Ready
+            | Phase::Halted
+            | Phase::RequalificationRequired
+            | Phase::Indeterminate => Ok(()),
             Phase::NativeActive(_)
             | Phase::SystemActive(_)
+            | Phase::DebugActive(_)
             | Phase::Retiring(_)
             | Phase::NativeCommitting => Err(()),
         }
@@ -103,6 +118,62 @@ impl PeExecutionAuthority {
 
     pub(crate) fn system_attempt(&self, attempt: u64) -> bool {
         self.sequence == attempt && self.phase == Phase::SystemActive(attempt)
+    }
+
+    pub(crate) fn halted(&self) -> bool {
+        self.phase == Phase::Halted
+    }
+
+    /// Canonical checked consumer settles real HLT effects while its original
+    /// source/control/memory/lifecycle loans remain held. No ordinary next-PC or
+    /// Ready grant follows this terminal. A wrong phase poisons the same PE.
+    pub(crate) fn finish_halt(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<(), ()> {
+        if !self.system_attempt(attempt) {
+            self.poison();
+            return Err(());
+        }
+        self.phase = Phase::Halted;
+        Ok(())
+    }
+
+    /// Actual EDITR source and lifecycle qualification precede this call under
+    /// the closed consumer. This cannot be reached from Ready or requalification.
+    pub(crate) fn begin_debug(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+    ) -> Result<u64, ()> {
+        if !self.halted() {
+            return Err(());
+        }
+        let Some(attempt) = self.sequence.checked_add(1) else {
+            self.poison();
+            return Err(());
+        };
+        self.sequence = attempt;
+        self.phase = Phase::DebugActive(attempt);
+        Ok(attempt)
+    }
+    pub(crate) fn debug_attempt(&self, attempt: u64) -> bool {
+        self.sequence == attempt && self.phase == Phase::DebugActive(attempt)
+    }
+    /// The same canonical consumer certifies exact debug completion/prefix and
+    /// actual ITE-ready/Halted lifecycle before returning this phase. Any later
+    /// error/Drop still poisons; this method supplies no normal native entry.
+    pub(crate) fn finish_debug(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<(), ()> {
+        if !self.debug_attempt(attempt) {
+            self.poison();
+            return Err(());
+        }
+        self.phase = Phase::Halted;
+        Ok(())
     }
 
     pub(crate) fn start_retirement(
