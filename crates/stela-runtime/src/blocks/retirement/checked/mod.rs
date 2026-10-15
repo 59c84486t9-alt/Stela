@@ -3,6 +3,7 @@
 
 mod diagnostics;
 mod low128_call;
+mod pauth_policy;
 mod provider;
 mod source;
 
@@ -25,6 +26,10 @@ pub(crate) enum OwnedStop {
     BudgetExhausted,
     EntryDeclined(String),
     HelperRefused(String),
+    PointerAuthenticationPoisonedTransfer {
+        instruction: stela_compiler::block::PointerAuthentication,
+        target: GuestAddress,
+    },
     /// No Ready/retry grant: delivery requires a separately reviewed consumer.
     FaultPending(OwnedMemoryFault),
     /// Original synchronous trap is settled, but no Darwin callback is exposed.
@@ -196,6 +201,22 @@ impl BlockRuntime {
         accounting.reason = match &stop {
             OwnedStop::StopAddress => StopReason::StopAddress,
             OwnedStop::BudgetExhausted => StopReason::BudgetExhausted,
+            OwnedStop::PointerAuthenticationPoisonedTransfer {
+                instruction,
+                target,
+            } => {
+                if instruction.operation.is_return() {
+                    StopReason::PointerAuthenticationPoisonedReturn {
+                        instruction: *instruction,
+                        poisoned_target: *target,
+                    }
+                } else {
+                    StopReason::PointerAuthenticationPoisonedBranch {
+                        instruction: *instruction,
+                        poisoned_target: *target,
+                    }
+                }
+            }
             _ => StopReason::Unsupported {
                 detail: format!("owned retirement stop: {stop:?}"),
             },
@@ -376,6 +397,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 // This actual same-call helper completed even
                                 // if later requalification fails. Retain its
                                 // observation before any fallible transition.
+                                let poisoned_transfer = event.poisoned_transfer();
                                 event.record(accounting);
                                 self.pe
                                     .authority
@@ -390,8 +412,13 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
                                 )?;
-                                self.finish_retirement(false)?;
-                                Ok(None)
+                                self.finish_retirement(poisoned_transfer.is_some())?;
+                                Ok(poisoned_transfer.map(|(instruction, target)| {
+                                    OwnedStop::PointerAuthenticationPoisonedTransfer {
+                                        instruction,
+                                        target,
+                                    }
+                                }))
                             }
                         }
                     }

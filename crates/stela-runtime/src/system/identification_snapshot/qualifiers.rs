@@ -12,6 +12,7 @@ const A64_AND_A32: u8 = 2;
 const APA_SHIFT: u32 = 4;
 const API_SHIFT: u32 = 8;
 const APA3_SHIFT: u32 = 12;
+const APA_QARMA5_CLASSIC: u8 = 1;
 const APA_QARMA5_FAULTING_COMBINED: u8 = 5;
 const RAS_BASE_VERSION: u8 = 1;
 const TGRAN4_SHIFT: u32 = 28;
@@ -196,11 +197,12 @@ impl Snapshot {
         let api = ((isar1 >> API_SHIFT) & FIELD_MASK) as u8;
         let apa3 = ((isar2 >> APA3_SHIFT) & FIELD_MASK) as u8;
         // This narrow source-reviewed PAuth_LR-absence path supports the current
-        // Auth2 algorithm tuple or all algorithms absent. Other tuples decline;
+        // Classic/Auth2 algorithm tuples or all algorithms absent. Other tuples decline;
         // it never mistakes PAuth_LR absence for general PAuth absence.
         if !matches!(
             (apa, api, apa3),
             (FEATURE_ABSENT, FEATURE_ABSENT, FEATURE_ABSENT)
+                | (APA_QARMA5_CLASSIC, FEATURE_ABSENT, FEATURE_ABSENT)
                 | (APA_QARMA5_FAULTING_COMBINED, FEATURE_ABSENT, FEATURE_ABSENT)
         ) {
             return Err(Unsupported::PauthLrTuple { apa, api, apa3 });

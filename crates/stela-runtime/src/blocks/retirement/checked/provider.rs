@@ -177,59 +177,17 @@ impl<'pe> CheckedProcessOwner<'pe> {
             "source namespace differs"
         );
         if let Some(instruction) = bound.pauth() {
-            use crate::system::identification::Register;
-            use stela_compiler::block::PointerAuthenticationKey as K;
             let ids = self
                 .controls
                 .identification_snapshot()
                 .ok_or_else(|| anyhow::anyhow!("PAuth identification owner unavailable"))?;
-            const APA_QARMA5_COMBINED: u64 = 5;
-            const APA_SHIFT: u32 = 4;
-            const FIELD_MASK: u64 = 15;
-            anyhow::ensure!(
-                (ids.read(Register::IdAa64Isar1El1)? >> APA_SHIFT) & FIELD_MASK
-                    == APA_QARMA5_COMBINED
-                    && self.pauth.version() == pauth::Version::FaultingCombined,
-                "PAuth key algorithm differs from the actual identification owner"
-            );
-            const TCR_T0SZ_MASK: u64 = 63;
-            const TCR_VA47_T0SZ: u64 = 17;
-            const TCR_TBI0: u64 = 1 << 37;
-            anyhow::ensure!(
-                self.controls.tcr_el1() & (TCR_T0SZ_MASK | TCR_TBI0) == TCR_VA47_T0SZ,
-                "PAuth instruction address policy requires actual VA47/iTBI0 controls"
-            );
-            anyhow::ensure!(
-                !matches!(
-                    instruction.operation,
-                    PointerAuthenticationOperation::Strip { data: true, .. }
-                ) && !matches!(instruction.operation.required_key(), Some(K::Da | K::Db)),
-                "PAuth data-address policy has no matching actual TCR authority"
-            );
-            if let Some(key) = instruction.operation.required_key() {
-                // June2026 SCTLR_EL1.EnIA/EnIB/EnDA/EnDB, same sole bank as memory.
-                const SCTLR_ENIA: u64 = 1 << 31;
-                const SCTLR_ENIB: u64 = 1 << 30;
-                const SCTLR_ENDA: u64 = 1 << 27;
-                const SCTLR_ENDB: u64 = 1 << 13;
-                let (key, enable) = match key {
-                    K::Ia => (pauth::Key::Ia, SCTLR_ENIA),
-                    K::Ib => (pauth::Key::Ib, SCTLR_ENIB),
-                    K::Da => (pauth::Key::Da, SCTLR_ENDA),
-                    K::Db => (pauth::Key::Db, SCTLR_ENDB),
-                };
-                anyhow::ensure!(
-                    self.controls.sctlr_el1() & enable != 0 && self.pauth.has_key(key),
-                    "PAuth disabled controls or unavailable actual key are unsupported"
-                );
-            }
-            anyhow::ensure!(
-                !matches!(
-                    instruction.operation,
-                    PointerAuthenticationOperation::GenericCode(_)
-                ),
-                "generic authentication identification authority is unsupported"
-            );
+            super::pauth_policy::qualify(
+                ids,
+                self.controls.sctlr_el1(),
+                self.controls.tcr_el1(),
+                self.pauth,
+                instruction.operation,
+            )?;
         }
         if bound.requirements.required_flags & stela_compiler::context::memory::flags::ASIMD != 0 {
             let fp = self
@@ -316,46 +274,9 @@ impl Owner for CheckedProcessOwner<'_> {
         registers: &mut GuestState,
     ) -> anyhow::Result<()> {
         self.qualify_current_resources(bound, system, registers)?;
-        if let Some(instruction) = bound.pauth() {
-            // Qualify the pointer before any native prefix can replace it.
-            // Prefix-dependent PAC operands need a separate source-effect proof.
-            anyhow::ensure!(
-                instruction.instruction_pc == bound.entry.entry(),
-                "PAuth pointer prefix is not qualified by the fixed address policy"
-            );
-            use stela_compiler::block::PointerAuthenticationOperation as O;
-            const LINK_REGISTER: u8 = 30;
-            const ZERO_REGISTER: u8 = 31;
-            let pointer_register = match instruction.operation {
-                O::SignIbSp | O::AuthenticateIbSp | O::ReturnIbSp | O::ReturnIaSp => {
-                    Some(LINK_REGISTER)
-                }
-                O::Sign { destination, .. }
-                | O::Authenticate { destination, .. }
-                | O::Strip { destination, .. } => Some(destination),
-                O::Branch { target, .. } => Some(target),
-                O::GenericCode(_) | O::Load(_) => None,
-            };
-            if let Some(register) = pointer_register {
-                let pointer = if register == ZERO_REGISTER {
-                    0
-                } else {
-                    registers.x[usize::from(register)]
-                };
-                const UPPER_REGION: u64 = 1 << 55;
-                anyhow::ensure!(
-                    pointer & UPPER_REGION == 0,
-                    "upper-region PAuth inputs are unsupported"
-                );
-                if matches!(instruction.operation, O::SignIbSp | O::Sign { .. }) {
-                    const VA47_ADDRESS_MASK: u64 = (1 << 47) - 1;
-                    anyhow::ensure!(
-                        pointer & !VA47_ADDRESS_MASK == 0,
-                        "noncanonical lower signing input is unsupported"
-                    );
-                }
-            }
-        }
+        // Pointer operands may be produced by the ordinary prefix (including
+        // loaded LR/SP). They are qualified only at the actual source-validated
+        // helper boundary, after the canonical consumer settles that prefix.
         Ok(())
     }
     fn invoke(
@@ -476,6 +397,11 @@ impl Owner for CheckedProcessOwner<'_> {
         }
         match helper {
             Helper::Pauth(instruction) => {
+                if let Err(error) =
+                    super::pauth_policy::qualify_pointer(instruction.operation, registers)
+                {
+                    return HelperOutcome::NoEffect(error);
+                }
                 if matches!(
                     instruction.operation,
                     PointerAuthenticationOperation::Load(_)
@@ -484,8 +410,9 @@ impl Owner for CheckedProcessOwner<'_> {
                         "LDRA has no qualified checked reader"
                     ));
                 }
-                // Existing helper performs all fallible authentication/signing
-                // before its register/link write. Conservative generic errors
+                // FPACCombined failure precedes register/link writes. Classic AUT
+                // poison and failed transfer link effects remain architectural.
+                // Conservative generic errors
                 // remain Indeterminate; no detached error-class proof grants Ready.
                 match complete_pauth_with_memory(self.pauth, instruction, registers, None) {
                     Ok((continuation, authenticated)) => HelperOutcome::Complete {
@@ -683,6 +610,19 @@ pub(crate) enum HelperEvent {
     Thread(ThreadRegisterEvent),
 }
 impl HelperEvent {
+    pub(super) fn poisoned_transfer(
+        &self,
+    ) -> Option<(stela_compiler::block::PointerAuthentication, GuestAddress)> {
+        match self {
+            Self::Pauth(event)
+                if event.instruction.operation.is_transfer()
+                    && event.authenticated == Some(false) =>
+            {
+                Some((event.instruction, event.next_pc))
+            }
+            _ => None,
+        }
+    }
     pub(super) fn record(self, accounting: &mut RunOutcome) {
         match self {
             Self::Pauth(event) => accounting.pointer_authentication_events.push(event),

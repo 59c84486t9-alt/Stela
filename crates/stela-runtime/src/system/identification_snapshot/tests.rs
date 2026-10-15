@@ -308,3 +308,40 @@ fn pfar_absence_requires_a_named_readback_and_rejects_present_or_reserved_values
         assert_eq!(snapshot.check_entry_profile(profile), expected.map(|_| ()));
     }
 }
+
+#[test]
+fn classic_qarma5_tuple_preserves_the_bounded_entry_absence_contract() {
+    const APA_QARMA5_CLASSIC: u64 = 1;
+    let mut raw = entries();
+    replace(
+        &mut raw,
+        Register::IdAa64Isar1El1,
+        APA_QARMA5_CLASSIC << APA_SHIFT,
+    );
+    let classic = Snapshot::declared(IDENTITY, &raw).unwrap();
+    assert_eq!(
+        classic.entry_profile(),
+        Snapshot::declared(IDENTITY, &entries())
+            .unwrap()
+            .entry_profile()
+    );
+    for (register, shift) in [
+        (Register::IdAa64Isar1El1, API_SHIFT),
+        (Register::IdAa64Isar2El1, APA3_SHIFT),
+    ] {
+        let mut invalid = raw.clone();
+        let value = invalid
+            .iter()
+            .find(|(candidate, _)| *candidate == register)
+            .unwrap()
+            .1
+            | (1 << shift);
+        replace(&mut invalid, register, value);
+        assert!(
+            Snapshot::declared(IDENTITY, &invalid)
+                .unwrap()
+                .entry_profile()
+                .is_err()
+        );
+    }
+}

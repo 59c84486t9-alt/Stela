@@ -11,6 +11,14 @@ impl fmt::Debug for OwnedStop {
             Self::BudgetExhausted => f.write_str("BudgetExhausted"),
             Self::EntryDeclined(value) => f.debug_tuple("EntryDeclined").field(value).finish(),
             Self::HelperRefused(value) => f.debug_tuple("HelperRefused").field(value).finish(),
+            Self::PointerAuthenticationPoisonedTransfer {
+                instruction,
+                target,
+            } => f
+                .debug_struct("PointerAuthenticationPoisonedTransfer")
+                .field("instruction", instruction)
+                .field("target", target)
+                .finish(),
             Self::FaultPending(value) => f.debug_tuple("FaultPending").field(value).finish(),
             Self::TrapPending(value) => f.debug_tuple("TrapPending").field(value).finish(),
             Self::Indeterminate(value) => f.debug_tuple("Indeterminate").field(value).finish(),
