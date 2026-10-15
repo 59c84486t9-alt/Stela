@@ -371,7 +371,14 @@
     "crates/stela-compiler/src/aarch64/simd/lut.rs",
     "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
     "crates/stela-compiler/src/x86_64/simd/lut.rs",
-    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs"
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs",
+    "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+    "crates/stela-compiler/src/block/scalable/fp8_matrix_scope_tests.rs",
+    "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs",
+    "crates/stela-compiler/src/aarch64/sme/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/sme/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/simd/exponent_scale.rs"
   ],
   "registry_version": "documented-a64-software-services-v1",
   "profile": {

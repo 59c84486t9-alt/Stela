@@ -101,6 +101,7 @@ pub enum FloatingPointOperation {
     Complex(simd::complex::Operand),
     Conversion(simd::conversion::Operand),
     Comparison(simd::comparison::Operand),
+    ExtremaScale(simd::extrema_scale::Operand),
     MinMax(simd::minmax::Operand),
     Rounding(simd::rounding::Operand),
     SquareRoot(simd::sqrt::Operand),
@@ -123,6 +124,8 @@ impl FloatingPointOperation {
             Some(result.map(Self::Complex))
         } else if let Some(result) = simd::conversion::decode(word) {
             Some(result.map(Self::Conversion))
+        } else if let Some(result) = simd::extrema_scale::decode(word) {
+            Some(result.map(Self::ExtremaScale))
         } else if let Some(result) = simd::comparison::decode(word) {
             Some(result.map(Self::Comparison))
         } else if let Some(result) = simd::minmax::decode(word) {
@@ -172,6 +175,11 @@ impl From<simd::conversion::Operand> for FloatingPointOperation {
 impl From<simd::comparison::Operand> for FloatingPointOperation {
     fn from(operand: simd::comparison::Operand) -> Self {
         Self::Comparison(operand)
+    }
+}
+impl From<simd::extrema_scale::Operand> for FloatingPointOperation {
+    fn from(operand: simd::extrema_scale::Operand) -> Self {
+        Self::ExtremaScale(operand)
     }
 }
 impl From<simd::minmax::Operand> for FloatingPointOperation {

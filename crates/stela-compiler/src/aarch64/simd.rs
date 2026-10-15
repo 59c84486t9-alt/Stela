@@ -9,6 +9,7 @@ pub mod comparison;
 pub mod complex;
 pub mod conversion;
 pub mod estimate;
+pub mod extrema_scale;
 pub mod floating;
 pub mod fp8_conversion;
 pub mod fused;

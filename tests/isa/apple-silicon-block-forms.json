@@ -371,7 +371,14 @@
     "crates/stela-compiler/src/aarch64/simd/lut.rs",
     "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
     "crates/stela-compiler/src/x86_64/simd/lut.rs",
-    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs"
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs",
+    "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+    "crates/stela-compiler/src/block/scalable/fp8_matrix_scope_tests.rs",
+    "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs",
+    "crates/stela-compiler/src/aarch64/sme/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/sme/extrema_scale.rs",
+    "crates/stela-compiler/src/x86_64/simd/exponent_scale.rs"
   ],
   "registry_version": "apple-silicon-block-forms-v16",
   "profile": {
@@ -1042,6 +1049,25 @@
         "actual_b_cond_byte_bridges": 16
       },
       "require_current_executable": true
+    },
+    "numerical44_fixed": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/selected44-publication-final-v4/compose.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/selected44-publication-final-v4/fixed-evidence.json",
+      "kind": "numerical44-current-body-retained-semantics-transfer-v1",
+      "comparison_field": "retained_source_equivalent_comparisons",
+      "abi": "x86_64-sysv-guest-state-v2-block-exit-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_measurements": {
+        "canonical_forms": 6,
+        "retained_source_equivalent_comparisons": 9987,
+        "direct_original_comparisons": 8637,
+        "transactional_refusals": 1350,
+        "actual_runtime_state_rows": 10797,
+        "retained_bodies": 270,
+        "new_arithmetic_replays": 0,
+        "new_original_captures": 0
+      }
     }
   },
   "forms": [
@@ -33322,6 +33348,234 @@
       ],
       "review": "Exact June FEAT_HBC branch semantics reuse existing ordinary conditional lowering. Genuine HBC-enabled original QEMU frames and emitted native BlockExit compare all16conditions and16NZCV values; all16 actual B.cond/BC bodies and source maps are byte-identical. Signed-offset composition is covered by decoder tests and existing ordinary branch lowering. No predictor-speed claim.",
       "scope": "FEAT_HBC enabled. All16 conditions and signed imm19 times4 targets under the existing nonwrapping guest-address profile. Conditional transfer preserves all GPR/SP/NZCV/FP/SIMD state and returns actual next guest PC/exit kind to serialized dispatch. Bit4 supplies a consistent-direction prediction hint with no additional architectural state effect. GCS is disabled and executable pages are unguarded; no PSTATE.BTYPE, exception delivery, hardware predictor identity or application execution claim."
+    },
+    {
+      "id": "FAMAX_asimdsame_only",
+      "instruction_id": "FAMAX_advsimd",
+      "mnemonic": "FAMAX",
+      "category": "fp_simd",
+      "source_file": "famax_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x0ea0dc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FAMINMAX",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "e6e0784dd1ed5b477401048575010868d33e6dc30f16078e16d2625a2b033245",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/famax_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x4ea2dc20",
+          "expected_mnemonics": [
+            "famax"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "FAMAX_asimdsamefp16_only",
+      "instruction_id": "FAMAX_advsimd",
+      "mnemonic": "FAMAX",
+      "category": "fp_simd",
+      "source_file": "famax_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0ec01c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FAMINMAX",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "e6e0784dd1ed5b477401048575010868d33e6dc30f16078e16d2625a2b033245",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/famax_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x4ec21c20",
+          "expected_mnemonics": [
+            "famax"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "FAMIN_asimdsame_only",
+      "instruction_id": "FAMIN_advsimd",
+      "mnemonic": "FAMIN",
+      "category": "fp_simd",
+      "source_file": "famin_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2ea0dc00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FAMINMAX",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "b11b0cb4cb14747bed3df10eb7a4c4ac38881ba6f3bb9cf0464f0e984ed4f751",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/famin_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x6ea2dc20",
+          "expected_mnemonics": [
+            "famin"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "FAMIN_asimdsamefp16_only",
+      "instruction_id": "FAMIN_advsimd",
+      "mnemonic": "FAMIN",
+      "category": "fp_simd",
+      "source_file": "famin_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ec01c00",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_FAMINMAX",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "b11b0cb4cb14747bed3df10eb7a4c4ac38881ba6f3bb9cf0464f0e984ed4f751",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/famin_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x6ec21c20",
+          "expected_mnemonics": [
+            "famin"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "FSCALE_asimdsame_only",
+      "instruction_id": "FSCALE_advsimd",
+      "mnemonic": "FSCALE",
+      "category": "fp_simd",
+      "source_file": "fscale_advsimd.xml",
+      "encoding_mask": "0xbfa0fc00",
+      "encoding_value": "0x2ea0fc00",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "d54958c3e3aa71a7b98e155cd8e0fcf92609610901778ae2a4b620de261e94c9",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fscale_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x6ea2fc20",
+          "expected_mnemonics": [
+            "fscale"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "FSCALE_asimdsamefp16_only",
+      "instruction_id": "FSCALE_advsimd",
+      "mnemonic": "FSCALE",
+      "category": "fp_simd",
+      "source_file": "fscale_advsimd.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x2ec03c00",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "d54958c3e3aa71a7b98e155cd8e0fcf92609610901778ae2a4b620de261e94c9",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fscale_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-block-v1",
+      "evidence_groups": [
+        "numerical44_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/extrema_scale.rs",
+        "crates/stela-compiler/src/x86_64/simd/extrema_scale.rs"
+      ],
+      "scope": "Complete allocated ordinary compile-block SM=0 fixed AdvSIMD extrema/scaling form in declared enabled FP/AdvSIMD with format-specific FP16/AFP assumptions; contextual fixed SIMD declined.",
+      "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0x6ec23c20",
+          "expected_mnemonics": [
+            "fscale"
+          ],
+          "consumed_source_bytes": 8
+        }
+      ]
     }
   ]
 }

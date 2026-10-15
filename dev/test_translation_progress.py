@@ -58,7 +58,7 @@ class LeafIndependentDecodingTests(unittest.TestCase):
         return {'word': word, 'offset': 0, 'mnemonic': mnemonic, 'operands': 'w0, w0, w0',
                 'assembly': mnemonic + ' w0, w0, w0'}
 
-    def smoke(self, forms, facts, receipt, *, accepted_words=()):
+    def smoke(self, forms, facts, receipt, *, accepted_words=(), mode='leaf'):
         instruction = type('Instruction', (), {'mnemonic': 'adc', 'op_str': 'w0, w0, w0'})()
         decoder = type('Decoder', (), {'disasm': lambda self, data, address:
             iter([instruction] if int.from_bytes(data, 'little') in accepted_words else [])})()
@@ -68,7 +68,7 @@ class LeafIndependentDecodingTests(unittest.TestCase):
              patch.object(progress, 'compile_probe',
                           return_value={'compiler_source_sha256': COMPILER}) as compile_call:
             result = progress.smoke_forms('cli', forms, forms, Path(directory),
-                                          canonical_facts=facts)
+                                          canonical_facts=facts, mode=mode)
         return result, decode, compile_call
 
     def test_declined_leaf_uses_exact_llvm_receipt_and_ordinary_compiler_lane(self):
@@ -89,6 +89,37 @@ class LeafIndependentDecodingTests(unittest.TestCase):
             self.assertEqual(result['independent_decode_basis'], disassembly.DECODE_BASIS)
             self.assertEqual(result['independent_decode_receipt'], receipt)
             self.assertNotIn('execution_profile', result)
+
+    def test_extrema_and_scale_attributes_only_enable_independent_decoding(self):
+        self.assertIn('+faminmax', progress.LEAF_DECODER_MATTRS)
+        self.assertIn('+fp8', progress.LEAF_DECODER_MATTRS)
+        for word, mnemonic in ((0x4ea2dc20, 'famax'), (0x6ea2fc20, 'fscale')):
+            with self.subTest(mnemonic=mnemonic):
+                row = {**fixtures()['forms'][0], 'id': 'synthetic_' + mnemonic,
+                       'encoding_mask': '0xffffffff', 'encoding_value': hex(word),
+                       'smoke_samples': [{'word': hex(word), 'expected_mnemonics': [mnemonic]}]}
+                forms = {row['id']: row}
+                facts = {row['id']: {**row, 'features': [], 'mnemonic': mnemonic.upper()}}
+                (_compiler, results), decode, compile_call = self.smoke(
+                    forms, facts, {'rows': [self.decoded(word, mnemonic)]})
+                self.assertEqual(decode.call_args.kwargs['mattrs'], progress.LEAF_DECODER_MATTRS)
+                self.assertEqual(compile_call.call_args.kwargs, {})
+                self.assertNotIn('execution_profile', results[0])
+
+    def test_declined_ordinary_block_keeps_block_lane_and_consumed_boundary(self):
+        word = 0x4ea2dc20
+        row = {**fixtures()['forms'][0], 'id': 'synthetic_famax_block',
+               'encoding_mask': '0xffffffff', 'encoding_value': hex(word),
+               'smoke_samples': [{'word': hex(word), 'expected_mnemonics': ['famax'],
+                                  'consumed_source_bytes': 8}]}
+        forms = {row['id']: row}
+        facts = {row['id']: {**row, 'features': [], 'mnemonic': 'FAMAX'}}
+        (_compiler, results), decode, compile_call = self.smoke(
+            forms, facts, {'rows': [self.decoded(word, 'famax')]}, mode='block')
+        self.assertEqual(decode.call_args.kwargs['mattrs'], progress.LEAF_DECODER_MATTRS)
+        self.assertEqual(compile_call.call_args.kwargs,
+                         {'mode': 'block', 'expected_source_bytes': 8})
+        self.assertNotIn('execution_profile', results[0])
 
     def test_accepted_or_unsupported_leaf_never_requests_llvm(self):
         forms = self.forms()

@@ -33,7 +33,7 @@ MOV_EDX_IMM32 = b'\xba'
 X86_RET = b'\xc3'
 SYSTEM_DECODER_MATTRS = ('+mte',)
 # Independent decoding attributes never grant guest execution features.
-LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut')
+LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut', '+faminmax', '+fp8')
 SYSTEM_GUEST_BASE = 0x10000000
 SERVICE_BINDINGS = {
     SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
@@ -771,7 +771,7 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
     results = []
     independent_receipts = {}
     preferred_aliases = None
-    if mode == 'leaf':
+    if mode in ('leaf', 'block'):
         import a64_disassembly
         declined = set()
         for identity, row in overrides.items():
@@ -839,7 +839,7 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             word = validate_sample(forms[identity], sample)
             independent_receipt = None
             independent_rows = {}
-            if mode == 'leaf':
+            if mode in ('leaf', 'block'):
                 independent_receipt = independent_receipts.get(LEAF_DECODER_MATTRS)
                 if independent_receipt is not None:
                     independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}

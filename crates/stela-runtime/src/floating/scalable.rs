@@ -8,7 +8,9 @@ mod faminmax;
 mod fp8;
 mod fp8_conversion_fixed;
 mod rounding;
+mod sme_extrema_scale;
 mod sme_fp8_conversion;
+mod sme_fp8_matrix;
 mod sme_matrix;
 mod sme_vector;
 
@@ -110,6 +112,9 @@ pub(crate) fn complete(
         ScalableNumericalOperation::SmeFp8Conversion(operand) => {
             sme_fp8_conversion::complete(state, scalable, operand, controls)
         }
+        ScalableNumericalOperation::SmeFp8Matrix(operand) => {
+            sme_fp8_matrix::complete(state, scalable, operand, controls)
+        }
         ScalableNumericalOperation::Sve(operation) => match operation {
             Operation::Arithmetic(operand) => {
                 arithmetic::complete(state, scalable, operand, controls)
@@ -126,6 +131,9 @@ pub(crate) fn complete(
                 conversion::complete(state, scalable, operand, controls)
             }
         },
+        ScalableNumericalOperation::SmeExtremaScale(operand) => {
+            sme_extrema_scale::complete(state, scalable, operand, controls)
+        }
         ScalableNumericalOperation::SmeVector(operand) => {
             sme_vector::complete(state, scalable, operand, controls)
         }

@@ -25,7 +25,7 @@ const HALF_BYTES: usize = size_of::<u16>();
 const SINGLE_BYTES: usize = size_of::<u32>();
 const MAX_ZA_ROWS: usize = MAX_VECTOR_BYTES / HALF_BYTES;
 
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
+pub(super) fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
     if condition {
         Ok(())
     } else {
@@ -33,7 +33,7 @@ fn require(condition: bool, message: &'static str) -> Result<(), CompletionError
     }
 }
 
-struct ZaResults<'scratch> {
+pub(super) struct ZaResults<'scratch> {
     rows: [usize; MAX_ZA_ROWS],
     count: usize,
     length: usize,
@@ -41,7 +41,7 @@ struct ZaResults<'scratch> {
 }
 
 impl<'scratch> ZaResults<'scratch> {
-    fn stage(
+    pub(super) fn stage(
         scalable: &ScalableState,
         rows: &[usize],
         bytes: &'scratch mut [u8],
@@ -72,17 +72,17 @@ impl<'scratch> ZaResults<'scratch> {
         Ok(result)
     }
 
-    fn row(&self, index: usize) -> &[u8] {
+    pub(super) fn row(&self, index: usize) -> &[u8] {
         let start = index * self.length;
         &self.bytes[start..start + self.length]
     }
 
-    fn row_mut(&mut self, index: usize) -> &mut [u8] {
+    pub(super) fn row_mut(&mut self, index: usize) -> &mut [u8] {
         let start = index * self.length;
         &mut self.bytes[start..start + self.length]
     }
 
-    fn commit(self, scalable: &mut ScalableState) {
+    pub(super) fn commit(self, scalable: &mut ScalableState) {
         for index in 0..self.count {
             // All rows were validated against this same exclusively borrowed
             // owner before evaluation. No mode, length or backing changes occur.
@@ -93,7 +93,7 @@ impl<'scratch> ZaResults<'scratch> {
     }
 }
 
-fn read_z(
+pub(super) fn read_z(
     state: &GuestState,
     scalable: &ScalableState,
     register: u8,
@@ -107,7 +107,7 @@ fn read_z(
     Ok(bytes)
 }
 
-fn selector(state: &GuestState, register: u8) -> Result<u32, CompletionError> {
+pub(super) fn selector(state: &GuestState, register: u8) -> Result<u32, CompletionError> {
     require(
         (8..=11).contains(&register),
         "ZA vector selector must be W8..W11",
@@ -115,14 +115,14 @@ fn selector(state: &GuestState, register: u8) -> Result<u32, CompletionError> {
     Ok(state.x[usize::from(register)] as u32)
 }
 
-fn read_lane(bytes: &[u8], lane: usize, width: usize) -> u64 {
+pub(super) fn read_lane(bytes: &[u8], lane: usize, width: usize) -> u64 {
     let mut result = [0; size_of::<u64>()];
     let start = lane * width;
     result[..width].copy_from_slice(&bytes[start..start + width]);
     u64::from_le_bytes(result)
 }
 
-fn write_lane(bytes: &mut [u8], lane: usize, width: usize, bits: u64) {
+pub(super) fn write_lane(bytes: &mut [u8], lane: usize, width: usize, bits: u64) {
     let start = lane * width;
     bytes[start..start + width].copy_from_slice(&bits.to_le_bytes()[..width]);
 }

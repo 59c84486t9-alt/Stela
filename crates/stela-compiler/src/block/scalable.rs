@@ -4,10 +4,10 @@
 use crate::{
     CompileError, GuestAddress,
     aarch64::{
-        floating::features::NumericalFeatures,
+        floating::{Format, features::NumericalFeatures},
         scalable::features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
         simd::fp8_conversion as fixed_fp8_conversion,
-        sme::{fp_matrix, fp_vector, fp8_conversion},
+        sme::{extrema_scale, fp_matrix, fp_vector, fp8_conversion, fp8_matrix},
         sve::floating,
     },
     extended::ScalableProfile,
@@ -20,6 +20,8 @@ pub enum ScalableNumericalOperation {
     Sve(floating::Operation),
     FixedFp8Conversion(fixed_fp8_conversion::Operand),
     SmeFp8Conversion(fp8_conversion::Operand),
+    SmeFp8Matrix(fp8_matrix::Operand),
+    SmeExtremaScale(extrema_scale::Operand),
     SmeVector(fp_vector::Operand),
     SmeMatrix(fp_matrix::Operand),
 }
@@ -76,11 +78,29 @@ impl ScalableNumericalOperation {
         let sme2 = sme.with(Feature::Sme2);
         match self {
             Self::Sve(operation) => operation.required_streaming_features(numerical_features),
+            Self::SmeExtremaScale(operand) => {
+                FeatureRequirement::all(sme2.with(match operand.kind {
+                    extrema_scale::Kind::AbsoluteMinMax(_) => Feature::FaMinMax,
+                    extrema_scale::Kind::Scale => Feature::Fp8,
+                }))
+            }
             Self::FixedFp8Conversion(_) => {
                 FeatureRequirement::all(ScalableFeatures::of(Feature::Fp8).with(Feature::Fpmr))
             }
             Self::SmeFp8Conversion(_) => {
                 FeatureRequirement::all(sme2.with(Feature::Fp8).with(Feature::Fpmr))
+            }
+            Self::SmeFp8Matrix(operand) => {
+                let accumulator = match operand {
+                    fp8_matrix::Operand::Vector(operand) => operand.accumulator,
+                    fp8_matrix::Operand::Outer(operand) => operand.accumulator,
+                };
+                let feature = match accumulator {
+                    Format::Half => Feature::SmeF8F16,
+                    Format::Single => Feature::SmeF8F32,
+                    Format::Double => unreachable!("FP8 matrix decoder allocates Half and Single"),
+                };
+                FeatureRequirement::all(sme.with(feature).with(Feature::Fpmr))
             }
             Self::SmeVector(operand) => FeatureRequirement::all(match operand.feature {
                 fp_vector::Feature::Sme2 => sme2,
@@ -125,6 +145,22 @@ pub fn admit_scalable_numerical_instruction(
             "scalable numerical source/descriptor mismatch".into(),
         ));
     }
+    // A typed descriptor is not execution evidence. Keep all vertical-dot forms
+    // private until an independently usable original execution domain exists.
+    if matches!(
+        instruction.operation,
+        ScalableNumericalOperation::SmeFp8Matrix(fp8_matrix::Operand::Vector(
+            fp8_matrix::VectorOperand {
+                operation: fp8_matrix::VectorOperation::VerticalDot { .. },
+                ..
+            }
+        ))
+    ) {
+        return Err(CompileError(format!(
+            "unadmitted SME FP8 vertical dot at {:#x}: original execution verification is pending",
+            instruction.instruction_pc.0
+        )));
+    }
     // This allocated form stays unadmitted until genuine original execution
     // verification exists. A decoder descriptor never grants execution permission.
     if matches!(
@@ -145,6 +181,7 @@ pub fn admit_scalable_numerical_instruction(
         ScalableNumericalOperation::FixedFp8Conversion(_)
             | ScalableNumericalOperation::SmeFp8Conversion(_)
             | ScalableNumericalOperation::Sve(floating::Operation::Fp8(_))
+            | ScalableNumericalOperation::SmeFp8Matrix(_)
     ) && !profile.controls().fpmr_enabled()
     {
         return Err(CompileError(
@@ -162,7 +199,7 @@ pub fn admit_scalable_numerical_instruction(
         !mode.streaming()
     }) || (matches!(
         instruction.operation,
-        ScalableNumericalOperation::SmeMatrix(_)
+        ScalableNumericalOperation::SmeMatrix(_) | ScalableNumericalOperation::SmeFp8Matrix(_)
     ) && !mode.za_enabled())
     {
         return Err(CompileError(format!(
@@ -204,6 +241,10 @@ pub fn decode_scalable_numerical_instruction(
         ScalableNumericalOperation::FixedFp8Conversion(operand)
     } else if let Some(operand) = fp8_conversion::decode(word) {
         ScalableNumericalOperation::SmeFp8Conversion(operand)
+    } else if let Some(operand) = fp8_matrix::decode(word) {
+        ScalableNumericalOperation::SmeFp8Matrix(operand)
+    } else if let Some(operand) = extrema_scale::decode(word) {
+        ScalableNumericalOperation::SmeExtremaScale(operand)
     } else if let Some(result) = floating::Operation::decode(word) {
         let operand =
             result.map_err(|()| CompileError("reserved scalable numerical encoding".into()))?;
@@ -268,3 +309,6 @@ mod numerical22_scope_tests;
 
 #[cfg(test)]
 mod sme_matrix_tests;
+
+#[cfg(test)]
+mod fp8_matrix_scope_tests;

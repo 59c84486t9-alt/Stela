@@ -357,6 +357,13 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/sme/lut_v2.rs"),
     include_str!("x86_64/simd/lut.rs"),
     include_str!("x86_64/sme/tables/lookup/lut_v2.rs"),
+    include_str!("aarch64/sme/fp8_matrix.rs"),
+    include_str!("block/scalable/fp8_matrix_scope_tests.rs"),
+    include_str!("aarch64/simd/extrema_scale.rs"),
+    include_str!("x86_64/simd/extrema_scale.rs"),
+    include_str!("aarch64/sme/extrema_scale.rs"),
+    include_str!("x86_64/sme/extrema_scale.rs"),
+    include_str!("x86_64/simd/exponent_scale.rs"),
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

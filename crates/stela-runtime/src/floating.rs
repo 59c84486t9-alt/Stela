@@ -4,6 +4,7 @@ mod bfloat16;
 mod comparison;
 mod complex;
 mod estimate;
+mod extrema_scale;
 mod minmax;
 mod refinement;
 mod rounding;
@@ -72,6 +73,9 @@ pub(crate) fn complete(
             FloatingPointOperation::Comparison(operand) => {
                 return comparison::complete(state, operand);
             }
+            FloatingPointOperation::ExtremaScale(operand) => {
+                return extrema_scale::complete(state, operand);
+            }
             FloatingPointOperation::MinMax(operand) => return minmax::complete(state, operand),
             FloatingPointOperation::Rounding(operand) => return rounding::complete(state, operand),
             FloatingPointOperation::SquareRoot(operand) => return sqrt::complete(state, operand),
@@ -109,6 +113,7 @@ pub(crate) fn complete(
             | FloatingPointOperation::Complex(_)
             | FloatingPointOperation::Conversion(_)
             | FloatingPointOperation::Comparison(_)
+            | FloatingPointOperation::ExtremaScale(_)
             | FloatingPointOperation::MinMax(_)
             | FloatingPointOperation::Rounding(_)
             | FloatingPointOperation::SquareRoot(_)

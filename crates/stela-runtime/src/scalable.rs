@@ -7,14 +7,12 @@ use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{
-        ElementSize, LOOKUP_TABLE_BYTES, PREDICATE_REGISTER_COUNT, STREAMING_RESET_FPSR,
-        ScalableMode, VECTOR_CHUNK_BYTES, VECTOR_REGISTER_COUNT, VectorLength,
-        is_predicate_register, is_z_register,
+        LOOKUP_TABLE_BYTES, PREDICATE_REGISTER_COUNT, STREAMING_RESET_FPSR, ScalableMode,
+        VECTOR_CHUNK_BYTES, VECTOR_REGISTER_COUNT, VectorLength, is_predicate_register,
+        is_z_register,
     },
     context::ScalableStateView,
 };
-
-const MIN_NUMERICAL_ZA_ELEMENT_BYTES: usize = ElementSize::Halfword.bytes();
 
 /// Owns one guest thread's scalable state, without duplicating GuestState.v.
 /// Controls exist before either of the independently lazy buffers is allocated.
@@ -61,7 +59,7 @@ impl ScalableState {
     }
 
     /// Borrow reusable staging for affected numerical ZA rows, bounded by the
-    /// largest Half tile. The callback owns evaluation and architectural commit;
+    /// complete physical matrix. The callback owns evaluation and architectural commit;
     /// this loan does not roll back writes the callback chooses to perform.
     /// Contents are unspecified: initialize every staged row before evaluation.
     /// Initialized high-water storage is retained without repeated zeroing after
@@ -74,9 +72,9 @@ impl ScalableState {
     where
         E: From<anyhow::Error>,
     {
-        let maximum_rows = self.length.bytes() / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+        let maximum_rows = self.length.bytes();
         if rows == 0 || rows > maximum_rows {
-            return Err(anyhow::anyhow!("ZA scratch row count exceeds a numerical tile").into());
+            return Err(anyhow::anyhow!("ZA scratch row count exceeds the physical matrix").into());
         }
         let storage = self
             .za_scratch
@@ -86,7 +84,7 @@ impl ScalableState {
             state: self,
             storage,
         };
-        // Validated architectural lengths and row counts bound this to 32KiB.
+        // Validated architectural lengths and physical row counts bound this to 64KiB.
         let bytes = rows * loan.state.length.bytes();
         if bytes > loan.storage.len() {
             loan.storage
@@ -593,7 +591,7 @@ mod tests {
             state.set_tpidr2_el0(123);
             state.set_fpmr(456);
             let original = state.clone();
-            let rows = bytes / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+            let rows = bytes;
             let pointer = state.with_za_row_scratch(rows, |_, scratch| -> Result<_> {
                 assert_eq!(scratch.len(), rows * bytes);
                 assert!(scratch.iter().all(|byte| *byte == 0));
@@ -633,7 +631,7 @@ mod tests {
     #[test]
     fn za_scratch_bounds_reentrancy_and_clone_are_independent() -> Result<()> {
         let mut state = ScalableState::new(length(32), true);
-        let maximum_rows = state.vector_length().bytes() / MIN_NUMERICAL_ZA_ELEMENT_BYTES;
+        let maximum_rows = state.vector_length().bytes();
         for invalid in [0, maximum_rows + 1, usize::MAX] {
             let result: Result<()> =
                 state.with_za_row_scratch(invalid, |_, _| panic!("invalid loan entered callback"));

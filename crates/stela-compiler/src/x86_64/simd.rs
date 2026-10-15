@@ -11,6 +11,8 @@ pub(in crate::x86_64) mod bfloat16;
 mod comparison;
 mod complex;
 mod estimate;
+pub(in crate::x86_64) mod exponent_scale;
+mod extrema_scale;
 mod floating;
 mod fused;
 pub(in crate::x86_64) mod half;
@@ -171,6 +173,7 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
         simd::conversion::Operand,
     };
     match operation {
+        FloatingPointOperation::ExtremaScale(operand) => extrema_scale::always_exits(operand),
         FloatingPointOperation::Binary(operand) => arithmetic::always_exits(operand),
         FloatingPointOperation::Fused(operand) => operand.format == Format::Half,
         FloatingPointOperation::Widening(_)
@@ -223,6 +226,9 @@ pub(super) fn emit_numerical(
         }
         crate::aarch64::FloatingPointOperation::Comparison(operand) => {
             comparison::emit(code, operand, pc)
+        }
+        crate::aarch64::FloatingPointOperation::ExtremaScale(operand) => {
+            extrema_scale::emit(code, operand, pc, target);
         }
         crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
         crate::aarch64::FloatingPointOperation::Rounding(operand) => {

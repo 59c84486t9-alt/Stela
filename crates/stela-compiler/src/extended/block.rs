@@ -229,10 +229,21 @@ pub fn compile_for_profile(
                     pc,
                     target,
                 )?,
+                ScalableNumericalOperation::SmeExtremaScale(operand) => {
+                    x86_64::sme::extrema_scale::emit(
+                        &mut code,
+                        operand,
+                        profile.scalable.vector_length(),
+                        profile.numerical_features,
+                        pc,
+                        target,
+                    )?
+                }
                 ScalableNumericalOperation::SmeVector(_)
                 | ScalableNumericalOperation::SmeMatrix(_)
                 | ScalableNumericalOperation::FixedFp8Conversion(_)
-                | ScalableNumericalOperation::SmeFp8Conversion(_) => false,
+                | ScalableNumericalOperation::SmeFp8Conversion(_)
+                | ScalableNumericalOperation::SmeFp8Matrix(_) => false,
             };
             if emitted {
                 // The guarded family mapping owns the exact-PC cold exit.

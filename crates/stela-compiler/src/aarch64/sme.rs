@@ -1,6 +1,8 @@
 //! Scalable-matrix operands. Mode and feature checks are execution contracts.
 
+pub mod extrema_scale;
 pub mod fp8_conversion;
+pub mod fp8_matrix;
 pub mod fp_matrix;
 pub mod fp_vector;
 pub mod integer_dots;
