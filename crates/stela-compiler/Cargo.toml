@@ -8,5 +8,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+stela-state.workspace = true
 serde.workspace = true
 rustc_apfloat.workspace = true

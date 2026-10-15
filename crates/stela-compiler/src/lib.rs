@@ -8,6 +8,7 @@ pub mod extended;
 mod target;
 pub mod x86_64;
 
+pub use stela_state::{GuestState, NATIVE_ABI};
 pub use target::TargetCpu;
 
 use serde::{Deserialize, Serialize};
@@ -277,6 +278,8 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/simd/halving.rs"),
     include_str!("aarch64/simd/immediates.rs"),
     include_str!("x86_64/simd/immediates.rs"),
+    include_str!("../../stela-state/src/lib.rs"),
+    include_str!("../../stela-state/Cargo.toml"),
     include_str!("../Cargo.toml"),
     include_str!("../../../Cargo.lock"),
 );
@@ -325,28 +328,6 @@ pub trait Lifter {
 pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,
     pub source_map: Vec<(GuestAddress, usize)>,
-}
-
-/// Native code requires the direct ordinary-RAM profile documented in compiler.md.
-pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v3-direct-ram";
-
-/// Native ABI v3: System V x86-64 `void function(GuestState *state)`.
-/// Registers are initially memory-backed; register allocation is future work.
-/// Only NZCV bits 31:28 are modeled, not the complete PSTATE register.
-/// V registers are little-endian low/high 64-bit limbs. Arithmetic preserves
-/// unrelated FPCR/FPSR bits; architectural register accesses apply the declared
-/// field masks. Saturating integer SIMD updates QC and numerical FP accumulates
-/// exception status. The state layout itself grants no instruction support.
-#[repr(C)]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GuestState {
-    pub x: [u64; 31],
-    pub sp: u64,
-    pub nzcv: u32,
-    pub reserved: u32,
-    pub v: [[u64; 2]; 32],
-    pub fpcr: u32,
-    pub fpsr: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,6 +455,17 @@ mod tests {
                     .x86_64_code,
             );
         }
+    }
+    #[test]
+    fn guest_state_reexport_is_the_shared_type() {
+        let mut shared = stela_state::GuestState::default();
+        let compiler: &mut GuestState = &mut shared;
+        compiler.x[30] = 0x1234;
+        let shared: &stela_state::GuestState = compiler;
+        assert_eq!(shared.x[30], 0x1234);
+        assert_eq!(NATIVE_ABI, stela_state::NATIVE_ABI);
+        assert!(SOURCE_FINGERPRINT_MATERIAL.contains(include_str!("../../stela-state/src/lib.rs")));
+        assert!(SOURCE_FINGERPRINT_MATERIAL.contains(include_str!("../../stela-state/Cargo.toml")));
     }
     #[test]
     fn guest_state_layout_is_the_native_abi() {
