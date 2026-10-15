@@ -6,6 +6,7 @@ pub(crate) mod floating_copy;
 pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_comparison;
 pub(crate) mod integer_logic;
+pub(crate) mod integer_predicate_move;
 pub(crate) mod integer_products;
 pub(crate) mod integer_saturation;
 pub(crate) mod predicate;

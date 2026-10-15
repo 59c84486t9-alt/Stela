@@ -19,8 +19,8 @@ use crate::{
         sve::{
             address, dot, floating_copy, integer_arithmetic, integer_comparison,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, predicate_generation, predicate_logic, rearrange,
-            rearrange_extract, rearrange_widen, reductions, sign,
+            integer_predicate_move, integer_products, integer_saturation, predicate_generation,
+            predicate_logic, rearrange, rearrange_extract, rearrange_widen, reductions, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -220,6 +220,7 @@ enum Decoded {
     Address(address::Operand),
     IntegerDot(dot::Operand),
     IntegerLogic(integer_logic::Operand),
+    IntegerPredicateMove(integer_predicate_move::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
     Rearrange(rearrange::Operand),
@@ -328,6 +329,25 @@ fn decode(
         }
         profile.require_features(FeatureRequirement::all(required), pc)?;
         return Ok(Decoded::IntegerDot(operand));
+    }
+    if let Some(decoded) = integer_predicate_move::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming predicate-to-vector encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme2p1)),
+            pc,
+        )?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::IntegerPredicateMove(operand));
     }
     if let Some(decoded) = integer_logic::decode(word) {
         let operand = decoded.map_err(|()| {
@@ -690,6 +710,9 @@ fn emit_decoded(
                     pc.0
                 )));
             }
+        }
+        Decoded::IntegerPredicateMove(operand) => {
+            x86_64::sve::integer_predicate_move::emit(code, operand, profile.length, target);
         }
         Decoded::IntegerLogic(operand) => {
             x86_64::sve::integer_logic::emit(code, operand, profile.length, target);
@@ -2091,3 +2114,7 @@ mod reductions_tests;
 #[cfg(test)]
 #[path = "extended/sme2p1_tests.rs"]
 mod sme2p1_tests;
+
+#[cfg(test)]
+#[path = "extended/predicate_move_tests.rs"]
+mod predicate_move_tests;

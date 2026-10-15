@@ -7,6 +7,7 @@ pub mod floating_copy;
 pub mod integer_arithmetic;
 pub mod integer_comparison;
 pub mod integer_logic;
+pub mod integer_predicate_move;
 pub mod integer_products;
 pub mod integer_saturation;
 pub mod predicate_generation;
@@ -25,6 +26,7 @@ pub enum Operand {
     IntegerArithmetic(integer_arithmetic::Operand),
     IntegerComparison(integer_comparison::Operand),
     IntegerLogic(integer_logic::Operand),
+    IntegerPredicateMove(integer_predicate_move::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
     PredicateGeneration(predicate_generation::Operand),
@@ -42,6 +44,10 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .map(|operand| operand.map(Operand::Address))
         .or_else(|| dot::decode_integer(word).map(|operand| operand.map(Operand::Dot)))
         .or_else(|| integer_logic::decode(word).map(|operand| operand.map(Operand::IntegerLogic)))
+        .or_else(|| {
+            integer_predicate_move::decode(word)
+                .map(|operand| operand.map(Operand::IntegerPredicateMove))
+        })
         .or_else(|| {
             integer_arithmetic::decode(word).map(|operand| operand.map(Operand::IntegerArithmetic))
         })

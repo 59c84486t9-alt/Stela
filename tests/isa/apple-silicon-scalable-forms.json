@@ -46,6 +46,7 @@
     "crates/stela-compiler/src/aarch64/sve/floating_copy.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
+    "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
@@ -71,6 +72,7 @@
     "crates/stela-compiler/src/x86_64/sve/floating_copy.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_arithmetic.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_logic.rs",
+    "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products/complex.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products/complex_wrapping.rs",
@@ -758,6 +760,31 @@
         "dev/differential.py",
         "dev/simd_fixtures/sve_integer/comparison.py"
       ]
+    },
+    "sve_integer_predicate_move": {
+      "kind": "scalable_predicate_move_retained_semantics_current_body_transfer",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "comparison_field": "retained_original_model_native_comparisons",
+      "report": ".stela/research/coverage-race/sve-integer/predicate-move/production-integration-1/final-admission-1/production-admission.json",
+      "harness": ".stela/research/coverage-race/sve-integer/predicate-move/production-integration-1/final-admission-1/admit.py",
+      "require_current_executable": true,
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/predicate_move.py"
+      ],
+      "required_measurements": {
+        "canonical_forms": 4,
+        "retained_original_model_native_comparisons": 600,
+        "retained_native_model_comparisons": 4050,
+        "production_body_matches": 2700,
+        "production_source_map_matches": 2700,
+        "fresh_production_entry_comparisons": 56,
+        "representative_endpoint_portion_classes": 7,
+        "cli_form_probes": 4,
+        "cli_scope_guards": 12
+      }
     }
   },
   "forms": [
@@ -36574,6 +36601,182 @@
       "source_file": "cmpeq_p_p_zz.xml",
       "source_sha256": "753f4ebe0f630aef02ad8107bc6481046a2b97b9280f05e0f299652aabc55564",
       "status": "implemented"
+    },
+    {
+      "id": "pmov_z_pi_b",
+      "instruction_id": "pmov_z_pi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_z_pi.xml",
+      "encoding_mask": "0xfffffe00",
+      "encoding_value": "0x052b3800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "source_sha256": "631691ba01f9bda189f90f6ecb40d6c54b4570a0efd5da0a17ec63829579e378",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "SME2p1 streaming context leaf, SM=1, optional ZA; ZT0 is unused, all allocated B/H/S/D portion indices, P0..P15 and Z0..Z31, SVL16/32/64/128/256. Transfers each element-leading P bit into packed Z bits; portion zero clears whole Z and other portions preserve unselected bits. Only Zd changes; primary/scalable state, NZCV/FPCR/FPSR and RAM are preserved. Shared V2 DIT=false declaration is inherited; no extra PMOV-specific DIT guard. FFR/FPMR original effects, block/cache entry, guest exceptions, physical hardware and applications/macOS remain unverified.",
+      "review": "Exact June semantics; retained 600 genuine original/model/native comparisons across all five SVLs and all 15 portions, plus 4,050 native/model cases. Frozen current compiler/CLI/observer bind 2,700 complete body/maps, 56 fresh full-bank/MXCSR runtime endpoint checks and 4 independently decoded CLI probes with 12 scope declines. Runtime endpoint classes are seven, not all 15. Width-bounded SWAR H/S compaction and scalar D gather; shorter SSE2 D gather measured 1.216–1.345 times slower. Initial unfrozen prototype observer evidence remains historical only.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_predicate_move"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x052b3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "pmov_z_pi_h",
+      "instruction_id": "pmov_z_pi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_z_pi.xml",
+      "encoding_mask": "0xfffdfe00",
+      "encoding_value": "0x052d3800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "source_sha256": "631691ba01f9bda189f90f6ecb40d6c54b4570a0efd5da0a17ec63829579e378",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "SME2p1 streaming context leaf, SM=1, optional ZA; ZT0 is unused, all allocated B/H/S/D portion indices, P0..P15 and Z0..Z31, SVL16/32/64/128/256. Transfers each element-leading P bit into packed Z bits; portion zero clears whole Z and other portions preserve unselected bits. Only Zd changes; primary/scalable state, NZCV/FPCR/FPSR and RAM are preserved. Shared V2 DIT=false declaration is inherited; no extra PMOV-specific DIT guard. FFR/FPMR original effects, block/cache entry, guest exceptions, physical hardware and applications/macOS remain unverified.",
+      "review": "Exact June semantics; retained 600 genuine original/model/native comparisons across all five SVLs and all 15 portions, plus 4,050 native/model cases. Frozen current compiler/CLI/observer bind 2,700 complete body/maps, 56 fresh full-bank/MXCSR runtime endpoint checks and 4 independently decoded CLI probes with 12 scope declines. Runtime endpoint classes are seven, not all 15. Width-bounded SWAR H/S compaction and scalar D gather; shorter SSE2 D gather measured 1.216–1.345 times slower. Initial unfrozen prototype observer evidence remains historical only.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_predicate_move"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x052d3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "pmov_z_pi_s",
+      "instruction_id": "pmov_z_pi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_z_pi.xml",
+      "encoding_mask": "0xfff9fe00",
+      "encoding_value": "0x05693800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "source_sha256": "631691ba01f9bda189f90f6ecb40d6c54b4570a0efd5da0a17ec63829579e378",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "SME2p1 streaming context leaf, SM=1, optional ZA; ZT0 is unused, all allocated B/H/S/D portion indices, P0..P15 and Z0..Z31, SVL16/32/64/128/256. Transfers each element-leading P bit into packed Z bits; portion zero clears whole Z and other portions preserve unselected bits. Only Zd changes; primary/scalable state, NZCV/FPCR/FPSR and RAM are preserved. Shared V2 DIT=false declaration is inherited; no extra PMOV-specific DIT guard. FFR/FPMR original effects, block/cache entry, guest exceptions, physical hardware and applications/macOS remain unverified.",
+      "review": "Exact June semantics; retained 600 genuine original/model/native comparisons across all five SVLs and all 15 portions, plus 4,050 native/model cases. Frozen current compiler/CLI/observer bind 2,700 complete body/maps, 56 fresh full-bank/MXCSR runtime endpoint checks and 4 independently decoded CLI probes with 12 scope declines. Runtime endpoint classes are seven, not all 15. Width-bounded SWAR H/S compaction and scalar D gather; shorter SSE2 D gather measured 1.216–1.345 times slower. Initial unfrozen prototype observer evidence remains historical only.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_predicate_move"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05693800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        }
+      ],
+      "alias": false
+    },
+    {
+      "id": "pmov_z_pi_d",
+      "instruction_id": "pmov_z_pi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_z_pi.xml",
+      "encoding_mask": "0xffb9fe00",
+      "encoding_value": "0x05a93800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "status": "implemented",
+      "source_sha256": "631691ba01f9bda189f90f6ecb40d6c54b4570a0efd5da0a17ec63829579e378",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "SME2p1 streaming context leaf, SM=1, optional ZA; ZT0 is unused, all allocated B/H/S/D portion indices, P0..P15 and Z0..Z31, SVL16/32/64/128/256. Transfers each element-leading P bit into packed Z bits; portion zero clears whole Z and other portions preserve unselected bits. Only Zd changes; primary/scalable state, NZCV/FPCR/FPSR and RAM are preserved. Shared V2 DIT=false declaration is inherited; no extra PMOV-specific DIT guard. FFR/FPMR original effects, block/cache entry, guest exceptions, physical hardware and applications/macOS remain unverified.",
+      "review": "Exact June semantics; retained 600 genuine original/model/native comparisons across all five SVLs and all 15 portions, plus 4,050 native/model cases. Frozen current compiler/CLI/observer bind 2,700 complete body/maps, 56 fresh full-bank/MXCSR runtime endpoint checks and 4 independently decoded CLI probes with 12 scope declines. Runtime endpoint classes are seven, not all 15. Width-bounded SWAR H/S compaction and scalar D gather; shorter SSE2 D gather measured 1.216–1.345 times slower. Initial unfrozen prototype observer evidence remains historical only.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve.rs",
+        "crates/stela-compiler/src/aarch64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/x86_64/sve.rs",
+        "crates/stela-compiler/src/x86_64/sve/integer_predicate_move.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
+        "crates/stela-compiler/src/x86_64/isa.rs"
+      ],
+      "evidence_groups": [
+        "sve_integer_predicate_move"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05a93800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 1
+        }
+      ],
+      "alias": false
     }
   ],
   "execution_profiles": {
