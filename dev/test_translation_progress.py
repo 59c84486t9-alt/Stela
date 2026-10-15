@@ -3,10 +3,12 @@ import copy
 from collections import Counter
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -1319,6 +1321,182 @@ class EvidenceTests(unittest.TestCase):
             progress.validate_evidence(self.registry, self.rows, COMPILER, self.root)
 
 
+
+
+class PreferredAliasSourceGuards(unittest.TestCase):
+    """Exercise source/fact binding with invented XML, not reference extracts."""
+
+    def fixture(self):
+        fact = {'id': 'synthetic_mova_form', 'instruction_id': 'synthetic_mova',
+                'mnemonic': 'MOVA', 'category': 'sme', 'source_file': 'synthetic.xml',
+                'encoding_mask': '0xfffff000', 'encoding_value': '0xc0000000',
+                'features': []}
+        canonical = b'''<instructionsection id="synthetic_mova" type="instruction">
+          <alias_list><aliasref aliasfile="synthetic_alias.xml" aliaspageid="synthetic_mov">
+          <aliaspref>Unconditionally</aliaspref></aliasref></alias_list></instructionsection>'''
+        alias = b'''<instructionsection id="synthetic_mov" type="alias">
+          <docvars><docvar key="alias_mnemonic" value="MOV"/>
+          <docvar key="mnemonic" value="MOVA"/></docvars>
+          <aliasto refiform="synthetic.xml" iformid="synthetic_mova"/>
+          <classes><iclass><regdiagram>
+          <box hibit="31" width="20"><c colspan="20">11000000000000000000</c></box>
+          <box hibit="11"><c>0</c></box></regdiagram>
+          <encoding name="synthetic_mov_form"><equivalent_to><asmtemplate>
+          <a href="synthetic.xml#synthetic_mova_form">synthetic canonical</a>
+          </asmtemplate><aliascond>Unconditionally</aliascond></equivalent_to>
+          </encoding></iclass></classes></instructionsection>'''
+        return fact, canonical, alias
+
+    def archive(self, directory, canonical, alias):
+        path = Path(directory) / 'synthetic.tar'
+        with tarfile.open(path, 'w') as handle:
+            for name, data in (('synthetic.xml', canonical), ('synthetic_alias.xml', alias)):
+                if data is None:
+                    continue
+                member = tarfile.TarInfo(disassembly.a64_checklist.PREFIX + name)
+                member.size = len(data)
+                handle.addfile(member, io.BytesIO(data))
+        return path
+
+    def verified(self, path, fact, canonical, *, identities=None, expected_source=None):
+        catalog = {'source_files_sha256': {'synthetic.xml':
+                   expected_source or hashlib.sha256(canonical).hexdigest()}}
+        with patch.object(disassembly.a64_checklist, 'validate', return_value={fact['id']: fact}), \
+             patch.object(disassembly.a64_checklist, 'ARCHIVE_SHA',
+                          hashlib.sha256(path.read_bytes()).hexdigest()):
+            return disassembly.PreferredAliases(catalog, path,
+                       [fact['id']] if identities is None else identities)
+
+    def row(self, word=0xc0000001, mnemonic='mov'):
+        return {'word': word, 'mnemonic': mnemonic, 'operands': 'synthetic operands',
+                'assembly': mnemonic + ' synthetic operands'}
+
+    def smoke(self, fact, *, mnemonic='mov', catalog=None, archive=None, expected=None):
+        row = {**fact, 'status': 'implemented', 'profile': progress.SCALABLE_PROFILE,
+               'smoke_samples': [{'word': '0xc0000001', 'svl_bytes': 16, 'svcr': 3,
+                                  'expected_mnemonics': expected or [mnemonic]}]}
+        forms = {fact['id']: row}
+        profile = {'id': progress.SCALABLE_PROFILE, 'compiler_command': 'compile-leaf',
+                   'abi': progress.CONTEXT_LEAF_ABI, 'svl_bytes': 16, 'svcr': 3}
+        decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(progress, 'Cs', return_value=decoder), \
+             patch.object(disassembly, 'decode_words', return_value={'rows': [self.row(mnemonic=mnemonic)]}), \
+             patch.object(progress, 'compile_probe', return_value={'compiler_source_sha256': COMPILER}):
+            return progress.smoke_forms('cli', forms, forms, Path(directory), mode='scalable',
+                canonical_facts={fact['id']: fact}, profile=profile,
+                canonical_catalog=catalog, arm_archive=archive)
+
+    def test_progress_canonical_llvm_rows_need_no_alias_archive(self):
+        fact, _canonical, _alias = self.fixture()
+        with patch.object(disassembly, 'PreferredAliases') as aliases:
+            compiler, results = self.smoke(fact, mnemonic='mova')
+        aliases.assert_not_called()
+        self.assertEqual(compiler, COMPILER)
+        self.assertEqual(results[0]['independent_decode_basis'], disassembly.DECODE_BASIS)
+        self.assertNotIn('independent_preferred_alias_facts', results[0])
+
+    def test_progress_alias_rows_require_source_proof_and_retain_it(self):
+        fact, canonical, alias = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'pinned Arm archive'):
+            self.smoke(fact)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.archive(directory, canonical, alias)
+            catalog = {'source_files_sha256': {'synthetic.xml': hashlib.sha256(canonical).hexdigest()}}
+            with patch.object(disassembly.a64_checklist, 'validate', return_value={fact['id']: fact}), \
+                 patch.object(disassembly.a64_checklist, 'ARCHIVE_SHA', hashlib.sha256(archive.read_bytes()).hexdigest()):
+                _compiler, results = self.smoke(fact, catalog=catalog, archive=archive)
+                self.assertEqual(results[0]['assembly'], 'mov synthetic operands')
+                evidence = results[0]['independent_preferred_alias_facts']
+                self.assertEqual(evidence['archive_sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+                self.assertEqual(evidence['aliases'][0]['canonical_id'], fact['id'])
+                with self.assertRaises(ValueError):
+                    self.smoke(fact, catalog=catalog, archive=archive, expected=['mova'])
+                with self.assertRaises(FileNotFoundError):
+                    self.smoke(fact, catalog=catalog, archive=Path(directory) / 'absent.tar')
+
+    def test_verified_alias_retains_canonical_identity_and_source_evidence(self):
+        fact, canonical, alias = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.archive(directory, canonical, alias)
+            verified = self.verified(path, fact, canonical)
+            self.assertEqual(disassembly.validate_canonical(self.row(), fact['id'], fact,
+                             ['mov'], preferred_aliases=verified),
+                             ('mov', 'mov synthetic operands', disassembly.DECODE_BASIS))
+            evidence = verified.evidence()
+            self.assertEqual(len(evidence['aliases']), 1)
+            self.assertEqual(evidence['aliases'][0]['canonical_id'], fact['id'])
+            self.assertEqual(evidence['aliases'][0]['canonical_fact_sha256'],
+                             disassembly.canonical_fact_digest(fact))
+            self.assertEqual(evidence['source_files_sha256'], {
+                disassembly.a64_checklist.PREFIX + 'synthetic.xml': hashlib.sha256(canonical).hexdigest(),
+                disassembly.a64_checklist.PREFIX + 'synthetic_alias.xml': hashlib.sha256(alias).hexdigest()})
+
+    def test_alias_requires_exact_reciprocal_unconditional_encoding_relation(self):
+        fact, canonical, alias = self.fixture()
+        mutations = [
+            (canonical.replace(b'id="synthetic_mova"', b'id="other"'), alias),
+            (canonical.replace(b'aliaspageid="synthetic_mov"', b'aliaspageid="other"'), alias),
+            (canonical.replace(b'Unconditionally', b'conditional'), alias),
+            (canonical.replace(b'</alias_list>', canonical[canonical.index(b'<aliasref'):canonical.index(b'</alias_list>')] + b'</alias_list>'), alias),
+            (canonical, alias.replace(b'type="alias"', b'type="instruction"')),
+            (canonical, alias.replace(b'refiform="synthetic.xml"', b'refiform="other.xml"')),
+            (canonical, alias.replace(b'iformid="synthetic_mova"', b'iformid="other"')),
+            (canonical, alias.replace(b'value="MOVA"', b'value="OTHER"')),
+            (canonical, alias.replace(b'key="alias_mnemonic" value="MOV"', b'key="unrelated" value="MOV"')),
+            (canonical, alias.replace(b'#synthetic_mova_form', b'#other_form')),
+            (canonical, alias.replace(b'<aliascond>Unconditionally', b'<aliascond>conditional')),
+        ]
+        for index, (changed_canonical, changed_alias) in enumerate(mutations):
+            with self.subTest(mutation=index), tempfile.TemporaryDirectory() as directory:
+                path = self.archive(directory, changed_canonical, changed_alias)
+                with self.assertRaises(ValueError):
+                    self.verified(path, fact, changed_canonical)
+
+    def test_archive_catalog_source_and_member_guards_fail_closed(self):
+        fact, canonical, alias = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.archive(directory, canonical, alias)
+            with patch.object(disassembly.a64_checklist, 'validate', return_value={fact['id']: fact}), \
+                 patch.object(disassembly.a64_checklist, 'ARCHIVE_SHA', '0' * 64), \
+                 self.assertRaises(ValueError):
+                disassembly.PreferredAliases({}, path, [fact['id']])
+            with self.assertRaises(ValueError):
+                self.verified(path, fact, canonical, expected_source='0' * 64)
+            for identities in ([], [fact['id'], fact['id']], ['missing']):
+                with self.subTest(identities=identities), self.assertRaises(ValueError):
+                    self.verified(path, fact, canonical, identities=identities)
+            with patch.object(disassembly.a64_checklist, 'validate', side_effect=ValueError('catalog differs')), \
+                 self.assertRaises(ValueError):
+                disassembly.PreferredAliases({}, path, [fact['id']])
+            path = self.archive(directory, canonical, None)
+            with self.assertRaises(KeyError):
+                self.verified(path, fact, canonical)
+
+    def test_per_word_fixed_bits_fact_digest_mnemonic_and_expected_set_are_required(self):
+        fact, canonical, alias = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.archive(directory, canonical, alias)
+            verified = self.verified(path, fact, canonical)
+            # Bit11 is variable in the canonical form but fixed zero by this alias.
+            for row in (self.row(0xc0000801), self.row(0xd0000001), self.row(mnemonic='other')):
+                with self.subTest(row=row), self.assertRaises(ValueError):
+                    disassembly.validate_canonical(row, fact['id'], fact, preferred_aliases=verified)
+            changed_fact = copy.deepcopy(fact)
+            changed_fact['features'] = [{'feature': 'invented'}]
+            with self.assertRaises(ValueError):
+                disassembly.validate_canonical(self.row(), fact['id'], changed_fact, preferred_aliases=verified)
+            with self.assertRaises(ValueError):
+                disassembly.validate_canonical(self.row(), fact['id'], fact, ['mova'], preferred_aliases=verified)
+            with self.assertRaises(ValueError):
+                disassembly.validate_canonical(self.row(), fact['id'], fact, preferred_aliases={'mov': True})
+            with self.assertRaises(ValueError):
+                disassembly.validate_canonical(self.row(), fact['id'], fact)
+            self.assertEqual(disassembly.validate_canonical(self.row(mnemonic='mova'), fact['id'], fact)[0], 'mova')
+            changed_row = self.row()
+            changed_row['assembly'] = 'mov tampered framing'
+            with self.assertRaises(ValueError):
+                disassembly.validate_canonical(changed_row, fact['id'], fact, preferred_aliases=verified)
 
 
 if __name__ == '__main__':

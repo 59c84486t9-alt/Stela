@@ -7,11 +7,16 @@ establish translation semantics, guest feature availability or coverage credit.
 
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import struct
 import subprocess
+import tarfile
+import xml.etree.ElementTree as ET
+
+import a64_checklist
 
 
 INSTRUCTION_BYTES = 4
@@ -52,6 +57,102 @@ PINNED_APPLE_LLVM21 = Toolchain(
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def canonical_fact_digest(fact):
+    return digest(json_bytes({name: fact[name] for name in a64_checklist.FACT_FIELDS}))
+
+
+def preferred_alias_entries(canonical, alias, alias_file, fact):
+    """Read unconditional alias relations, never infer them from a mnemonic."""
+    if (canonical.attrib.get('id') != fact['instruction_id']
+            or alias.attrib.get('type') != 'alias'):
+        raise ValueError('Preferred alias instruction identity differs')
+    references = [entry for entry in canonical.findall('./alias_list/aliasref')
+                  if entry.attrib.get('aliasfile') == alias_file
+                  and entry.attrib.get('aliaspageid') == alias.attrib.get('id')
+                  and entry.findtext('./aliaspref', '').strip() == 'Unconditionally']
+    backlink = alias.find('./aliasto')
+    if (len(references) != 1 or backlink is None
+            or backlink.attrib.get('refiform') != fact['source_file']
+            or backlink.attrib.get('iformid') != fact['instruction_id']):
+        raise ValueError('Preferred alias lacks an unconditional reciprocal source relation')
+    variables = {entry.attrib['key']: entry.attrib['value']
+                 for entry in alias.findall('./docvars/docvar')}
+    mnemonic = variables.get('alias_mnemonic', '').lower()
+    if not mnemonic or variables.get('mnemonic', '').lower() != fact['mnemonic'].lower():
+        raise ValueError('Preferred alias source mnemonic differs')
+    entries = []
+    canonical_link = fact['source_file'] + '#' + fact['id']
+    for group in alias.findall('./classes/iclass'):
+        for encoding in group.findall('./encoding'):
+            equivalent = encoding.find('./equivalent_to')
+            if equivalent is None:
+                continue
+            links = [link.attrib.get('href') for link in equivalent.findall('./asmtemplate/a')]
+            if canonical_link not in links:
+                continue
+            if equivalent.findtext('./aliascond', '').strip() != 'Unconditionally':
+                raise ValueError('Conditional preferred aliases require a separate reviewed predicate')
+            mask, value = a64_checklist.fixed_bits(group.findall('./regdiagram/box') + encoding.findall('./box'))
+            entries.append({'canonical_id': fact['id'], 'canonical_fact_sha256': canonical_fact_digest(fact),
+                            'mnemonic': mnemonic, 'alias_encoding': encoding.attrib['name'],
+                            'encoding_mask': mask, 'encoding_value': value,
+                            'canonical_source': fact['source_file'], 'alias_source': alias_file})
+    if not entries:
+        raise ValueError('Preferred alias has no exact unconditional canonical encoding relation')
+    return entries
+
+
+class PreferredAliases:
+    """Source-verified preferred aliases from the existing pinned Arm archive."""
+
+    def __init__(self, catalog, archive, identities):
+        facts = a64_checklist.validate(catalog)
+        identities = tuple(identities)
+        if not identities or len(set(identities)) != len(identities) or any(identity not in facts for identity in identities):
+            raise ValueError('Preferred aliases require unique canonical identities')
+        raw = Path(archive).read_bytes()
+        if digest(raw) != a64_checklist.ARCHIVE_SHA:
+            raise ValueError('Preferred aliases require the pinned June Arm archive')
+        self._entries = {}
+        self._sources = {}
+        with tarfile.open(fileobj=io.BytesIO(raw)) as handle:
+            pages = {}
+            def page(name):
+                if name not in pages:
+                    member = a64_checklist.PREFIX + name
+                    data = handle.extractfile(member).read()
+                    pages[name] = ET.fromstring(data)
+                    self._sources[member] = digest(data)
+                return pages[name]
+            for identity in identities:
+                fact = facts[identity]
+                canonical = page(fact['source_file'])
+                if self._sources[a64_checklist.PREFIX + fact['source_file']] != catalog['source_files_sha256'][fact['source_file']]:
+                    raise ValueError('Preferred alias canonical source differs from pinned facts')
+                entries = []
+                for reference in canonical.findall('./alias_list/aliasref'):
+                    if reference.findtext('./aliaspref', '').strip() != 'Unconditionally':
+                        continue
+                    alias_file = reference.attrib['aliasfile']
+                    entries.extend(preferred_alias_entries(canonical, page(alias_file), alias_file, fact))
+                if not entries:
+                    raise ValueError('No unconditional source-bound preferred alias for ' + identity)
+                self._entries[identity] = tuple(entries)
+
+    def accepts(self, identity, fact, mnemonic, word):
+        return any(entry['canonical_fact_sha256'] == canonical_fact_digest(fact)
+                   and entry['mnemonic'] == mnemonic
+                   and word & int(entry['encoding_mask'], 16) == int(entry['encoding_value'], 16)
+                   for entry in self._entries.get(identity, ()))
+
+    def evidence(self):
+        return {'kind': 'pinned-arm-unconditional-preferred-alias-facts-v1',
+                'archive_sha256': a64_checklist.ARCHIVE_SHA,
+                'catalog_facts_sha256': a64_checklist.FACTS_SHA,
+                'source_files_sha256': dict(self._sources),
+                'aliases': [dict(entry) for entries in self._entries.values() for entry in entries]}
 
 
 def write_new(path, data):
@@ -177,7 +278,7 @@ def decode_words(words, directory, *, toolchain=PINNED_APPLE_LLVM21, mattrs=DEFA
     return receipt
 
 
-def validate_canonical(row, identity, fact, expected_mnemonics=None):
+def validate_canonical(row, identity, fact, expected_mnemonics=None, *, preferred_aliases=None):
     """Constrain actual decoding to one caller-supplied validated canonical fact."""
     if fact.get('id') != identity:
         raise ValueError('Independent decoding canonical identity differs')
@@ -187,7 +288,11 @@ def validate_canonical(row, identity, fact, expected_mnemonics=None):
     if word & int(fact['encoding_mask'], 16) != int(fact['encoding_value'], 16):
         raise ValueError('Independent decoded word differs from canonical fixed bits')
     mnemonic = row['mnemonic']
-    if mnemonic != fact['mnemonic'].lower() or expected_mnemonics is not None and mnemonic not in expected_mnemonics:
+    canonical = mnemonic == fact['mnemonic'].lower()
+    if preferred_aliases is not None and not isinstance(preferred_aliases, PreferredAliases):
+        raise ValueError('Preferred alias acceptance requires verified source facts')
+    alias = preferred_aliases is not None and preferred_aliases.accepts(identity, fact, mnemonic, word)
+    if not (canonical or alias) or expected_mnemonics is not None and mnemonic not in expected_mnemonics:
         raise ValueError('Independent LLVM mnemonic differs from canonical form')
     if row['assembly'] != mnemonic + (' ' + row['operands'] if row['operands'] else ''):
         raise ValueError('Independent LLVM assembly framing differs')

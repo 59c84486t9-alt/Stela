@@ -529,7 +529,8 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
                                                'guest_base', 'target_cpu')} if mode == 'scalable' else {})}
 
 
-def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_rows=None):
+def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_rows=None,
+                   preferred_aliases=None):
     instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
     if instruction is not None:
         return instruction.mnemonic, f'{instruction.mnemonic} {instruction.op_str}', 'capstone'
@@ -545,12 +546,13 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_ro
         import a64_disassembly
         if fact is None:
             raise ValueError('Independent LLVM decoding requires validated canonical facts')
-        return a64_disassembly.validate_canonical(independent_rows[word], identity, fact)
+        return a64_disassembly.validate_canonical(independent_rows[word], identity, fact,
+                                                  preferred_aliases=preferred_aliases)
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
 
 
 def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=None, profile=None,
-                execution_profiles=None):
+                execution_profiles=None, canonical_catalog=None, arm_archive=None):
     profiles = validate_scalable_profiles(profile or {}, execution_profiles) if mode == 'scalable' else {}
     def contract(row=None):
         return profiles[profile['id'] if row is None else row['profile']]
@@ -566,6 +568,7 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
     fingerprint = None
     results = []
     independent_receipts = {}
+    preferred_aliases = None
     if mode == 'scalable':
         import a64_disassembly
         declined = {}
@@ -580,6 +583,22 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
         for index, (attrs, words) in enumerate(sorted(declined.items())):
             independent_receipts[attrs] = a64_disassembly.decode_words(
                 sorted(words), directory / f'llvm-decoding-{index}', mattrs=attrs)
+        alias_identities = set()
+        for identity, row in overrides.items():
+            if row['status'] == 'unsupported':
+                continue
+            attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
+            decoded = {entry['word']: entry for entry in independent_receipts.get(attrs, {}).get('rows', [])}
+            fact = (canonical_facts or {}).get(identity)
+            for sample in row['smoke_samples']:
+                actual = decoded.get(validate_sample(forms[identity], sample))
+                if actual is not None and fact is not None and actual['mnemonic'] != fact['mnemonic'].lower():
+                    alias_identities.add(identity)
+        if alias_identities:
+            if canonical_catalog is None or arm_archive is None:
+                raise ValueError('Independent preferred aliases require the validated catalog and pinned Arm archive')
+            preferred_aliases = a64_disassembly.PreferredAliases(
+                canonical_catalog, arm_archive, sorted(alias_identities))
     for identity, row in overrides.items():
         if row['status'] == 'unsupported':
             continue
@@ -592,7 +611,8 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
                 independent_receipt = independent_receipts.get(attrs)
                 if independent_receipt is not None:
                     independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
-            mnemonic, assembly, basis = smoke_decoding(decoder, word, identity, canonical_facts, independent_rows)
+            mnemonic, assembly, basis = smoke_decoding(
+                decoder, word, identity, canonical_facts, independent_rows, preferred_aliases)
             if mnemonic not in sample['expected_mnemonics']:
                 raise ValueError(f'Independent decoder differs for {identity}: {word:#x}')
             location = directory / f'{len(results)}-supported'
@@ -607,7 +627,10 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             results.append({'id': identity, 'sample': index, 'assembly': assembly,
                             'independent_decode_basis': basis, **probe,
                             **({'independent_decode_receipt': independent_receipt}
-                               if basis == 'apple_llvm21_objdump' else {})})
+                               if basis == 'apple_llvm21_objdump' else {}),
+                            **({'independent_preferred_alias_facts': preferred_aliases.evidence()}
+                               if basis == 'apple_llvm21_objdump' and preferred_aliases is not None
+                               and mnemonic != canonical_facts[identity]['mnemonic'].lower() else {})})
         for index, sample in enumerate(row.get('rejected_samples', [])):
             location = directory / f'{len(results)}-rejected'
             location.mkdir()
@@ -849,6 +872,9 @@ def main():
     parser.add_argument('--service-registry', type=Path, default=ROOT / 'tests/isa/a64-service-forms.json')
     parser.add_argument('--scalable-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-scalable-forms.json')
     parser.add_argument('--checklist', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
+    parser.add_argument('--arm-archive', type=Path,
+                        default=ROOT / '.stela/isa/ISA_A64_xml_A_profile-2026-06.tar.gz',
+                        help='Pinned June 2026 Arm XML archive; required only for preferred-alias LLVM rows')
     parser.add_argument('--apple-profiles', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
@@ -900,6 +926,7 @@ def main():
         scalable_compiler, scalable_probes = smoke_forms(
             args.cli, scalable_rows, scalable_rows, scalable_directory, mode='scalable',
             canonical_facts=canonical_facts, profile=scalable_registry['profile'],
+            canonical_catalog=catalog, arm_archive=args.arm_archive,
             **({'execution_profiles': scalable_registry['execution_profiles']}
                if 'execution_profiles' in scalable_registry else {}))
         if any(identity != compiler for identity in (block_compiler, service_compiler, scalable_compiler)):
