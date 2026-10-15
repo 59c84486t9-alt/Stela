@@ -1,5 +1,8 @@
 //! Thread-owned scalable register storage; the existing V registers own low Z bits.
 
+mod context;
+pub mod leaf;
+
 use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestState,
@@ -93,6 +96,12 @@ impl ScalableState {
             loan.storage.resize(bytes, 0);
         }
         operation(loan.state, &mut loan.storage[..bytes])
+    }
+
+    /// Whether this owner reserves ZT0 backing storage. This allocation
+    /// capability does not establish guest feature availability or access.
+    pub const fn has_zt0_storage(&self) -> bool {
+        self.sme2
     }
 
     pub fn vector_length(&self) -> VectorLength {
@@ -651,4 +660,3 @@ mod tests {
 }
 
 pub mod block;
-mod context;

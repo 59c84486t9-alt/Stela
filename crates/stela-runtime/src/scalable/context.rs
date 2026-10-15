@@ -1,6 +1,6 @@
 //! Scoped context pointers shared by owned synchronous leaf/block entries.
 
-use stela_compiler::context::{ExecutionContext, ScalableStateView};
+use stela_compiler::context::{ExecutionContext, ScalableStateView, memory::MemoryContextView};
 
 /// Pointers are restored before the matching register/service loan expires,
 /// including ordinary Rust error unwinding around a completed native call.
@@ -25,6 +25,12 @@ impl<'a> ContextLoan<'a> {
     ) -> Self {
         let loan = Self::new(context);
         loan.context.scalable = std::ptr::from_mut(view);
+        loan
+    }
+
+    pub(super) fn memory(context: &'a mut ExecutionContext, view: &mut MemoryContextView) -> Self {
+        let loan = Self::new(context);
+        loan.context.memory = std::ptr::from_mut(view).cast();
         loan
     }
 

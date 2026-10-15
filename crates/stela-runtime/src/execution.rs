@@ -235,6 +235,23 @@ pub(crate) mod platform {
             Ok(unsafe { function(state, context) })
         }
 
+        /// Invoke the two-argument context-leaf ABI. Architectural failure is
+        /// recorded in the owned memory view, never inferred from RAX.
+        pub unsafe fn call_context(
+            &self,
+            state: &mut GuestState,
+            context: &mut stela_compiler::context::ExecutionContext,
+        ) -> Result<()> {
+            // SAFETY: The context entry owns the checked source/profile and
+            // validates its live borrowed views before this synchronous call.
+            let function: unsafe extern "C" fn(
+                *mut GuestState,
+                *mut stela_compiler::context::ExecutionContext,
+            ) = unsafe { std::mem::transmute(self.pointer.as_ptr()) };
+            unsafe { function(state, context) };
+            Ok(())
+        }
+
         pub unsafe fn call_block(
             &self,
             state: &mut GuestState,
@@ -292,6 +309,14 @@ pub(crate) mod platform {
         ) -> Result<stela_compiler::block::BlockExit> {
             ensure_supported()?;
             unreachable!()
+        }
+
+        pub unsafe fn call_context(
+            &self,
+            _state: &mut GuestState,
+            _context: &mut stela_compiler::context::ExecutionContext,
+        ) -> Result<()> {
+            ensure_supported()
         }
 
         pub unsafe fn call_block(

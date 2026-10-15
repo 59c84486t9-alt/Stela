@@ -1,5 +1,6 @@
 //! Shared scalable operands. Instruction families own allocation and mode checks.
 
+pub mod execution;
 pub mod features;
 pub mod profile;
 

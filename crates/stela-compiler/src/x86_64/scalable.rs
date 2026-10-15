@@ -5,6 +5,8 @@
 //! scalable view. Helpers use only caller-saved RAX/RCX/RDX and XMM0..7. They
 //! access architectural state storage, never guest data RAM or monitor metadata.
 
+pub(crate) use super::memory_context as memory;
+
 mod legacy;
 pub(crate) mod numerical;
 pub(crate) mod routing;

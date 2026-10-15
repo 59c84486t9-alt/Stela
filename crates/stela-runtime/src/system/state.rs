@@ -191,6 +191,12 @@ impl SystemState {
         })
     }
 
+    /// PSTATE bits owned here; NZCV remains authoritative in GuestState.
+    /// Use `pstate` when the complete composed value is required.
+    pub const fn pstate_misc(&self) -> u64 {
+        self.pstate_misc
+    }
+
     pub fn pstate(&self, registers: &GuestState) -> u64 {
         self.pstate_misc | (u64::from(registers.nzcv) & NZCV_MASK)
     }

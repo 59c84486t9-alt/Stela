@@ -8,6 +8,8 @@ use super::{
     access::ExceptionLevel,
     events::EventEndpoint,
     execution::EntryBoundary,
+    identification::Register,
+    identification_snapshot::{Snapshot, Unsupported as IdentificationUnsupported},
     profile::BaseSpeAbsence,
     pstate::{DAIF_MASK, NZCV_MASK},
     state::{PSTATE_EL0T, PSTATE_IL_MASK, PSTATE_MODE_MASK, SystemState},
@@ -16,6 +18,7 @@ use crate::memory::{
     domain::{DataPolicy, MemoryExecutionLoan, MemoryThread},
     policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
 };
+use std::sync::Arc;
 use stela_compiler::{
     GuestState,
     block::ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -27,6 +30,9 @@ use stela_compiler::{
 #[path = "process_memory/source.rs"]
 mod source;
 pub use source::SourceNormalWbDomain;
+#[path = "process_memory/scalable.rs"]
+mod scalable;
+pub use scalable::ScalableExecutionError;
 
 const SCTLR_MMU_ENABLE: u64 = 1;
 const SCTLR_DATA_CACHE_ENABLE: u64 = 1 << 2;
@@ -68,6 +74,7 @@ const SOURCE_PSTATE_MASK: u64 = NZCV_MASK | DAIF_MASK | PSTATE_MODE_MASK;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessMemoryError {
+    Identification(IdentificationUnsupported),
     UnsupportedFeature {
         register: &'static str,
         field: &'static str,
@@ -98,6 +105,25 @@ pub struct ProcessMemoryFeatures {
 }
 
 impl ProcessMemoryFeatures {
+    /// Derive only this bounded memory feature seal from the same named source.
+    /// Missing IDs remain unsupported; no exception-feature absence is inferred.
+    pub fn from_snapshot(identification: &Snapshot) -> Result<Self, ProcessMemoryError> {
+        let read = |register| {
+            identification
+                .read(register)
+                .map_err(ProcessMemoryError::Identification)
+        };
+        Self::from_id_registers(
+            read(Register::IdAa64Mmfr0El1)?,
+            read(Register::IdAa64Mmfr2El1)?,
+            read(Register::IdAa64Isar3El1)?,
+            read(Register::IdAa64Pfr1El1)?,
+            identification
+                .base_spe_absence()
+                .map_err(ProcessMemoryError::Identification)?,
+        )
+    }
+
     pub fn from_id_registers(
         id_aa64mmfr0_el1: u64,
         id_aa64mmfr2_el1: u64,
@@ -155,6 +181,7 @@ impl ProcessMemoryFeatures {
 #[derive(Debug)]
 pub struct FixedProcessMemoryControls {
     _features: ProcessMemoryFeatures,
+    identification: Option<Arc<Snapshot>>,
     sctlr_el1: u64,
     tcr_el1: u64,
     lower_address: LowerAddressProfile,
@@ -196,11 +223,38 @@ impl FixedProcessMemoryControls {
         }
         Ok(Self {
             _features: features,
+            identification: None,
             sctlr_el1,
             tcr_el1,
             lower_address,
             source,
         })
+    }
+
+    /// Construct a fresh scope whose memory features and EL10 regime are
+    /// derived from this exact retained identification allocation. Dynamic
+    /// CurrentEL/PSTATE and scalable access controls remain separate owners.
+    /// This does not qualify PFAR or any other exception-entry optional effect.
+    pub fn new_with_identification(
+        identification: Arc<Snapshot>,
+        sctlr_el1: u64,
+        tcr_el1: u64,
+        lower_address_bits: u8,
+        source: SourceNormalWbDomain,
+    ) -> Result<Self, ProcessMemoryError> {
+        identification
+            .check_el10_regime()
+            .map_err(ProcessMemoryError::Identification)?;
+        let features = ProcessMemoryFeatures::from_snapshot(&identification)?;
+        let mut controls = Self::new(features, sctlr_el1, tcr_el1, lower_address_bits, source)?;
+        controls.identification = Some(identification);
+        Ok(controls)
+    }
+
+    /// The same immutable source used at construction, if this scope has one.
+    /// Legacy raw-ID construction intentionally supplies no scalable authority.
+    pub fn identification_snapshot(&self) -> Option<&Snapshot> {
+        self.identification.as_deref()
     }
 
     pub const fn sctlr_el1(&self) -> u64 {
@@ -243,22 +297,7 @@ impl FixedProcessMemoryControls {
         thread: &'run mut MemoryThread<MemoryControls>,
         endpoint: Option<&'run EventEndpoint>,
     ) -> Result<PreparedProcessMemory<'run>, ProcessMemoryError> {
-        let pstate = system.pstate(registers);
-        if pstate & PSTATE_IL_MASK != 0 {
-            return Err(ProcessMemoryError::IllegalExecutionState);
-        }
-        if system.current_el() != ExceptionLevel::El0 || pstate & PSTATE_MODE_MASK != PSTATE_EL0T {
-            return Err(ProcessMemoryError::UnsupportedMode(
-                pstate & PSTATE_MODE_MASK,
-            ));
-        }
-        let unsupported = pstate & !SOURCE_PSTATE_MASK;
-        if unsupported != 0 {
-            return Err(ProcessMemoryError::UnsupportedPstate(unsupported));
-        }
-        if system.mte().is_some() || system.tag_check_override() {
-            return Err(ProcessMemoryError::MteState);
-        }
+        self.validate_source_state(system, registers)?;
         // Capture the actual provider loan before validating source generation.
         // It owns the same domain Arc without borrowing/extracting the policy;
         // failed preparation releases it through Drop before returning.
@@ -312,6 +351,30 @@ impl FixedProcessMemoryControls {
             endpoint,
             requirements,
         })
+    }
+
+    fn validate_source_state(
+        &self,
+        system: &SystemState,
+        registers: &GuestState,
+    ) -> Result<(), ProcessMemoryError> {
+        let pstate = system.pstate(registers);
+        if pstate & PSTATE_IL_MASK != 0 {
+            return Err(ProcessMemoryError::IllegalExecutionState);
+        }
+        if system.current_el() != ExceptionLevel::El0 || pstate & PSTATE_MODE_MASK != PSTATE_EL0T {
+            return Err(ProcessMemoryError::UnsupportedMode(
+                pstate & PSTATE_MODE_MASK,
+            ));
+        }
+        let unsupported = pstate & !SOURCE_PSTATE_MASK;
+        if unsupported != 0 {
+            return Err(ProcessMemoryError::UnsupportedPstate(unsupported));
+        }
+        if system.mte().is_some() || system.tag_check_override() {
+            return Err(ProcessMemoryError::MteState);
+        }
+        Ok(())
     }
 
     fn memory_controls(&self, system: &SystemState) -> MemoryControls {
@@ -454,3 +517,7 @@ impl<P: DataPolicy> Drop for PolicyLoan<'_, P> {
 #[cfg(test)]
 #[path = "process_memory/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "process_memory/identification_tests.rs"]
+mod identification_tests;

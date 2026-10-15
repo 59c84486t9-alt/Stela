@@ -322,6 +322,20 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/sve/floating/conversion/integer.rs"),
     include_str!("x86_64/sve/floating/conversion/unsigned64.rs"),
     include_str!("x86_64/sve/floating/rounding.rs"),
+    include_str!("aarch64/scalable/execution.rs"),
+    include_str!("aarch64/sve/memory.rs"),
+    include_str!("aarch64/sve/memory_load.rs"),
+    include_str!("aarch64/sve/memory_multi.rs"),
+    include_str!("aarch64/sve/memory_store.rs"),
+    include_str!("aarch64/sve/memory_structure.rs"),
+    include_str!("aarch64/sme/memory.rs"),
+    include_str!("x86_64/sve/memory.rs"),
+    include_str!("x86_64/sve/memory_load.rs"),
+    include_str!("x86_64/sve/memory_multi.rs"),
+    include_str!("x86_64/sve/memory_store.rs"),
+    include_str!("x86_64/sve/memory_structure.rs"),
+    include_str!("x86_64/sme/memory.rs"),
+    include_str!("x86_64/sme/memory/za.rs"),
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

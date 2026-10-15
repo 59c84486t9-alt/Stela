@@ -6,6 +6,7 @@ pub mod integer_dots;
 pub mod integer_matrix;
 pub mod integer_vector;
 pub mod length;
+pub mod memory;
 pub mod movement;
 pub mod tables;
 
@@ -15,12 +16,16 @@ pub enum Operand {
     IntegerMatrix(integer_matrix::Operand),
     IntegerVector(integer_vector::Operand),
     Length(length::Operand),
+    Memory(memory::Operand),
     Movement(movement::Operand),
     Tables(tables::Operand),
 }
 
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(operand) = memory::decode(word) {
+        return Some(Ok(Operand::Memory(operand)));
+    }
     if let Some(operand) = tables::decode(word) {
         return Some(Ok(Operand::Tables(operand)));
     }

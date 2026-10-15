@@ -336,7 +336,21 @@
     "crates/stela-compiler/src/x86_64/sve/floating/conversion/half_widening.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/conversion/integer.rs",
     "crates/stela-compiler/src/x86_64/sve/floating/conversion/unsigned64.rs",
-    "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs"
+    "crates/stela-compiler/src/x86_64/sve/floating/rounding.rs",
+    "crates/stela-compiler/src/aarch64/scalable/execution.rs",
+    "crates/stela-compiler/src/aarch64/sve/memory.rs",
+    "crates/stela-compiler/src/aarch64/sve/memory_load.rs",
+    "crates/stela-compiler/src/aarch64/sve/memory_multi.rs",
+    "crates/stela-compiler/src/aarch64/sve/memory_store.rs",
+    "crates/stela-compiler/src/aarch64/sve/memory_structure.rs",
+    "crates/stela-compiler/src/aarch64/sme/memory.rs",
+    "crates/stela-compiler/src/x86_64/sve/memory.rs",
+    "crates/stela-compiler/src/x86_64/sve/memory_load.rs",
+    "crates/stela-compiler/src/x86_64/sve/memory_multi.rs",
+    "crates/stela-compiler/src/x86_64/sve/memory_store.rs",
+    "crates/stela-compiler/src/x86_64/sve/memory_structure.rs",
+    "crates/stela-compiler/src/x86_64/sme/memory.rs",
+    "crates/stela-compiler/src/x86_64/sme/memory/za.rs"
   ],
   "registry_version": "documented-a64-software-services-v1",
   "profile": {

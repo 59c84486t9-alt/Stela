@@ -12,6 +12,11 @@ pub mod integer_logic;
 pub mod integer_predicate_move;
 pub mod integer_products;
 pub mod integer_saturation;
+pub mod memory;
+pub mod memory_load;
+pub mod memory_multi;
+pub mod memory_store;
+pub mod memory_structure;
 pub mod predicate_generation;
 pub mod predicate_logic;
 pub mod prefix;
@@ -35,6 +40,10 @@ pub enum Operand {
     IntegerPredicateMove(integer_predicate_move::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
+    MemoryLoad(memory_load::Operand),
+    MemoryMulti(memory_multi::Operand),
+    MemoryStore(memory_store::Operand),
+    MemoryStructure(memory_structure::Operand),
     PredicateGeneration(predicate_generation::Operand),
     PredicateLogic(predicate_logic::Operand),
     Rearrange(rearrange::Operand),
@@ -65,6 +74,12 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         })
         .or_else(|| {
             integer_saturation::decode(word).map(|operand| operand.map(Operand::IntegerSaturation))
+        })
+        .or_else(|| memory_load::decode(word).map(|operand| operand.map(Operand::MemoryLoad)))
+        .or_else(|| memory_multi::decode(word).map(|operand| operand.map(Operand::MemoryMulti)))
+        .or_else(|| memory_store::decode(word).map(|operand| operand.map(Operand::MemoryStore)))
+        .or_else(|| {
+            memory_structure::decode(word).map(|operand| operand.map(Operand::MemoryStructure))
         })
         .or_else(|| {
             predicate_generation::decode(word)

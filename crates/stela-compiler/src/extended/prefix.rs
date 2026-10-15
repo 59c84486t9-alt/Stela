@@ -1,7 +1,7 @@
 //! Source-adjacent MOVPRFX pairs for reviewed total inline followers.
 //! Effectful boundaries remain explicit declines until restart state is carried.
 
-use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, decode};
+use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, decode_recording_features};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -24,6 +24,8 @@ pub(super) struct Pair {
     pub follower_pc: GuestAddress,
     pub prefix: integer_logic::Operand,
     pub follower: Decoded,
+    pub prefix_features: FeatureRequirement,
+    pub follower_features: Vec<FeatureRequirement>,
 }
 
 /// Return no pair for a nonprefix instruction. A prefix requires both complete
@@ -66,10 +68,8 @@ pub(super) fn decode_pair(
             prefix_pc.0
         )));
     }
-    profile.require_features(
-        FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
-        prefix_pc,
-    )?;
+    let prefix_features = FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme));
+    profile.require_features(prefix_features, prefix_pc)?;
     let pair_end = offset
         .checked_add(PAIR_BYTES)
         .ok_or_else(|| CompileError("MOVPRFX pair source extent overflow".into()))?;
@@ -99,7 +99,15 @@ pub(super) fn decode_pair(
     }
     // Keep unsupported allocation/features/semantics distinct from a known
     // decoded pairing violation. Existing decode errors stay compiler declines.
-    let follower = decode(follower_pc, follower_word, profile, target).map_err(|error| {
+    let mut follower_features = Vec::new();
+    let follower = decode_recording_features(
+        follower_pc,
+        follower_word,
+        profile,
+        target,
+        &mut follower_features,
+    )
+    .map_err(|error| {
         CompileError(format!(
             "MOVPRFX pair validation: unsupported follower at {:#x}: {error}",
             follower_pc.0
@@ -140,6 +148,8 @@ pub(super) fn decode_pair(
         follower_pc,
         prefix: operand,
         follower,
+        prefix_features,
+        follower_features,
     }))
 }
 
@@ -299,6 +309,7 @@ mod window_boundary_tests {
 
 #[cfg(test)]
 mod dispatcher_tests {
+    use super::super::decode;
     use super::*;
     use crate::aarch64::{
         scalable::{ScalableMode, VectorLength},

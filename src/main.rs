@@ -2375,6 +2375,16 @@ fn run() -> Result<()> {
                 zt0_enabled,
             )?;
             let source = std::fs::read(&input)?;
+            let memory_requirements = profile
+                .map(|profile| {
+                    stela_compiler::extended::memory_requirements(
+                        &source,
+                        stela_compiler::GuestAddress(guest_base),
+                        profile,
+                        cpu_target,
+                    )
+                })
+                .transpose()?;
             let block = if let Some(profile) = profile {
                 stela_compiler::extended::compile_for_profile(
                     &source,
@@ -2418,6 +2428,27 @@ fn run() -> Result<()> {
                 manifest["execution_profile"] = scalable_execution_manifest(profile)?;
                 manifest["entry_prefix_bytes"] =
                     serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+                let requirements = memory_requirements
+                    .context("context leaf requires compiler-derived memory metadata")?;
+                use stela_compiler::context::memory::SpAlignmentRequirement;
+                let sp_alignment = match requirements.required_sp_alignment {
+                    SpAlignmentRequirement::Any => "any",
+                    SpAlignmentRequirement::Enabled => "enabled",
+                    SpAlignmentRequirement::Disabled => "disabled",
+                };
+                manifest["memory_requirements"] = serde_json::json!({
+                    "required_flags": requirements.required_flags,
+                    "required_host_caps": requirements.required_host_caps,
+                    "required_profile": requirements.required_profile,
+                    "required_sp_alignment": sp_alignment,
+                });
+                use stela_compiler::context::memory::{
+                    MEMORY_IMPLEMENTATION_PROFILE_ID, profile_requirements,
+                };
+                manifest["memory_implementation_profile"] = serde_json::json!(
+                    (requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0)
+                        .then_some(MEMORY_IMPLEMENTATION_PROFILE_ID)
+                );
             }
             write_json(&output_dir.join("manifest.json"), &manifest)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
