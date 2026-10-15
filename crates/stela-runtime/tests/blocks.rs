@@ -476,7 +476,9 @@ fn finite_budget_suspends_loop_at_real_guest_pc_and_resumes_from_cached_block() 
     assert_eq!(first.reason, StopReason::BudgetExhausted);
     assert_eq!(first.blocks_executed, 2);
     assert_eq!(first.compiled_blocks, 1);
-    assert_eq!(first.memory_cache_hits, 1);
+    // Both original iterations retire in the first loaded native body; the
+    // internal edge performs no second cache lookup.
+    assert_eq!(first.memory_cache_hits, 0);
     assert_eq!(thread.pc, GuestAddress(BASE));
     assert_eq!(thread.registers.x[0], 1);
     // SAFETY: the same owned code now reaches its return within two blocks.

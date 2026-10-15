@@ -1,0 +1,287 @@
+//! Fixed resident assignments for bounded, nonfaulting scalar self-loops.
+//! Every observable exit settles the original bank. No mid-native recovery,
+//! checked-memory or asynchronous-delivery contract is introduced here.
+use super::{
+    AllocationStats, Effects, Emitter, FRAME_LOCATIONS, GPR_SLOTS, HostGpr, Location,
+    MAX_INSTRUCTIONS, OptimizedRegion, POOL, Resident, analysis, constant, encoding, flags,
+};
+#[cfg(test)]
+use super::{Liveness, Phase};
+use crate::{
+    GuestAddress, NativeBlock,
+    aarch64::{Instruction, Operation},
+    block::{ExitKind, Terminator},
+};
+
+const ARM_CONDITION_INVERSE_BIT: u8 = 1;
+const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
+
+pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) -> NativeBlock {
+    let mut code = vec![];
+    encoding::load_budget(&mut code);
+    encoding::skip_jump_if_budget_zero(&mut code);
+    let body_jump = encoding::near_jump(&mut code);
+    super::super::block::direct_exit(&mut code, base, ExitKind::Direct);
+    let body = code.len();
+    encoding::patch_relative(&mut code, body_jump, body);
+    encoding::decrement_stored_budget(&mut code);
+    let prefix = code.len();
+    code.extend(native.x86_64_code);
+    for (_, offset) in &mut native.source_map {
+        *offset += prefix;
+    }
+    if let Some((_, offset)) = native.source_map.first_mut() {
+        *offset = 0;
+    }
+    native.x86_64_code = code;
+    native
+}
+
+/// Decoded eligibility and lowering inputs shared by cache identity and emission.
+pub(crate) struct Plan {
+    entry: GuestAddress,
+    branch_pc: GuestAddress,
+    fallthrough: GuestAddress,
+    normal_condition: encoding::NativeCondition,
+    effects: Vec<Effects>,
+    prefix_steps: Vec<flags::Step>,
+    used: u32,
+    last: Instruction,
+}
+
+impl Plan {
+    pub(crate) fn new(
+        instructions: &[Instruction],
+        terminal: Option<&(GuestAddress, Terminator)>,
+        fallthrough: GuestAddress,
+    ) -> Option<Self> {
+        let entry = instructions.first()?.pc;
+        let (branch_pc, Terminator::Branch(Operation::BranchCondition { target, condition })) =
+            terminal?
+        else {
+            return None;
+        };
+        if *target != entry || instructions.len() > MAX_INSTRUCTIONS {
+            return None;
+        }
+        let normal_condition = *encoding::SUBTRACTION_CONDITIONS
+            .get(usize::from(*condition ^ ARM_CONDITION_INVERSE_BIT))?;
+        let (last, prefix) = instructions.split_last()?;
+        // Every internal flag read has known host provenance. The final complete
+        // subtraction defines every flag observed by the edge and canonical exit.
+        let Operation::AddSub {
+            width,
+            subtract: true,
+            flags: true,
+            destination,
+            source,
+            immediate,
+        } = last.operation
+        else {
+            return None;
+        };
+        let mut provenance = None;
+        let prefix_steps: Vec<_> = prefix
+            .iter()
+            .map(|instruction| flags::analyze(&instruction.operation, &mut provenance))
+            .collect::<Option<_>>()?;
+        let mut effects: Vec<Effects> = prefix_steps.iter().map(|(effect, _)| *effect).collect();
+        let final_effects = analysis::effects(&Operation::AddSub {
+            width,
+            subtract: true,
+            flags: false,
+            destination,
+            source,
+            immediate,
+        })?;
+        effects.push(final_effects);
+        for (index, instruction) in instructions.iter().enumerate() {
+            if instruction.pc.0 != entry.0.checked_add((index as u64) * INSTRUCTION_BYTES)? {
+                return None;
+            }
+        }
+        if branch_pc.0
+            != entry
+                .0
+                .checked_add((instructions.len() as u64) * INSTRUCTION_BYTES)?
+            || fallthrough.0 != branch_pc.0.checked_add(INSTRUCTION_BYTES)?
+        {
+            return None;
+        }
+        let used = effects
+            .iter()
+            .fold(0u32, |mask, effect| mask | effect.reads | effect.writes);
+        let available: Vec<usize> = (0..POOL.len())
+            .filter(|&index| POOL[index] != HostGpr::Rcx)
+            .collect();
+        // A stable per-guest assignment needs no edge shuffle or pressure spill.
+        // Broader live-range reuse/callee-saved pools remain separate work.
+        if used.count_ones() as usize > available.len() {
+            return None;
+        }
+        Some(Self {
+            entry,
+            branch_pc: *branch_pc,
+            fallthrough,
+            normal_condition,
+            effects,
+            prefix_steps: prefix_steps.into_iter().map(|(_, step)| step).collect(),
+            used,
+            last: last.clone(),
+        })
+    }
+
+    pub(crate) fn emit(
+        self,
+        instructions: &[Instruction],
+    ) -> Result<NativeBlock, super::RegionError> {
+        let Self {
+            entry,
+            branch_pc,
+            fallthrough,
+            normal_condition,
+            effects,
+            prefix_steps,
+            used,
+            last,
+        } = self;
+        let Operation::AddSub {
+            width,
+            destination,
+            source,
+            immediate,
+            ..
+        } = last.operation
+        else {
+            unreachable!("planned complete final subtraction")
+        };
+        let prefix = &instructions[..instructions.len() - 1];
+        let available = (0..POOL.len()).filter(|&index| POOL[index] != HostGpr::Rcx);
+        let mut code = vec![];
+        encoding::push_budget_pointer(&mut code);
+        encoding::load_budget(&mut code);
+        encoding::skip_jump_if_budget_zero(&mut code);
+        let body_jump = encoding::near_jump(&mut code);
+        encoding::pop_budget_pointer(&mut code);
+        super::super::block::direct_exit(&mut code, entry, ExitKind::Direct);
+        let cold_entry = code.len();
+        encoding::patch_relative(&mut code, body_jump, cold_entry);
+        let mut emitter = Emitter {
+            output: OptimizedRegion {
+                code,
+                consumed_instructions: instructions.len(),
+                source_map: vec![],
+                recovery: vec![],
+                #[cfg(test)]
+                exit_pc: Some(fallthrough),
+                #[cfg(test)]
+                exit_gprs: FRAME_LOCATIONS,
+                #[cfg(test)]
+                liveness: Liveness::compute(&effects),
+                stats: AllocationStats::default(),
+            },
+            resident: [None; POOL.len()],
+            locations: FRAME_LOCATIONS,
+            effects: &effects,
+            current: 0,
+            #[cfg(test)]
+            pc: entry,
+            #[cfg(test)]
+            phase: Phase::BeforeGuestCommit,
+            constants: constant::ConstantRegisters::default(),
+            reserved_hosts: HostGpr::Rcx.mask(),
+            pinned_hosts: 0,
+            persistent: true,
+        };
+        for (guest, index) in (0..GPR_SLOTS)
+            .filter(|&guest| used & (1 << guest) != 0)
+            .zip(available)
+        {
+            let host = POOL[index];
+            emitter.emit(|code| encoding::load(code, host, guest));
+            emitter.locations[guest] = Location::Host(host);
+            emitter.resident[index] = Some(Resident {
+                guest,
+                dirty: false,
+            });
+            emitter.output.stats.state_loads += 1;
+        }
+        let header = emitter.output.code.len();
+        for (instruction, step) in prefix.iter().zip(&prefix_steps) {
+            #[cfg(test)]
+            {
+                emitter.pc = instruction.pc;
+            }
+            flags::emit(&mut emitter, instruction, *step)?;
+            emitter.current += 1;
+        }
+        #[cfg(test)]
+        {
+            emitter.pc = last.pc;
+        }
+        emitter
+            .output
+            .source_map
+            .push((last.pc, emitter.output.code.len()));
+        if let Some(host) = emitter.in_place(destination, source) {
+            emitter.emit(|code| encoding::arithmetic_immediate(code, host, true, immediate, width));
+            emitter.committed_in_place(destination);
+        } else {
+            emitter.read(source, encoding::RESULT);
+            emitter.emit(|code| {
+                encoding::arithmetic_immediate(code, encoding::RESULT, true, immediate, width)
+            });
+            // Register copies and explicit ZR NOP preserve the subtraction flags.
+            emitter.commit(destination, width);
+        }
+        emitter.current += 1;
+        let code = &mut emitter.output.code;
+        emitter.output.source_map.push((branch_pc, code.len()));
+        encoding::decrement_budget_preserving_flags(code);
+        // The actual original edge has priority over budget exhaustion. A false
+        // edge returns fallthrough even when this completed block used the budget.
+        let normal_exit_jump = encoding::conditional_jump(code, normal_condition);
+        encoding::skip_jump_if_budget_zero(code);
+        let backedge = encoding::near_jump(code);
+        encoding::patch_relative(code, backedge, header);
+        let dirty: Vec<_> = emitter
+            .resident
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                value
+                    .filter(|value| value.dirty)
+                    .map(|value| (POOL[index], value.guest))
+            })
+            .collect();
+        settle_exit(code, &dirty, entry, ExitKind::Direct);
+        let normal_exit = code.len();
+        encoding::patch_relative(code, normal_exit_jump, normal_exit);
+        settle_exit(code, &dirty, fallthrough, ExitKind::Fallthrough);
+        if let Some((_, offset)) = emitter.output.source_map.first_mut() {
+            *offset = 0;
+        }
+        Ok(NativeBlock {
+            x86_64_code: emitter.output.code,
+            source_map: emitter.output.source_map,
+        })
+    }
+}
+
+fn settle_exit(
+    code: &mut Vec<u8>,
+    dirty: &[(HostGpr, usize)],
+    next_pc: GuestAddress,
+    kind: ExitKind,
+) {
+    // Every instruction before NZCV capture preserves host subtraction flags.
+    for &(host, guest) in dirty {
+        encoding::store(code, host, guest);
+    }
+    encoding::pop_budget_pointer(code);
+    encoding::store_budget(code);
+    // Shared complete SUBS flag recipe, including ARM's no-borrow C polarity.
+    // It may now clobber RCX: remaining budget and all dirty GPRs are settled.
+    super::super::nzcv(code, true);
+    super::super::block::direct_exit(code, next_pc, kind);
+}

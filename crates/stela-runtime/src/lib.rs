@@ -181,8 +181,36 @@ pub fn prepare_block_for_target(
     profile: stela_compiler::block::BlockProfile,
     target: stela_compiler::TargetCpu,
 ) -> Result<PreparedBlock> {
-    use stela_compiler::block;
-    let plan = block::CompilationPlan::new(source, base, profile, target)?;
+    let plan = stela_compiler::block::CompilationPlan::new(source, base, profile, target)?;
+    prepare_block_plan(source, base, root, target, plan)
+}
+
+/// Ordinary dispatch may select a source-derived resident ABI; explicit service
+/// profiles retain their existing call and recovery contracts.
+pub(crate) fn prepare_runtime_block_for_target(
+    source: &[u8],
+    base: GuestAddress,
+    root: &Path,
+    profile: stela_compiler::block::BlockProfile,
+    target: stela_compiler::TargetCpu,
+) -> Result<(PreparedBlock, stela_compiler::block::BlockProfile)> {
+    let plan = stela_compiler::block::CompilationPlan::new(source, base, profile, target)?
+        .with_resident_loops();
+    let artifact_profile = plan.profile();
+    Ok((
+        prepare_block_plan(source, base, root, target, plan)?,
+        artifact_profile,
+    ))
+}
+
+fn prepare_block_plan(
+    source: &[u8],
+    base: GuestAddress,
+    root: &Path,
+    target: stela_compiler::TargetCpu,
+    plan: stela_compiler::block::CompilationPlan,
+) -> Result<PreparedBlock> {
+    let profile = plan.profile();
     let source_bytes = plan.source_bytes();
     let memory_requirements = plan.memory_requirements();
     let prefix = &source[..source_bytes];

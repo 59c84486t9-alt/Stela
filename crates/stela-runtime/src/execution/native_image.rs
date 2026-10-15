@@ -99,6 +99,31 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     }
 
     /// # Safety
+    /// Caller binds the exact ordinary resident-budget ABI, same bank and
+    /// invocation-local budget. Selected resident loops are nonfaulting integer
+    /// regions; fallbacks retain the original ordinary call's memory, fault and
+    /// target prerequisites. No asynchronous producer domain is admitted. The
+    /// counter is not a PE, source, checked-memory or retirement permission.
+    /// Original storage and any applicable canonical owner remain borrowed
+    /// through both observations.
+    pub(super) unsafe fn call_budgeted_block(
+        &self,
+        state: &mut GuestState,
+        budget: &mut stela_compiler::block::loop_budget::LoopBudget,
+    ) -> Result<ReachedCall<BlockExit, S::Error>, S::Error> {
+        self.revalidate()?;
+        let function: unsafe extern "C" fn(
+            *mut GuestState,
+            *mut stela_compiler::block::loop_budget::LoopBudget,
+        ) -> BlockExit = unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        let returned = unsafe { function(state, budget) };
+        Ok(ReachedCall {
+            returned,
+            storage_after: self.revalidate(),
+        })
+    }
+
+    /// # Safety
     /// Exact direct-RAM block struct-return ABI and all memory/fault/target
     /// prerequisites apply. The adopted-PE retained Active contract above remains
     /// mandatory; a raw GuestState argument is not CPU or retirement authority.

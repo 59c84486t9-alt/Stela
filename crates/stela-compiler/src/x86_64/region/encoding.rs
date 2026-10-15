@@ -1,4 +1,5 @@
-//! Baseline integer encodings. No optional host feature or host flag dependency.
+//! Baseline integer encodings with explicit flag-preserving helpers.
+//! Conditional recipes require caller-owned arithmetic flag provenance.
 use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{Logical, Shift, Width};
 
@@ -307,4 +308,165 @@ pub fn ordinary_pair_load_ends(
         }
     }
     (code.len() == end).then_some(ends)
+}
+
+/// Native conditions after a full-width ARM subtraction (C is inverted CF).
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum NativeCondition {
+    Equal = 0x84,
+    NotEqual = 0x85,
+    AboveEqual = 0x83,
+    Below = 0x82,
+    Sign = 0x88,
+    NotSign = 0x89,
+    Overflow = 0x80,
+    NotOverflow = 0x81,
+    Above = 0x87,
+    BelowEqual = 0x86,
+    GreaterEqual = 0x8d,
+    Less = 0x8c,
+    Greater = 0x8f,
+    LessEqual = 0x8e,
+}
+
+pub const SUBTRACTION_CONDITIONS: [NativeCondition; 14] = [
+    NativeCondition::Equal,
+    NativeCondition::NotEqual,
+    NativeCondition::AboveEqual,
+    NativeCondition::Below,
+    NativeCondition::Sign,
+    NativeCondition::NotSign,
+    NativeCondition::Overflow,
+    NativeCondition::NotOverflow,
+    NativeCondition::Above,
+    NativeCondition::BelowEqual,
+    NativeCondition::GreaterEqual,
+    NativeCondition::Less,
+    NativeCondition::Greater,
+    NativeCondition::LessEqual,
+];
+
+impl NativeCondition {
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::AboveEqual => Self::Below,
+            Self::Below => Self::AboveEqual,
+            Self::Sign => Self::NotSign,
+            Self::NotSign => Self::Sign,
+            Self::Overflow => Self::NotOverflow,
+            Self::NotOverflow => Self::Overflow,
+            Self::Above => Self::BelowEqual,
+            Self::BelowEqual => Self::Above,
+            Self::GreaterEqual => Self::Less,
+            Self::Less => Self::GreaterEqual,
+            Self::Greater => Self::LessEqual,
+            Self::LessEqual => Self::Greater,
+        }
+    }
+}
+
+pub fn conditional_copy(
+    code: &mut Vec<u8>,
+    destination: HostGpr,
+    source: HostGpr,
+    condition: NativeCondition,
+    width: Width,
+) {
+    const JCC_TO_CMOV: u8 = 0x40;
+    rex(code, width, destination, source);
+    code.extend([
+        TWO_BYTE_OPCODE,
+        condition as u8 - JCC_TO_CMOV,
+        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
+    ]);
+}
+
+pub fn increment_preserving_flags(code: &mut Vec<u8>, register: HostGpr, width: Width) {
+    rex(code, width, register, register);
+    code.extend([
+        LEA,
+        DISP8_MODE | ((register as u8 & 7) << 3) | (register as u8 & 7),
+        1,
+    ]);
+}
+
+const NEAR_JUMP: u8 = 0xe9;
+const JRCXZ: u8 = 0xe3;
+const PUSH_REGISTER: u8 = 0x50;
+const POP_REGISTER: u8 = 0x58;
+const LEA: u8 = 0x8d;
+const INC_DEC_GROUP: u8 = 0xff;
+const DEC_EXTENSION: u8 = 1;
+const RELATIVE_BYTES: usize = std::mem::size_of::<i32>();
+const NEAR_JUMP_BYTES: u8 = 1 + RELATIVE_BYTES as u8;
+
+pub fn near_jump(code: &mut Vec<u8>) -> usize {
+    code.push(NEAR_JUMP);
+    let displacement = code.len();
+    code.extend(0i32.to_le_bytes());
+    displacement
+}
+
+pub fn conditional_jump(code: &mut Vec<u8>, condition: NativeCondition) -> usize {
+    code.extend([TWO_BYTE_OPCODE, condition as u8]);
+    let displacement = code.len();
+    code.extend(0i32.to_le_bytes());
+    displacement
+}
+
+pub fn patch_relative(code: &mut [u8], displacement: usize, target: usize) {
+    let relative = i32::try_from(target as isize - (displacement + RELATIVE_BYTES) as isize)
+        .expect("bounded block displacement fits i32");
+    code[displacement..displacement + RELATIVE_BYTES].copy_from_slice(&relative.to_le_bytes());
+}
+
+/// Zero skips exactly the following near jump; no host flags change.
+pub fn skip_jump_if_budget_zero(code: &mut Vec<u8>) {
+    code.extend([JRCXZ, NEAR_JUMP_BYTES]);
+}
+
+pub fn push_budget_pointer(code: &mut Vec<u8>) {
+    code.push(PUSH_REGISTER | HostGpr::Rsi as u8);
+}
+
+pub fn pop_budget_pointer(code: &mut Vec<u8>) {
+    code.push(POP_REGISTER | HostGpr::Rsi as u8);
+}
+
+pub fn load_budget(code: &mut Vec<u8>) {
+    const _: () = assert!(crate::block::loop_budget::REMAINING_OFFSET == 0);
+    code.extend([
+        REX | REX_W,
+        MOV_LOAD,
+        (HostGpr::Rcx as u8) << 3 | HostGpr::Rsi as u8,
+    ]);
+}
+
+pub fn store_budget(code: &mut Vec<u8>) {
+    code.extend([
+        REX | REX_W,
+        MOV_STORE,
+        (HostGpr::Rcx as u8) << 3 | HostGpr::Rsi as u8,
+    ]);
+}
+
+pub fn decrement_budget_preserving_flags(code: &mut Vec<u8>) {
+    code.extend([
+        REX | REX_W,
+        LEA,
+        DISP8_MODE | ((HostGpr::Rcx as u8) << 3) | HostGpr::Rcx as u8,
+    ]);
+    code.extend((-1i8).to_le_bytes());
+}
+
+/// Fallback consumes one original block before entering its unchanged body.
+pub fn decrement_stored_budget(code: &mut Vec<u8>) {
+    code.extend([
+        REX | REX_W,
+        INC_DEC_GROUP,
+        (DEC_EXTENSION << 3) | HostGpr::Rsi as u8,
+    ]);
 }

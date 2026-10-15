@@ -3,9 +3,13 @@
 //! emission and settles every dirty value before its faultable access.
 //! Research rows do not provide general asynchronous/native-fault delivery.
 mod analysis;
+mod self_loop;
 pub(super) use analysis::MAX_INSTRUCTIONS;
+pub(crate) use self_loop::Plan as ResidentLoopPlan;
+pub(super) use self_loop::prefix_with_budget;
 mod constant;
 mod encoding;
+mod flags;
 pub mod recovery;
 
 use crate::{
@@ -88,6 +92,8 @@ struct Emitter<'a> {
     constants: constant::ConstantRegisters,
     reserved_hosts: u16,
     pinned_hosts: u16,
+    /// A fixed loop assignment retains architectural outputs until its side exit.
+    persistent: bool,
 }
 
 impl Emitter<'_> {
@@ -230,7 +236,7 @@ impl Emitter<'_> {
         // evict them according to next use without changing this operation.
         self.pinned_hosts = 0;
         if let Some(guest) = slot(destination) {
-            if next_use(self.effects, self.current + 1, guest) == usize::MAX {
+            if !self.persistent && next_use(self.effects, self.current + 1, guest) == usize::MAX {
                 // This value has reached its last use in the region. Commit to
                 // its canonical final location, retaining the old Host recipe
                 // until the store succeeds. Other resident values stay cached.
@@ -388,11 +394,26 @@ impl Emitter<'_> {
     }
 
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), RegionError> {
+        let constant = self.constants.step(&instruction.operation);
+        self.instruction_with_constant(instruction, constant)
+    }
+
+    fn instruction_defining_flags(&mut self, instruction: &Instruction) -> Result<(), RegionError> {
+        // A constant value replacement does not reproduce arithmetic flags.
+        self.constants.clear();
+        self.instruction_with_constant(instruction, None)
+    }
+
+    fn instruction_with_constant(
+        &mut self,
+        instruction: &Instruction,
+        constant: Option<constant::ConstantWrite>,
+    ) -> Result<(), RegionError> {
         self.pinned_hosts = 0;
         self.output
             .source_map
             .push((instruction.pc, self.output.code.len()));
-        if let Some(write) = self.constants.step(&instruction.operation) {
+        if let Some(write) = constant {
             let guest = slot(write.destination).expect("known constant has a real destination");
             if next_use(self.effects, self.current + 1, guest) != usize::MAX {
                 let index = self.allocate(guest);
@@ -845,6 +866,7 @@ fn emit_prefix_selected(
             0
         },
         pinned_hosts: 0,
+        persistent: false,
     };
     for instruction in instructions.iter().take(consumed) {
         #[cfg(test)]

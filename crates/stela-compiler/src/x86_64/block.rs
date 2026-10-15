@@ -1,6 +1,8 @@
 //! Guest control transfers return to the native dispatcher with canonical state.
 pub(crate) mod checked_memory;
 pub(crate) mod el1_m0;
+pub(crate) use super::region::ResidentLoopPlan;
+
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation, Register, Width},
@@ -58,6 +60,22 @@ pub(crate) fn emit_ordinary_for_target(
     target: crate::TargetCpu,
 ) -> NativeBlock {
     emit_selected(instructions, terminal, fallthrough, target, true)
+}
+
+/// Every artifact in this profile accepts the same invocation-local budget ABI.
+pub(crate) fn emit_resident_fallback_for_target(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+) -> NativeBlock {
+    let base = instructions
+        .first()
+        .map(|instruction| instruction.pc)
+        .or_else(|| terminal.map(|(pc, _)| *pc))
+        .unwrap_or(fallthrough);
+    let native = emit_ordinary_for_target(instructions, terminal, fallthrough, target);
+    super::region::prefix_with_budget(native, base)
 }
 
 pub(crate) fn emit_for_target(

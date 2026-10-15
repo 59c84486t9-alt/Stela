@@ -15,6 +15,7 @@ use crate::{
 use serde::Serialize;
 
 pub mod el1_m0;
+pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
 pub mod pauth_memory;
@@ -66,6 +67,8 @@ pub const EL1_M0_INTEGER_BLOCK_ABI: &str =
 pub enum BlockProfile {
     #[default]
     Ordinary,
+    /// Ordinary direct RAM with bounded nonfaulting resident self-loops.
+    OrdinaryResidentV1,
     El1DirectBranchV1,
     El1M0IntegerV1,
     CheckedMemory(CheckedMemoryProfile),
@@ -84,6 +87,7 @@ impl BlockProfile {
     pub const fn abi(self) -> &'static str {
         match self {
             Self::Ordinary => BLOCK_ABI,
+            Self::OrdinaryResidentV1 => loop_budget::RESIDENT_BLOCK_ABI,
             Self::El1DirectBranchV1 => EL1_DIRECT_BRANCH_BLOCK_ABI,
             Self::El1M0IntegerV1 => EL1_M0_INTEGER_BLOCK_ABI,
             Self::CheckedMemory(profile) => profile.abi(),
@@ -95,6 +99,10 @@ impl BlockProfile {
             Self::AppleArm64eSoftwarePauthThreadV1 => PAUTH_THREAD_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockThreadV1 => CLOCK_THREAD_BLOCK_ABI,
         }
+    }
+
+    pub const fn supports_resident_loops(self) -> bool {
+        matches!(self, Self::OrdinaryResidentV1)
     }
 
     pub const fn checked_memory(self) -> Option<CheckedMemoryProfile> {
@@ -989,7 +997,8 @@ pub struct CompilationPlan {
     checked: Option<memory::CheckedPlan>,
     el1_m0: Option<el1_m0::Plan>,
     target: crate::TargetCpu,
-    ordinary_regions: bool,
+    profile: BlockProfile,
+    resident: Option<crate::x86_64::block::ResidentLoopPlan>,
 }
 impl CompilationPlan {
     pub fn new(
@@ -1023,14 +1032,44 @@ impl CompilationPlan {
         let el1_m0 = (profile == BlockProfile::El1M0IntegerV1)
             .then(|| el1_m0::Plan::new(&parsed))
             .transpose()?;
+        let resident = if profile.supports_resident_loops() {
+            crate::x86_64::block::ResidentLoopPlan::new(
+                &parsed.instructions,
+                parsed.terminal.as_ref(),
+                parsed.next_pc,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             parsed,
             checked,
             el1_m0,
             target,
-            ordinary_regions: profile == BlockProfile::Ordinary,
+            profile,
+            resident,
         })
     }
+    /// Allow the ordinary runtime to retain eligible internal loop edges. Other
+    /// service profiles keep their existing admission and call contracts.
+    pub fn with_resident_loops(mut self) -> Self {
+        if self.profile == BlockProfile::Ordinary {
+            self.resident = crate::x86_64::block::ResidentLoopPlan::new(
+                &self.parsed.instructions,
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+            );
+            if self.resident.is_some() {
+                self.profile = BlockProfile::OrdinaryResidentV1;
+            }
+        }
+        self
+    }
+
+    pub fn profile(&self) -> BlockProfile {
+        self.profile
+    }
+
     pub fn source_bytes(&self) -> usize {
         self.parsed.source_bytes
     }
@@ -1053,7 +1092,18 @@ impl CompilationPlan {
                 self.parsed.next_pc,
                 self.target,
             )?
-        } else if self.ordinary_regions {
+        } else if let Some(resident) = self.resident {
+            resident
+                .emit(&self.parsed.instructions)
+                .map_err(|error| CompileError(format!("resident loop emission: {error:?}")))?
+        } else if self.profile.supports_resident_loops() {
+            crate::x86_64::block::emit_resident_fallback_for_target(
+                &self.parsed.instructions,
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+                self.target,
+            )
+        } else if self.profile == BlockProfile::Ordinary {
             crate::x86_64::block::emit_ordinary_for_target(
                 &self.parsed.instructions,
                 self.parsed.terminal.as_ref(),

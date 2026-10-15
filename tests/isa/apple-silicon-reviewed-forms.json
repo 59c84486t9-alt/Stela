@@ -48279,6 +48279,9 @@
     }
   ],
   "compiler_fingerprint_sources": [
+    "crates/stela-compiler/src/x86_64/region/flags.rs",
+    "crates/stela-compiler/src/block/loop_budget.rs",
+    "crates/stela-compiler/src/x86_64/region/self_loop.rs",
     "crates/stela-compiler/src/x86_64/region.rs",
     "crates/stela-compiler/src/x86_64/region/analysis.rs",
     "crates/stela-compiler/src/x86_64/region/constant.rs",

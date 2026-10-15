@@ -11,8 +11,8 @@ pub use retirement::checked::software_el1::{
 pub(crate) mod scalable;
 
 use crate::{
-    Prepared, clock, execution::platform, floating, memory, pauth, prepare_block_for_target,
-    system, thread,
+    Prepared, clock, execution::platform, floating, memory, pauth,
+    prepare_runtime_block_for_target, system, thread,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -208,6 +208,7 @@ pub struct ThreadRegisterEvent {
 #[derive(Debug, Serialize)]
 pub struct RunOutcome {
     pub reason: StopReason,
+    /// Completed original blocks, including resident internal edges.
     pub blocks_executed: usize,
     pub compiled_blocks: usize,
     pub disk_cache_hits: usize,
@@ -240,6 +241,7 @@ struct CodeRegion {
 
 #[derive(Debug)]
 struct LoadedBlock {
+    profile: BlockProfile,
     region_base: u64,
     generation: u64,
     source_bytes: usize,
@@ -348,6 +350,8 @@ pub struct BlockRuntime {
 /// Preparing it performs no native mapping, invocation or guest memory access.
 #[derive(Debug, Serialize)]
 pub struct PreparedDiscoveryBlock {
+    #[serde(skip)]
+    artifact_profile: BlockProfile,
     pub entry: GuestAddress,
     pub region_base: GuestAddress,
     pub generation: u64,
@@ -521,8 +525,13 @@ impl BlockRuntime {
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let prepared =
-            prepare_block_for_target(window, pc, &self.cache_root, self.profile, self.target)?;
+        let (prepared, artifact_profile) = prepare_runtime_block_for_target(
+            window,
+            pc,
+            &self.cache_root,
+            self.profile,
+            self.target,
+        )?;
         ensure!(
             prepared.source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
@@ -530,7 +539,7 @@ impl BlockRuntime {
         let manifest = &prepared.prepared.manifest;
         ensure!(
             manifest.identity.guest_base == pc.0
-                && manifest.identity.abi == self.profile.abi()
+                && manifest.identity.abi == artifact_profile.abi()
                 && manifest.identity.target_cpu == self.target.id()
                 && manifest.identity.schema_version == 1,
             "unsupported block translation identity"
@@ -546,6 +555,7 @@ impl BlockRuntime {
             "invalid block native size"
         );
         Ok(PreparedDiscoveryBlock {
+            artifact_profile,
             entry: pc,
             region_base: GuestAddress(base),
             generation,
@@ -671,6 +681,7 @@ impl BlockRuntime {
             return Ok(());
         }
         let prepared = self.prepare(pc)?;
+        let profile = prepared.artifact_profile;
         let generation = prepared.generation;
         let source_bytes = prepared.analysis.source_bytes;
         let prepared = prepared.prepared;
@@ -695,6 +706,7 @@ impl BlockRuntime {
         self.loaded.insert(
             pc.0,
             LoadedBlock {
+                profile,
                 region_base: base,
                 generation,
                 source_bytes,
@@ -1113,6 +1125,7 @@ impl BlockRuntime {
                 block.generation == current.generation && block.source_bytes > 0,
                 "refusing stale block execution"
             );
+            let mut completed_blocks = 1;
             let native_exit = if self.profile.checked_memory().is_some() {
                 let requirements = block
                     .prepared
@@ -1197,6 +1210,21 @@ impl BlockRuntime {
                         break;
                     }
                 }
+            } else if block.profile.supports_resident_loops() {
+                let available = block_budget - outcome.blocks_executed;
+                let mut budget = stela_compiler::block::loop_budget::LoopBudget::new(available);
+                // SAFETY: the distinct immutable profile/ABI binds this source
+                // and mapping to the same bank and invocation-local counter.
+                let returned = unsafe {
+                    block
+                        .mapping
+                        .call_budgeted_block(&mut state.registers, &mut budget)?
+                };
+                completed_blocks = budget
+                    .consumed(available)
+                    .filter(|&consumed| consumed != 0)
+                    .context("invalid resident-block budget accounting")?;
+                returned
             } else {
                 unsafe { block.mapping.call_block(&mut state.registers)? }
             };
@@ -1296,7 +1324,7 @@ impl BlockRuntime {
             };
             state.pc = GuestAddress(next_pc);
             outcome.last_exit = Some((next_pc, kind));
-            outcome.blocks_executed += 1;
+            outcome.blocks_executed += completed_blocks;
             if let Some(boundary) = system_boundary {
                 let instruction = boundary.instruction();
                 let dispatcher = system_dispatcher
@@ -2853,3 +2881,10 @@ mod system_boundary_tests {
         assert!(validate_system_exit(BASE, terminal, source.len(), BASE.0, &source[..4]).is_err());
     }
 }
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod resident_tests;

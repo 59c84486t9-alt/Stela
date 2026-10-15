@@ -281,6 +281,30 @@ pub(crate) mod platform {
             unsafe { NativeImage::borrow(self).call_context_block(state, context) }
         }
 
+        /// Invoke the exact ordinary resident-budget ABI over this original
+        /// mapping. The budget bounds execution; it grants no PE or domain loan.
+        ///
+        /// # Safety
+        /// Caller binds the actual source/ABI/target and same canonical bank.
+        /// Selected resident loops are nonfaulting integer regions. A fallback
+        /// retains the original ordinary call's memory, fault and target
+        /// prerequisites. Asynchronous producer domains and checked/System/
+        /// threaded entry are excluded; the budget grants no such admission.
+        pub unsafe fn call_budgeted_block(
+            &self,
+            state: &mut GuestState,
+            budget: &mut stela_compiler::block::loop_budget::LoopBudget,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            // SAFETY: the original immutable RX mapping and exact invocation
+            // bank/budget stay borrowed through returned storage observations.
+            let reached =
+                match unsafe { NativeImage::borrow(self).call_budgeted_block(state, budget) } {
+                    Ok(reached) => reached,
+                    Err(never) => match never {},
+                };
+            Ok(reached.into_infallible())
+        }
+
         /// Actual reached carrier/storage observations for the declared ONE
         /// GuestState-pointer block ABI. The canonical retained Active/session
         /// must own original full PE/source/System/domain through settlement.
@@ -376,6 +400,15 @@ pub(crate) mod platform {
             _context: &mut stela_compiler::context::ExecutionContext,
         ) -> Result<()> {
             ensure_supported()
+        }
+
+        pub unsafe fn call_budgeted_block(
+            &self,
+            _state: &mut GuestState,
+            _budget: &mut stela_compiler::block::loop_budget::LoopBudget,
+        ) -> Result<stela_compiler::block::BlockExit> {
+            ensure_supported()?;
+            unreachable!()
         }
 
         pub unsafe fn call_block(
