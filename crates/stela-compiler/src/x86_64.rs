@@ -315,25 +315,34 @@ fn immediate(code: &mut Vec<u8>, value: u64) {
 }
 
 fn nzcv(code: &mut Vec<u8>, subtract: bool) {
-    code.extend([0x9c, 0x5a]); // pushfq; pop rdx, before any flag-clobbering work
-    // N <- SF. Z <- ZF. C <- CF for ADD, !CF (no borrow) for SUB. V <- OF.
-    code.extend([
-        0x48, 0x89, 0xd0, 0x48, 0xc1, 0xe8, 7, 0x83, 0xe0, 1, 0xc1, 0xe0, 31,
-    ]);
-    for (source_shift, destination_shift, invert) in
-        [(6, 30, false), (0, 29, subtract), (11, 28, false)]
-    {
-        code.extend([0x48, 0x89, 0xd1]);
-        if source_shift != 0 {
-            code.extend([0x48, 0xc1, 0xe9, source_shift]);
-        }
-        code.extend([0x83, 0xe1, 1]);
-        if invert {
-            code.extend([0x83, 0xf1, 1]);
-        }
-        code.extend([0xc1, 0xe1, destination_shift, 0x09, 0xc8]);
+    const HOST_SIGN_BIT: u8 = 7;
+    const HOST_ZERO_BIT: u8 = 6;
+    const HOST_OVERFLOW_BIT: u8 = 11;
+    const ARM_NEGATIVE_BIT: u8 = 31;
+    const ARM_ZERO_BIT: u8 = 30;
+    const ARM_CARRY_BIT: u8 = 29;
+    const ARM_OVERFLOW_BIT: u8 = 28;
+    const NEGATIVE_ZERO_MASK: u32 = (1 << ARM_NEGATIVE_BIT) | (1 << ARM_ZERO_BIT);
+    const STATE_NZCV_OFFSET: u32 = std::mem::offset_of!(crate::GuestState, nzcv) as u32;
+    const SIGN_ZERO_SHIFT: u8 = ARM_NEGATIVE_BIT - HOST_SIGN_BIT;
+    const _: () = assert!(SIGN_ZERO_SHIFT == ARM_ZERO_BIT - HOST_ZERO_BIT);
+
+    code.extend([0x9c, 0x5a]); // pushfq; pop rdx: capture before modifying flags.
+    code.extend([0x89, 0xd0]); // mov eax,edx
+    code.extend([0xc1, 0xe0, SIGN_ZERO_SHIFT]); // shl eax,24: SF/ZF together.
+    code.push(0x25); // and eax,imm32: retain ARM N/Z only.
+    code.extend(NEGATIVE_ZERO_MASK.to_le_bytes());
+
+    code.extend([0x89, 0xd1, 0x83, 0xe1, 1]); // mov ecx,edx; and ecx,1: CF.
+    if subtract {
+        code.extend([0x83, 0xf1, 1]); // xor ecx,1: ARM subtraction has no-borrow C.
     }
-    code.extend([0x89, 0x87, 0, 1, 0, 0]); // mov dword [rdi+256],eax
+    code.extend([0xc1, 0xe1, ARM_CARRY_BIT, 0x09, 0xc8]); // shl ecx,29; or eax,ecx
+
+    code.extend([0xc1, 0xea, HOST_OVERFLOW_BIT, 0x83, 0xe2, 1]); // shr edx,11; and edx,1
+    code.extend([0xc1, 0xe2, ARM_OVERFLOW_BIT, 0x09, 0xd0]); // shl edx,28; or eax,edx
+    code.extend([0x89, 0x87]); // mov dword [rdi+GuestState.nzcv],eax
+    code.extend(STATE_NZCV_OFFSET.to_le_bytes());
 }
 
 /// Shared semantic emission. Block compilation handles control transfers itself.
