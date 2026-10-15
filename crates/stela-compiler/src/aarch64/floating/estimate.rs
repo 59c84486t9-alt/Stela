@@ -1,5 +1,7 @@
 //! Deterministic standard-precision estimates in the RPRES-disabled A64 profile.
 //! AFP controls are supported; this does not assert a closed Apple hardware profile.
+pub mod precision;
+
 use super::{
     Class, Control, DIVIDE_BY_ZERO, FPCR_FIZ, FPCR_FZ, FPCR_ROUNDING_MASK, FPCR_ROUNDING_SHIFT,
     Format, INEXACT, OVERFLOW, Outcome, UNDERFLOW, UnsupportedControl, nan, unpack,

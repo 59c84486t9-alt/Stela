@@ -241,6 +241,17 @@ pub fn decode_core_binary(word: u32) -> Option<Result<Operand, ()>> {
     decode_encoding(word, encoding)
 }
 
+/// Numerical arithmetic admission uses the shared canonical encoding table.
+/// Total sign instructions retain their separately published decoder and emitter.
+#[allow(clippy::result_unit_err)]
+pub fn decode_numerical(word: u32) -> Option<Result<Operand, ()>> {
+    let encoding = matching_encoding(word)?;
+    if matches!(encoding.kind, Kind::Absolute | Kind::Negate) {
+        return None;
+    }
+    decode_encoding(word, encoding)
+}
+
 fn decode_encoding(word: u32, encoding: &Encoding) -> Option<Result<Operand, ()>> {
     let format = match encoding.layout {
         Layout::IndexedBinary(f) | Layout::IndexedFused(f) | Layout::ComplexIndexed(f) => f,

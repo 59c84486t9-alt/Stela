@@ -12,7 +12,7 @@ mod complex;
 mod estimate;
 mod floating;
 mod fused;
-mod half;
+pub(in crate::x86_64) mod half;
 mod halving;
 mod i8mm;
 mod immediates;

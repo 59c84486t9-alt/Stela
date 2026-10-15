@@ -7,7 +7,8 @@
 //! survive; mechanics may clobber RAX/RCX/RDX, flags, and the selected XMM.
 
 use super::{
-    DWORD_BYTES, HALFWORD_BYTES, Host, QWORD_BYTES, store_z_chunk, write_predicate_chunk, xmm,
+    DWORD_BYTES, HALFWORD_BYTES, Host, QWORD_BYTES, clear_z_upper, store_z_chunk,
+    write_predicate_chunk, xmm,
 };
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
@@ -60,12 +61,14 @@ const COMMIT_XMM: u8 = 0;
 pub(crate) enum Output {
     Z(u8),
     Predicate(u8),
+    /// Low128 write with architectural active-upper-Z clearing.
+    V(u8),
 }
 
 impl Output {
     fn valid(self) -> bool {
         match self {
-            Self::Z(register) => is_z_register(register),
+            Self::Z(register) | Self::V(register) => is_z_register(register),
             Self::Predicate(register) => is_predicate_register(register),
         }
     }
@@ -73,7 +76,7 @@ impl Output {
     fn overlaps(self, other: Self) -> bool {
         match (self, other) {
             (Self::Predicate(a), Self::Predicate(b)) => a == b,
-            (Self::Z(a), Self::Z(b)) => a == b,
+            (Self::Z(a) | Self::V(a), Self::Z(b) | Self::V(b)) => a == b,
             _ => false,
         }
     }
@@ -82,6 +85,7 @@ impl Output {
         match self {
             Self::Z(_) => length.bytes(),
             Self::Predicate(_) => length.predicate_bytes(),
+            Self::V(_) => VECTOR_CHUNK_BYTES,
         }
     }
 }
@@ -178,7 +182,7 @@ pub(crate) fn begin(
     })
 }
 
-/// Stage one complete 16-byte Z segment; other XMMs and guest banks survive.
+/// Stage one complete 16-byte Z/V segment; other XMMs and guest banks survive.
 pub(crate) fn stage_vector_chunk(
     code: &mut Vec<u8>,
     frame: &Frame,
@@ -188,7 +192,7 @@ pub(crate) fn stage_vector_chunk(
     target: TargetCpu,
 ) {
     let slot = &frame.slots[output];
-    assert!(matches!(slot.output, Output::Z(_)));
+    assert!(matches!(slot.output, Output::Z(_) | Output::V(_)));
     assert!(chunk < slot.output.bytes(frame.length) / VECTOR_CHUNK_BYTES);
     stack_vector(
         code,
@@ -242,6 +246,12 @@ pub(crate) fn capture_status(code: &mut Vec<u8>, frame: &Frame) {
     code.extend(MXCSR_STATUS_MASK.to_le_bytes());
 }
 
+/// Clear host stage status after installation, retaining approved pending FPSR.
+pub(crate) fn clear_status(code: &mut Vec<u8>, frame: &Frame) {
+    private(frame);
+    memory(code, LDMXCSR_RSP_DISP32, PRIVATE_MXCSR);
+}
+
 /// Accumulate only family-approved guest FPSR bits from EAX, without committing.
 pub(crate) fn add_fpsr(code: &mut Vec<u8>, frame: &Frame) {
     private(frame);
@@ -286,7 +296,7 @@ pub(crate) fn finish(
     restore(code, frame);
     for slot in &frame.slots {
         match slot.output {
-            Output::Z(register) => {
+            Output::Z(register) | Output::V(register) => {
                 for chunk in 0..slot.output.bytes(frame.length) / VECTOR_CHUNK_BYTES {
                     stack_vector(
                         code,
@@ -296,6 +306,9 @@ pub(crate) fn finish(
                         target,
                     );
                     store_z_chunk(code, register, chunk, COMMIT_XMM, frame.length, target);
+                }
+                if matches!(slot.output, Output::V(_)) {
+                    clear_z_upper(code, register, COMMIT_XMM, frame.length, target);
                 }
             }
             Output::Predicate(register) => {
@@ -355,7 +368,8 @@ mod tests {
             vec![],
             vec![Output::Z(32)],
             vec![Output::Predicate(16)],
-            vec![Output::Z(0); 2],
+            vec![Output::V(32)],
+            vec![Output::Z(0), Output::V(0)],
             vec![Output::Predicate(1); 2],
             vec![Output::Z(0); 5],
         ] {
@@ -372,6 +386,7 @@ mod tests {
             for environment in [Environment::Exact, Environment::PrivateMxcsr] {
                 for outputs in [
                     vec![Output::Predicate(0)],
+                    vec![Output::V(0)],
                     vec![Output::Z(0)],
                     vec![Output::Z(0), Output::Z(1), Output::Z(2), Output::Z(3)],
                 ] {

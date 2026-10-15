@@ -5,6 +5,7 @@ pub mod comparison;
 pub mod complex;
 pub mod dot;
 pub mod estimate;
+pub mod exponent;
 pub mod features;
 pub mod fused;
 pub mod integer;

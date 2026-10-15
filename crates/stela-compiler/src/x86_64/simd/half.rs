@@ -1,5 +1,6 @@
 //! Exact normal-Half lane fields, private rounding and compact scratch loop.
 //! Callers own input classification, arithmetic, exception policy and guest commit.
+mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};
 use super::{Host, packed};
 use crate::{
@@ -21,7 +22,7 @@ const FPCR_ROUNDING_HIGH: u32 = FPCR_ROUNDING_LOW << 1;
 const XOR_EAX_IMM32: u8 = 0x35;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RoundingPolicy {
+pub(in crate::x86_64) enum RoundingPolicy {
     Fpcr,
     AhNearestEven,
 }
@@ -33,7 +34,7 @@ pub(super) enum LeftScale {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ResultSign {
+pub(in crate::x86_64) enum ResultSign {
     Preserve,
     Negate,
     Absolute,
@@ -113,6 +114,12 @@ const HALF_DISCARDED_MASK: u64 = (1u64 << HALF_TO_DOUBLE_SHIFT) - 1;
 const HALF_NORMAL_EXPONENT_COUNT: u8 = ((Format::Half.exponent_mask()
     >> Format::Half.fraction_bits())
     - RESULT_MINIMUM_EXPONENT as u64) as u8;
+
+const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
+const MOVD_XMM6_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xf0];
+const CVTSS2SD_XMM6_XMM6: &[u8] = &[0xf3, 0x0f, 0x5a, 0xf6];
+const MOVQ_XMM6_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf0];
+const ADD_RAX_R9: &[u8] = &[0x4c, 0x01, 0xc8];
 
 fn jump(code: &mut Vec<u8>) -> usize {
     code.push(JMP_REL32);
@@ -202,107 +209,13 @@ pub(super) fn widen_lane_checked(code: &mut Vec<u8>, target: TargetCpu) {
     code.extend(CVTSS2SD_XMM1_XMM1);
 }
 
-fn round_half_magnitude(code: &mut Vec<u8>, rounding: RoundingPolicy) {
-    // RAX holds positive rebased Double fields, RCX the original sign.
-    let nearest_ah = if rounding == RoundingPolicy::AhNearestEven {
-        test_control(code, FPCR_AH);
-        Some(branch(code, Condition::NotZero))
-    } else {
-        None
-    };
-    test_control(code, FPCR_ROUNDING_HIGH);
-    let high = branch(code, Condition::NotZero);
-    test_control(code, FPCR_ROUNDING_LOW);
-    let positive = branch(code, Condition::NotZero);
-    let nearest = code.len();
-    if let Some(patch) = nearest_ah {
-        resolve(code, patch, nearest);
-    }
-    immediate64(code, MOVABS_RDX, HALF_DISCARDED_MASK >> 1);
-    shift(code, BT_RAX, HALF_TO_DOUBLE_SHIFT);
-    code.extend(ADC_RAX_RDX);
-    let nearest_done = jump(code);
-    let high_start = code.len();
-    resolve(code, high, high_start);
-    test_control(code, FPCR_ROUNDING_LOW);
-    let truncating = branch(code, Condition::NotZero);
-    code.extend(TEST_ECX_ECX);
-    let negative_unmatched = branch(code, Condition::Zero);
-    let negative_bias = jump(code);
-    let positive_start = code.len();
-    resolve(code, positive, positive_start);
-    code.extend(TEST_ECX_ECX);
-    let positive_unmatched = branch(code, Condition::NotZero);
-    let bias_start = code.len();
-    resolve(code, negative_bias, bias_start);
-    immediate64(code, MOVABS_RDX, HALF_DISCARDED_MASK);
-    code.extend(ADD_RAX_RDX);
-    let end = code.len();
-    for patch in [
-        nearest_done,
-        truncating,
-        negative_unmatched,
-        positive_unmatched,
-    ] {
-        resolve(code, patch, end);
-    }
-    shift(code, SHR_RAX, HALF_TO_DOUBLE_SHIFT);
-}
-
 pub(super) fn pack_lane(
     code: &mut Vec<u8>,
     rollback: &mut Vec<usize>,
     rounding: RoundingPolicy,
     sign: ResultSign,
 ) {
-    code.extend(MOVQ_RAX_XMM6);
-    code.extend(MOV_RCX_RAX);
-    shift(code, SHR_RCX, (Format::Double.bits() - SIGN_BITS) as u8);
-    shift(code, BTR_RAX, (Format::Double.bits() - SIGN_BITS) as u8);
-    code.extend(MOV_RDX_RAX);
-    shift(code, SHR_RDX, Format::Double.fraction_bits() as u8);
-    code.extend(SUB_EDX_IMM32);
-    code.extend(
-        (Format::Double.exponent_bias() - Format::Half.exponent_bias()
-            + u32::from(RESULT_MINIMUM_EXPONENT))
-        .to_le_bytes(),
-    );
-    code.extend(CMP_EDX_IMM8);
-    code.push(HALF_NORMAL_EXPONENT_COUNT);
-    rollback.push(branch(code, Condition::AboveOrEqual));
-    code.extend(SUB_RAX_R9);
-    code.extend(MOV_RDX_RAX);
-    shift(
-        code,
-        SHL_RDX,
-        Format::Double.bits() as u8 - HALF_TO_DOUBLE_SHIFT,
-    );
-    code.extend(SETNE_DL);
-    code.extend(MOVZX_EDX_DL);
-    shift(code, SHL_EDX, INEXACT.trailing_zeros() as u8);
-    code.extend(OR_R10D_EDX);
-    round_half_magnitude(code, rounding);
-    code.extend(MOV_EDX_EAX);
-    shift(code, SHR_EDX, Format::Half.fraction_bits() as u8);
-    code.extend(SUB_EDX_IMM8);
-    code.push(RESULT_MINIMUM_EXPONENT);
-    code.extend(CMP_EDX_IMM8);
-    code.push(HALF_NORMAL_EXPONENT_COUNT);
-    rollback.push(branch(code, Condition::AboveOrEqual));
-    shift(code, SHL_ECX, (Format::Half.bits() - SIGN_BITS) as u8);
-    code.extend(OR_EAX_ECX);
-    // Transform the target-rounded bits, preserving directed-rounding order.
-    match sign {
-        ResultSign::Preserve => {}
-        ResultSign::Negate => {
-            code.push(XOR_EAX_IMM32);
-            code.extend((Format::Half.sign_mask() as u32).to_le_bytes());
-        }
-        ResultSign::Absolute => {
-            code.push(AND_EAX_IMM32);
-            code.extend((Format::Half.sign_mask() as u32 - 1).to_le_bytes());
-        }
-    }
+    kernel::emit_normal(code, rollback, rounding, sign);
     code.extend(STORE_RESULT_HALF);
 }
 
@@ -354,4 +267,34 @@ pub(super) fn merge_scalar(code: &mut Vec<u8>) {
     packed(code, Host::MoveAligned, LEFT, ORIGINAL_LEFT);
     let merged = code.len();
     resolve(code, clearing, merged);
+}
+
+pub(in crate::x86_64) use kernel::emit_normal as pack_normal;
+
+/// Widen one caller-guarded finite normal raw Half in EAX to exact Double
+/// XMM6. R9 contains the unscaled Half-to-Double bias. Only RAX/RDX/flags and
+/// XMM6 are clobbered; no frame or MXCSR change occurs. Checked F16C receives
+/// an isolated Half with zero upper lanes, preserving the existing kernel.
+pub(in crate::x86_64) fn widen_normal(code: &mut Vec<u8>, target: TargetCpu) {
+    if target.supports(TargetCpu::F16c) {
+        // Isolate the selected Half before packed conversion: the next lane in
+        // XMM7 may be an inactive sNaN. MOVD also zeros every higher Half lane.
+        code.extend(MOVZX_EAX_AX);
+        code.extend(MOVD_XMM6_EAX);
+        Host::ConvertHalfToSingle.register(code, RESULT, RESULT, target);
+        code.extend(CVTSS2SD_XMM6_XMM6);
+        return;
+    }
+    code.extend(MOV_EDX_EAX);
+    code.push(AND_EAX_IMM32);
+    code.extend((Format::Half.sign_mask() as u32 - 1).to_le_bytes());
+    code.extend(SHL_RAX);
+    code.push(HALF_TO_DOUBLE_SHIFT);
+    code.extend(ADD_RAX_R9);
+    code.extend(AND_EDX_IMM32);
+    code.extend((Format::Half.sign_mask() as u32).to_le_bytes());
+    code.extend(SHL_RDX);
+    code.push(HALF_TO_DOUBLE_SIGN_SHIFT);
+    code.extend(OR_RAX_RDX);
+    code.extend(MOVQ_XMM6_RAX);
 }

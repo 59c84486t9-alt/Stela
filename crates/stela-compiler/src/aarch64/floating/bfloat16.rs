@@ -30,6 +30,12 @@ pub const fn widen(bits: u16) -> u32 {
     (bits as u32) << BFLOAT16_TO_SINGLE_SHIFT
 }
 
+/// BFNeg preserves NaN sign under AH and raises no status.
+pub fn negate(fpcr: u32, bits: u16) -> u16 {
+    (super::negate(Format::Single, u64::from(widen(bits)), Control(fpcr))
+        >> BFLOAT16_TO_SINGLE_SHIFT) as u16
+}
+
 fn effective_control(fpcr: u32) -> Result<Control, UnsupportedControl> {
     let control = Control(fpcr);
     if control.alternative() {
@@ -465,5 +471,16 @@ mod tests {
             assert_eq!(convert(fpcr, SINGLE_ONE), expected);
             assert_eq!(multiply_add(fpcr, 0, BFLOAT16_ONE, BFLOAT16_ONE), expected);
         }
+    }
+
+    #[test]
+    fn negate_honors_alternative_nan_sign_without_quieting() {
+        const SIGNALING_NAN: u16 = 0x7f81;
+        const NEGATIVE_ZERO: u16 = 0x8000;
+        const INFINITY: u16 = 0x7f80;
+        assert_eq!(negate(0, SIGNALING_NAN), SIGNALING_NAN | NEGATIVE_ZERO);
+        assert_eq!(negate(FPCR_AH, SIGNALING_NAN), SIGNALING_NAN);
+        assert_eq!(negate(FPCR_AH, INFINITY), INFINITY | NEGATIVE_ZERO);
+        assert_eq!(negate(FPCR_AH, 1), 1 | NEGATIVE_ZERO);
     }
 }

@@ -222,6 +222,7 @@ pub fn compile_for_profile(
             let emitted = match *instruction.operation() {
                 ScalableNumericalOperation::Sve(operation) => x86_64::sve::floating::emit(
                     &mut code,
+                    instruction.word(),
                     operation,
                     profile.scalable.vector_length(),
                     profile.numerical_features,

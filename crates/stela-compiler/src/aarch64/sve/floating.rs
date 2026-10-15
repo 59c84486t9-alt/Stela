@@ -1,10 +1,12 @@
-//! Reviewed SVE numerical groups share one source-admitted completion boundary.
+//! Reviewed streaming numerical families share one source-admitted completion boundary.
 
 pub mod arithmetic;
+pub mod bfloat16;
 pub mod comparison;
 pub mod control;
 pub mod conversion;
 
+use super::dot;
 use crate::aarch64::{
     floating::features::NumericalFeatures,
     scalable::features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
@@ -15,20 +17,66 @@ pub enum Operation {
     Arithmetic(arithmetic::Operand),
     Comparison(comparison::Operand),
     Conversion(conversion::Operand),
+    Dot(dot::Operand),
+    Bfloat16(bfloat16::Operand),
 }
 
 impl Operation {
-    /// All 22 selected forms use the SME-derived streaming availability branch.
+    /// Requirements for this declared SME-derived streaming profile. Source
+    /// admission remains separate from allocation and host capabilities.
     pub fn required_streaming_features(self, _numerical: NumericalFeatures) -> FeatureRequirement {
-        FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme))
+        use ScalableFeature as Feature;
+        let sme = ScalableFeatures::of(Feature::Sme);
+        let required = match self {
+            Self::Arithmetic(operand) => match (operand.kind, operand.inputs, operand.shape) {
+                (
+                    _,
+                    arithmetic::Inputs::Reduction { .. },
+                    arithmetic::ResultShape::QuadReduction,
+                ) => sme.with(Feature::Sme2p1),
+                (arithmetic::Kind::Clamp, _, _) => sme.with(Feature::Sme2),
+                _ => sme,
+            },
+            Self::Dot(dot::Operand {
+                kind: dot::Kind::HalfDot,
+                ..
+            }) => sme.with(Feature::Sme2),
+            Self::Bfloat16(bfloat16::Operand {
+                kind: bfloat16::Kind::MultiplyLong { subtract: true, .. },
+                ..
+            }) => sme.with(Feature::Sme2),
+            Self::Bfloat16(_) => sme.with(Feature::Bf16),
+            Self::Comparison(_) | Self::Conversion(_) | Self::Dot(_) => sme,
+        };
+        FeatureRequirement::all(required)
     }
 
     #[allow(clippy::result_unit_err)]
     pub fn decode(word: u32) -> Option<Result<Self, ()>> {
-        arithmetic::decode_core_binary(word)
-            .map(|value| value.map(Self::Arithmetic))
-            .or_else(|| comparison::decode(word).map(|value| value.map(Self::Comparison)))
-            .or_else(|| conversion::decode(word).map(|value| value.map(Self::Conversion)))
+        // BF allocations overlap the broader ordinary floating size fields.
+        // This endpoint admits accumulation only; true BF arithmetic is later.
+        if let Some(result) = bfloat16::decode(word) {
+            return Some(result.map(Self::Bfloat16));
+        }
+        if let Some(result) = arithmetic::decode_numerical(word) {
+            return Some(result.map(Self::Arithmetic));
+        }
+        if let Some(result) = comparison::decode(word) {
+            return Some(result.map(Self::Comparison));
+        }
+        if let Some(result) = conversion::decode(word) {
+            return Some(result.map(Self::Conversion));
+        }
+        // Published integer DOT/CDOT remain owned by the generic SVE decoder.
+        dot::decode(word).and_then(|result| {
+            result.ok().and_then(|operand| {
+                matches!(
+                    operand.kind,
+                    dot::Kind::HalfDot | dot::Kind::HalfMultiplyLong { .. }
+                )
+                .then_some(Ok(Self::Dot(operand)))
+            })
+        })
     }
 
     pub const fn requires_numerical_completion(self) -> bool {

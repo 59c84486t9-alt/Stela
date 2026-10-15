@@ -1,7 +1,9 @@
 //! One transactional numerical completion boundary for scalable SVE/SME state.
 mod arithmetic;
+mod bfloat16;
 mod comparison;
 mod conversion;
+mod dot;
 mod sme_matrix;
 mod sme_vector;
 
@@ -61,6 +63,7 @@ impl From<UnsupportedControl> for CompletionError {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NumericalControls {
     pub fpcr: u32,
+    pub features: NumericalFeatures,
 }
 
 impl NumericalControls {
@@ -69,7 +72,7 @@ impl NumericalControls {
         if !features.ebf16() {
             fpcr &= !FPCR_EBF;
         }
-        Self { fpcr }
+        Self { fpcr, features }
     }
 }
 
@@ -96,6 +99,8 @@ pub(crate) fn complete(
             Operation::Arithmetic(operand) => {
                 arithmetic::complete(state, scalable, operand, controls)
             }
+            Operation::Dot(operand) => dot::complete(state, scalable, operand, controls),
+            Operation::Bfloat16(operand) => bfloat16::complete(state, scalable, operand, controls),
             Operation::Comparison(operand) => {
                 comparison::complete(state, scalable, operand, controls)
             }
@@ -131,6 +136,7 @@ mod tests {
         let enabled =
             NumericalControls::new(state.fpcr, true, NumericalFeatures::new(true, true, true));
         assert_eq!(enabled.fpcr, state.fpcr);
+        assert!(enabled.features.rpres());
         assert_eq!(state.fpcr, u32::MAX);
     }
 }

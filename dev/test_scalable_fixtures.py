@@ -283,5 +283,99 @@ class ScalableProfileGuards(unittest.TestCase):
             native.validate_v2_profile(receipt)
 
 
+# Pure numerical regressions; no original or translated instruction executes.
+from simd_fixtures.sve_floating import arithmetic as _future83_arithmetic
+from simd_fixtures.sve_floating import arithmetic_scalar as _future83_scalar
+from simd_fixtures.sve_floating import arithmetic_estimate as _future83_estimate
+from simd_fixtures.sve_floating import arithmetic_special as _future83_special
+from simd_fixtures.sve_floating import half_dot as _future83_half
+from simd_fixtures.sve_floating import control as _future83_control
+from simd_fixtures.sve_floating.ieee import LaneResult as _Future83LaneResult
+
+
+class Future83NumericalModelTests(unittest.TestCase):
+    def test_rounding_midpoint_and_fused_residual(self):
+        model = _future83_scalar
+        # 1 + 2^-24 is a Single midpoint. Directed rounding changes one ULP.
+        for rounding, expected in ((0, 0x3f800000), (1, 0x3f800001)):
+            with self.subTest(rounding=rounding):
+                self.assertEqual(model.binary_lane(model.BinaryOperation.ADD, 32,
+                                                   rounding << 22, 0x3f800000, 0x33800000),
+                                 _Future83LaneResult(expected, _future83_control.FPSR_INEXACT))
+        # (1 + 2^-23)(1 - 2^-23) - 1 = -2^-46, requiring fused rounding.
+        self.assertEqual(model.fused_lane(model.FusedOperation.ADD, 32, 0,
+                                         0xbf800000, 0x3f800001, 0x3f7ffffe),
+                         _Future83LaneResult(0xa8800000))
+
+    def test_inactive_signaling_nan_merges_without_exception(self):
+        model = _future83_arithmetic
+        left = struct.pack('<4I', 0x3f800000, 0x7f800001, 0x7f800001, 0x7f800001)
+        right = struct.pack('<4I', *([0x40000000] * 4))
+        old = struct.pack('<4I', 0xdeadbeef, 0x11223344, 0x55667788, 0x99aabbcc)
+        result = model.evaluate_vector(model.ArithmeticSpec(_future83_scalar.BinaryOperation.ADD, 32),
+                                       (left, right), old, b'\x01\x00',
+                                       fpsr=_future83_control.FPSR_QC)
+        self.assertEqual(result.destination, struct.pack('<I', 0x40400000) + old[4:])
+        self.assertEqual(result.fpsr, _future83_control.FPSR_QC)
+
+    def test_indexed_arithmetic_repeats_each_128_bit_segment(self):
+        model = _future83_arithmetic
+        source = bytearray(struct.pack('<8I', *([0x3f800000] * 8)))
+        indexed = struct.pack('<8I', 0, 0x40000000, 0, 0, 0, 0x40400000, 0, 0)
+        before = bytes(source)
+        spec = model.ArithmeticSpec(_future83_scalar.BinaryOperation.MULTIPLY, 32,
+                                    model.Layout.INDEXED, index=1)
+        result = model.evaluate_vector(spec, (source, indexed), source)
+        self.assertEqual(result.destination, struct.pack('<8I', *([0x40000000] * 4 + [0x40400000] * 4)))
+        self.assertEqual(result.fpsr, 0)
+        self.assertEqual(bytes(source), before)
+
+    def test_scalar_reduction_clears_upper_destination(self):
+        model = _future83_arithmetic
+        source = struct.pack('<4I', 0x3f800000, 0x40000000, 0x40400000, 0x40800000)
+        spec = model.ArithmeticSpec(_future83_scalar.BinaryOperation.ADD, 32,
+                                    model.Layout.SCALAR_REDUCTION)
+        result = model.evaluate_vector(spec, (source,), b'\xff' * 16)
+        self.assertEqual(result.destination, struct.pack('<I', 0x41200000) + bytes(12))
+        self.assertEqual(result.fpsr, 0)
+
+    def test_estimate_special_values_and_integer_exponents(self):
+        model = _future83_estimate
+        self.assertEqual(model.evaluate_lane(model.Kind.SQRT, 32, 0, 0x40800000),
+                         _Future83LaneResult(0x40000000))
+        self.assertEqual(model.evaluate_lane(model.Kind.RECIPROCAL, 32, 0, 0x80000000),
+                         _Future83LaneResult(0xff800000, _future83_control.FPSR_DIVIDE_BY_ZERO))
+        self.assertEqual(model.evaluate_lane(model.Kind.UNSIGNED_RECIPROCAL, 32, 0xffffffff, 0),
+                         _Future83LaneResult(0xffffffff))
+        self.assertEqual(_future83_special.logb_lane(32, 0, 0x41000000), _Future83LaneResult(3))
+        self.assertEqual(_future83_special.logb_lane(32, 0, 0),
+                         _Future83LaneResult(0x80000000, _future83_control.FPSR_INVALID))
+        self.assertEqual(_future83_special.scale_lane(32, 0, 0x3fc00000, 0xffffffff),
+                         _Future83LaneResult(0x3f400000))
+
+    def test_half_dot_rounds_pair_before_accumulator(self):
+        # The pair sum 1 + 2^-24 rounds to 1 before adding -1. A three-term
+        # fused expression would incorrectly preserve the 2^-24 residual.
+        self.assertEqual(_future83_half.dot_lane(0, 0xbf800000,
+                                                (0x3c00, 0x0001), (0x3c00, 0x3c00)),
+                         _Future83LaneResult(0, _future83_control.FPSR_INEXACT))
+        self.assertEqual(_future83_half.dot_lane(0, 0, (1, 0), (1, 0)),
+                         _Future83LaneResult(0x27800000))
+        self.assertEqual(_future83_half.dot_lane(_future83_control.FPCR_FZ16, 0, (1, 0), (1, 0)),
+                         _Future83LaneResult(0))
+
+    def test_half_widening_index_top_and_segment_selection(self):
+        model = _future83_half
+        destination = struct.pack('<8I', *([0x3f800000] * 8))
+        # Bottom lanes contain sNaNs; selecting top must avoid their exceptions.
+        left = struct.pack('<16H', *([0x7c01, 0x3c00] * 8))
+        right = struct.pack('<16H', *([0x4000] * 8 + [0x4200] * 8))
+        result = model.evaluate(model.Kind.MULTIPLY_ADD_LONG, destination, left, right,
+                                index=0, top=True, fpsr=_future83_control.FPSR_QC)
+        self.assertEqual(result.value, struct.pack('<8I', *([0x40400000] * 4 + [0x40800000] * 4)))
+        self.assertEqual((result.fpsr, result.exceptions), (_future83_control.FPSR_QC, 0))
+
+
+
 if __name__ == '__main__':
     unittest.main()

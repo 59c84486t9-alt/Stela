@@ -20,7 +20,7 @@ const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 pub(super) const INPUT_MINIMUM_EXPONENT: u8 = 1;
 pub(super) const RESULT_MINIMUM_EXPONENT: u8 = 2;
 /// Callers must prove usable AVX through their independent FMA/F16C capability.
-pub(super) const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
+pub(in crate::x86_64) const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 const SCALAR_SINGLE_PREFIX: u8 = 0xf3;
 const SCALAR_DOUBLE_PREFIX: u8 = 0xf2;
 const PACKED_DOUBLE_PREFIX: u8 = 0x66;
@@ -84,7 +84,7 @@ const FMA_DOUBLE_W: u8 = 0x80;
 const FMA_SCALAR_OPCODE_BIT: u8 = 1;
 
 #[repr(u8)]
-pub(super) enum Condition {
+pub(in crate::x86_64) enum Condition {
     Below = 0x82,
     AboveOrEqual = 0x83,
     Zero = 0x84,
@@ -101,7 +101,7 @@ pub(in crate::x86_64) enum ArithmeticOpcode {
 }
 
 #[repr(u8)]
-pub(super) enum FusedOpcode {
+pub(in crate::x86_64) enum FusedOpcode {
     MultiplyAdd = 0x98,
     MultiplySubtract = 0x9a,
     NegativeMultiplyAdd = 0x9c,
@@ -125,7 +125,7 @@ pub(super) use quantization::{
 
 /// Checked FMA132 with the shared numerical allocation: XMM0 is the product
 /// destination, XMM1 the multiplier and XMM6 the addend. All are caller-volatile.
-pub(super) fn emit_fma(
+pub(in crate::x86_64) fn emit_fma(
     code: &mut Vec<u8>,
     format: Format,
     shape: Shape,
@@ -157,13 +157,13 @@ pub(super) fn emit_fma(
     ]);
 }
 
-pub(super) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
+pub(in crate::x86_64) fn branch(code: &mut Vec<u8>, condition: Condition) -> usize {
     code.extend([SSE_ESCAPE, condition as u8]);
     let patch = code.len();
     code.extend(0i32.to_le_bytes());
     patch
 }
-pub(super) fn resolve(code: &mut [u8], patch: usize, target: usize) {
+pub(in crate::x86_64) fn resolve(code: &mut [u8], patch: usize, target: usize) {
     let target = i64::try_from(target).expect("numerical branch target fits i64");
     let next = i64::try_from(patch + size_of::<i32>()).expect("numerical branch source fits i64");
     let distance = i32::try_from(target - next).expect("bounded numerical branch");
@@ -406,7 +406,11 @@ fn half_validity_mask(code: &mut Vec<u8>, byte_mask: u32) {
 }
 
 /// Classify a caller-selected low Half lane span without inventing a vector shape.
-pub(super) fn vector_half_exponent_range(code: &mut Vec<u8>, source: u8, byte_mask: u32) {
+pub(in crate::x86_64) fn vector_half_exponent_range(
+    code: &mut Vec<u8>,
+    source: u8,
+    byte_mask: u32,
+) {
     vector_exponent_validity(code, Format::Half, source, false);
     half_validity_mask(code, byte_mask);
 }
@@ -451,7 +455,7 @@ fn vector_exponent_range_impl(
 /// Widen four staged Half fields with integer operations. Callers guard active
 /// inputs and supply zero and the broadcast Single-minus-Half exponent bias.
 /// Inactive raw fields also become finite normal Single values without status.
-pub(super) fn widen_half_to_single(
+pub(in crate::x86_64) fn widen_half_to_single(
     code: &mut Vec<u8>,
     destination: u8,
     source: u8,
