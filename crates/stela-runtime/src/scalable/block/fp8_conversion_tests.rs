@@ -1,3 +1,4 @@
+//! Grouped SME FP8 preparation and descriptor integrity at every length.
 use super::*;
 use stela_compiler::{
     aarch64::{
@@ -38,7 +39,7 @@ fn profile(bytes: usize) -> ScalableProfile {
 }
 
 #[test]
-fn bfcvt_pending_original_verification_declines_before_executable_preparation() -> Result<()> {
+fn bfcvt_preparation_preserves_prefix_source_and_descriptor_integrity() -> Result<()> {
     let operand = fp8_conversion::decode(BFCVT_Z8_MZ2).unwrap();
     assert_eq!(operand.format, ElementFormat::BFloat16);
     assert!(matches!(operand.conversion, Conversion::Narrow { .. }));
@@ -48,7 +49,7 @@ fn bfcvt_pending_original_verification_declines_before_executable_preparation() 
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let error = PreparedScalableBlock::prepare(
+        let prepared = PreparedScalableBlock::prepare(
             &source,
             BASE,
             ExtendedBlockProfile::new(
@@ -57,13 +58,11 @@ fn bfcvt_pending_original_verification_declines_before_executable_preparation() 
                 NumericalFeatures::default(),
             ),
             TargetCpu::Baseline,
-        )
-        .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("unadmitted SME BF16-to-FP8 narrowing"));
-        assert!(message.contains("0x1004"));
-        // No executable is returned, so no native prefix can be invoked.
-        // Guest state is not an input to preparation.
+        )?;
+        assert_eq!(prepared.source(), &source[..2 * size_of::<u32>()]);
+        assert_eq!(prepared.source_map().len(), 2);
+        assert_eq!(prepared.source_map()[0].0, BASE);
+        assert_eq!(prepared.source_map()[1].0, GuestAddress(BASE.0 + 4));
 
         let mut decoded = decode_scalable_numerical_instruction(BASE, BFCVT_Z8_MZ2)?.unwrap();
         if let ScalableNumericalOperation::SmeFp8Conversion(ref mut operand) = decoded.operation {

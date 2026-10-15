@@ -257,5 +257,5 @@ mod sme_completion_tests;
 mod fp8_tests;
 
 #[cfg(test)]
-#[path = "block/bfcvt_pending_tests.rs"]
-mod bfcvt_pending_tests;
+#[path = "block/fp8_conversion_tests.rs"]
+mod fp8_conversion_tests;

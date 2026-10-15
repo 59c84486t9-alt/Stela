@@ -1623,6 +1623,23 @@
         "new_arithmetic_replays": 0,
         "new_original_captures": 0
       }
+    },
+    "sme4_fp8_conversion_vertical": {
+      "harness": ".stela/research/sme-fp8-matrix/oracle4-independent-source-v1/prepare-publication-v1.py",
+      "report": ".stela/research/sme-fp8-matrix/oracle4-independent-source-v1/publication-v1/evidence.json",
+      "kind": "sme4-current-native-derived-model-v1",
+      "comparison_field": "full_state_model_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_measurements": {
+        "canonical_forms": 4,
+        "native_cases": 94,
+        "same_requested_derived_comparisons": 72,
+        "raw_fpcr_raz_exclusions": 22,
+        "current_cli_pairs": 49,
+        "declared_smoke_samples": 20
+      }
     }
   },
   "forms": [
@@ -88383,7 +88400,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88426,7 +88443,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88469,7 +88486,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88512,7 +88529,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88555,7 +88572,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88598,7 +88615,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88641,7 +88658,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88684,7 +88701,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88727,7 +88744,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88770,7 +88787,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88813,7 +88830,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88856,7 +88873,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88899,7 +88916,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88942,7 +88959,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -88985,7 +89002,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89028,7 +89045,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89071,7 +89088,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89114,7 +89131,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89157,7 +89174,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89200,7 +89217,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89243,7 +89260,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89286,7 +89303,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89329,7 +89346,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89372,7 +89389,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89415,7 +89432,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89458,7 +89475,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89501,7 +89518,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89544,7 +89561,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89587,7 +89604,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89630,7 +89647,7 @@
         "crates/stela-compiler/src/aarch64/floating/fp8.rs",
         "crates/stela-compiler/src/block/scalable.rs"
       ],
-      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception; vertical-dot forms remain typed refusals.",
+      "scope": "Complete allocated streaming FP8 ZA arithmetic form in declared SME_F8F16/F8F32 and explicit indirect-FPMR profile. No FPSR change or numerical exception.",
       "review": "Pinned June allocation and exact canonical source facts; independently audited retained original/native/model/control exclusions plus current349 complete emitted-body/profile/ABI/maps and retained48 focused checks plus current strict Clippy. Native component epoch remains331 or326, current349 transfer does not rerun arithmetic. Performance remains unmeasured.",
       "smoke_samples": [
         {
@@ -89640,6 +89657,322 @@
           ],
           "consumed_source_bytes": 4,
           "svl_bytes": 16,
+          "svcr": 3
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "bfcvt_z8_mz2_",
+      "instruction_id": "bfcvt_z8_mz2",
+      "mnemonic": "BFCVT",
+      "category": "sme",
+      "source_file": "bfcvt_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0xc164e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "ad5b26ebf11c324f3bcd03747166a1bbde90531b04852f771a39e8311512afd9",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/bfcvt_z8_mz2.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-fp8-conversion-and-vertical",
+      "evidence_groups": [
+        "sme4_fp8_conversion_vertical"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/scalable.rs"
+      ],
+      "scope": "Complete streaming grouped BF16-to-FP8 narrowing at SVL 16–256 bytes with explicit FPMR access; contiguous source halves, signed NSCALE and cumulative FPSR commit. Enabled numerical trap delivery remains outside scope.",
+      "review": "Pinned June semantics and independently reviewed derived-QEMU source/decode/status corrections; current compiler001813/352 actual94 full-state model matches, 72 same-requested derived matches and 22 explicit raw FPCR RAZ exclusions. Actual native entry and numerical completion, strict Clippy, focused Rust gates, exact49 CLI bodies and20 independently decoded smoke probes. Derived/model evidence does not establish physical Apple execution; performance is unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0xc164e000",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164e000",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164e000",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164e000",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0xc164e000",
+          "expected_mnemonics": [
+            "bfcvt"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "fvdot_za_z8z8i_2xi",
+      "instruction_id": "fvdot_za_z8z8i",
+      "mnemonic": "FVDOT",
+      "category": "sme",
+      "source_file": "fvdot_za_z8z8i.xml",
+      "encoding_mask": "0xfff09030",
+      "encoding_value": "0xc1d01020",
+      "features": [
+        {
+          "feature": "FEAT_SME_F8F16",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "7fb57b56bb52bc708e67598122ba0e2ae3ed28966163f04c8cf997cbcc397242",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fvdot_za_z8z8i.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-fp8-conversion-and-vertical",
+      "evidence_groups": [
+        "sme4_fp8_conversion_vertical"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/scalable.rs"
+      ],
+      "scope": "Complete streaming vertical FP8 ZA dot form at SVL 16–256 bytes with explicit FPMR access and active ZA; fixed source pair, unaligned wrapping rows and per-segment indexed operands. FPSR and FPMR are preserved; no numerical exceptions.",
+      "review": "Pinned June semantics and independently reviewed derived-QEMU source/decode/status corrections; current compiler001813/352 actual94 full-state model matches, 72 same-requested derived matches and 22 explicit raw FPCR RAZ exclusions. Actual native entry and numerical completion, strict Clippy, focused Rust gates, exact49 CLI bodies and20 independently decoded smoke probes. Derived/model evidence does not establish physical Apple execution; performance is unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0xc1d01020",
+          "expected_mnemonics": [
+            "fvdot"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d01020",
+          "expected_mnemonics": [
+            "fvdot"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d01020",
+          "expected_mnemonics": [
+            "fvdot"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d01020",
+          "expected_mnemonics": [
+            "fvdot"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d01020",
+          "expected_mnemonics": [
+            "fvdot"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "fvdotb_za32_z8z8i_2xi",
+      "instruction_id": "fvdotb_za32_z8z8i",
+      "mnemonic": "FVDOTB",
+      "category": "sme",
+      "source_file": "fvdotb_za32_z8z8i.xml",
+      "encoding_mask": "0xfff09830",
+      "encoding_value": "0xc1d00800",
+      "features": [
+        {
+          "feature": "FEAT_SME_F8F32",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "acab7dcf7e8a00228f0b19946eb5c3586440e5bb31dc4af051da2475a4c77815",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fvdotb_za32_z8z8i.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-fp8-conversion-and-vertical",
+      "evidence_groups": [
+        "sme4_fp8_conversion_vertical"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/scalable.rs"
+      ],
+      "scope": "Complete streaming vertical FP8 ZA dot form at SVL 16–256 bytes with explicit FPMR access and active ZA; fixed source pair, unaligned wrapping rows and per-segment indexed operands. FPSR and FPMR are preserved; no numerical exceptions.",
+      "review": "Pinned June semantics and independently reviewed derived-QEMU source/decode/status corrections; current compiler001813/352 actual94 full-state model matches, 72 same-requested derived matches and 22 explicit raw FPCR RAZ exclusions. Actual native entry and numerical completion, strict Clippy, focused Rust gates, exact49 CLI bodies and20 independently decoded smoke probes. Derived/model evidence does not establish physical Apple execution; performance is unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0xc1d00800",
+          "expected_mnemonics": [
+            "fvdotb"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00800",
+          "expected_mnemonics": [
+            "fvdotb"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00800",
+          "expected_mnemonics": [
+            "fvdotb"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00800",
+          "expected_mnemonics": [
+            "fvdotb"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00800",
+          "expected_mnemonics": [
+            "fvdotb"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "fvdott_za32_z8z8i_2xi",
+      "instruction_id": "fvdott_za32_z8z8i",
+      "mnemonic": "FVDOTT",
+      "category": "sme",
+      "source_file": "fvdott_za32_z8z8i.xml",
+      "encoding_mask": "0xfff09830",
+      "encoding_value": "0xc1d00810",
+      "features": [
+        {
+          "feature": "FEAT_SME_F8F32",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "7945f7242ecbedfe0189fbec1fef21baaec6956e3100661c62f209abfc929dd5",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/fvdott_za32_z8z8i.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-fp8-conversion-and-vertical",
+      "evidence_groups": [
+        "sme4_fp8_conversion_vertical"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_matrix.rs",
+        "crates/stela-compiler/src/extended.rs",
+        "crates/stela-compiler/src/block/scalable.rs"
+      ],
+      "scope": "Complete streaming vertical FP8 ZA dot form at SVL 16–256 bytes with explicit FPMR access and active ZA; fixed source pair, unaligned wrapping rows and per-segment indexed operands. FPSR and FPMR are preserved; no numerical exceptions.",
+      "review": "Pinned June semantics and independently reviewed derived-QEMU source/decode/status corrections; current compiler001813/352 actual94 full-state model matches, 72 same-requested derived matches and 22 explicit raw FPCR RAZ exclusions. Actual native entry and numerical completion, strict Clippy, focused Rust gates, exact49 CLI bodies and20 independently decoded smoke probes. Derived/model evidence does not establish physical Apple execution; performance is unmeasured.",
+      "smoke_samples": [
+        {
+          "word": "0xc1d00810",
+          "expected_mnemonics": [
+            "fvdott"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00810",
+          "expected_mnemonics": [
+            "fvdott"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00810",
+          "expected_mnemonics": [
+            "fvdott"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00810",
+          "expected_mnemonics": [
+            "fvdott"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0xc1d00810",
+          "expected_mnemonics": [
+            "fvdott"
+          ],
+          "consumed_source_bytes": 4,
+          "svl_bytes": 256,
           "svcr": 3
         }
       ],
@@ -90281,7 +90614,52 @@
         "+sme-f8f16",
         "+sme-f8f32"
       ],
-      "description": "FP8 ZA arithmetic with active ZA and explicit indirect FPMR permission. Format-specific SME_F8F16/F8F32 allocation checks remain separate; three vertical forms are explicitly declined."
+      "description": "FP8 ZA arithmetic with active ZA and explicit indirect FPMR permission. Format-specific SME_F8F16/F8F32 allocation checks remain separate."
+    },
+    "sme-streaming-v2-fp8-conversion-and-vertical": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-block",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "svl_bytes": 16,
+      "max_svl_bytes": 256,
+      "dit": false,
+      "numerical_features": {
+        "full_a64": false,
+        "ebf16": false,
+        "rpres": false
+      },
+      "outside_scope": [
+        "Physical Apple execution and hardware availability; enabled numerical trap delivery; complete processes, applications and macOS.",
+        "Arithmetic throughput is unmeasured; the inspected 29-byte native body enters the shared numerical completion path."
+      ],
+      "features": [
+        "FEAT_BF16",
+        "FEAT_FAMINMAX",
+        "FEAT_FP8",
+        "FEAT_FPMR",
+        "FEAT_I8MM",
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME2p1",
+        "FEAT_SME_B16B16",
+        "FEAT_SME_F16F16",
+        "FEAT_SME_F64F64",
+        "FEAT_SME_F8F16",
+        "FEAT_SME_F8F32",
+        "FEAT_SME_FA64",
+        "FEAT_SME_I16I64",
+        "FEAT_SVE_B16B16"
+      ],
+      "svcr": 3,
+      "zt0_enabled": true,
+      "fpmr_enabled": true,
+      "decoder_mattrs": [
+        "+sme2",
+        "+fp8",
+        "+sme-f8f16",
+        "+sme-f8f32"
+      ],
+      "description": "Declared test availability for grouped BF16-to-FP8 narrowing and vertical FP8 ZA dot products; typed instruction requirements, FPMR access and mode checks remain separate."
     }
   }
 }

@@ -1,4 +1,4 @@
-//! Public matrix30 admission and the private vertical-dot verification boundary.
+//! Reviewed SME FP8 matrix/conversion admission and typed execution scope.
 use super::*;
 use crate::{
     TargetCpu,
@@ -8,7 +8,8 @@ use crate::{
 };
 
 const PC: GuestAddress = GuestAddress(0x1000);
-const BFCVT_PENDING: u32 = 0xc164_e000;
+const BFCVT_WORD: u32 = crate::aarch64::sme::fp8_conversion::BFCVT_Z8_MZ2;
+const BFCVT_HIGH_OPERANDS: u32 = (30 << 5) | 31;
 const NOP_WORD: u32 = 0xd503_201f;
 // Pinned June encoding facts: canonical ID, lowest operands, highest operands.
 const PUBLIC_FORMS: &[(&str, u32, u32)] = &[
@@ -43,7 +44,7 @@ const PUBLIC_FORMS: &[(&str, u32, u32)] = &[
     ("fdot_za32_z8z8w_2x2", 0xc1a01030, 0xc1be73f7),
     ("fdot_za32_z8z8w_4x4", 0xc1a11030, 0xc1bd73b7),
 ];
-const PRIVATE_VERTICAL_FORMS: &[(&str, u32, u32)] = &[
+const VERTICAL_FORMS: &[(&str, u32, u32)] = &[
     ("fvdotb_za32_z8z8i_2xi", 0xc1d00800, 0xc1df6fcf),
     ("fvdott_za32_z8z8i_2xi", 0xc1d00810, 0xc1df6fdf),
     ("fvdot_za_z8z8i_2xi", 0xc1d01020, 0xc1df7fef),
@@ -110,54 +111,75 @@ fn public_thirty_forms_admit_and_emit_exact_source() {
 }
 
 #[test]
-fn all_vertical_forms_refuse_before_profile_or_emission() {
-    assert_eq!(PRIVATE_VERTICAL_FORMS.len(), 3);
-    for length in [16, 64, 256] {
-        for available in [false, true] {
-            for streaming in [false, true] {
-                let profile = declared_profile(length, available, streaming);
-                for &(id, low, high) in PRIVATE_VERTICAL_FORMS {
-                    for word in [low, high] {
-                        let decoded = decode_scalable_numerical_instruction(PC, word)
-                            .unwrap()
-                            .unwrap();
-                        let error = admit_scalable_numerical_instruction(
-                            decoded,
-                            profile,
-                            NumericalFeatures::default(),
-                        )
-                        .unwrap_err();
-                        assert!(
-                            error.0.contains("unadmitted SME FP8 vertical dot"),
-                            "{id}: {error}"
-                        );
-                        let emitted = compile_for_profile(
-                            &word.to_le_bytes(),
-                            PC,
-                            ExtendedBlockProfile::new(
-                                profile,
-                                BlockProfile::Ordinary,
-                                NumericalFeatures::default(),
-                            ),
-                            TargetCpu::Baseline,
-                        );
-                        assert!(
-                            emitted
-                                .unwrap_err()
-                                .0
-                                .contains("unadmitted SME FP8 vertical dot"),
-                            "{id}"
-                        );
-                    }
-                }
+fn newly_reviewed_forms_admit_at_every_streaming_length() {
+    for length in [16, 32, 64, 128, 256] {
+        let profile = declared_profile(length, true, true);
+        for (id, low, high) in VERTICAL_FORMS.iter().copied().chain([(
+            "bfcvt_z8_mz2_",
+            BFCVT_WORD,
+            BFCVT_WORD | BFCVT_HIGH_OPERANDS,
+        )]) {
+            for word in [low, high] {
+                let decoded = decode_scalable_numerical_instruction(PC, word)
+                    .unwrap()
+                    .unwrap();
+                let admitted = admit_scalable_numerical_instruction(
+                    decoded,
+                    profile,
+                    NumericalFeatures::default(),
+                )
+                .unwrap();
+                assert_eq!(admitted.word(), word, "{id}");
+                assert_eq!(admitted.next_pc(), GuestAddress(0x1004), "{id}");
+                let compiled = compile_for_profile(
+                    &word.to_le_bytes(),
+                    PC,
+                    ExtendedBlockProfile::new(
+                        profile,
+                        BlockProfile::Ordinary,
+                        NumericalFeatures::default(),
+                    ),
+                    TargetCpu::Baseline,
+                )
+                .unwrap();
+                assert_eq!(compiled.source_bytes, size_of::<u32>(), "{id}");
+                assert_eq!(compiled.native.source_map.len(), 1, "{id}");
+                assert_eq!(compiled.native.source_map[0].0, PC, "{id}");
+                assert!(!compiled.native.x86_64_code.is_empty(), "{id}");
             }
         }
     }
 }
 
 #[test]
-fn source_descriptor_mismatch_precedes_vertical_verification_refusal() {
-    let word = PRIVATE_VERTICAL_FORMS[0].1;
+fn newly_reviewed_forms_keep_fpmr_and_streaming_requirements() {
+    for (_, word, _) in
+        VERTICAL_FORMS
+            .iter()
+            .copied()
+            .chain([("bfcvt_z8_mz2_", BFCVT_WORD, BFCVT_WORD)])
+    {
+        let decoded = decode_scalable_numerical_instruction(PC, word)
+            .unwrap()
+            .unwrap();
+        for (available, streaming, message) in [
+            (false, true, "FPMR access"),
+            (true, false, "mode unavailable"),
+        ] {
+            let error = admit_scalable_numerical_instruction(
+                decoded,
+                declared_profile(16, available, streaming),
+                NumericalFeatures::default(),
+            )
+            .unwrap_err();
+            assert!(error.0.contains(message), "{error}");
+        }
+    }
+}
+
+#[test]
+fn source_descriptor_mismatch_precedes_profile_checks() {
+    let word = VERTICAL_FORMS[0].1;
     let mut decoded = decode_scalable_numerical_instruction(PC, word)
         .unwrap()
         .unwrap();
@@ -194,15 +216,37 @@ fn supported_forms_retain_fpmr_and_za_access_requirements() {
 }
 
 #[test]
-fn existing_bfcvt_pending_policy_is_preserved() {
-    let decoded = decode_scalable_numerical_instruction(PC, BFCVT_PENDING)
+fn conversion_needs_streaming_but_vertical_dot_also_needs_za() {
+    let original = declared_profile(16, true, true);
+    let streaming_without_za = ScalableProfile::new_with_features(
+        original.vector_length(),
+        ScalableMode::new(true, false),
+        original.features(),
+        original.controls(),
+    )
+    .unwrap();
+    let conversion = decode_scalable_numerical_instruction(PC, BFCVT_WORD)
         .unwrap()
         .unwrap();
-    let error = admit_scalable_numerical_instruction(
-        decoded,
-        declared_profile(16, true, true),
-        NumericalFeatures::default(),
-    )
-    .unwrap_err();
-    assert!(error.0.contains("unadmitted SME BF16-to-FP8 narrowing"));
+    assert!(
+        admit_scalable_numerical_instruction(
+            conversion,
+            streaming_without_za,
+            NumericalFeatures::default(),
+        )
+        .is_ok()
+    );
+    for &(_, word, _) in VERTICAL_FORMS {
+        let decoded = decode_scalable_numerical_instruction(PC, word)
+            .unwrap()
+            .unwrap();
+        assert!(
+            admit_scalable_numerical_instruction(
+                decoded,
+                streaming_without_za,
+                NumericalFeatures::default(),
+            )
+            .is_err()
+        );
+    }
 }

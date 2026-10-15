@@ -145,37 +145,6 @@ pub fn admit_scalable_numerical_instruction(
             "scalable numerical source/descriptor mismatch".into(),
         ));
     }
-    // A typed descriptor is not execution evidence. Keep all vertical-dot forms
-    // private until an independently usable original execution domain exists.
-    if matches!(
-        instruction.operation,
-        ScalableNumericalOperation::SmeFp8Matrix(fp8_matrix::Operand::Vector(
-            fp8_matrix::VectorOperand {
-                operation: fp8_matrix::VectorOperation::VerticalDot { .. },
-                ..
-            }
-        ))
-    ) {
-        return Err(CompileError(format!(
-            "unadmitted SME FP8 vertical dot at {:#x}: original execution verification is pending",
-            instruction.instruction_pc.0
-        )));
-    }
-    // This allocated form stays unadmitted until genuine original execution
-    // verification exists. A decoder descriptor never grants execution permission.
-    if matches!(
-        instruction.operation,
-        ScalableNumericalOperation::SmeFp8Conversion(fp8_conversion::Operand {
-            format: fp8_conversion::ElementFormat::BFloat16,
-            conversion: fp8_conversion::Conversion::Narrow { .. },
-            ..
-        })
-    ) {
-        return Err(CompileError(format!(
-            "unadmitted SME BF16-to-FP8 narrowing at {:#x}: original execution verification is pending",
-            instruction.instruction_pc.0
-        )));
-    }
     if matches!(
         instruction.operation,
         ScalableNumericalOperation::FixedFp8Conversion(_)
