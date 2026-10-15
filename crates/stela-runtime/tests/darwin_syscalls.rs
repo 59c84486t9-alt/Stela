@@ -1656,3 +1656,6 @@ mod native_thread_services {
 
 #[path = "darwin/mach_vm.rs"]
 mod native_mach_vm;
+
+#[path = "darwin/shared_region.rs"]
+mod native_shared_region;

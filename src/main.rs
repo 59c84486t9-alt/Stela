@@ -170,6 +170,9 @@ enum Command {
         /// Complete the declared unavailable Darwin cross-architecture service.
         #[arg(long)]
         crossarch_services: bool,
+        /// Query the declared absent guest shared-region attachment.
+        #[arg(long)]
+        absent_shared_region_services: bool,
         /// Supply host kernel entropy through bounded owned-memory copyout.
         #[arg(long)]
         entropy_services: bool,
@@ -1390,6 +1393,7 @@ fn run() -> Result<()> {
             memory: memory_path,
             data_vm_services,
             crossarch_services,
+            absent_shared_region_services,
             entropy_services,
             mach_vm_services,
             csr_active_configuration,
@@ -1511,6 +1515,7 @@ fn run() -> Result<()> {
                     || mach_port_services
                     || thread_services
                     || crossarch_services
+                    || absent_shared_region_services
                     || csr_policy.is_some()
                     || mach_vm_services
                     || entropy_services
@@ -1526,6 +1531,7 @@ fn run() -> Result<()> {
                             clock: clock.as_mut(),
                             data_vm: data_vm_services,
                             crossarch: crossarch_services,
+                            absent_shared_region: absent_shared_region_services,
                             mach_vm: mach_vm_services,
                             csr: csr_policy.as_ref(),
                             entropy: entropy_services,
@@ -1579,6 +1585,8 @@ fn run() -> Result<()> {
                 "thread_service_events":service_run.thread_services,
                 "crossarch_service_profile":crossarch_services.then_some(stela_runtime::darwin::crossarch::PROFILE_ID),
                 "crossarch_service_events":service_run.crossarch_services,
+                "shared_region_service_profile":absent_shared_region_services.then_some(stela_runtime::darwin::shared_region::PROFILE_ID),
+                "shared_region_service_events":service_run.shared_region_services,
                 "csr_service_profile":csr_policy.as_ref().map(|_| stela_runtime::darwin::csr::PROFILE_ID),
                 "csr_active_configuration":csr_policy.as_ref().map(|policy| policy.active_configuration()),
                 "csr_service_events":service_run.csr_services,

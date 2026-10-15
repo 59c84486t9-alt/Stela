@@ -295,6 +295,7 @@ pub struct ServiceRunOutcome {
     pub mach_services: Vec<crate::mach::Event>,
     pub thread_services: Vec<crate::thread::Event>,
     pub crossarch_services: Vec<BsdServiceEvent>,
+    pub shared_region_services: Vec<BsdServiceEvent>,
     pub csr_services: Vec<BsdServiceEvent>,
     pub entropy_services: Vec<BsdServiceEvent>,
     pub mach_vm_services: Vec<crate::mach::Event>,
@@ -308,6 +309,7 @@ impl ServiceRunOutcome {
             mach_services: Vec::new(),
             thread_services: Vec::new(),
             crossarch_services: Vec::new(),
+            shared_region_services: Vec::new(),
             csr_services: Vec::new(),
             entropy_services: Vec::new(),
             mach_vm_services: Vec::new(),
@@ -321,6 +323,8 @@ pub struct ExecutionServices<'a> {
     pub data_vm: bool,
     pub mach_vm: bool,
     pub crossarch: bool,
+    /// Caller-established absence of an owned guest shared-region attachment.
+    pub absent_shared_region: bool,
     pub csr: Option<&'a csr::ArmSecurityPolicy>,
     pub entropy: bool,
     pub pauth: Option<&'a crate::pauth::Context>,
@@ -440,6 +444,8 @@ pub fn service_data_mprotect(
 /// All BlockRuntime direct-RAM requirements apply; this owner must cover data
 /// used by trusted code. No concurrent guest execution or code/data mutation is
 /// allowed. Executable transitions are declined rather than invalidated here.
+/// Selecting `absent_shared_region` requires actual process ownership without a
+/// guest shared-region attachment; file and anonymous RAM alone do not attach one.
 pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
@@ -454,6 +460,7 @@ pub unsafe fn run_services(
     let mut mach_events = Vec::new();
     let mut thread_events = Vec::new();
     let mut crossarch_events = Vec::new();
+    let mut shared_region_events = Vec::new();
     let mut csr_events = Vec::new();
     let mut entropy_events = Vec::new();
     let mut mach_vm_events = Vec::new();
@@ -573,6 +580,11 @@ pub unsafe fn run_services(
             let serviced = event.completion.is_some();
             crossarch_events.push(event);
             serviced
+        } else if services.absent_shared_region && shared_region::handles(state, &trap) {
+            let event = shared_region::service_absent(state, &trap);
+            let serviced = event.completion.is_some();
+            shared_region_events.push(event);
+            serviced
         } else if let Some(policy) = services.csr.filter(|_| csr::handles(state, &trap)) {
             let event = csr::service(state, &trap, memory, policy);
             let serviced = event.completion.is_some();
@@ -610,6 +622,7 @@ pub unsafe fn run_services(
         mach_services: mach_events,
         thread_services: thread_events,
         crossarch_services: crossarch_events,
+        shared_region_services: shared_region_events,
         csr_services: csr_events,
         entropy_services: entropy_events,
         mach_vm_services: mach_vm_events,
