@@ -5,4 +5,5 @@ pub(crate) mod integer_arithmetic;
 pub(crate) mod integer_logic;
 pub(crate) mod integer_products;
 pub(crate) mod integer_saturation;
+pub(crate) mod rearrange_extract;
 pub(crate) mod sign;

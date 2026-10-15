@@ -43,11 +43,13 @@
     "crates/stela-compiler/src/aarch64/sve/integer_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
+    "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
     "crates/stela-compiler/src/aarch64/sme.rs",
     "crates/stela-compiler/src/aarch64/sme/integer_dots.rs",
     "crates/stela-compiler/src/aarch64/sme/length.rs",
     "crates/stela-compiler/src/x86_64/scalable.rs",
+    "crates/stela-compiler/src/x86_64/scalable/legacy.rs",
     "crates/stela-compiler/src/x86_64/scalable_matrix.rs",
     "crates/stela-compiler/src/x86_64/sve.rs",
     "crates/stela-compiler/src/x86_64/sve/dot.rs",
@@ -60,6 +62,7 @@
     "crates/stela-compiler/src/x86_64/sve/integer_products/saturating.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_products/widening.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
+    "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
     "crates/stela-compiler/src/x86_64/sme.rs",
     "crates/stela-compiler/src/x86_64/sme/integer_dots.rs",
@@ -394,6 +397,31 @@
         "actual_cli_checks": 6,
         "new_native_semantic_comparisons": 0,
         "original_replays": 0
+      },
+      "require_current_executable": true
+    },
+    "streaming_sve_register_extract": {
+      "harness": "dev/scalable_fixture_runner.py",
+      "report": ".stela/research/coverage-race/sve-integer/permute/integration-extract/final-compose-2/admission-report-2.json",
+      "kind": "arm64_streaming_extract_selected_body_transfer",
+      "comparison_field": "retained_selected_complete_wrapper_original_joins",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "required_shared_sources": [
+        "dev/scalable_fixture_runner.py",
+        "dev/scalable_frame.py",
+        "dev/scalable_original.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_integer/rearrange_extract.py"
+      ],
+      "required_measurements": {
+        "canonical_forms": 15,
+        "historical_original_cases": 875,
+        "historical_strict_comparisons_retained": 1750,
+        "current_cli_body_bridges": 1720,
+        "retained_selected_complete_wrapper_original_joins": 30,
+        "current_complete_wrapper_byte_matches": 30,
+        "fresh_native_executions": 0,
+        "registered_inputs": 178
       },
       "require_current_executable": true
     }
@@ -15452,6 +15480,1101 @@
       "evidence_groups": [
         "sme_integer_dots"
       ]
+    },
+    {
+      "id": "clasta_r_p_z_",
+      "instruction_id": "clasta_r_p_z",
+      "mnemonic": "CLASTA",
+      "category": "sve",
+      "source_file": "clasta_r_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0530a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x0530bca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0530bca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0530bca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0530bca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0530bca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "ff0167cc17a34b978dd768c7b2cdca9746af23ce181f317bfb5c840d60d58386",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clasta_r_p_z.xml"
+    },
+    {
+      "id": "clasta_v_p_z_",
+      "instruction_id": "clasta_v_p_z",
+      "mnemonic": "CLASTA",
+      "category": "sve",
+      "source_file": "clasta_v_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x052a8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x052a9ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a9ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a9ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a9ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a9ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "f1822732ae56143ca10bf5466d64f6b85e3ebf03ca8546632cddbcfa1befef00",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clasta_v_p_z.xml"
+    },
+    {
+      "id": "clasta_z_p_zz_",
+      "instruction_id": "clasta_z_p_zz",
+      "mnemonic": "CLASTA",
+      "category": "sve",
+      "source_file": "clasta_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05288000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x05289ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05289ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05289ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05289ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05289ca5",
+          "expected_mnemonics": [
+            "clasta"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "6efdcec63d6cc483be1cbd0e64a084898687c40b7383b360edebcf8aa89cc863",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clasta_z_p_zz.xml"
+    },
+    {
+      "id": "clastb_r_p_z_",
+      "instruction_id": "clastb_r_p_z",
+      "mnemonic": "CLASTB",
+      "category": "sve",
+      "source_file": "clastb_r_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0531a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x0531bca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0531bca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0531bca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0531bca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0531bca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "ce029edb462ef0f60b0701012f54e81482d7698efe73d075e29aed3b96f5998f",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clastb_r_p_z.xml"
+    },
+    {
+      "id": "clastb_v_p_z_",
+      "instruction_id": "clastb_v_p_z",
+      "mnemonic": "CLASTB",
+      "category": "sve",
+      "source_file": "clastb_v_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x052b8000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x052b9ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052b9ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052b9ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052b9ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052b9ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "a70f189c6b225b13c6b7bad76d8f5272be255516427bf26d21ed1bbc380869d6",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clastb_v_p_z.xml"
+    },
+    {
+      "id": "clastb_z_p_zz_",
+      "instruction_id": "clastb_z_p_zz",
+      "mnemonic": "CLASTB",
+      "category": "sve",
+      "source_file": "clastb_z_p_zz.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05298000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x05299ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05299ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05299ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05299ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05299ca5",
+          "expected_mnemonics": [
+            "clastb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "f345f14925b08ecd1d1caece4d9f04a9862c492d3983d15d3a4be4ce3869bce3",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/clastb_z_p_zz.xml"
+    },
+    {
+      "id": "dup_z_i_",
+      "instruction_id": "dup_z_i",
+      "mnemonic": "DUP",
+      "category": "sve",
+      "source_file": "dup_z_i.xml",
+      "encoding_mask": "0xff3fc000",
+      "encoding_value": "0x2538c000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x2538d01f",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x2538d01f",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x2538d01f",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x2538d01f",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x2538d01f",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "c0710abc9d3759bdbb9341581bb38964eb6ce5fd2514e20c122281af371228b6",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/dup_z_i.xml"
+    },
+    {
+      "id": "dup_z_r_",
+      "instruction_id": "dup_z_r",
+      "mnemonic": "DUP",
+      "category": "sve",
+      "source_file": "dup_z_r.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05203800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x052038a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052038a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052038a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052038a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052038a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "20caea7fe455db062a4e9a1e4f659985a599cb1811bb760136786bf2b2ba1672",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/dup_z_r.xml"
+    },
+    {
+      "id": "dup_z_zi_",
+      "instruction_id": "dup_z_zi",
+      "mnemonic": "DUP",
+      "category": "sve",
+      "source_file": "dup_z_zi.xml",
+      "encoding_mask": "0xff20fc00",
+      "encoding_value": "0x05202000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x052120a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052120a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052120a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052120a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052120a5",
+          "expected_mnemonics": [
+            "mov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "77f0e560694d44329055457fdeccea99262c580bdd4863745ed5535d8fc83ad1",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/dup_z_zi.xml"
+    },
+    {
+      "id": "insr_z_r_",
+      "instruction_id": "insr_z_r",
+      "mnemonic": "INSR",
+      "category": "sve",
+      "source_file": "insr_z_r.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05243800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x052438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "e337c218acc0800189c66c6b4ddc6a2275daa6f40982061052ccf7feec389313",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/insr_z_r.xml"
+    },
+    {
+      "id": "insr_z_v_",
+      "instruction_id": "insr_z_v",
+      "mnemonic": "INSR",
+      "category": "sve",
+      "source_file": "insr_z_v.xml",
+      "encoding_mask": "0xff3ffc00",
+      "encoding_value": "0x05343800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x053438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x053438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x053438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x053438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x053438a5",
+          "expected_mnemonics": [
+            "insr"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "23dabcb3993bf74109b1bd41a36b237d78dee1a9d280dbf163a470eef1c16e23",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/insr_z_v.xml"
+    },
+    {
+      "id": "lasta_r_p_z_",
+      "instruction_id": "lasta_r_p_z",
+      "mnemonic": "LASTA",
+      "category": "sve",
+      "source_file": "lasta_r_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0520a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x0520bca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0520bca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0520bca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0520bca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0520bca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "536873baf8a3d9dd8a1fbacff9464bd6db988389a5c90079c260c549db1ae6b9",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/lasta_r_p_z.xml"
+    },
+    {
+      "id": "lasta_v_p_z_",
+      "instruction_id": "lasta_v_p_z",
+      "mnemonic": "LASTA",
+      "category": "sve",
+      "source_file": "lasta_v_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05228000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x05229ca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05229ca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05229ca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05229ca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05229ca5",
+          "expected_mnemonics": [
+            "lasta"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "bb11a71edb2a84117731f59b5ee6e0593daf5b5885d906effcc215af0b0797fd",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/lasta_v_p_z.xml"
+    },
+    {
+      "id": "lastb_r_p_z_",
+      "instruction_id": "lastb_r_p_z",
+      "mnemonic": "LASTB",
+      "category": "sve",
+      "source_file": "lastb_r_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x0521a000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x0521bca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x0521bca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x0521bca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x0521bca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x0521bca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "b451cfd38db16673cee5d6e6d0ce09d014054b3efbc3e57b8e3a208d205ec6de",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/lastb_r_p_z.xml"
+    },
+    {
+      "id": "lastb_v_p_z_",
+      "instruction_id": "lastb_v_p_z",
+      "mnemonic": "LASTB",
+      "category": "sve",
+      "source_file": "lastb_v_p_z.xml",
+      "encoding_mask": "0xff3fe000",
+      "encoding_value": "0x05238000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "status": "implemented",
+      "profile": "apple-sme2-streaming-v1",
+      "scope": "Streaming SM=1, fixed SVL16/32/64/128/256; FEAT_SME suffices without ZA or SME2p1. Complete allocated scalar/GPR/vector effects, including encoded SP/ZR, aliasing and conditional narrowing. Original FFR/FPMR observation, guest exception delivery, scalable block/cache, applications and OS compatibility remain outside this admission.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
+        "crates/stela-compiler/src/x86_64/scalable.rs",
+        "crates/stela-compiler/src/x86_64/scalable/legacy.rs"
+      ],
+      "review": "Pinned June2026 canonical encoding/operand review. Original875cases/1750strict comparisons remain immutable. Current successor transfers1720selected instruction bodies/maps and30previously executed complete actualCLI wrappers by exact whole bytes/profile/manifest contract. Zero new native/original replay. Historical150earlier wrappers and selected30 original/model/native wrapper joins remain separately scoped; selected SSE2 DUP/checkedPALIGNR INSR and byte-vector CLAST PSHUFB recipes unchanged.",
+      "smoke_samples": [
+        {
+          "word": "0x05239ca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05239ca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05239ca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05239ca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05239ca5",
+          "expected_mnemonics": [
+            "lastb"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "source_sha256": "84c099a8bfa8dd2667019187543f56099fab08e8296a64e1148dfdc4cbd11e2a",
+      "evidence_groups": [
+        "streaming_sve_register_extract"
+      ],
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/lastb_v_p_z.xml"
     }
   ],
   "execution_profiles": {

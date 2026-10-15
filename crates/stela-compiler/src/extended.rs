@@ -19,7 +19,7 @@ use crate::{
         sve::{
             dot, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, sign,
+            integer_products, integer_saturation, rearrange_extract, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -220,6 +220,7 @@ enum Decoded {
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
+    RearrangeExtract(rearrange_extract::Operand),
     Sign(sign::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     Length(length::Operand),
@@ -417,6 +418,25 @@ fn decode(
         }
         return Ok(Decoded::SmeIntegerDots(operand));
     }
+    if let Some(decoded) = rearrange_extract::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming extraction encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        profile.require_features(
+            FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
+            pc,
+        )?;
+        return Ok(Decoded::RearrangeExtract(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -486,6 +506,9 @@ fn emit_decoded(
         }
         Decoded::SmeIntegerDots(operand) => {
             x86_64::sme::integer_dots::emit(code, &operand, profile.length, target);
+        }
+        Decoded::RearrangeExtract(operand) => {
+            x86_64::sve::rearrange_extract::emit(code, operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -1605,3 +1628,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod rearrange_extract_tests;

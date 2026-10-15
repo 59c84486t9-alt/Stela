@@ -6,6 +6,7 @@ pub mod integer_arithmetic;
 pub mod integer_logic;
 pub mod integer_products;
 pub mod integer_saturation;
+pub mod rearrange_extract;
 pub mod sign;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub enum Operand {
     IntegerLogic(integer_logic::Operand),
     IntegerProducts(integer_products::Operand),
     IntegerSaturation(integer_saturation::Operand),
+    RearrangeExtract(rearrange_extract::Operand),
     Sign(sign::Operand),
 }
 
@@ -31,6 +33,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         })
         .or_else(|| {
             integer_saturation::decode(word).map(|operand| operand.map(Operand::IntegerSaturation))
+        })
+        .or_else(|| {
+            rearrange_extract::decode(word).map(|operand| operand.map(Operand::RearrangeExtract))
         })
         .or_else(|| sign::decode(word).map(|operand| operand.map(Operand::Sign)))
 }

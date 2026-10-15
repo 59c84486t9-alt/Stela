@@ -5,6 +5,9 @@
 //! scalable view. Helpers use only caller-saved RAX/RCX/RDX and XMM0..7. They
 //! access architectural state storage, never guest data RAM or monitor metadata.
 
+mod legacy;
+pub(crate) use legacy::clear_z_upper;
+
 use super::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::{
     GuestState, TargetCpu,
@@ -26,6 +29,7 @@ const ADDRESS_RDX: u8 = 2;
 const HALFWORD_BYTES: usize = std::mem::size_of::<u16>();
 const DWORD_BYTES: usize = std::mem::size_of::<u32>();
 const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const PREDICATE_CHUNK_BYTES: usize = QWORD_BYTES;
 const PREDICATE_MASK_BYTES: usize = VECTOR_CHUNK_BYTES / BITS_PER_BYTE;
 const MOV_RDX_CONTEXT_DISP8: &[u8] = &[0x49, 0x8b, 0x57];
 const MOV_RDX_RDX_DISP8: &[u8] = &[0x48, 0x8b, 0x52];
@@ -236,6 +240,26 @@ pub(crate) fn expand_predicate_mask(
     Host::UnpackLowQword.register(code, scratch, scratch, target);
     Host::And.register(code, destination, scratch, target);
     Host::EqualByte.register(code, destination, scratch, target);
+}
+
+fn predicate_chunk(chunk: usize, length: VectorLength) -> (usize, usize) {
+    assert!(chunk < length.predicate_bytes().div_ceil(PREDICATE_CHUNK_BYTES));
+    let offset = chunk * PREDICATE_CHUNK_BYTES;
+    let bytes = (length.predicate_bytes() - offset).min(PREDICATE_CHUNK_BYTES);
+    (offset, bytes)
+}
+
+/// Read an 8-byte packed-P chunk into RAX, zero-extending a final 2/4-byte chunk.
+/// The chunk index addresses packed bytes, not Z chunks. Clobbers RDX only.
+pub(crate) fn read_predicate_chunk(
+    code: &mut Vec<u8>,
+    predicate: u8,
+    chunk: usize,
+    length: VectorLength,
+) {
+    let (offset, bytes) = predicate_chunk(chunk, length);
+    storage_pointer(code, SCALABLE_PREDICATES_OFFSET);
+    read_predicate_at(code, predicate_offset(predicate, offset, length), bytes);
 }
 
 #[cfg(test)]
