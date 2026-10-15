@@ -1,4 +1,4 @@
-"""Apple profile inventory/parser checks without private inputs or native execution."""
+"""Official Apple compiler inventory/predicate checks without private inputs or native execution."""
 import copy
 import json
 from pathlib import Path
@@ -9,51 +9,48 @@ import apple_isa
 
 
 class AppleIsaTests(unittest.TestCase):
-    def test_comments_strings_and_nested_arguments(self):
-        text = '/* ignored */ def X : Extension<"a//b", "X", "FEAT_X", "comma, <angle>", [FeatureY]>; // ignored'
-        stripped = apple_isa.without_comments(text)
-        self.assertIn('"a//b"', stripped)
-        self.assertNotIn('ignored', stripped)
-        args = apple_isa.balanced_arguments(stripped, stripped.index('<'))
-        self.assertEqual(args, ['"a//b"', '"X"', '"FEAT_X"', '"comma, <angle>"', '[FeatureY]'])
-        self.assertEqual(apple_isa.split_arguments('[FeatureA, FeatureB], !listconcat([FeatureC], [FeatureD]), "x,y"'),
-                         ['[FeatureA, FeatureB]', '!listconcat([FeatureC], [FeatureD])', '"x,y"'])
-        for bad in ('<"unterminated>', '<FeatureA', '<[FeatureA)>'):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                apple_isa.balanced_arguments(bad, 0)
+    def test_official_feature_snapshot_is_strict_and_hash_pinned(self):
+        root = Path(__file__).resolve().parents[1]
+        snapshot = json.loads((root / 'tests/isa/apple-clang-features.json').read_bytes())
+        self.assertEqual(apple_isa.load_snapshot(snapshot), snapshot)
+        self.assertEqual(set(snapshot['profiles']), set(apple_isa.CPUS))
+        self.assertEqual(snapshot['tool']['version'], 'Apple clang version 21.0.0 (clang-2100.3.34.2)')
+        for change in ('schema', 'extra_field', 'unknown_cpu', 'missing_cpu', 'target',
+                       'command_cpu', 'feature', 'rehashed_feature', 'tool_hash', 'export_hash'):
+            modified = copy.deepcopy(snapshot)
+            if change == 'schema':
+                modified['schema_version'] = 99
+            elif change == 'extra_field':
+                modified['unreviewed'] = True
+            elif change == 'unknown_cpu':
+                modified['profiles']['apple-m7'] = modified['profiles'].pop('apple-m6')
+            elif change == 'missing_cpu':
+                del modified['profiles']['apple-m6']
+            elif change == 'target':
+                modified['target'] = 'aarch64-unknown-none-elf'
+            elif change == 'command_cpu':
+                modified['profiles']['apple-m1']['command'][2] = '-mcpu=apple-m6'
+            elif change in ('feature', 'rehashed_feature'):
+                modified['profiles']['apple-m6']['architectural_features'].remove('FEAT_CPA')
+            elif change == 'tool_hash':
+                modified['tool']['sha256'] = '0' * 64
+            else:
+                modified['profiles']['apple-m1']['stdout_sha256'] = '0' * 64
+            if change == 'rehashed_feature':
+                modified['facts_sha256'] = apple_isa.snapshot_hash(modified)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                apple_isa.load_snapshot(modified)
 
-    def test_architecture_defaults_are_not_implied_cpu_features(self):
-        definitions = apple_isa.feature_definitions('''
-            def FeatureBase : Extension<"base", "Base", "FEAT_Base, FEAT_Base2", "base">;
-            def FeatureOptional : Extension<"optional", "Optional", "FEAT_Optional", "optional">;
-            def HasV8_0aOps : Architecture64<8, 0, "a", "v8a", [FeatureBase], [FeatureOptional]>;
-        ''')
-        features, architectural = apple_isa.feature_closure(definitions, ['HasV8_0aOps'])
-        self.assertEqual(features, {'HasV8_0aOps', 'FeatureBase'})
-        self.assertEqual(architectural, {'FEAT_Base', 'FEAT_Base2'})
-        with self.assertRaises(ValueError):
-            apple_isa.literal_features('!listconcat([FeatureBase], [FeatureOptional])')
-
-    def test_unknown_or_cyclic_features_fail_closed(self):
-        with self.assertRaises(ValueError):
-            apple_isa.feature_closure({}, ['FeatureMissing'])
-        definitions = {'FeatureA': {'dependencies': ['FeatureB'], 'architectural': []},
-                       'FeatureB': {'dependencies': ['FeatureA'], 'architectural': []}}
-        with self.assertRaises(ValueError):
-            apple_isa.feature_closure(definitions, ['FeatureA'])
-
-    def test_cpu_aliases_use_literal_apple_model_roots(self):
-        source = '''
-          list<SubtargetFeature> AppleCPU = [HasV8_0aOps, FeatureBase];
-          def : ProcessorModel<"apple-a14", Tune, ProcessorFeatures.AppleCPU, []>;
-          def : ProcessorAlias<"apple-m1", "apple-a14">;
-        '''
-        self.assertEqual(apple_isa.cpu_roots(source, 'apple-m1'),
-                         ('AppleCPU', ['HasV8_0aOps', 'FeatureBase']))
-        with self.assertRaises(ValueError):
-            apple_isa.cpu_roots(source, 'apple-m6')
-        with self.assertRaises(ValueError):
-            apple_isa.cpu_roots('def : ProcessorAlias<"a", "b">; def : ProcessorAlias<"b", "a">;', 'a')
+    def test_exported_features_are_not_expanded_or_hardware_claims(self):
+        root = Path(__file__).resolve().parents[1]
+        snapshot = apple_isa.load_snapshot(json.loads((root / 'tests/isa/apple-clang-features.json').read_bytes()))
+        enabled = set(snapshot['profiles']['apple-m6']['architectural_features'])
+        self.assertIn('FEAT_FP8', enabled)
+        for absent in ('FEAT_SVE', 'FEAT_SVE2', 'FEAT_FP8FMA', 'FEAT_FP8DOT2', 'FEAT_FP8DOT4'):
+            self.assertNotIn(absent, enabled)
+        self.assertFalse(apple_isa.feature_expression('FEAT_FP8 && FEAT_FP8FMA', enabled))
+        self.assertIn('FEAT_BTI', snapshot['profiles']['apple-m1']['architectural_features'])
+        self.assertIn('not a hardware capability', snapshot['basis'])
 
     def test_predicate_precedence_and_unknown_operand_conditions(self):
         enabled = {'FEAT_SME', 'FEAT_SME_I16I64'}
@@ -82,16 +79,23 @@ class AppleIsaTests(unittest.TestCase):
         inventory = json.loads((root / 'tests/isa/apple-codegen-profiles.json').read_bytes())
         assessed, _ = a64_checklist.assess(catalog, [])
         summaries = apple_isa.assess(inventory, assessed)
-        self.assertEqual(summaries['union']['total'], 3119)
+        self.assertEqual(summaries['union']['total'], 3231)
         self.assertEqual(summaries['union']['implemented'], 0)
         self.assertEqual({cpu: row['total'] for cpu, row in summaries.items() if cpu != 'union'}, apple_isa.EXPECTED_COUNTS)
         self.assertEqual(sum(row['membership_basis'] == 'untagged_reference_candidate' for row in inventory['forms']), 301)
-        self.assertEqual(len(inventory['sve_mode_audit']['pages']), 745)
-        self.assertEqual(inventory['pending_profiles'], ['apple-m6'])
+        self.assertEqual(len(inventory['sve_mode_audit']['pages']), 757)
+        self.assertEqual(inventory['pending_profiles'], [])
         self.assertFalse(inventory['inventory_complete'])
         for cpu, profile in inventory['profiles'].items():
             self.assertFalse(profile['general_nonstreaming_sve'])
-            self.assertEqual(profile['streaming_sve'], cpu in ('apple-m4', 'apple-m5'))
+            self.assertEqual(profile['streaming_sve'], cpu in ('apple-m4', 'apple-m5', 'apple-m6'))
+
+        self.assertEqual(sum(row['conditional_nonstreaming_check'] for row in inventory['sve_mode_audit']['pages'].values()), 41)
+        by_id = {row['id']: row for row in inventory['forms']}
+        self.assertEqual(by_id['ADDPT_64_addsub_pt']['cpus'], ['apple-m6'])
+        self.assertEqual(by_id['PACM_HI_hints']['cpus'], ['apple-m6'])
+        self.assertEqual(by_id['movt_zt_z_']['cpus'], ['apple-m6'])
+        self.assertEqual(by_id['bf1cvt_z_z8_b2bf']['sve_mode'], 'streaming_only_candidate')
 
         original = next(row for row in catalog['forms'] if row['id'] == 'ADCS_32_addsub_carry')
         review = {**original, 'source_sha256': catalog['source_files_sha256'][original['source_file']],
@@ -99,7 +103,7 @@ class AppleIsaTests(unittest.TestCase):
         partial, _ = a64_checklist.assess(catalog, [{'forms': [review]}])
         self.assertEqual(apple_isa.assess(inventory, partial)['union']['implementation_percentage'], 0)
         implemented, _ = a64_checklist.assess(catalog, [{'forms': [{**review, 'status': 'implemented'}]}])
-        self.assertEqual(apple_isa.assess(inventory, implemented)['union']['implementation_percentage'], 100 / 3119)
+        self.assertEqual(apple_isa.assess(inventory, implemented)['union']['implementation_percentage'], 100 / 3231)
         for change in ('membership', 'rehashed_membership', 'closed_inventory', 'hardware_claim', 'source'):
             modified = copy.deepcopy(inventory)
             if change in ('membership', 'rehashed_membership'):
@@ -109,7 +113,7 @@ class AppleIsaTests(unittest.TestCase):
             elif change == 'hardware_claim':
                 modified['hardware_membership_verified'] = True
             else:
-                modified['llvm_commit'] = '0' * 40
+                modified['compiler']['sha256'] = '0' * 64
             if change == 'rehashed_membership':
                 modified['facts_sha256'] = apple_isa.inventory_hash(modified)
             with self.subTest(change=change), self.assertRaises(ValueError):

@@ -1,7 +1,7 @@
-"""Pinned Apple LLVM CPU profiles mapped to documented Arm encoding candidates.
+"""Pinned official Apple compiler features mapped to documented A64 candidates.
 
-Compiler feature models are not a complete hardware-capability inventory. Keep
-that distinction in the artifact and in every percentage derived from it.
+Feature exports describe compiler configuration, not complete hardware capability.
+Regeneration is offline from factual compiler exports and the pinned Arm archive.
 """
 import argparse
 from collections import Counter
@@ -15,162 +15,56 @@ import xml.etree.ElementTree as ET
 import a64_checklist
 
 ROOT = Path(__file__).resolve().parents[1]
-LLVM_COMMIT = 'b4badb65df4ea15fc6ecabd8f9366a96df11dcb5'
-VERSION = 'apple-llvm-m1-m5-arm-2026-06-v1'
-FACTS_SHA = 'ca64f36c40f05a99c35bd6c9652932b7af86a509f62f93b20ade50fa801b6e91'
-SOURCE_HASHES = {
-    'AArch64Features.td': '6531064d60165020e4c99ab61e45112ec2aaa77749d6eb2f50979d9c65b29352',
-    'AArch64Processors.td': 'c583a1b2463935ad3497a641b0e5bf2714788e2e2bb02bf182d54d9078fa75cd',
-}
-CPUS = tuple(f'apple-m{number}' for number in range(1, 6))
-EXPECTED_COUNTS = {'apple-m1': 1523, 'apple-m2': 1537, 'apple-m3': 1537,
-                   'apple-m4': 2931, 'apple-m5': 3119}
+VERSION = 'apple-clang-m1-m6-arm-2026-06-v2'
+FACTS_SHA = '5514bc8738b8c3bd56722292a30f21f2dfc3e54be7689e25fe5003b76e80a394'
+SNAPSHOT_VERSION = 'apple-clang-2100.3.34.2-m1-m6-v1'
+SNAPSHOT_FACTS_SHA = '92df4b0be28c91f1d98bdebe332df1eae6984b68d31bc6a4a499f64ec4af7f2a'
+CPUS = tuple(f'apple-m{number}' for number in range(1, 7))
+EXPECTED_COUNTS = {'apple-m1': 1524, 'apple-m2': 1537, 'apple-m3': 1537,
+                   'apple-m4': 2931, 'apple-m5': 3119, 'apple-m6': 3231}
+UNION_COUNT = 3231
 LIMITS = (
-    'Public LLVM code-generation feature models select candidate canonical forms, '
-    'not exhaustive Apple hardware capabilities or per-OS availability. Untagged '
-    'reference forms are candidates, including system forms with feature-dependent '
-    'operands. Architecture-implied privileged features are not hardware validation. '
-    'SME admits streaming SVE candidates without enabling general non-streaming SVE. '
-    'Mode, operand, privilege, FP, memory and exception semantics need separate '
-    'verification. M6, Apple-private operations and full hardware membership remain '
+    'Official Apple clang enabled-feature exports select candidate canonical forms, '
+    'not exhaustive Apple hardware capabilities, assembler operands or per-OS availability. '
+    'Untagged reference forms are candidates, including system forms with feature-dependent '
+    'operands. Privileged compiler features and accepted HINT/system-register syntax '
+    'are not hardware validation. SME admits streaming SVE candidates without enabling '
+    'general non-streaming SVE. Mode, operand, FP, memory and exception semantics need '
+    'separate verification. Apple-private operations and full hardware membership remain '
     'open. A form count is not application or macOS compatibility.'
 )
 
 
-def without_comments(source):
-    pattern = r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/'
-    return re.sub(pattern, lambda m: m[0] if m[0].startswith('"') else re.sub(r'[^\n]', ' ', m[0]), source)
+def snapshot_hash(snapshot):
+    return a64_checklist.checksum({key: value for key, value in snapshot.items() if key != 'facts_sha256'})
 
 
-def balanced_arguments(source, start):
-    """Read a TableGen angle argument list, respecting quoted strings."""
-    if source[start] != '<':
-        raise ValueError('Expected TableGen argument list')
-    depth, quoted, escaped = 0, False, False
-    for index in range(start, len(source)):
-        char = source[index]
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char == '<':
-            depth += 1
-        elif char == '>':
-            depth -= 1
-            if depth == 0:
-                return split_arguments(source[start + 1:index])
-    raise ValueError('Unterminated TableGen argument list')
-
-
-def split_arguments(source):
-    result, stack, quoted, escaped, start = [], [], False, False, 0
-    for index, char in enumerate(source):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char in '[(<':
-            stack.append(char)
-        elif char in '])>':
-            if not stack or stack.pop() != {']': '[', ')': '(', '>': '<'}[char]:
-                raise ValueError('Unbalanced TableGen arguments')
-        elif char == ',' and not stack:
-            result.append(source[start:index].strip())
-            start = index + 1
-    if quoted or stack:
-        raise ValueError('Unterminated TableGen argument')
-    tail = source[start:].strip()
-    if tail:
-        result.append(tail)
-    return result
-
-
-def literal_features(source):
-    source = source.strip()
-    if not source.startswith('[') or not source.endswith(']'):
-        raise ValueError('Feature dependency must be a literal list')
-    values = split_arguments(source[1:-1])
-    if any(not re.fullmatch(r'(?:Feature\w+|HasV\w+Ops)', value) for value in values):
-        raise ValueError('Unreviewed feature dependency expression')
-    return values
-
-
-def feature_definitions(source):
-    source = without_comments(source)
-    definitions = {}
-    for match in re.finditer(r'\bdef\s+(\w+)\s*:\s*(Architecture64|ExtensionWithMArch|Extension|SubtargetFeature)\s*<', source):
-        name, kind = match[1], match[2]
-        args = balanced_arguments(source, match.end() - 1)
-        if len(args) < 4 or (kind == 'Architecture64' and len(args) != 6):
-            raise ValueError('Unexpected feature definition signature')
-        dependencies = literal_features(args[4]) if len(args) >= 5 else []
-        architectural = []
-        if kind in ('Extension', 'ExtensionWithMArch'):
-            value = json.loads(args[2])
-            architectural = [part.strip() for part in value.split(',') if part.strip()]
-            if any(not re.fullmatch(r'FEAT_\w+', part) for part in architectural):
-                raise ValueError('Unexpected architectural feature spelling')
-        if name in definitions:
-            raise ValueError('Duplicate feature definition')
-        definitions[name] = {'dependencies': dependencies, 'architectural': architectural}
-    return definitions
-
-
-def cpu_roots(source, cpu):
-    source = without_comments(source)
-    aliases, models = {}, {}
-    for match in re.finditer(r'\b(ProcessorAlias|ProcessorModel)\s*<', source):
-        args = balanced_arguments(source, match.end() - 1)
-        name = json.loads(args[0])
-        if match[1] == 'ProcessorAlias':
-            aliases[name] = json.loads(args[1])
-        else:
-            models[name] = args[2]
-    visited = set()
-    while cpu in aliases:
-        if cpu in visited:
-            raise ValueError('Cyclic CPU aliases')
-        visited.add(cpu)
-        cpu = aliases[cpu]
-    model = re.fullmatch(r'ProcessorFeatures\.(\w+)', models.get(cpu, ''))
-    if model is None:
-        raise ValueError('Unknown or unreviewed Apple CPU model')
-    name = model[1]
-    match = re.search(r'list\s*<\s*SubtargetFeature\s*>\s+' + re.escape(name) + r'\s*=\s*(\[[^]]*\])\s*;', source)
-    if match is None:
-        raise ValueError('CPU feature roots are not a reviewed literal list')
-    return name, literal_features(match[1])
-
-
-def feature_closure(definitions, roots):
-    complete, active = set(), set()
-
-    def visit(name):
-        if name not in definitions:
-            raise ValueError(f'Unknown feature dependency: {name}')
-        if name in active:
-            raise ValueError('Cyclic feature dependencies')
-        if name in complete:
-            return
-        active.add(name)
-        for dependency in definitions[name]['dependencies']:
-            visit(dependency)
-        active.remove(name)
-        complete.add(name)
-
-    for root in roots:
-        visit(root)
-    return complete, {name for feature in complete for name in definitions[feature]['architectural']}
+def load_snapshot(snapshot):
+    """Validate exact factual exports; never reconstruct omitted compiler features."""
+    fields = {'schema_version', 'kind', 'version', 'publisher', 'tool', 'target',
+              'capture_date', 'basis', 'profiles', 'facts_sha256'}
+    if (not isinstance(snapshot, dict) or set(snapshot) != fields
+            or snapshot.get('schema_version') != 1
+            or snapshot.get('kind') != 'apple_clang_enabled_feature_snapshot'
+            or snapshot.get('version') != SNAPSHOT_VERSION
+            or snapshot.get('facts_sha256') != SNAPSHOT_FACTS_SHA
+            or snapshot_hash(snapshot) != SNAPSHOT_FACTS_SHA):
+        raise ValueError('Official Apple compiler feature snapshot differs from pinned facts')
+    if snapshot['target'] != 'arm64-apple-macos' or set(snapshot['profiles']) != set(CPUS):
+        raise ValueError('Official Apple compiler target/CPU inventory differs')
+    for cpu, profile in snapshot['profiles'].items():
+        if set(profile) != {'command', 'stdout_sha256', 'stderr_sha256', 'architectural_features'}:
+            raise ValueError('Unknown compiler feature profile schema')
+        command = [snapshot['tool']['path'], '--target=' + snapshot['target'],
+                   '-mcpu=' + cpu, '--print-enabled-extensions']
+        features = profile['architectural_features']
+        if (profile['command'] != command or not isinstance(features, list)
+                or any(not isinstance(name, str) or not re.fullmatch(r'FEAT_\w+', name) for name in features)
+                or features != sorted(set(features))
+                or any(not re.fullmatch(r'[0-9a-f]{64}', profile[name])
+                       for name in ('stdout_sha256', 'stderr_sha256'))):
+            raise ValueError('Invalid compiler CPU feature export')
+    return snapshot
 
 
 def feature_expression(expression, enabled):
@@ -272,18 +166,15 @@ def sve_mode_audit(catalog, selected, archive):
             'scope': 'Every selected SVE page contains CheckSVEEnabled; on SME-only CPUs this requires streaming mode. Conditional non-streaming checks and feature-dependent operands still require per-encoding review. No general SVE support is inferred.'}
 
 
-def generate(catalog, features, processors, archive):
+def generate(catalog, snapshot, archive):
     a64_checklist.validate(catalog)
-    for name, raw in (('AArch64Features.td', features), ('AArch64Processors.td', processors)):
-        if hashlib.sha256(raw).hexdigest() != SOURCE_HASHES[name]:
-            raise ValueError('LLVM source does not match the pinned commit')
+    snapshot = load_snapshot(snapshot)
     if hashlib.sha256(Path(archive).read_bytes()).hexdigest() != a64_checklist.ARCHIVE_SHA:
         raise ValueError('Arm archive identity changed')
-    definitions = feature_definitions(features.decode())
     profiles, memberships = {}, {}
     for cpu in CPUS:
-        model, roots = cpu_roots(processors.decode(), cpu)
-        transitive, architectural = feature_closure(definitions, roots)
+        source = snapshot['profiles'][cpu]
+        architectural = set(source['architectural_features'])
         forms = []
         for row in catalog['forms']:
             membership = candidate(row, architectural)
@@ -293,28 +184,32 @@ def generate(catalog, features, processors, archive):
                 forms.append(row)
                 memberships.setdefault(row['id'], []).append(cpu)
         if len(forms) != EXPECTED_COUNTS[cpu]:
-            raise ValueError('Pinned Apple model candidate count changed')
-        profiles[cpu] = {'llvm_model': model, 'roots': roots,
-            'transitive_llvm_features': sorted(transitive), 'architectural_features': sorted(architectural),
+            raise ValueError('Pinned Apple compiler candidate count changed')
+        profiles[cpu] = {'compiler_cpu': cpu,
+            'architectural_features': sorted(architectural),
+            'feature_export_stdout_sha256': source['stdout_sha256'],
             'canonical_forms': len(forms), 'mnemonics': len({row['mnemonic'] for row in forms}),
             'categories': dict(sorted(Counter(row['category'] for row in forms).items())),
             'general_nonstreaming_sve': 'FEAT_SVE' in architectural,
             'streaming_sve': 'FEAT_SME' in architectural}
     audit = sve_mode_audit(catalog, memberships, archive)
     forms = [{'id': row['id'], 'cpus': memberships[row['id']],
-              'membership_basis': 'untagged_reference_candidate' if not row['features'] else 'llvm_feature_predicate',
+              'membership_basis': 'untagged_reference_candidate' if not row['features'] else 'official_compiler_feature_predicate',
               'sve_mode': 'streaming_only_candidate' if row['category'] == 'sve' else None}
              for row in catalog['forms'] if row['id'] in memberships]
-    result = {'schema_version': 1, 'kind': 'apple_codegen_candidate_inventory', 'version': VERSION,
+    if len(forms) != UNION_COUNT:
+        raise ValueError('Pinned Apple compiler candidate union changed')
+    result = {'schema_version': 2, 'kind': 'apple_codegen_candidate_inventory', 'version': VERSION,
         'arm_catalog_facts_sha256': catalog['facts_sha256'],
-        'sources': {name: {'sha256': digest, 'uri': f'https://raw.githubusercontent.com/llvm/llvm-project/{LLVM_COMMIT}/llvm/lib/Target/AArch64/{name}'}
-                    for name, digest in SOURCE_HASHES.items()},
-        'llvm_commit': LLVM_COMMIT, 'profiles': profiles, 'sve_mode_audit': audit,
+        'sources': {'apple_clang_features': {'path': 'tests/isa/apple-clang-features.json',
+            'version': SNAPSHOT_VERSION, 'facts_sha256': SNAPSHOT_FACTS_SHA}},
+        'compiler': snapshot['tool'], 'target': snapshot['target'],
+        'profiles': profiles, 'sve_mode_audit': audit,
         'inventory_complete': False, 'hardware_membership_verified': False,
-        'pending_profiles': ['apple-m6'], 'limits': LIMITS, 'forms': forms}
+        'pending_profiles': [], 'limits': LIMITS, 'forms': forms}
     result['facts_sha256'] = inventory_hash(result)
     if result['facts_sha256'] != FACTS_SHA:
-        raise ValueError('Pinned Apple profile facts changed')
+        raise ValueError('Pinned Apple compiler profile facts changed')
     return result
 
 
@@ -325,7 +220,7 @@ def inventory_hash(inventory):
 def assess(inventory, assessed_catalog):
     rows = a64_checklist.validate(assessed_catalog)
     if (inventory.get('kind') != 'apple_codegen_candidate_inventory' or inventory.get('version') != VERSION
-            or inventory.get('schema_version') != 1 or inventory.get('inventory_complete') is not False
+            or inventory.get('schema_version') != 2 or inventory.get('inventory_complete') is not False
             or inventory.get('hardware_membership_verified') is not False
             or inventory.get('arm_catalog_facts_sha256') != assessed_catalog['facts_sha256']
             or inventory.get('facts_sha256') != FACTS_SHA
@@ -337,7 +232,7 @@ def assess(inventory, assessed_catalog):
     summaries = {}
     for cpu in (*CPUS, 'union'):
         forms = [rows[row['id']] for row in selected if cpu == 'union' or cpu in row['cpus']]
-        total = 3119 if cpu == 'union' else EXPECTED_COUNTS[cpu]
+        total = UNION_COUNT if cpu == 'union' else EXPECTED_COUNTS[cpu]
         if len(forms) != total:
             raise ValueError('Apple candidate profile membership changed')
         counts = Counter(row['status'] for row in forms)
@@ -348,13 +243,13 @@ def assess(inventory, assessed_catalog):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--features', type=Path, default=ROOT / '.stela/isa/llvm-AArch64Features-b4badb65df4e.td')
-    parser.add_argument('--processors', type=Path, default=ROOT / '.stela/isa/llvm-AArch64Processors-b4badb65df4e.td')
+    parser.add_argument('--features', type=Path, default=ROOT / 'tests/isa/apple-clang-features.json',
+                        help='Pinned factual Apple compiler feature snapshot')
     parser.add_argument('--archive', type=Path, default=ROOT / '.stela/isa/ISA_A64_xml_A_profile-2026-06.tar.gz')
     parser.add_argument('--catalog', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
     parser.add_argument('--output', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
     args = parser.parse_args()
-    inventory = generate(json.loads(args.catalog.read_bytes()), args.features.read_bytes(), args.processors.read_bytes(), args.archive)
+    inventory = generate(json.loads(args.catalog.read_bytes()), json.loads(args.features.read_bytes()), args.archive)
     a64_checklist.write(args.output, inventory)
     print(json.dumps({'output': str(args.output), 'facts_sha256': inventory['facts_sha256'],
                       'counts': {cpu: row['canonical_forms'] for cpu, row in inventory['profiles'].items()}}, indent=2))

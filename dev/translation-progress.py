@@ -1292,17 +1292,23 @@ def markdown(report):
             checkpoint_text = (f"{checkpoint['implemented']:,} / {checkpoint['total']:,}; compiler `{checkpoint['compiler_source_sha256'][:12]}`"
                                if checkpoint else 'Pending')
             checkpoint_row = f'| Last full instruction-verification checkpoint | {checkpoint_text} |\n'
-            basis = 'Current counts reflect reviewed implementation and emission smoke checks. Full regression verification is deferred to integration checkpoints. '
+            basis = ('Current counts reflect retained reviewed implementation and emission smoke evidence. Inventory membership was reassessed without rerunning emission checks. '
+                     if report.get('inventory_reassessment') else
+                     'Current counts reflect reviewed implementation and emission smoke checks. ')
+            basis += 'Full regression verification is deferred to integration checkpoints. '
+        compiler_version = report['apple_codegen_candidates'].get('compiler_version')
+        compiler_basis = (f'Captured **{compiler_version}** CPU features' if compiler_version
+                          else 'Official Apple clang CPU feature snapshot')
         return ('| Measurement | Current evidence |\n| --- | --- |\n'
-                f"| Apple M1–M5 candidate forms implemented | **{row['implemented']:,} / {row['total']:,} ({row['implementation_percentage']:.2f}%)** |\n"
+                f"| Apple M1–M6 candidate forms implemented | **{row['implemented']:,} / {row['total']:,} ({row['implementation_percentage']:.2f}%)** |\n"
                 f"| Candidate forms partially implemented | {row['partial']:,} |\n"
                 f"| Candidate forms unimplemented | {row['unsupported']:,} |\n" + checkpoint_row +
                 f"| Apple-specific extension groups | {apple['implemented']} implemented / {apple['tracked']} tracked; inventory open |\n"
                 f"| Complete binaries verified through Stela | {report['summary']['complete_binaries']['verified']:,} |\n\n"
-                f"Pinned LLVM Apple CPU models mapped to Arm **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. " + basis +
+                f"{compiler_basis} mapped to Arm **2026-06**; compiler `{report['compiler_source_sha256'][:12]}`. " + basis +
                 'Canonical encoding forms count once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
                 'This candidate inventory includes streaming SVE through SME, without general non-streaming SVE. '
-                'Full hardware membership, M6 and Apple-private additions remain open; reviewed-profile instruction coverage does not establish complete CPU, application or macOS compatibility.\n\n'
+                'Full hardware membership and Apple-private additions remain open; reviewed-profile instruction coverage does not establish complete CPU, application or macOS compatibility.\n\n'
                 '[Apple profile inventory](tests/isa/apple-codegen-profiles.json) · '
                 '[Arm reference checklist](tests/isa/a64-documented-checklist.json) · '
                 '[Apple extensions](tests/isa/apple-specific-extensions.json) · '
@@ -1520,6 +1526,7 @@ def main():
               'apple_codegen_candidates': {'version': apple_profiles['version'],
                   'facts_sha256': apple_profiles['facts_sha256'],
                   'inventory_sha256': hashlib.sha256(apple_profiles_data).hexdigest(),
+                  'compiler_version': apple_profiles['compiler']['version'],
                   'harness_source_sha256': sha256(apple_isa.__file__), 'summary': apple_summary,
                   'inventory_complete': False, 'hardware_membership_verified': False},
               'apple_specific_extensions': {'tracked': len(apple['extensions']),
@@ -1555,7 +1562,7 @@ def main():
               'native_differential_evidence': evidence, 'compiler_smoke_probes': probes,
               'reviewed_forms': [{'id': identity, 'status': row['status'], 'scope': row['scope']}
                                  for identity, row in rows.items()],
-              'limits': 'Headline instruction percentage uses pinned public LLVM Apple M1–M5 code-generation candidate forms mapped to the June2026 Arm reference, deduplicated across reviewed execution profiles. Full Arm reference coverage remains secondary. Partial forms earn no credit. These models do not prove complete Apple hardware/mode/operand availability; M6, Apple-private additions and full CPU/VM conformance remain open. Differential tests establish evidence, not exhaustive correctness or complete application/macOS execution.'}
+              'limits': 'Headline instruction percentage uses captured official Apple clang M1–M6 enabled-feature candidates mapped to the June2026 Arm reference, deduplicated across reviewed execution profiles. Full Arm reference coverage remains secondary. Partial forms earn no credit. These models do not prove complete Apple hardware/mode/operand availability; Apple-private additions and full CPU/VM conformance remain open. Differential tests establish evidence, not exhaustive correctness or complete application/macOS execution.'}
     archive = write_evidence(args.output, report)
     if args.markdown_output:
         write_markdown(args.markdown_output, markdown(report))

@@ -159,7 +159,7 @@ class IsaProgressTests(unittest.TestCase):
         text = progress.markdown(report)
         self.assertIn('284 / 3,119 (9.11%)', text)
         self.assertIn('streaming SVE through SME', text)
-        self.assertIn('Full hardware membership, M6 and Apple-private additions remain open', text)
+        self.assertIn('Full hardware membership and Apple-private additions remain open', text)
         self.assertNotIn('4,332', text)
         self.assertIn('reviewed execution profiles', text)
         report['implementation_only'] = True
