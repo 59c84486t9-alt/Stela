@@ -39,6 +39,11 @@ const MOV_IMMEDIATE: u8 = 0xb8;
 const IMMEDIATE_GROUP: u8 = 0x81;
 const SHIFT_IMMEDIATE_GROUP: u8 = 0xc1;
 const UNARY_GROUP: u8 = 0xf7;
+const NOP: u8 = 0x90;
+
+pub fn nop(code: &mut Vec<u8>) {
+    code.push(NOP);
+}
 
 fn rex(code: &mut Vec<u8>, width: Width, reg: HostGpr, rm: HostGpr) {
     let value = REX

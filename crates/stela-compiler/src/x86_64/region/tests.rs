@@ -307,13 +307,103 @@ fn clean_byte_load_tier_retains_five_nonclobbered_slots() {
     assert_eq!(output.consumed_instructions, 5);
     assert_eq!(output.stats.clean_loads, 1);
     assert_eq!(output.stats.load_boundary_stores, 2);
+    assert!(
+        output
+            .recovery
+            .iter()
+            .any(|row| { row.gprs[16] == Location::Host(HostGpr::Rcx) })
+    );
     assert!(output.recovery.iter().all(|row| {
         row.gprs
             .iter()
-            .all(|location| *location != Location::Host(HostGpr::Rcx))
+            .enumerate()
+            .all(|(guest, location)| guest == 16 || *location != Location::Host(HostGpr::Rcx))
     }));
     assert_eq!(output.exit_gprs, FRAME_LOCATIONS);
     assert_eq!(emit_prefix(&instructions).unwrap().consumed_instructions, 2);
+}
+
+#[test]
+fn cached_right_destination_commutes_only_plain_unshifted_operations() {
+    let arithmetic = |subtract, amount| Operation::AddSubRegister {
+        width: Width::X64,
+        subtract,
+        flags: false,
+        destination: Register::X(1),
+        left: Register::X(0),
+        right: Register::X(1),
+        shift: Shift::Lsl,
+        amount,
+    };
+    let emit = |operation| {
+        emit_prefix(&[
+            instruction(0, add(Register::X(0), Register::X(0))),
+            instruction(1, add(Register::X(1), Register::X(1))),
+            instruction(2, operation),
+        ])
+        .unwrap()
+    };
+    let commuted = emit(arithmetic(false, 0));
+    assert_eq!(commuted.stats.native_instructions, 9);
+    assert_eq!(emit(arithmetic(true, 0)).stats.native_instructions, 10);
+    assert_eq!(emit(arithmetic(false, 1)).stats.native_instructions, 12);
+    for kind in [Logical::And, Logical::Or, Logical::Xor] {
+        let logical = |invert, amount| Operation::LogicalRegister {
+            width: Width::W32,
+            kind,
+            flags: false,
+            invert,
+            destination: Register::X(1),
+            left: Register::X(0),
+            right: Register::X(1),
+            shift: Shift::Lsl,
+            amount,
+        };
+        assert_eq!(emit(logical(false, 0)).stats.native_instructions, 9);
+        assert_eq!(emit(logical(true, 0)).stats.native_instructions, 12);
+        assert_eq!(emit(logical(false, 1)).stats.native_instructions, 12);
+    }
+}
+
+#[test]
+fn borrowed_load_result_settles_dirty_changes_before_next_faultable_load() {
+    let load = |data| Operation::Memory {
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width: Width::W32,
+        },
+        bytes: 1,
+        data: Register::X(data),
+        base: Register::X(1),
+        displacement: 0,
+        mode: AddressMode::Offset,
+    };
+    let output = emit_clean_load_prefix(&[
+        instruction(0, load(10)),
+        instruction(1, add(Register::X(10), Register::X(10))),
+        instruction(2, load(11)),
+        instruction(3, add(Register::X(0), Register::X(10))),
+    ])
+    .unwrap();
+    assert_eq!(output.stats.load_boundary_stores, 1);
+    let accesses: Vec<_> = output
+        .code
+        .windows(3)
+        .enumerate()
+        .filter(|(_, bytes)| *bytes == [0x0f, 0xb6, 0x08])
+        .map(|(offset, _)| {
+            output
+                .recovery
+                .iter()
+                .find(|row| row.native_start == offset)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(accesses.len(), 2);
+    assert_eq!(accesses[1].gprs[10], FRAME_LOCATIONS[10]);
+    assert_eq!(accesses[1].gprs[11], FRAME_LOCATIONS[11]);
+    assert_eq!(output.exit_gprs, FRAME_LOCATIONS);
+    assert!(output.recovery.iter().all(RecoveryPoint::validate));
 }
 
 #[test]

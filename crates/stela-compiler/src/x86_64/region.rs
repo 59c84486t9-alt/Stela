@@ -80,6 +80,7 @@ struct Emitter<'a> {
     phase: Phase,
     constants: constant::ConstantRegisters,
     pool_start: usize,
+    operand_reuse: bool,
 }
 
 impl Emitter<'_> {
@@ -233,7 +234,7 @@ impl Emitter<'_> {
         } else {
             // Nonfaulting ZR writes have no architectural effects. Keep an
             // explicit host boundary so retirement is still observable.
-            self.emit(|code| code.push(0x90));
+            self.emit(encoding::nop);
         }
         self.output.stats.commits += 1;
     }
@@ -285,6 +286,26 @@ impl Emitter<'_> {
             self.emit(|code| code.extend_from_slice(&raw[start..end]));
             start = end;
         }
+        // The unchanged memory recipe has committed this exact zero-extended
+        // value to frame. Borrow its remaining RCX copy without another load or
+        // register move. General allocation still skips RCX in this tier, and
+        // the next memory access flushes any later change before clobbering it.
+        if self.operand_reuse
+            && let Some(guest) = slot(data)
+        {
+            debug_assert_eq!(POOL[0], HostGpr::Rcx);
+            debug_assert!(self.resident[0].is_none());
+            self.resident[0] = Some(Resident {
+                guest,
+                dirty: false,
+            });
+            self.locations[guest] = Location::Host(HostGpr::Rcx);
+            self.output.stats.peak_resident = self
+                .output
+                .stats
+                .peak_resident
+                .max(self.resident.iter().flatten().count());
+        }
         self.output.stats.clean_loads += 1;
         self.output.stats.commits += 1;
         Ok(())
@@ -321,7 +342,7 @@ impl Emitter<'_> {
                 self.clean_byte_load(transfer, bytes, data, base, displacement, mode)?;
             }
             Operation::Nop => {
-                self.emit(|code| code.push(0x90));
+                self.emit(encoding::nop);
                 self.output.stats.commits += 1;
             }
             Operation::PcRelative(operand) => {
@@ -388,6 +409,16 @@ impl Emitter<'_> {
                 shift,
                 amount,
             } => {
+                let (left, right) = if self.operand_reuse
+                    && !subtract
+                    && amount == 0
+                    && self.in_place(destination, left).is_none()
+                    && self.in_place(destination, right).is_some()
+                {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
                 let in_place = self.in_place(destination, left);
                 // ADD is commutative only without a shifted right operand.
                 // Prefer a cached left as the native RHS when the other source
@@ -456,6 +487,16 @@ impl Emitter<'_> {
                 shift,
                 amount,
             } => {
+                let (left, right) = if self.operand_reuse
+                    && !invert
+                    && amount == 0
+                    && self.in_place(destination, left).is_none()
+                    && self.in_place(destination, right).is_some()
+                {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
                 let in_place = self.in_place(destination, left);
                 let swapped_right =
                     if !invert && amount == 0 && in_place.is_none() && self.cached(right).is_none()
@@ -627,6 +668,7 @@ fn emit_prefix_selected(
         phase: Phase::BeforeGuestCommit,
         constants: constant::ConstantRegisters::default(),
         pool_start: usize::from(contains_load),
+        operand_reuse: true,
     };
     for instruction in instructions.iter().take(consumed) {
         #[cfg(test)]
