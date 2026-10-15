@@ -4,7 +4,9 @@ mod bfloat16;
 mod comparison;
 mod conversion;
 mod dot;
+mod fp8_conversion_fixed;
 mod rounding;
+mod sme_fp8_conversion;
 mod sme_matrix;
 mod sme_vector;
 
@@ -92,10 +94,20 @@ pub(crate) fn complete(
     }
     let controls = NumericalControls::new(
         state.fpcr,
-        scalable.mode().streaming(),
+        scalable.mode().streaming()
+            && !matches!(
+                instruction.operation(),
+                ScalableNumericalOperation::FixedFp8Conversion(_)
+            ),
         instruction.numerical_features(),
     );
     match instruction.operation() {
+        ScalableNumericalOperation::FixedFp8Conversion(operand) => {
+            fp8_conversion_fixed::complete(state, scalable, operand, controls)
+        }
+        ScalableNumericalOperation::SmeFp8Conversion(operand) => {
+            sme_fp8_conversion::complete(state, scalable, operand, controls)
+        }
         ScalableNumericalOperation::Sve(operation) => match operation {
             Operation::Arithmetic(operand) => {
                 arithmetic::complete(state, scalable, operand, controls)

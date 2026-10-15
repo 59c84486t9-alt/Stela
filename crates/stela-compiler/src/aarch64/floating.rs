@@ -7,6 +7,7 @@ pub mod dot;
 pub mod estimate;
 pub mod exponent;
 pub mod features;
+pub mod fp8;
 pub mod fused;
 pub mod integer;
 pub mod minmax;

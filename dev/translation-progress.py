@@ -40,11 +40,11 @@ DECLARED_SCALABLE_PROFILE = 'sme-streaming-v2'
 SCALABLE_PROFILE_IDS = (SCALABLE_PROFILE, DECLARED_SCALABLE_PROFILE)
 # Architectural names accepted by scalable/features.rs; no feature implication.
 SCALABLE_FEATURES = (
-    'FEAT_BF16', 'FEAT_FAMINMAX', 'FEAT_I8MM', 'FEAT_SME', 'FEAT_SME2',
+    'FEAT_BF16', 'FEAT_FAMINMAX', 'FEAT_FP8', 'FEAT_FPMR', 'FEAT_I8MM', 'FEAT_LUT', 'FEAT_SME', 'FEAT_SME2',
     'FEAT_SME2p1', 'FEAT_SME_B16B16', 'FEAT_SME_F16F16', 'FEAT_SME_F64F64',
-    'FEAT_SME_F8F16', 'FEAT_SME_FA64', 'FEAT_SME_I16I64', 'FEAT_SVE_B16B16',
+    'FEAT_SME_F8F16', 'FEAT_SME_F8F32', 'FEAT_SME_FA64', 'FEAT_SME_I16I64', 'FEAT_SME_LUTv2', 'FEAT_SVE_B16B16',
 )
-SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit')
+SCALABLE_DECLARATION_FIELDS = ('features', 'max_svl_bytes', 'zt0_enabled', 'dit', 'fpmr_enabled')
 CONTEXT_LEAF_ABI = 'x86_64-sysv-guest-state-v1-context-direct-ram'
 CONTEXT_BLOCK_ABI = 'x86_64-sysv-guest-state-v1-context-block-exit-direct-ram'
 NUMERICAL_FEATURE_FIELDS = ('full_a64', 'ebf16', 'rpres')
@@ -401,10 +401,10 @@ def validate_scalable_configuration(svl_bytes, svcr):
 
 
 def scalable_execution_profile(guest_profile, svl_bytes, svcr, *, features=None,
-                               max_svl_bytes=None, zt0_enabled=None, dit=None):
+                               max_svl_bytes=None, zt0_enabled=None, dit=None, fpmr_enabled=None):
     validate_scalable_configuration(svl_bytes, svcr)
     execution = {'id': guest_profile, 'svl_bytes': svl_bytes, 'svcr': svcr}
-    declaration = (features, max_svl_bytes, zt0_enabled, dit)
+    declaration = (features, max_svl_bytes, zt0_enabled, dit, fpmr_enabled)
     if guest_profile == SCALABLE_PROFILE:
         if any(value is not None for value in declaration):
             raise ValueError('V1 scalable profile does not accept V2 declarations')
@@ -425,6 +425,13 @@ def scalable_execution_profile(guest_profile, svl_bytes, svcr, *, features=None,
         raise ValueError('V2 scalable profile requires explicit ZT0 permission and DIT=false')
     if zt0_enabled and 'FEAT_SME2' not in features:
         raise ValueError('ZT0 permission requires explicit FEAT_SME2')
+    if fpmr_enabled is not None and type(fpmr_enabled) is not bool:
+        raise ValueError('FPMR access permission must be a boolean when present')
+    if fpmr_enabled and 'FEAT_FPMR' not in features:
+        raise ValueError('FPMR access permission requires explicit FEAT_FPMR')
+    # Preserve historical manifests exactly: omitted permission means disabled.
+    if fpmr_enabled is not None:
+        execution['fpmr_enabled'] = fpmr_enabled
     execution.update(features=sorted(features), max_svl_bytes=max_svl_bytes,
                      zt0_enabled=zt0_enabled, dit=dit)
     return execution
@@ -448,6 +455,10 @@ def validate_context_contract(compiler_command, abi, numerical_features):
 
 
 def scalable_profile_identity(profile, execution):
+    # Compare effective immutable controls while preserving serialized absence.
+    execution = dict(execution)
+    if execution.get('id') == DECLARED_SCALABLE_PROFILE:
+        execution.setdefault('fpmr_enabled', False)
     identity = {'compiler_command': profile['compiler_command'], 'abi': profile['abi'],
                 'execution_profile': execution}
     if 'numerical_features' in profile:
@@ -573,7 +584,8 @@ def validate_context_manifest(manifest, source_data, native_bytes, svl_bytes, sv
 def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run, mode='leaf',
                   expected_source_bytes=4, guest_profile=None, svl_bytes=None, svcr=None,
                   features=None, max_svl_bytes=None, zt0_enabled=None, dit=None, cpu_target=None, service_profile=None,
-                  following_words=None, compiler_command=None, context_abi=None, numerical_features=None):
+                  following_words=None, compiler_command=None, context_abi=None, numerical_features=None,
+                  fpmr_enabled=None):
     if mode not in ('leaf', 'block', 'service', 'scalable'):
         raise ValueError('Unknown compiler probe mode')
     if type(expected_source_bytes) is not int or expected_source_bytes not in (4, 8, 12):
@@ -588,10 +600,10 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
         following = validate_following_words(following_words) if following_words is not None else []
         cpu_target = validate_cpu_target(BASELINE_CPU_TARGET if cpu_target is None else cpu_target)
         execution = scalable_execution_profile(guest_profile, svl_bytes, svcr, features=features,
-            max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit)
+            max_svl_bytes=max_svl_bytes, zt0_enabled=zt0_enabled, dit=dit, fpmr_enabled=fpmr_enabled)
     elif any(value is not None for value in (guest_profile, svl_bytes, svcr, features,
                                             max_svl_bytes, zt0_enabled, dit, cpu_target, following_words,
-                                            compiler_command, context_abi, numerical_features)):
+                                            compiler_command, context_abi, numerical_features, fpmr_enabled)):
         raise ValueError('Scalable configuration requires the context compiler lane')
     if service_profile is not None and mode != 'service':
         raise ValueError('Service profile requires the service compiler lane')
@@ -617,6 +629,8 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
                 command.extend(['--guest-feature', feature])
             command.extend(['--max-svl-bytes', str(max_svl_bytes),
                             '--zt0-enabled', str(zt0_enabled).lower()])
+            if fpmr_enabled is not None:
+                command.extend(['--fpmr-enabled', str(fpmr_enabled).lower()])
     if mode == 'scalable' and compiler_command == 'compile-block':
         for key in NUMERICAL_FEATURE_FIELDS:
             command.extend(['--' + key.replace('_', '-'), str(numerical_features[key]).lower()])
@@ -657,7 +671,7 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     if mode == 'scalable':
         validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,
             guest_profile, expected_target_cpu=cpu_target, compiler_command=compiler_command,
-            context_abi=context_abi, numerical_features=numerical_features, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS}
+            context_abi=context_abi, numerical_features=numerical_features, **({key: execution[key] for key in SCALABLE_DECLARATION_FIELDS if key in execution}
                              if guest_profile == DECLARED_SCALABLE_PROFILE else {}))
     fingerprint = manifest.get('compiler_source_sha256')
     if not isinstance(fingerprint, str) or len(fingerprint) != 64:

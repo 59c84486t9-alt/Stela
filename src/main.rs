@@ -142,6 +142,9 @@ enum Command {
         /// Explicit V2 ZT0 permission: true or false.
         #[arg(long, requires = "guest_profile", num_args = 1)]
         zt0_enabled: Option<bool>,
+        /// Effective indirect FPMR access; V2 only, omission means disabled.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        fpmr_enabled: Option<bool>,
         /// Explicit effective FullA64 availability for contextual blocks.
         #[arg(long, requires = "guest_profile", num_args = 1)]
         full_a64: Option<bool>,
@@ -494,6 +497,9 @@ enum Command {
         /// Explicit V2 ZT0 permission: true or false.
         #[arg(long, requires = "guest_profile", num_args = 1)]
         zt0_enabled: Option<bool>,
+        /// Effective indirect FPMR access; V2 only, omission means disabled.
+        #[arg(long, requires = "guest_profile", num_args = 1)]
+        fpmr_enabled: Option<bool>,
         #[arg(long)]
         output_dir: PathBuf,
     },
@@ -543,6 +549,7 @@ fn compile_scalable_profile(
     feature_names: &[String],
     max_length: Option<stela_compiler::aarch64::scalable::VectorLength>,
     zt0_enabled: Option<bool>,
+    fpmr_enabled: Option<bool>,
 ) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
     use stela_compiler::{
         aarch64::scalable::{features::ScalableFeatures, profile::ScalableControls},
@@ -554,7 +561,8 @@ fn compile_scalable_profile(
                 && mode.is_none()
                 && feature_names.is_empty()
                 && max_length.is_none()
-                && zt0_enabled.is_none(),
+                && zt0_enabled.is_none()
+                && fpmr_enabled.is_none(),
             "scalable options require an explicit guest profile"
         );
         return Ok(None);
@@ -564,7 +572,10 @@ fn compile_scalable_profile(
     let profile = match id {
         PROFILE_ID => {
             ensure!(
-                feature_names.is_empty() && max_length.is_none() && zt0_enabled.is_none(),
+                feature_names.is_empty()
+                    && max_length.is_none()
+                    && zt0_enabled.is_none()
+                    && fpmr_enabled.is_none(),
                 "V1 profile does not accept V2 feature or control options"
             );
             ScalableProfile::new(length, mode)
@@ -579,7 +590,8 @@ fn compile_scalable_profile(
             let controls = ScalableControls::new(
                 max_length.context("V2 profile requires an explicit maximum SVL")?,
                 zt0_enabled.context("V2 profile requires explicit ZT0 permission")?,
-            );
+            )
+            .with_fpmr_enabled(fpmr_enabled.unwrap_or(false));
             ScalableProfile::new_with_features(length, mode, features, controls)?
         }
         _ => anyhow::bail!("unknown guest profile {id:?}"),
@@ -621,6 +633,7 @@ fn compile_context_block_profile(
 
 fn scalable_execution_manifest(
     profile: stela_compiler::extended::ScalableProfile,
+    fpmr_enabled: Option<bool>,
 ) -> Result<serde_json::Value> {
     let mut execution = serde_json::json!({
         "id": profile.id(),
@@ -632,6 +645,13 @@ fn scalable_execution_manifest(
         execution["features"] = serde_json::json!(features.names());
         execution["max_svl_bytes"] = serde_json::json!(controls.max_vector_length().bytes());
         execution["zt0_enabled"] = serde_json::json!(controls.zt0_enabled());
+        ensure!(
+            fpmr_enabled.unwrap_or(false) == controls.fpmr_enabled(),
+            "FPMR manifest declaration differs from resolved profile"
+        );
+        if fpmr_enabled.is_some() {
+            execution["fpmr_enabled"] = serde_json::json!(controls.fpmr_enabled());
+        }
         execution["dit"] = serde_json::json!(
             profile
                 .required_dit()
@@ -1474,6 +1494,7 @@ fn run() -> Result<()> {
             guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
             full_a64,
             ebf16,
             rpres,
@@ -1495,6 +1516,7 @@ fn run() -> Result<()> {
                 &guest_feature,
                 max_svl_bytes,
                 zt0_enabled,
+                fpmr_enabled,
             )?;
             let context_profile =
                 compile_context_block_profile(scalable, profile, full_a64, ebf16, rpres)?;
@@ -1534,7 +1556,7 @@ fn run() -> Result<()> {
                 manifest["schema_version"] = serde_json::json!(2);
                 manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_BLOCK_ABI);
                 manifest["execution_profile"] =
-                    scalable_execution_manifest(context_profile.scalable())?;
+                    scalable_execution_manifest(context_profile.scalable(), fpmr_enabled)?;
                 manifest["numerical_features"] =
                     serde_json::to_value(context_profile.numerical_features())?;
                 manifest["guest_instructions"] =
@@ -2364,6 +2386,7 @@ fn run() -> Result<()> {
             guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
             output_dir,
         } => {
             let profile = compile_scalable_profile(
@@ -2373,6 +2396,7 @@ fn run() -> Result<()> {
                 &guest_feature,
                 max_svl_bytes,
                 zt0_enabled,
+                fpmr_enabled,
             )?;
             let source = std::fs::read(&input)?;
             let memory_requirements = profile
@@ -2425,7 +2449,7 @@ fn run() -> Result<()> {
             if let Some(profile) = profile {
                 manifest["schema_version"] = serde_json::json!(2);
                 manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_LEAF_ABI);
-                manifest["execution_profile"] = scalable_execution_manifest(profile)?;
+                manifest["execution_profile"] = scalable_execution_manifest(profile, fpmr_enabled)?;
                 manifest["entry_prefix_bytes"] =
                     serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
                 let requirements = memory_requirements
@@ -3031,6 +3055,7 @@ mod scalable_profile_cli_tests {
             guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
             ..
         } = Cli::try_parse_from(args)?.command
         else {
@@ -3043,6 +3068,7 @@ mod scalable_profile_cli_tests {
             &guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
         )
     }
 
@@ -3130,6 +3156,7 @@ mod context_block_cli_tests {
             guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
             full_a64,
             ebf16,
             rpres,
@@ -3149,6 +3176,7 @@ mod context_block_cli_tests {
             &guest_feature,
             max_svl_bytes,
             zt0_enabled,
+            fpmr_enabled,
         )?;
         compile_context_block_profile(
             scalable,
@@ -3205,7 +3233,7 @@ mod context_block_cli_tests {
             NumericalFeatures::new(false, false, false)
         );
         assert_eq!(
-            scalable_execution_manifest(profile.scalable())?,
+            scalable_execution_manifest(profile.scalable(), None)?,
             serde_json::json!({
                 "id":"sme-streaming-v2", "svl_bytes":32, "svcr":3, "features":["FEAT_SME"],
                 "max_svl_bytes":256, "zt0_enabled":false, "dit":false
@@ -3313,3 +3341,6 @@ mod fileset_root_thread_cli_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod fpmr_cli_tests;

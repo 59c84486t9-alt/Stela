@@ -8,6 +8,7 @@ use super::VectorLength;
 pub struct ScalableControls {
     max_vector_length: VectorLength,
     zt0_enabled: bool,
+    fpmr_enabled: bool,
 }
 
 impl ScalableControls {
@@ -15,7 +16,20 @@ impl ScalableControls {
         Self {
             max_vector_length,
             zt0_enabled,
+            fpmr_enabled: false,
         }
+    }
+
+    /// Declare effective indirect FPMR access after all applicable EnFPM
+    /// controls have been resolved for the actual guest EL/host configuration.
+    /// FPMR readback and FEAT_FP8 availability do not grant this permission.
+    pub const fn with_fpmr_enabled(mut self, enabled: bool) -> Self {
+        self.fpmr_enabled = enabled;
+        self
+    }
+
+    pub const fn fpmr_enabled(self) -> bool {
+        self.fpmr_enabled
     }
 
     pub const fn max_vector_length(self) -> VectorLength {

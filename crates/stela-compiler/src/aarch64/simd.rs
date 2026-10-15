@@ -10,6 +10,7 @@ pub mod complex;
 pub mod conversion;
 pub mod estimate;
 pub mod floating;
+pub mod fp8_conversion;
 pub mod fused;
 pub mod halving;
 pub mod i8mm;

@@ -38,6 +38,9 @@
     "crates/stela-compiler/src/aarch64/floating/dot.rs",
     "crates/stela-compiler/src/aarch64/floating/sign.rs",
     "crates/stela-compiler/src/aarch64/floating/features.rs",
+    "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+    "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+    "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
     "crates/stela-compiler/src/aarch64/sve/floating.rs",
     "crates/stela-compiler/src/aarch64/sve/floating/arithmetic.rs",
     "crates/stela-compiler/src/aarch64/sve/floating/arithmetic/encodings.rs",
@@ -1369,6 +1372,29 @@
         "new_original_captures_for_report_production": 0,
         "new_native_execution_for_report_production": 0,
         "current_body_bridge_native_entries": 0
+      }
+    },
+    "fp8_conversion17": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/compose-first17-metadata-current324.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/first17-publication-final-v1/current324/evidence.json",
+      "kind": "fp8-conversion17-current-body-retained-semantics-transfer-v1",
+      "comparison_field": "source_equivalent_retained_fullstate_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_positive_counts": [
+        "current_cli_positive_manifests",
+        "current_cli_negative_requests"
+      ],
+      "required_measurements": {
+        "canonical_forms": 17,
+        "fixed_retained_native_cases": 96,
+        "full_a64_retained_native_cases": 12,
+        "sme_retained_native_cases": 900,
+        "source_equivalent_retained_fullstate_comparisons": 1008,
+        "direct_original_fullstate_comparisons": 380,
+        "new_original_captures": 0,
+        "new_arithmetic_replays": 0
       }
     }
   },
@@ -79825,6 +79851,873 @@
           "cpu_target": "x86_64-baseline"
         }
       ]
+    },
+    {
+      "id": "BF1CVTL_asimdmisc_V",
+      "instruction_id": "BF12CVTL_advsimd",
+      "mnemonic": "BF1CVTL",
+      "category": "fp_simd",
+      "source_file": "bf12cvtl_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2ea17800",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "dc5576019776ab4c62b0b6275f3c4df0d053fcd9fee533c01d22bd3a8b5d1196",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ea17800",
+          "expected_mnemonics": [
+            "bf1cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x2ea17800",
+          "expected_mnemonics": [
+            "bf1cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "BF2CVTL_asimdmisc_V",
+      "instruction_id": "BF12CVTL_advsimd",
+      "mnemonic": "BF2CVTL",
+      "category": "fp_simd",
+      "source_file": "bf12cvtl_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2ee17800",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "dc5576019776ab4c62b0b6275f3c4df0d053fcd9fee533c01d22bd3a8b5d1196",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2ee17800",
+          "expected_mnemonics": [
+            "bf2cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x2ee17800",
+          "expected_mnemonics": [
+            "bf2cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "F1CVTL_asimdmisc_V",
+      "instruction_id": "F12CVTL_advsimd",
+      "mnemonic": "F1CVTL",
+      "category": "fp_simd",
+      "source_file": "f12cvtl_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e217800",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "c9f16577e5f1d7911825b814df7fad563989b378585db59b90e574ff7c44e568",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e217800",
+          "expected_mnemonics": [
+            "f1cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x2e217800",
+          "expected_mnemonics": [
+            "f1cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "F2CVTL_asimdmisc_V",
+      "instruction_id": "F12CVTL_advsimd",
+      "mnemonic": "F2CVTL",
+      "category": "fp_simd",
+      "source_file": "f12cvtl_advsimd.xml",
+      "encoding_mask": "0xbffffc00",
+      "encoding_value": "0x2e617800",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "c9f16577e5f1d7911825b814df7fad563989b378585db59b90e574ff7c44e568",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x2e617800",
+          "expected_mnemonics": [
+            "f2cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0x2e617800",
+          "expected_mnemonics": [
+            "f2cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "FCVTN_asimdsame2_D",
+      "instruction_id": "FCVTN_advsimd_168",
+      "mnemonic": "FCVTN",
+      "category": "fp_simd",
+      "source_file": "fcvtn_advsimd_168.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e40f400",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "c213ba0710f19f2bc30e7d00a34b9d19853f69090bfa0c36fedaafe77bbb1959",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xe40f400",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xe40f400",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "FCVTN_asimdsame2_H",
+      "instruction_id": "FCVTN_advsimd_328",
+      "mnemonic": "FCVTN",
+      "category": "fp_simd",
+      "source_file": "fcvtn_advsimd_328.xml",
+      "encoding_mask": "0xbfe0fc00",
+      "encoding_value": "0x0e00f400",
+      "features": [
+        {
+          "feature": "FEAT_FP8",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "4572fbe87eb1570c5e43873b1b1b1531ddf7be818d14d708f63cab22ce028994",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-fixed17-sm0",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/simd/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xe00f400",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xe00f400",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 0,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf1cvt_mz2_z8_",
+      "instruction_id": "bf1cvt_mz2_z8",
+      "mnemonic": "BF1CVT",
+      "category": "sme",
+      "source_file": "bf1cvt_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc166e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "fee1e47b1bbcaa9dd4b16dafcc8f1cace5538a02bd5b69b22f98feaae4f7b644",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc166e000",
+          "expected_mnemonics": [
+            "bf1cvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc166e000",
+          "expected_mnemonics": [
+            "bf1cvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf1cvtl_mz2_z8_",
+      "instruction_id": "bf1cvtl_mz2_z8",
+      "mnemonic": "BF1CVTL",
+      "category": "sme",
+      "source_file": "bf1cvtl_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc166e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "605878f0cecd583c5166260bbd860b423eb71f90b5e181904a3d6279445d3309",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc166e001",
+          "expected_mnemonics": [
+            "bf1cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc166e001",
+          "expected_mnemonics": [
+            "bf1cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf2cvt_mz2_z8_",
+      "instruction_id": "bf1cvt_mz2_z8",
+      "mnemonic": "BF2CVT",
+      "category": "sme",
+      "source_file": "bf1cvt_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc1e6e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "fee1e47b1bbcaa9dd4b16dafcc8f1cace5538a02bd5b69b22f98feaae4f7b644",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e6e000",
+          "expected_mnemonics": [
+            "bf2cvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc1e6e000",
+          "expected_mnemonics": [
+            "bf2cvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "bf2cvtl_mz2_z8_",
+      "instruction_id": "bf1cvtl_mz2_z8",
+      "mnemonic": "BF2CVTL",
+      "category": "sme",
+      "source_file": "bf1cvtl_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc1e6e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "605878f0cecd583c5166260bbd860b423eb71f90b5e181904a3d6279445d3309",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1e6e001",
+          "expected_mnemonics": [
+            "bf2cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc1e6e001",
+          "expected_mnemonics": [
+            "bf2cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f1cvt_mz2_z8_",
+      "instruction_id": "f1cvt_mz2_z8",
+      "mnemonic": "F1CVT",
+      "category": "sme",
+      "source_file": "f1cvt_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc126e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "01e29e18acb9b19b3488dee0b8d2deaed841666a430d5e445e4992517979e31c",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc126e000",
+          "expected_mnemonics": [
+            "f1cvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc126e000",
+          "expected_mnemonics": [
+            "f1cvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f1cvtl_mz2_z8_",
+      "instruction_id": "f1cvtl_mz2_z8",
+      "mnemonic": "F1CVTL",
+      "category": "sme",
+      "source_file": "f1cvtl_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc126e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "9a614898d3076815731afa6fb2ad4a1a8a8f1205b9e35a96d586c31402885227",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc126e001",
+          "expected_mnemonics": [
+            "f1cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc126e001",
+          "expected_mnemonics": [
+            "f1cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f2cvt_mz2_z8_",
+      "instruction_id": "f1cvt_mz2_z8",
+      "mnemonic": "F2CVT",
+      "category": "sme",
+      "source_file": "f1cvt_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc1a6e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "01e29e18acb9b19b3488dee0b8d2deaed841666a430d5e445e4992517979e31c",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a6e000",
+          "expected_mnemonics": [
+            "f2cvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc1a6e000",
+          "expected_mnemonics": [
+            "f2cvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "f2cvtl_mz2_z8_",
+      "instruction_id": "f1cvtl_mz2_z8",
+      "mnemonic": "F2CVTL",
+      "category": "sme",
+      "source_file": "f1cvtl_mz2_z8.xml",
+      "encoding_mask": "0xfffffc01",
+      "encoding_value": "0xc1a6e001",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "9a614898d3076815731afa6fb2ad4a1a8a8f1205b9e35a96d586c31402885227",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc1a6e001",
+          "expected_mnemonics": [
+            "f2cvtl"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc1a6e001",
+          "expected_mnemonics": [
+            "f2cvtl"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvt_z8_mz2_",
+      "instruction_id": "fcvt_z8_mz2",
+      "mnemonic": "FCVT",
+      "category": "sme",
+      "source_file": "fcvt_z8_mz2.xml",
+      "encoding_mask": "0xfffffc20",
+      "encoding_value": "0xc124e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "7520733956e406fae2f4b44f8c130c38e4b138f3a266ac9f7d3905cd272eeda3",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc124e000",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc124e000",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvt_z8_mz4_",
+      "instruction_id": "fcvt_z8_mz4",
+      "mnemonic": "FCVT",
+      "category": "sme",
+      "source_file": "fcvt_z8_mz4.xml",
+      "encoding_mask": "0xfffffc60",
+      "encoding_value": "0xc134e000",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "0bd2e2c6412ba821cc95027d9ce112341a25086864380b1d0d7f38115d6a974e",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc134e000",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc134e000",
+          "expected_mnemonics": [
+            "fcvt"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "fcvtn_z8_mz4_",
+      "instruction_id": "fcvtn_z8_mz4",
+      "mnemonic": "FCVTN",
+      "category": "sme",
+      "source_file": "fcvtn_z8_mz4.xml",
+      "encoding_mask": "0xfffffc60",
+      "encoding_value": "0xc134e020",
+      "features": [
+        {
+          "feature": "FEAT_SME2 && FEAT_FP8",
+          "name": "v9Ap3 && v9Ap5"
+        }
+      ],
+      "source_sha256": "af8d2d735d66134f538abac7180a67552be1f521bdcc706ccb31b24c4ca8aa1a",
+      "status": "implemented",
+      "alias": false,
+      "profiles": [],
+      "profile": "sme-streaming-v2-fp8-grouped17",
+      "scope": "Six fixed AdvSIMD FP8 forms in a declared nonstreaming owned numerical context, or eleven grouped streaming SME forms, with explicit FP8/FPMR features and effective indirect FPMR permission. Transactional full owned-state completion and cumulative FPSR; enabled exceptions decline before effects. Fixed FullA64 specialization is separately qualified; this primary fixed profile is SM=0.",
+      "review": "Pinned June operands and typed source-redecoded feature/access guards. Retained selected explicit x86-64 Prepared native comparisons and genuine original subsets transfer through unchanged semantic dependencies and current CLI body/profile/source-map equality. Status-only QEMU limitations and three fixed alias model-only cases remain explicit; BF16 narrowing is not admitted.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/floating/fp8.rs",
+        "crates/stela-compiler/src/aarch64/sme/fp8_conversion.rs",
+        "crates/stela-compiler/src/block/scalable.rs",
+        "crates/stela-compiler/src/extended/block.rs"
+      ],
+      "evidence_groups": [
+        "fp8_conversion17"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0xc134e020",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xc134e020",
+          "expected_mnemonics": [
+            "fcvtn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 1,
+          "consumed_source_bytes": 4
+        }
+      ]
     }
   ],
   "execution_profiles": {
@@ -80192,6 +81085,69 @@
       "svcr": 1,
       "svl_bytes": 16,
       "zt0_enabled": false
+    },
+    "sme-streaming-v2-fp8-fixed17-sm0": {
+      "dit": false,
+      "features": [
+        "FEAT_FP8",
+        "FEAT_FPMR",
+        "FEAT_SME"
+      ],
+      "fpmr_enabled": true,
+      "id": "sme-streaming-v2",
+      "max_svl_bytes": 256,
+      "svcr": 0,
+      "svl_bytes": 16,
+      "zt0_enabled": false,
+      "compiler_command": "compile-block",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "numerical_features": {
+        "ebf16": false,
+        "full_a64": false,
+        "rpres": false
+      },
+      "decoder_mattrs": [
+        "+sme2",
+        "+fp8"
+      ],
+      "description": "Explicit indirect FPMR-enabled FP8 conversion declaration. Fixed forms use SM=0; grouped SME forms require SM=1. Source/profile admission and transactional completion are shared.",
+      "outside_scope": [
+        "Direct FPMR MRS/MSR authority, enabled numerical exception delivery, general nonstreaming SVE, application and OS execution.",
+        "SME BF16 narrowing BFCVT remains unadmitted pending a usable original oracle.",
+        "Grouped SME wrapper throughput is unmeasured; retained fixed Prepared performance is separate."
+      ]
+    },
+    "sme-streaming-v2-fp8-grouped17": {
+      "dit": false,
+      "features": [
+        "FEAT_FP8",
+        "FEAT_FPMR",
+        "FEAT_SME",
+        "FEAT_SME2"
+      ],
+      "fpmr_enabled": true,
+      "id": "sme-streaming-v2",
+      "max_svl_bytes": 256,
+      "svcr": 1,
+      "svl_bytes": 16,
+      "zt0_enabled": false,
+      "compiler_command": "compile-block",
+      "abi": "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram",
+      "numerical_features": {
+        "ebf16": false,
+        "full_a64": false,
+        "rpres": false
+      },
+      "decoder_mattrs": [
+        "+sme2",
+        "+fp8"
+      ],
+      "description": "Explicit indirect FPMR-enabled FP8 conversion declaration. Fixed forms use SM=0; grouped SME forms require SM=1. Source/profile admission and transactional completion are shared.",
+      "outside_scope": [
+        "Direct FPMR MRS/MSR authority, enabled numerical exception delivery, general nonstreaming SVE, application and OS execution.",
+        "SME BF16 narrowing BFCVT remains unadmitted pending a usable original oracle.",
+        "Grouped SME wrapper throughput is unmeasured; retained fixed Prepared performance is separate."
+      ]
     }
   }
 }

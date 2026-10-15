@@ -230,7 +230,9 @@ pub fn compile_for_profile(
                     target,
                 )?,
                 ScalableNumericalOperation::SmeVector(_)
-                | ScalableNumericalOperation::SmeMatrix(_) => false,
+                | ScalableNumericalOperation::SmeMatrix(_)
+                | ScalableNumericalOperation::FixedFp8Conversion(_)
+                | ScalableNumericalOperation::SmeFp8Conversion(_) => false,
             };
             if emitted {
                 // The guarded family mapping owns the exact-PC cold exit.

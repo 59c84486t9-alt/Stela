@@ -21,13 +21,21 @@ pub enum ScalableFeature {
     Bf16,
     I8mm,
     FaMinMax,
+    Fp8,
+    Fpmr,
+    SmeF8F32,
+    SmeLutV2,
+    Lut,
 }
 
 // Architectural-name order also defines deterministic manifest output.
 const FEATURES_BY_NAME: &[ScalableFeature] = &[
     ScalableFeature::Bf16,
     ScalableFeature::FaMinMax,
+    ScalableFeature::Fp8,
+    ScalableFeature::Fpmr,
     ScalableFeature::I8mm,
+    ScalableFeature::Lut,
     ScalableFeature::Sme,
     ScalableFeature::Sme2,
     ScalableFeature::Sme2p1,
@@ -35,8 +43,10 @@ const FEATURES_BY_NAME: &[ScalableFeature] = &[
     ScalableFeature::SmeF16F16,
     ScalableFeature::SmeF64F64,
     ScalableFeature::SmeF8F16,
+    ScalableFeature::SmeF8F32,
     ScalableFeature::SmeFa64,
     ScalableFeature::SmeI16I64,
+    ScalableFeature::SmeLutV2,
     ScalableFeature::SveB16B16,
 ];
 
@@ -56,6 +66,11 @@ impl ScalableFeature {
             Self::Bf16 => "FEAT_BF16",
             Self::I8mm => "FEAT_I8MM",
             Self::FaMinMax => "FEAT_FAMINMAX",
+            Self::Fp8 => "FEAT_FP8",
+            Self::Fpmr => "FEAT_FPMR",
+            Self::SmeF8F32 => "FEAT_SME_F8F32",
+            Self::SmeLutV2 => "FEAT_SME_LUTv2",
+            Self::Lut => "FEAT_LUT",
         }
     }
 

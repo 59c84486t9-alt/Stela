@@ -251,3 +251,11 @@ mod numerical22_tests;
 
 #[cfg(test)]
 mod sme_completion_tests;
+
+#[cfg(test)]
+#[path = "block/fp8_tests.rs"]
+mod fp8_tests;
+
+#[cfg(test)]
+#[path = "block/bfcvt_pending_tests.rs"]
+mod bfcvt_pending_tests;

@@ -6,7 +6,8 @@ use crate::{
     aarch64::{
         floating::features::NumericalFeatures,
         scalable::features::{FeatureRequirement, ScalableFeature, ScalableFeatures},
-        sme::{fp_matrix, fp_vector},
+        simd::fp8_conversion as fixed_fp8_conversion,
+        sme::{fp_matrix, fp_vector, fp8_conversion},
         sve::floating,
     },
     extended::ScalableProfile,
@@ -17,6 +18,8 @@ const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalableNumericalOperation {
     Sve(floating::Operation),
+    FixedFp8Conversion(fixed_fp8_conversion::Operand),
+    SmeFp8Conversion(fp8_conversion::Operand),
     SmeVector(fp_vector::Operand),
     SmeMatrix(fp_matrix::Operand),
 }
@@ -73,6 +76,12 @@ impl ScalableNumericalOperation {
         let sme2 = sme.with(Feature::Sme2);
         match self {
             Self::Sve(operation) => operation.required_streaming_features(numerical_features),
+            Self::FixedFp8Conversion(_) => {
+                FeatureRequirement::all(ScalableFeatures::of(Feature::Fp8).with(Feature::Fpmr))
+            }
+            Self::SmeFp8Conversion(_) => {
+                FeatureRequirement::all(sme2.with(Feature::Fp8).with(Feature::Fpmr))
+            }
             Self::SmeVector(operand) => FeatureRequirement::all(match operand.feature {
                 fp_vector::Feature::Sme2 => sme2,
                 fp_vector::Feature::Sme2SveB16B16 => sme2.with(Feature::SveB16B16),
@@ -116,12 +125,44 @@ pub fn admit_scalable_numerical_instruction(
             "scalable numerical source/descriptor mismatch".into(),
         ));
     }
+    // This allocated form stays unadmitted until genuine original execution
+    // verification exists. A decoder descriptor never grants execution permission.
+    if matches!(
+        instruction.operation,
+        ScalableNumericalOperation::SmeFp8Conversion(fp8_conversion::Operand {
+            format: fp8_conversion::ElementFormat::BFloat16,
+            conversion: fp8_conversion::Conversion::Narrow { .. },
+            ..
+        })
+    ) {
+        return Err(CompileError(format!(
+            "unadmitted SME BF16-to-FP8 narrowing at {:#x}: original execution verification is pending",
+            instruction.instruction_pc.0
+        )));
+    }
+    if matches!(
+        instruction.operation,
+        ScalableNumericalOperation::FixedFp8Conversion(_)
+            | ScalableNumericalOperation::SmeFp8Conversion(_)
+    ) && !profile.controls().fpmr_enabled()
+    {
+        return Err(CompileError(
+            "indirect FPMR access is not enabled in the declared guest profile".into(),
+        ));
+    }
     let mode = profile.mode();
-    if !mode.streaming()
-        || (matches!(
-            instruction.operation,
-            ScalableNumericalOperation::SmeMatrix(_)
-        ) && !mode.za_enabled())
+    let fixed = matches!(
+        instruction.operation,
+        ScalableNumericalOperation::FixedFp8Conversion(_)
+    );
+    if (if fixed {
+        mode.streaming() && !numerical_features.full_a64()
+    } else {
+        !mode.streaming()
+    }) || (matches!(
+        instruction.operation,
+        ScalableNumericalOperation::SmeMatrix(_)
+    ) && !mode.za_enabled())
     {
         return Err(CompileError(format!(
             "scalable numerical mode unavailable at {:#x}",
@@ -158,7 +199,11 @@ pub fn decode_scalable_numerical_instruction(
             "scalable numerical PC must be aligned to 4 bytes".into(),
         ));
     }
-    let operation = if let Some(result) = floating::Operation::decode(word) {
+    let operation = if let Some(operand) = fixed_fp8_conversion::decode(word) {
+        ScalableNumericalOperation::FixedFp8Conversion(operand)
+    } else if let Some(operand) = fp8_conversion::decode(word) {
+        ScalableNumericalOperation::SmeFp8Conversion(operand)
+    } else if let Some(result) = floating::Operation::decode(word) {
         let operand =
             result.map_err(|()| CompileError("reserved scalable numerical encoding".into()))?;
         if !operand.requires_numerical_completion() {

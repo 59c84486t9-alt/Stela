@@ -94,6 +94,9 @@ impl ScalableProfile {
         if features.contains(ScalableFeature::Sme2p1) && !features.contains(ScalableFeature::Sme2) {
             return Err(CompileError("FEAT_SME2p1 requires FEAT_SME2".into()));
         }
+        if controls.fpmr_enabled() && !features.contains(ScalableFeature::Fpmr) {
+            return Err(CompileError("FPMR access enable requires FEAT_FPMR".into()));
+        }
         if controls.zt0_enabled() && !features.contains(ScalableFeature::Sme2) {
             return Err(CompileError("ZT0 enable requires FEAT_SME2".into()));
         }
