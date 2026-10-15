@@ -16,6 +16,11 @@ mod profile;
 #[path = "domain/tag_transfer.rs"]
 mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
+#[path = "domain/lifecycle.rs"]
+mod lifecycle;
+pub(in crate::memory) use lifecycle::MemoryServiceLoan;
+use lifecycle::{DomainSnapshot, DomainState};
+pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
 
 #[path = "domain/exclusive.rs"]
 mod exclusive;
@@ -111,9 +116,10 @@ type ReservationThread = monitor::ThreadMonitor<MemoryBacking, MemoryView, Mappi
 type ReservationMapping = monitor::Mapping<MemoryView, MappingAttributes>;
 type MappingRegistry = HashMap<MappingId, Weak<ReservationMapping>>;
 
-struct RegisteredView {
-    view: Arc<MemoryView>,
-    monitor: Arc<ReservationMapping>,
+#[derive(Clone)]
+pub(super) struct RegisteredView {
+    pub(super) view: Arc<MemoryView>,
+    pub(super) monitor: Arc<ReservationMapping>,
 }
 
 /// One guest machine's physical coherence and reservation owner. Shared backing
@@ -164,11 +170,12 @@ impl MemorySystem {
 /// snapshot and explicit retirement; host mapping rights remain pinned by the
 /// unsafe backing contract throughout every native invocation.
 pub struct MemoryDomain {
-    views: Vec<RegisteredView>,
+    state: Mutex<DomainState>,
+    #[cfg(test)]
+    admission_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
     target: TargetCpu,
     system: Arc<MemorySystem>,
     address_space: Option<u64>,
-    profile: MemoryProfile,
 }
 
 impl MemoryDomain {
@@ -217,20 +224,40 @@ impl MemoryDomain {
             })
             .collect::<Result<_, MemoryStatus>>()?;
         Ok(Arc::new(Self {
-            views,
+            state: Mutex::new(DomainState {
+                snapshot: DomainSnapshot {
+                    views,
+                    profile,
+                    generation: 0,
+                },
+                native_loans: 0,
+                servicing: false,
+            }),
+            #[cfg(test)]
+            admission_barrier: Mutex::new(None),
             target,
             system,
             address_space,
-            profile,
         }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn registered_views(&self) -> Vec<RegisteredView> {
+        self.state.lock().unwrap().snapshot.views.clone()
     }
 
     pub fn address_space(&self) -> Option<u64> {
         self.address_space
     }
 
-    pub fn profile(&self) -> &MemoryProfile {
-        &self.profile
+    pub fn profile(&self) -> Result<MemoryProfile, MemoryStatus> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| MemoryStatus::Domain)?
+            .snapshot
+            .profile
+            .clone())
     }
 
     pub fn thread<P: DataPolicy>(self: &Arc<Self>, policy: P) -> MemoryThread<P> {
@@ -257,8 +284,25 @@ impl MemoryDomain {
     /// The lifecycle owner serializes this shared mapping generation across all
     /// snapshots/address spaces retaining its Arc and excludes in-flight native
     /// accesses before native rights changes or unmapping.
-    pub fn retire(&self, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
-        let registered = self
+    pub fn retire(self: &Arc<Self>, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
+        let _loan = self.service_loan()?;
+        // Exhausted generations must decline before invalidating any mapping or
+        // reservation. The exclusive service loan pins this preflight value.
+        let next_generation = self
+            .generation()?
+            .checked_add(1)
+            .ok_or(MemoryStatus::Domain)?;
+        self.retire_view(view)?;
+        let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
+        self.check_execution()?;
+        state.snapshot.generation = next_generation;
+        Ok(())
+    }
+
+    fn retire_view(&self, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
+        let state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
+        let registered = state
+            .snapshot
             .views
             .iter()
             .find(|registered| Arc::ptr_eq(&registered.view, view))
@@ -296,18 +340,18 @@ impl MemoryDomain {
         bytes: usize,
         kind: AccessKind,
     ) -> Result<PhysicalAccess, MemoryStatus> {
+        let state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
+        let views = &state.snapshot.views;
         let mut first_span: Option<ResolvedAccess> = None;
         let mut remaining_spans = Vec::new();
         let mut current = address;
         let mut remaining = bytes;
         let mut attributes = None;
         while remaining != 0 {
-            let index = self
-                .views
-                .partition_point(|view| view.view.guest_base() <= current);
+            let index = views.partition_point(|view| view.view.guest_base() <= current);
             let registered = index
                 .checked_sub(1)
-                .and_then(|index| self.views.get(index))
+                .and_then(|index| views.get(index))
                 .ok_or(MemoryStatus::Translation)?;
             let offset = current
                 .checked_sub(registered.view.guest_base())
@@ -411,8 +455,19 @@ impl<P: DataPolicy> MemoryThread<P> {
         self.domain.address_space()
     }
 
-    pub fn profile(&self) -> &MemoryProfile {
+    pub fn profile(&self) -> Result<MemoryProfile, MemoryStatus> {
         self.domain.profile()
+    }
+
+    pub fn execution_loan(&self) -> Result<MemoryExecutionLoan, MemoryStatus> {
+        self.domain.execution_loan()
+    }
+
+    /// Observe this actual domain under an exclusive read-only service loan.
+    /// The caller retains its source/PE observation boundary; this loan supplies
+    /// physical serialization, current views and private diagnostic staging.
+    pub fn observation_loan(&self) -> Result<MemoryObservationLoan, MemoryStatus> {
+        self.domain.observation_loan()
     }
 
     /// Admit the complete body's platform requirements before any guest effect.
@@ -424,7 +479,7 @@ impl<P: DataPolicy> MemoryThread<P> {
             owner.domain.check_execution()?;
             owner
                 .domain
-                .profile
+                .profile()?
                 .validate(requirements, owner.domain.target)?;
             owner.validate_execution(requirements.required_flags)?;
             owner
@@ -531,6 +586,9 @@ impl<P: DataPolicy> MemoryThread<P> {
     pub unsafe fn with_view<R>(&mut self, callback: impl FnOnce(&mut MemoryContextView) -> R) -> R {
         // Legacy low-level contract: callers cannot infer successful finalization
         // from R. Owned checked execution must use with_checked_view instead.
+        let _loan = self
+            .execution_loan()
+            .expect("serialized legacy memory invocation");
         let (result, _finalization) = unsafe { self.invoke_memory_view(callback) };
         result
     }
@@ -547,6 +605,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
         // SAFETY: the caller retains the same owner and native invocation loan.
+        let _loan = self.execution_loan()?;
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
         finalization.map(|()| result)
     }

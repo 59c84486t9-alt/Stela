@@ -132,7 +132,7 @@ fn snapshot(backing: &MemoryBacking) -> Vec<u8> {
 type ReservationAccess = monitor::Access<MemoryBacking, MemoryView, MappingAttributes>;
 
 fn reserve<P: DataPolicy>(thread: &mut MemoryThread<P>) -> ReservationAccess {
-    let registered = &thread.domain.views[0];
+    let registered = &thread.domain.registered_views()[0];
     let access = monitor::Access::new(
         Arc::clone(registered.view.backing()),
         Arc::clone(&registered.monitor),

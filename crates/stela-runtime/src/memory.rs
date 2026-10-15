@@ -1,16 +1,16 @@
-//! Owned guest-address mappings for the direct-RAM native execution profile.
+//! Owned guest mappings with explicit direct-RAM or canonical domain binding.
 //!
 //! Original Arm instructions are data to the x86 host: a guest executable
 //! region never receives host execute permission. Mapping must succeed at the
 //! requested address without replacing any existing allocation.
-//! The child modules provide a separate context-backed physical memory domain;
-//! OwnedMemory retains its existing serialized direct-RAM execution contract.
+//! Opt-in binding retains actual storage in one canonical physical domain.
+//! Serialized service loans govern snapshots, publication and mapping changes.
 
 mod access;
 mod allocation;
 mod binding;
 use binding::SharedBinding;
-pub use binding::{SharedBindingError, SharedMemoryConfig};
+pub use binding::{SharedBindingError, SharedMemoryConfig, SharedMemoryParticipant};
 pub mod backing;
 pub mod domain;
 pub mod monitor;
@@ -532,9 +532,6 @@ impl OwnedMemory {
         mut protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
     ) -> std::result::Result<(), ProtectionError> {
         use ProtectionError as E;
-        if self.shared.is_some() {
-            return Err(E::SharedDomainBound);
-        }
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -625,6 +622,10 @@ impl OwnedMemory {
                 });
             }
         }
+        if self.shared.is_some() {
+            return self
+                .protect_shared(address, bytes, readable, writable, next, rollback, protect);
+        }
         if let Err(errno) = protect(address, bytes, host_protection(readable, writable)) {
             // Some host kernels can partially change a failed range. Restore
             // every covered old view, including the failed call's own pages.
@@ -693,10 +694,16 @@ impl OwnedMemory {
     }
 
     pub fn read_snapshot(&self, address: u64, length: usize) -> Result<Vec<u8>> {
-        if self.shared.is_some() {
-            return Err(SharedBindingError::SharedDomainBound.into());
-        }
         self.validate_access(address, length, false)?;
+        if let Some(shared) = &self.shared {
+            return shared
+                .domain
+                .service_loan()
+                .map_err(SharedBindingError::Domain)?
+                .snapshot(address, length)
+                .map_err(SharedBindingError::Domain)
+                .map_err(Into::into);
+        }
         let mut bytes = vec![0; length];
         for (start, count, offset) in self.access_spans(address, length) {
             // SAFETY: all requested bytes belong to live readable regions, the
@@ -901,10 +908,16 @@ impl PublishedReadOnlyRegion {
     }
 
     pub fn read_snapshot(&self, offset: usize, bytes: usize) -> Result<Vec<u8>> {
-        if self.shared.is_some() {
-            return Err(SharedBindingError::SharedDomainBound.into());
-        }
         self.extent(offset, bytes)?;
+        if let Some(shared) = &self.shared {
+            return shared
+                .domain
+                .service_loan()
+                .map_err(SharedBindingError::Domain)?
+                .snapshot(self.region.guest_address + offset as u64, bytes)
+                .map_err(SharedBindingError::Domain)
+                .map_err(Into::into);
+        }
         let mut result = vec![0; bytes];
         // SAFETY: live RO mapping, bounded copy, independent owned destination;
         // publication cannot run concurrently through this non-Send/Sync owner.

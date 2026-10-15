@@ -126,6 +126,18 @@ impl Context {
     pub fn native(address_space: u64) -> Result<Self> {
         Self::new(address_space, Box::new(NativeDarwinSource::new()?))
     }
+    /// Register the existing writable publication alias, retaining this clock.
+    pub fn shared_memory_participant(&mut self) -> crate::memory::SharedMemoryParticipant<'_> {
+        self.page.shared_memory_participant(self.address_space)
+    }
+
+    pub fn check_execution_thread<P: crate::memory::domain::DataPolicy>(
+        &self,
+        thread: &crate::memory::domain::MemoryThread<P>,
+    ) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
+        self.page.check_execution_thread(thread)
+    }
+
     pub fn address_space(&self) -> u64 {
         self.address_space
     }

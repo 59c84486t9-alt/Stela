@@ -66,6 +66,11 @@ impl Context {
         })
     }
 
+    /// Join the actual static backing to the process canonical domain.
+    pub fn shared_memory_participant(&mut self) -> crate::memory::SharedMemoryParticipant<'_> {
+        crate::memory::SharedMemoryParticipant::owned(&mut self.memory, self.address_space)
+    }
+
     pub fn address_space(&self) -> u64 {
         self.address_space
     }
@@ -100,6 +105,7 @@ mod tests {
 
     #[test]
     fn arm64_page_sizes_are_explicit_owned_and_readonly() -> Result<()> {
+        let _guard = crate::clock::TEST_CONTEXT_LOCK.lock().unwrap();
         for kernel in [KernelPageSize::FourKiB, KernelPageSize::SixteenKiB] {
             let mut context = Context::new(71, kernel)?;
             assert_eq!(context.address_space(), 71);

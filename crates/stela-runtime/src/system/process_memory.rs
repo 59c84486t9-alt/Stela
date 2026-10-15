@@ -13,7 +13,7 @@ use super::{
     state::{PSTATE_EL0T, PSTATE_IL_MASK, PSTATE_MODE_MASK, SystemState},
 };
 use crate::memory::{
-    domain::{DataPolicy, MemoryThread},
+    domain::{DataPolicy, MemoryExecutionLoan, MemoryThread},
     policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
 };
 use stela_compiler::{
@@ -150,7 +150,7 @@ impl ProcessMemoryFeatures {
 /// Sole immutable owner of these supplied controls in the fresh process scope.
 /// The raw controls must select M=1/C=1 and the declared lower namespace must
 /// match T0SZ in the bounded 4-KiB/DS=0 translation scope. The retained source
-/// witness binds the exact immutable domain; neither host storage nor M/C alone
+/// witness binds the exact domain and published generation; neither host storage nor M/C alone
 /// establish effective ARM attributes. This does not implement a page-table walk.
 #[derive(Debug)]
 pub struct FixedProcessMemoryControls {
@@ -211,6 +211,26 @@ impl FixedProcessMemoryControls {
         self.tcr_el1
     }
 
+    /// Install a freshly source-resolved witness after a successful mapping
+    /// transaction, preserving this actual domain and all fixed controls.
+    /// The source owner must resolve the entire resulting mapping set before
+    /// minting `fresh`; there is no raw epoch or automatic refresh entry point.
+    /// Failed transactions or incompatible effective controls require their
+    /// actual owner path, not renewal through this method.
+    pub fn renew_source_resolved(
+        &mut self,
+        fresh: SourceNormalWbDomain,
+    ) -> Result<(), ProcessMemoryError> {
+        if !self.source.same_domain(&fresh) {
+            return Err(ProcessMemoryError::WrongMemoryDomain);
+        }
+        if !fresh.is_current().map_err(ProcessMemoryError::Memory)? {
+            return Err(ProcessMemoryError::WrongMemoryDomain);
+        }
+        self.source = fresh;
+        Ok(())
+    }
+
     /// Existing entry validation separately binds exact source, execution/debug
     /// state and compiler-derived requirements. This does not prewalk accesses.
     /// The backend supplies its live endpoint; an ASID is not PE identity.
@@ -239,6 +259,12 @@ impl FixedProcessMemoryControls {
         if system.mte().is_some() || system.tag_check_override() {
             return Err(ProcessMemoryError::MteState);
         }
+        // Capture the actual provider loan before validating source generation.
+        // It owns the same domain Arc without borrowing/extracting the policy;
+        // failed preparation releases it through Drop before returning.
+        let execution_loan = thread
+            .execution_loan()
+            .map_err(ProcessMemoryError::Memory)?;
         if !self.source.matches(thread) {
             return Err(ProcessMemoryError::WrongMemoryDomain);
         }
@@ -280,6 +306,7 @@ impl FixedProcessMemoryControls {
         // No policy installation occurs here. Dropping or forgetting an unused
         // token leaves the baseline category policy unchanged.
         Ok(PreparedProcessMemory {
+            execution_loan,
             authority,
             thread,
             endpoint,
@@ -344,6 +371,7 @@ impl ProcessMemoryAuthorization<'_> {
 /// One synchronous checked scope. No GuestState borrow, Clone, thread accessor,
 /// policy accessor or caller-selected replacement escapes this token.
 pub struct PreparedProcessMemory<'run> {
+    execution_loan: MemoryExecutionLoan,
     authority: ProcessMemoryAuthorization<'run>,
     thread: &'run mut MemoryThread<MemoryControls>,
     endpoint: Option<&'run EventEndpoint>,
@@ -374,6 +402,11 @@ impl PreparedProcessMemory<'_> {
         self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
+        // This inner guard closes prepare->invoke, body and checked finalization.
+        // The actual v2.5 invocation provider must additionally retain an outer
+        // same-domain execution loan through once-only PC settlement, then drop
+        // that outer guard before entering a Darwin mapping service transaction.
+        let _execution_loan = self.execution_loan;
         let loan = PolicyLoan::new(self.thread, self.authority.temporary_policy());
         if let Some(endpoint) = self.endpoint {
             // Actual retained same-PE identity, rechecked immediately before

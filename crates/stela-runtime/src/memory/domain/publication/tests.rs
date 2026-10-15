@@ -133,7 +133,7 @@ fn reservation_access(
     domain: &MemoryDomain,
     offset: u64,
 ) -> monitor::Access<MemoryBacking, MemoryView, MappingAttributes> {
-    let registered = &domain.views[0];
+    let registered = &domain.registered_views()[0];
     monitor::Access::new(
         Arc::clone(registered.view.backing()),
         Arc::clone(&registered.monitor),

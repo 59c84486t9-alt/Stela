@@ -154,7 +154,7 @@ fn reservation_access(
     domain: &MemoryDomain,
     offset: u64,
 ) -> monitor::Access<MemoryBacking, MemoryView, MappingAttributes> {
-    let registered = &domain.views[0];
+    let registered = &domain.registered_views()[0];
     monitor::Access::new(
         Arc::clone(registered.view.backing()),
         Arc::clone(&registered.monitor),
@@ -654,8 +654,8 @@ fn one_view_generation_cannot_change_attributes_between_live_snapshots() {
     ));
     let unchanged = in_system(&system, vec![mapping]);
     assert!(Arc::ptr_eq(
-        &original.views[0].monitor,
-        &unchanged.views[0].monitor
+        &original.registered_views()[0].monitor,
+        &unchanged.registered_views()[0].monitor
     ));
 }
 
@@ -671,7 +671,7 @@ fn retiring_an_unregistered_view_declines_without_mutation() {
         Err(MemoryStatus::InvalidRequest)
     );
     assert!(unregistered.is_current());
-    assert!(original.views[0].view.is_current());
+    assert!(original.registered_views()[0].view.is_current());
 }
 
 #[test]
@@ -896,7 +896,7 @@ fn sme_crossing_prefix_invalidates_only_bytes_actually_written() {
     let touched_access = reservation_access(&domain, 10);
     let untouched_access = monitor::Access::new(
         backing.clone(),
-        domain.views[1].monitor.clone(),
+        domain.registered_views()[1].monitor.clone(),
         16,
         1,
         monitor::Shape::Scalar,
@@ -1189,7 +1189,7 @@ fn asimd32_prefix_and_descriptor_clear_do_not_touch_later_reservation_granules()
     let first = reservation_access(&domain, 0);
     let future = monitor::Access::new(
         physical.clone(),
-        domain.views[1].monitor.clone(),
+        domain.registered_views()[1].monitor.clone(),
         16,
         1,
         monitor::Shape::Scalar,
@@ -1770,7 +1770,7 @@ fn exclusive_service_second_view_retirement_and_mapdead_gap_clear_actual_global_
     domain
         .system
         .reservations
-        .revoke_mapping(&domain.views[1].monitor)
+        .revoke_mapping(&domain.registered_views()[1].monitor)
         .unwrap();
     assert!(second.is_current());
     let mut load = exclusive_data(ExclusiveOperation::Load, ExclusiveShape::Scalar, 0);
@@ -1824,7 +1824,7 @@ fn exclusive_service_stale_second_view_is_rechecked_inside_gate() {
     let physical = domain.resolve(GUEST_BASE, 4, AccessKind::Read).unwrap();
     let access = monitor::Access::new(
         backing,
-        domain.views[0].monitor.clone(),
+        domain.registered_views()[0].monitor.clone(),
         0,
         4,
         monitor::Shape::Scalar,

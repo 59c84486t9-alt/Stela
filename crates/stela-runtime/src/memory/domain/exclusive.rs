@@ -82,7 +82,8 @@ impl<P: DataPolicy> MemoryThread<P> {
             required_sp_alignment: SpAlignmentRequirement::Any,
         };
         self.domain
-            .profile
+            .profile()
+            .map_err(fail)?
             .validate(requirements, self.domain.target)
             .map_err(fail)?;
         // Selected June AllInSCAGranule quantity is 16 with LSE2 and alignment
@@ -164,14 +165,19 @@ impl<P: DataPolicy> MemoryThread<P> {
         }
         // Resolve already proved the whole quantity; this lookup retrieves its
         // actual first registered mapping without creating another monitor owner.
-        let registered = self
+        let state = self
             .domain
+            .state
+            .lock()
+            .map_err(|_| fail(MemoryStatus::Domain))?;
+        let registered = state
+            .snapshot
             .views
             .binary_search_by_key(&first.view().guest_base(), |view| view.view.guest_base())
             .map_err(|_| fail(MemoryStatus::Domain))?;
         let reserved = monitor::Access::new(
             Arc::clone(first.view().backing()),
-            Arc::clone(&self.domain.views[registered].monitor),
+            Arc::clone(&state.snapshot.views[registered].monitor),
             first.backing_offset() as u64,
             request.bytes as u8,
             match shape {
@@ -180,6 +186,7 @@ impl<P: DataPolicy> MemoryThread<P> {
             },
         )
         .map_err(|_| fail(MemoryStatus::Domain))?;
+        drop(state);
         let mut output = data;
         if write {
             let value = u128::from(data.value[0]) | u128::from(data.value[1]) << u64::BITS;

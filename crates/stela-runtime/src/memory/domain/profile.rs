@@ -18,6 +18,7 @@ use stela_compiler::{
 /// immutable domain's lifetime. The supported native data profile is coherent
 /// Normal-WB, LSE2/SCA16, AlignmentEnforced=false and CPA2 disabled; emitters
 /// retain original-SP checks independently.
+#[derive(Clone)]
 pub struct MemoryProfile {
     native_congruent: bool,
     reservation_congruent: bool,
@@ -231,7 +232,7 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
             data_requirements.required_profile &= !profile_requirements::TAG_GRANULES;
             owner
                 .domain
-                .profile
+                .profile()?
                 .validate(data_requirements, owner.domain.target)?;
             owner
                 .policy
@@ -247,10 +248,10 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
             if requirements.required_profile & profile_requirements::TAG_GRANULES != 0 {
                 // Even suppressed tag storage still performs exact granule
                 // translation/rights resolution through this representation.
-                if !owner.domain.profile.tag_fragments {
+                if !owner.domain.profile()?.tag_fragments {
                     return Err(MemoryStatus::Unsupported);
                 }
-                for attributes in &owner.domain.profile.tag_ineligible {
+                for attributes in &owner.domain.profile()?.tag_ineligible {
                     if attributes.tagged
                         && owner
                             .policy

@@ -169,6 +169,34 @@ impl MemoryBacking {
         maximum_permissions: AccessPermissions,
         lifetime_owner: Arc<O>,
     ) -> Result<Arc<Self>, AccessError> {
+        Self::construct(host_base, bytes, maximum_permissions, lifetime_owner)
+    }
+
+    /// Canonical owner-managed host rights over one stable physical identity.
+    ///
+    /// # Safety
+    /// The real storage owner retains this extent and excludes all native access
+    /// through the same domain's execution/service loans before changing rights.
+    /// Every current view and host publication must validate the actual current
+    /// rights. Maximum permissions are the immutable owner authorization, not
+    /// permission to access a protected page. Do not expose this backing to an
+    /// independently constructed domain/view or raw consumer. The original
+    /// constructor's alias, storage, coherence and reference rules still apply.
+    pub(in crate::memory) unsafe fn new_managed<O: Send + Sync + 'static>(
+        host_base: NonNull<u8>,
+        bytes: usize,
+        maximum_permissions: AccessPermissions,
+        lifetime_owner: Arc<O>,
+    ) -> Result<Arc<Self>, AccessError> {
+        Self::construct(host_base, bytes, maximum_permissions, lifetime_owner)
+    }
+
+    fn construct<O: Send + Sync + 'static>(
+        host_base: NonNull<u8>,
+        bytes: usize,
+        maximum_permissions: AccessPermissions,
+        lifetime_owner: Arc<O>,
+    ) -> Result<Arc<Self>, AccessError> {
         if bytes == 0 {
             return Err(AccessError::EmptyRange);
         }

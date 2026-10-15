@@ -544,7 +544,8 @@ fn checked_owned_entry_matches_original_width4_states_and_ram() -> Result<()> {
         // it does not reproduce the oracle's complete address space. Its domain
         // and source-resolution contract remain immutable for the witness life.
         let source_domain =
-            unsafe { SourceNormalWbDomain::from_source_resolved(std::sync::Arc::clone(&domain)) };
+            unsafe { SourceNormalWbDomain::from_source_resolved(std::sync::Arc::clone(&domain)) }
+                .unwrap();
         let controls =
             FixedProcessMemoryControls::new(features, sctlr, tcr, address_bits, source_domain)
                 .map_err(|error| anyhow::anyhow!("fixed controls: {error:?}"))?;

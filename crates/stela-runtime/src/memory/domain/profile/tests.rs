@@ -137,7 +137,7 @@ fn checked_entry_validates_declared_caps_unknown_requirements_and_policy() {
         ),
         Err(MemoryStatus::Unsupported)
     ));
-    let physical = domain.views[0].view.clone();
+    let physical = domain.registered_views()[0].view.clone();
     let baseline = MemoryDomain::new(
         domain.system.clone(),
         vec![(physical, ATTRIBUTES)],

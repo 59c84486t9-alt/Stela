@@ -1,7 +1,7 @@
 use super::*;
 use crate::memory::{
-    AllocateDataError, AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement,
-    MemoryRegionSpec, ProtectionError, backing::AccessKind, host_page_size,
+    AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement, MemoryRegionSpec,
+    backing::AccessKind, host_page_size,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -114,7 +114,7 @@ fn bind_retains_actual_storage_after_facade_drop() {
 }
 
 #[test]
-fn bound_exact_write_preserves_neighbors_and_private_api_declines() {
+fn bound_exact_write_preserves_neighbors_and_supports_lifecycle() {
     let (mut memory, base) = owned();
     memory.write(base, &[0xa5; 32]).unwrap();
     unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 1), &mut []) }
@@ -131,27 +131,28 @@ fn bound_exact_write_preserves_neighbors_and_private_api_declines() {
             }
         );
     }
-    assert!(memory.read_snapshot(base, 1).is_err());
+    assert_eq!(memory.read_snapshot(base, 1).unwrap(), [0xa5]);
     assert_eq!(
         memory.protect_data(base, host_page_size().unwrap() as u64, true, false),
-        Err(ProtectionError::SharedDomainBound)
+        Ok(())
     );
     let rights = DataPermissions {
         readable: true,
         writable: true,
         executable: false,
     };
-    assert_eq!(
-        memory.allocate_data(AllocateDataRequest {
-            placement: DataPlacement::Anywhere { hint: 0 },
-            bytes: 1,
-            alignment_mask: 0,
-            current: rights,
-            maximum: rights,
-            alias_tag: 0,
-            inheritance: DataInheritance::Copy
-        }),
-        Err(AllocateDataError::SharedDomainBound)
+    assert!(
+        memory
+            .allocate_data(AllocateDataRequest {
+                placement: DataPlacement::Anywhere { hint: 0 },
+                bytes: 1,
+                alignment_mask: 0,
+                current: rights,
+                maximum: rights,
+                alias_tag: 0,
+                inheritance: DataInheritance::Copy
+            })
+            .is_ok()
     );
     assert_eq!(
         unsafe { memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 2), &mut []) }
@@ -179,7 +180,7 @@ fn guest_ro_publisher_uses_same_group_and_retains_both_aliases() {
     ));
     owner.publish(5, &[8, 9]).unwrap();
     assert_eq!(native(&backing, 5, 2), 0x0908);
-    assert!(owner.read_snapshot(0, 1).is_err());
+    assert_eq!(owner.read_snapshot(0, 1).unwrap(), [7]);
     assert!(owner.publish(32, &[1]).is_err());
     assert_eq!(native(&backing, 7, 1), 7);
     drop(owner);
@@ -250,7 +251,7 @@ fn split_rights_and_private_file_decline_before_binding() {
 }
 
 #[test]
-fn current_ro_host_rights_are_not_promoted_from_logical_maximum() {
+fn maximum_authority_does_not_promote_current_ro_view() {
     let (mut memory, base) = owned();
     memory
         .protect_data(base, host_page_size().unwrap() as u64, true, false)
@@ -259,7 +260,7 @@ fn current_ro_host_rights_are_not_promoted_from_logical_maximum() {
         .unwrap();
     assert!(memory.allocations[0].maximum_writable);
     let backing = Arc::clone(memory.allocations[0].shared_backing.as_ref().unwrap());
-    assert!(!backing.maximum_permissions().writable);
+    assert!(backing.maximum_permissions().writable);
     assert!(memory.write(base, &[1]).is_err());
     assert_eq!(native(&backing, 0, 1), 0);
 }

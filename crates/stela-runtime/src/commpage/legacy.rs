@@ -99,6 +99,20 @@ impl Page {
             configuration,
         })
     }
+    pub(crate) fn shared_memory_participant(
+        &mut self,
+        address_space: u64,
+    ) -> crate::memory::SharedMemoryParticipant<'_> {
+        crate::memory::SharedMemoryParticipant::published(&mut self.mapping, address_space)
+    }
+
+    pub(crate) fn check_execution_thread<P: crate::memory::domain::DataPolicy>(
+        &self,
+        thread: &crate::memory::domain::MemoryThread<P>,
+    ) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
+        self.mapping.check_execution_thread(thread)
+    }
+
     pub(crate) fn configuration(&self) -> Configuration {
         self.configuration
     }

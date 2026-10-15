@@ -118,9 +118,12 @@ impl OwnedMemory {
         request: AllocateDataRequest,
     ) -> Result<PendingDataAllocation<'_>, AllocateDataError> {
         use AllocateDataError as E;
-        if self.shared.is_some() {
-            return Err(E::SharedDomainBound);
-        }
+        let service = self
+            .shared
+            .as_ref()
+            .map(|shared| shared.domain.service_loan())
+            .transpose()
+            .map_err(|_| E::SharedDomainBound)?;
         if !self.usable {
             return Err(E::AddressSpaceUnusable);
         }
@@ -187,6 +190,7 @@ impl OwnedMemory {
             allocation,
             current: request.current,
             initialized_bytes: 0,
+            service,
         })
     }
 
@@ -221,6 +225,7 @@ pub struct PendingDataAllocation<'a> {
     allocation: DataAllocation,
     current: DataPermissions,
     initialized_bytes: usize,
+    service: Option<super::domain::MemoryServiceLoan>,
 }
 
 impl std::fmt::Debug for PendingDataAllocation<'_> {
@@ -308,6 +313,55 @@ impl PendingDataAllocation<'_> {
         mut self,
         protect: impl FnOnce(u64, u64, i32) -> Result<(), Option<i32>>,
     ) -> Result<DataAllocation, AllocateDataError> {
+        let (shared_backing, candidate) = if let Some(service) = &self.service {
+            let storage = self.storage.as_ref().expect("unpublished storage");
+            let maximum = super::backing::AccessPermissions {
+                readable: self.allocation.maximum.readable,
+                writable: self.allocation.maximum.writable,
+                executable: self.allocation.maximum.executable,
+            };
+            // SAFETY: fresh actual privately initialized anonymous storage;
+            // service loan excludes native entry until view publication. Current
+            // logical rights below limit each host access after mprotect.
+            let backing = unsafe {
+                super::backing::MemoryBacking::new_managed(
+                    storage.primary_base(),
+                    storage.bytes(),
+                    maximum,
+                    Arc::clone(storage),
+                )
+            }
+            .map_err(|_| AllocateDataError::MetadataAllocation)?;
+            let view = super::backing::MemoryView::new(
+                Arc::clone(&backing),
+                self.allocation.guest_address,
+                0,
+                self.allocation.virtual_bytes as usize,
+                super::backing::AccessPermissions {
+                    readable: self.current.readable,
+                    writable: self.current.writable,
+                    executable: false,
+                },
+            )
+            .map_err(|_| AllocateDataError::MetadataAllocation)?;
+            let mut views = service
+                .views()
+                .map_err(|_| AllocateDataError::AddressSpaceUnusable)?;
+            views.push((
+                view,
+                self.owner
+                    .shared
+                    .as_ref()
+                    .expect("bound pending allocation")
+                    .attributes,
+            ));
+            let candidate = service
+                .prepare(views)
+                .map_err(|_| AllocateDataError::MetadataAllocation)?;
+            (Some(backing), Some(candidate))
+        } else {
+            (None, None)
+        };
         protect(
             self.allocation.guest_address,
             self.allocation.mapped_bytes,
@@ -331,7 +385,7 @@ impl PendingDataAllocation<'_> {
             .take()
             .expect("unpublished storage retains ownership");
         let allocation = Allocation {
-            shared_backing: None,
+            shared_backing,
             storage,
             base: self.allocation.guest_address,
             bytes: self.allocation.mapped_bytes,
@@ -343,6 +397,14 @@ impl PendingDataAllocation<'_> {
             alias_tag: self.allocation.alias_tag,
             inheritance: self.allocation.inheritance,
         };
+        if let Some(candidate) = candidate {
+            let service = self.service.as_ref().expect("bound candidate");
+            if service.commit(candidate).is_err() {
+                service.poison();
+                self.owner.usable = false;
+                return Err(AllocateDataError::AddressSpaceUnusable);
+            }
+        }
         // Both vectors reserved their insertion capacity before mmap. Publication
         // cannot allocate or fail after the final host protection succeeds.
         let allocation_index = self

@@ -37,7 +37,7 @@ fn source(domain: &Arc<MemoryDomain>) -> SourceNormalWbDomain {
     // SAFETY: these fixtures explicitly declare retained source mappings
     // NormalWB with matching rights, tag/shareability attributes and offsets.
     // This is a fresh software component declaration, not a hardware observation.
-    unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }
+    unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }.unwrap()
 }
 fn controls(domain: &Arc<MemoryDomain>) -> FixedProcessMemoryControls {
     FixedProcessMemoryControls::new(
@@ -300,3 +300,111 @@ fn callback_error_prepare_decline_and_unwind_restore_exact_baseline() {
 
 #[path = "tests/reservation.rs"]
 mod reservation;
+
+#[test]
+fn source_generation_capture_and_same_domain_renewal_are_explicit() {
+    let domain = domain();
+    assert_eq!(domain.generation().unwrap(), 0);
+    let mut controls = controls(&domain);
+    let thread = memory(&domain);
+    assert!(controls.source.matches(&thread));
+    controls.renew_source_resolved(source(&domain)).unwrap();
+    assert!(controls.source.matches(&thread));
+    assert_eq!(controls.sctlr_el1(), SCTLR_NATIVE_NORMAL_WB);
+    assert_eq!(controls.tcr_el1(), LOWER_SIZE);
+}
+
+#[test]
+fn source_renewal_rejects_equal_looking_other_domain_without_replacing_old_witness() {
+    let original = domain();
+    let other = domain();
+    let mut controls = controls(&original);
+    assert_eq!(original.generation().unwrap(), other.generation().unwrap());
+    assert_eq!(
+        controls.renew_source_resolved(source(&other)),
+        Err(ProcessMemoryError::WrongMemoryDomain)
+    );
+    assert!(controls.source.matches(&memory(&original)));
+    assert!(!controls.source.matches(&memory(&other)));
+}
+
+#[test]
+fn actual_mapping_publication_invalidates_same_domain_source_until_explicit_renewal() {
+    use crate::memory::domain::MappingAttributes;
+    use crate::memory::{
+        AllocateDataRequest, DataInheritance, DataPermissions, DataPlacement, OwnedMemory,
+        SharedMemoryConfig,
+    };
+    let page = crate::memory::host_page_size().unwrap() as u64;
+    let rights = DataPermissions {
+        readable: true,
+        writable: true,
+        executable: false,
+    };
+    let request = AllocateDataRequest {
+        placement: DataPlacement::Anywhere { hint: 0 },
+        bytes: page,
+        alignment_mask: 0,
+        current: rights,
+        maximum: rights,
+        alias_tag: 0,
+        inheritance: DataInheritance::Copy,
+    };
+    let mut owner = OwnedMemory::map(Vec::new()).unwrap();
+    let allocation = owner.allocate_data(request).unwrap();
+    // SAFETY: fixture is the sole source/creation owner of actual anonymous
+    // software-machine RAM. All current untagged/shareable Normal-WB views
+    // and host writers participate in this same domain; no native run is active.
+    let domain = unsafe {
+        owner.bind_shared_memory(
+            SharedMemoryConfig {
+                address_space: ADDRESS_SPACE,
+                system: MemorySystem::new(ERG_BYTES, MONITOR_STRIPES).unwrap(),
+                target: TargetCpu::Baseline,
+                attributes: MappingAttributes {
+                    tagged: false,
+                    shareable: true,
+                },
+            },
+            &mut [],
+        )
+    }
+    .unwrap();
+    let lower_bits = 47;
+    let mut authority = FixedProcessMemoryControls::new(
+        features(),
+        SCTLR_NATIVE_NORMAL_WB,
+        u64::from(64 - lower_bits),
+        lower_bits,
+        source(&domain),
+    )
+    .unwrap();
+    let thread = domain.thread(MemoryControls::new(
+        LowerAddressProfile::new(lower_bits, false).unwrap(),
+        false,
+        false,
+        false,
+        TagCheckFaultMode::Ignore,
+        false,
+    ));
+    let old = source(&domain);
+    assert!(authority.source.matches(&thread));
+    owner
+        .protect_data(allocation.guest_address, page, true, false)
+        .unwrap();
+    assert_eq!(domain.generation().unwrap(), 1);
+    assert!(!authority.source.matches(&thread));
+    assert_eq!(
+        authority.renew_source_resolved(old),
+        Err(ProcessMemoryError::WrongMemoryDomain)
+    );
+    // This explicit fixture source owner resolves the entire resulting view set
+    // under serialization; host mprotect alone does not mint this witness.
+    authority.renew_source_resolved(source(&domain)).unwrap();
+    assert!(authority.source.matches(&thread));
+    owner.allocate_data(request).unwrap();
+    assert_eq!(domain.generation().unwrap(), 2);
+    assert!(!authority.source.matches(&thread));
+    authority.renew_source_resolved(source(&domain)).unwrap();
+    assert!(authority.source.matches(&thread));
+}

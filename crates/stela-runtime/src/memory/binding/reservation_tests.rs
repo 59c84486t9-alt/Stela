@@ -14,7 +14,7 @@ fn bound_host_same_value_and_aba_invalidate_existing_system_reservation() {
     let system = MemorySystem::new(16, 8).unwrap();
     let domain =
         unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 11), &mut []) }.unwrap();
-    let mapping = &domain.views[0];
+    let mapping = &domain.registered_views()[0];
     let backing = Arc::clone(mapping.view.backing());
     let access = monitor::Access::new(
         Arc::clone(&backing),
@@ -76,7 +76,7 @@ fn guest_ro_publisher_invalidates_reservation_in_another_address_space() {
     .unwrap();
     let access = monitor::Access::new(
         Arc::clone(&backing),
-        Arc::clone(&other.views[0].monitor),
+        Arc::clone(&other.registered_views()[0].monitor),
         0,
         8,
         monitor::Shape::Scalar,
@@ -98,4 +98,88 @@ fn guest_ro_publisher_invalidates_reservation_in_another_address_space() {
         monitor::ConditionalWrite::<()>::Failed
     );
     assert_ne!(domain.address_space(), other.address_space());
+}
+
+#[test]
+fn canonical_snapshots_and_unrelated_mapping_changes_preserve_live_reservation() {
+    let (mut owner, base) = owned();
+    let (mut other_owner, other_base) = owned();
+    let system = MemorySystem::new(16, 8).unwrap();
+    let domain = unsafe {
+        owner.bind_shared_memory_group(
+            config(Arc::clone(&system), 14),
+            &mut [&mut other_owner],
+            &mut [],
+        )
+    }
+    .unwrap();
+    let views = domain.registered_views();
+    let mapping = views
+        .iter()
+        .find(|mapping| mapping.view.guest_base() == base)
+        .unwrap();
+    let backing = Arc::clone(mapping.view.backing());
+    let access = monitor::Access::new(
+        Arc::clone(&backing),
+        Arc::clone(&mapping.monitor),
+        0,
+        8,
+        monitor::Shape::Scalar,
+    )
+    .unwrap();
+    let mut thread = system.reservations.thread();
+    system
+        .reservations
+        .load(&mut thread, &access, || Ok::<_, ()>(native(&backing, 0, 8)))
+        .unwrap();
+    assert_eq!(owner.read_snapshot(base, 8).unwrap(), [0; 8]);
+    other_owner
+        .protect_data(
+            other_base,
+            crate::memory::host_page_size().unwrap() as u64,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        system
+            .reservations
+            .store(&mut thread, &access, || Ok::<_, ()>(()))
+            .unwrap(),
+        monitor::ConditionalWrite::Stored(())
+    );
+    system
+        .reservations
+        .load(&mut thread, &access, || Ok::<_, ()>(native(&backing, 0, 8)))
+        .unwrap();
+    owner
+        .protect_data(
+            base,
+            crate::memory::host_page_size().unwrap() as u64,
+            true,
+            false,
+        )
+        .unwrap();
+    let current = domain.registered_views();
+    let mapping = current
+        .iter()
+        .find(|mapping| mapping.view.guest_base() == base)
+        .unwrap();
+    let replacement = monitor::Access::new(
+        Arc::clone(&backing),
+        Arc::clone(&mapping.monitor),
+        0,
+        8,
+        monitor::Shape::Scalar,
+    )
+    .unwrap();
+    assert_eq!(
+        system
+            .reservations
+            .store(&mut thread, &replacement, || -> Result<(), ()> {
+                panic!("retired view reservation must not reach write")
+            })
+            .unwrap(),
+        monitor::ConditionalWrite::Failed
+    );
 }

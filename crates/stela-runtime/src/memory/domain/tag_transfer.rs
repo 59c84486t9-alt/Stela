@@ -38,6 +38,7 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
             cause: tag_transfer::Cause::Platform(status),
             completed: tag_transfer::Progress::default(),
         };
+        let _loan = self.execution_loan().map_err(platform_fault)?;
         self.policy
             .validate_privilege(profile.privileged())
             .map_err(platform_fault)?;
@@ -100,6 +101,7 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
     type Error = MemoryStatus;
 
     fn read_tag(&mut self, descriptor: Access) -> Result<AllocationTag, Self::Error> {
+        let _loan = self.execution_loan()?;
         let physical =
             self.resolve_tag_transfer(descriptor, TransferAccessKind::TagRead, AccessKind::Read)?;
         if !self.allocation_access_enabled(descriptor, &physical)? {
@@ -115,6 +117,7 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
     }
 
     fn write_tag(&mut self, descriptor: Access, tag: AllocationTag) -> Result<(), Self::Error> {
+        let _loan = self.execution_loan()?;
         let physical =
             self.resolve_tag_transfer(descriptor, TransferAccessKind::TagWrite, AccessKind::Write)?;
         if !self.allocation_access_enabled(descriptor, &physical)? {
@@ -136,6 +139,7 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
         descriptor: Access,
         data: [u8; TAG_GRANULE_BYTES],
     ) -> Result<(), Self::Error> {
+        let _loan = self.execution_loan()?;
         let physical = self.resolve_tag_transfer(
             descriptor,
             TransferAccessKind::DataWrite,

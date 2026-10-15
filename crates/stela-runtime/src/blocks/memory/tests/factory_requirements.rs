@@ -152,7 +152,8 @@ fn checked_factory_cannot_downgrade_source_requirements_before_prefix() -> Resul
         // SAFETY: this fresh software fixture explicitly declares every retained
         // source mapping NormalWB/RW/untagged/shareable with identity offsets.
         let witness =
-            unsafe { SourceNormalWbDomain::from_source_resolved(std::sync::Arc::clone(&domain)) };
+            unsafe { SourceNormalWbDomain::from_source_resolved(std::sync::Arc::clone(&domain)) }
+                .unwrap();
         let features = ProcessMemoryFeatures::from_id_registers(
             0,
             MMFR2_LSE2,

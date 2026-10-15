@@ -135,7 +135,7 @@ fn mark<P: DataPolicy>(
     thread: &mut MemoryThread<P>,
 ) -> monitor::Access<MemoryBacking, MemoryView, MappingAttributes> {
     let domain = &thread.domain;
-    let registered = &domain.views[0];
+    let registered = &domain.registered_views()[0];
     let access = monitor::Access::new(
         Arc::clone(registered.view.backing()),
         Arc::clone(&registered.monitor),
