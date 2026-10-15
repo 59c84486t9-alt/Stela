@@ -353,6 +353,10 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("aarch64/sve/tables.rs"),
     include_str!("x86_64/sve/tables.rs"),
     include_str!("x86_64/scalable/lut.rs"),
+    include_str!("aarch64/simd/lut.rs"),
+    include_str!("aarch64/sme/lut_v2.rs"),
+    include_str!("x86_64/simd/lut.rs"),
+    include_str!("x86_64/sme/tables/lookup/lut_v2.rs"),
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

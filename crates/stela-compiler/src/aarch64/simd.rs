@@ -15,6 +15,7 @@ pub mod fused;
 pub mod halving;
 pub mod i8mm;
 pub mod immediates;
+pub mod lut;
 pub mod memory;
 pub mod minmax;
 pub mod products;
@@ -78,6 +79,7 @@ pub enum Operand {
     Reduce(reductions::Operand),
     Shift(shifts::Operand),
     Rearrange(rearrange::Operand),
+    Lut(lut::Operand),
     Compare {
         operation: Comparison,
         destination: u8,
@@ -126,6 +128,9 @@ pub enum Operand {
 /// Each reviewed family validates its reserved encodings.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+    if let Some(operand) = lut::decode(word) {
+        return Some(Ok(Operand::Lut(operand)));
+    }
     if let Some(decoded) = structure_memory::decode(word) {
         return Some(decoded.map(Operand::StructureMemory));
     }

@@ -367,7 +367,11 @@
     "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
     "crates/stela-compiler/src/aarch64/sve/tables.rs",
     "crates/stela-compiler/src/x86_64/sve/tables.rs",
-    "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+    "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+    "crates/stela-compiler/src/aarch64/simd/lut.rs",
+    "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+    "crates/stela-compiler/src/x86_64/simd/lut.rs",
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs"
   ],
   "registry_version": "documented-a64-software-services-v1",
   "profile": {

@@ -4,6 +4,8 @@
 //! 32-bit stride, including Byte/Halfword results. All scratch SIMD operands are
 //! XMM0..7; the private frame contains architectural register storage only.
 
+pub(super) mod lut_v2;
+
 use super::{
     MODRM_REGISTER_SHIFT, MODRM_STACK_DISP32, SIB_STACK, allocate_frame, release_frame,
     stack_chunk, stage,

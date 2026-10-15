@@ -945,6 +945,27 @@
         "soft_undefined_policy_state_comparisons": 480,
         "actual_body_bridges": 36
       }
+    },
+    "lut7_fixed": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/lut7-publication-final-v1/compose.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/lut7-publication-final-v1/fixed-evidence.json",
+      "kind": "lut7-current-body-retained-native-transfer-v1",
+      "comparison_field": "retained_source_equivalent_fullstate_comparisons",
+      "abi": "x86_64-sysv-guest-state-v3-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_positive_counts": [
+        "current_cli_positive_manifests",
+        "current_cli_negative_requests"
+      ],
+      "required_measurements": {
+        "canonical_forms": 4,
+        "unique_usable_original_cases": 1728,
+        "unique_oracle_limited_cases": 0,
+        "retained_source_equivalent_fullstate_comparisons": 6912,
+        "new_current_arithmetic_replays": 0,
+        "new_original_captures": 0
+      }
     }
   },
   "status_policy": "Statuses apply only to explicitly reviewed forms in the declared bounded profile. Unreviewed required Apple forms have unknown count and are not claimed supported. Neither reviewed-form ratios nor corpus frequency represent whole-binary or OS completion. Aliases are not separate support units.",
@@ -48099,6 +48120,162 @@
       ],
       "review": "Exact June source and baseline serialization mapping reviewed; integrated leaf/block byte-map and full-State original/native receipt required before admission.",
       "scope": "Context-independent leaf/block execution; full GuestState and guest RAM preserved. YIELD selects PAUSE; CSDB/SB strengthen to serializing CPUID leaf0 preserving host RBX in caller-saved R8. SB feature enabled; all CRm should-be-zero values select permitted execute-as-zero policy. Other system operations, asynchronous exception delivery and enabled-feature absence are not implied."
+    },
+    {
+      "id": "LUTI2_asimdtbl_L5",
+      "instruction_id": "LUTI2_advsimd",
+      "mnemonic": "LUTI2",
+      "category": "fp_simd",
+      "source_file": "luti2_advsimd.xml",
+      "encoding_mask": "0xffe09c00",
+      "encoding_value": "0x4e801000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_LUT",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "9329698ddc2a1b84dad0728ea978123b1ed1108fe574505f3dd2a829e13e54bb",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "lut7_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "scope": "Complete allocated fixed LUT form in enabled AdvSIMD/FEAT_LUT SM=0 ordinary GuestState profile; fixed contextual SIMD is explicitly declined.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0x4e9f73ff",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LUTI2_asimdtbl_L6",
+      "instruction_id": "LUTI2_advsimd",
+      "mnemonic": "LUTI2",
+      "category": "fp_simd",
+      "source_file": "luti2_advsimd.xml",
+      "encoding_mask": "0xffe08c00",
+      "encoding_value": "0x4ec00000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_LUT",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "9329698ddc2a1b84dad0728ea978123b1ed1108fe574505f3dd2a829e13e54bb",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti2_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "lut7_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "scope": "Complete allocated fixed LUT form in enabled AdvSIMD/FEAT_LUT SM=0 ordinary GuestState profile; fixed contextual SIMD is explicitly declined.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0x4edf73ff",
+          "expected_mnemonics": [
+            "luti2"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LUTI4_asimdtbl_L5",
+      "instruction_id": "LUTI4_advsimd",
+      "mnemonic": "LUTI4",
+      "category": "fp_simd",
+      "source_file": "luti4_advsimd.xml",
+      "encoding_mask": "0xffe0bc00",
+      "encoding_value": "0x4e402000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_LUT",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "2adae6998b4675436fc9386a858d238a9788ce35d72b8c7417ac523948c7d555",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "lut7_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "scope": "Complete allocated fixed LUT form in enabled AdvSIMD/FEAT_LUT SM=0 ordinary GuestState profile; fixed contextual SIMD is explicitly declined.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0x4e5f63ff",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
+    },
+    {
+      "id": "LUTI4_asimdtbl_L7",
+      "instruction_id": "LUTI4_advsimd",
+      "mnemonic": "LUTI4",
+      "category": "fp_simd",
+      "source_file": "luti4_advsimd.xml",
+      "encoding_mask": "0xffe09c00",
+      "encoding_value": "0x4e401000",
+      "features": [
+        {
+          "feature": "FEAT_AdvSIMD && FEAT_LUT",
+          "name": "v8Ap0 && v9Ap5"
+        }
+      ],
+      "source_sha256": "2adae6998b4675436fc9386a858d238a9788ce35d72b8c7417ac523948c7d555",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_advsimd.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "direct-private-ram-leaf-v2",
+      "evidence_groups": [
+        "lut7_fixed"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/simd/lut.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+      ],
+      "scope": "Complete allocated fixed LUT form in enabled AdvSIMD/FEAT_LUT SM=0 ordinary GuestState profile; fixed contextual SIMD is explicitly declined.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0x4e5f73ff",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "consumed_source_bytes": 4
+        }
+      ]
     }
   ],
   "compiler_fingerprint_sources": [
@@ -48439,6 +48616,10 @@
     "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
     "crates/stela-compiler/src/aarch64/sve/tables.rs",
     "crates/stela-compiler/src/x86_64/sve/tables.rs",
-    "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+    "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+    "crates/stela-compiler/src/aarch64/simd/lut.rs",
+    "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+    "crates/stela-compiler/src/x86_64/simd/lut.rs",
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs"
   ]
 }

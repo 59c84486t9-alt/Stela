@@ -367,7 +367,11 @@
     "crates/stela-compiler/src/x86_64/sve/floating/faminmax.rs",
     "crates/stela-compiler/src/aarch64/sve/tables.rs",
     "crates/stela-compiler/src/x86_64/sve/tables.rs",
-    "crates/stela-compiler/src/x86_64/scalable/lut.rs"
+    "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+    "crates/stela-compiler/src/aarch64/simd/lut.rs",
+    "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+    "crates/stela-compiler/src/x86_64/simd/lut.rs",
+    "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs"
   ],
   "registry_version": "apple-silicon-scalable-forms-v3",
   "profile": {
@@ -1549,6 +1553,27 @@
         "timing_samples": 378,
         "policy_qualified_wins": 0,
         "policy_regressions": 0
+      }
+    },
+    "lut7_sme": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/lut7-publication-final-v1/compose.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/sme-fp8-integration/lut7-publication-final-v1/sme-evidence.json",
+      "kind": "lut7-current-body-retained-native-transfer-v1",
+      "comparison_field": "retained_source_equivalent_fullstate_comparisons",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_positive_counts": [
+        "current_cli_positive_manifests",
+        "current_cli_negative_requests"
+      ],
+      "required_measurements": {
+        "canonical_forms": 3,
+        "unique_usable_original_cases": 472,
+        "unique_oracle_limited_cases": 8,
+        "retained_source_equivalent_fullstate_comparisons": 1920,
+        "new_current_arithmetic_replays": 0,
+        "new_original_captures": 0
       }
     }
   },
@@ -87824,6 +87849,135 @@
           "cpu_target": "x86_64-baseline+cx16"
         }
       ]
+    },
+    {
+      "id": "luti4_mz4_ztmz2_1",
+      "instruction_id": "luti4_mz4_ztmz2",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz4_ztmz2.xml",
+      "encoding_mask": "0xffffcc23",
+      "encoding_value": "0xc08b0000",
+      "features": [
+        {
+          "feature": "FEAT_SME_LUTv2",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "7f727fe687d00766b4f5ae5f1d6fd421c6e210b034c9f4afaae4affff2b67174",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz4_ztmz2.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-lut7",
+      "evidence_groups": [
+        "lut7_sme"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+        "crates/stela-compiler/src/extended.rs"
+      ],
+      "scope": "Complete allocated streaming LUTv2 form at SVL16/32/64/128/256 with active ZA and enabled ZT0. SME2 storage is a separate software-context prerequisite; strided LUTI4 adds SME2p1. ZA contents preserve; no guest memory or MOVPRFX pairing.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0xc08b03d0",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "luti4_mz4_ztmz2_4",
+      "instruction_id": "luti4_mz4_ztmz2",
+      "mnemonic": "LUTI4",
+      "category": "sme",
+      "source_file": "luti4_mz4_ztmz2.xml",
+      "encoding_mask": "0xffffcc2c",
+      "encoding_value": "0xc09b0000",
+      "features": [
+        {
+          "feature": "FEAT_SME2p1 && FEAT_SME_LUTv2",
+          "name": "v9Ap4 && v9Ap5"
+        }
+      ],
+      "source_sha256": "7f727fe687d00766b4f5ae5f1d6fd421c6e210b034c9f4afaae4affff2b67174",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/luti4_mz4_ztmz2.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-lut7-strided",
+      "evidence_groups": [
+        "lut7_sme"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+        "crates/stela-compiler/src/extended.rs"
+      ],
+      "scope": "Complete allocated streaming LUTv2 form at SVL16/32/64/128/256 with active ZA and enabled ZT0. SME2 storage is a separate software-context prerequisite; strided LUTI4 adds SME2p1. ZA contents preserve; no guest memory or MOVPRFX pairing.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0xc09b03d3",
+          "expected_mnemonics": [
+            "luti4"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "profiles": []
+    },
+    {
+      "id": "movt_zt_z_",
+      "instruction_id": "movt_zt_z",
+      "mnemonic": "MOVT",
+      "category": "sme",
+      "source_file": "movt_zt_z.xml",
+      "encoding_mask": "0xffffcfe0",
+      "encoding_value": "0xc04f03e0",
+      "features": [
+        {
+          "feature": "FEAT_SME_LUTv2",
+          "name": "v9Ap5"
+        }
+      ],
+      "source_sha256": "07dc16bd75eeff33f8d032ed7a3578e604278444195e99652c14f997cf7598b9",
+      "source_archive_member": "ISA_A64_xml_A_profile-2026-06/movt_zt_z.xml",
+      "status": "implemented",
+      "alias": false,
+      "profile": "sme-streaming-v2-lut7",
+      "evidence_groups": [
+        "lut7_sme"
+      ],
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sme/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/sme/tables/lookup/lut_v2.rs",
+        "crates/stela-compiler/src/x86_64/scalable/lut.rs",
+        "crates/stela-compiler/src/extended.rs"
+      ],
+      "scope": "Complete allocated streaming LUTv2 form at SVL16/32/64/128/256 with active ZA and enabled ZT0. SME2 storage is a separate software-context prerequisite; strided LUTI4 adds SME2p1. ZA contents preserve; no guest memory or MOVPRFX pairing.",
+      "review": "Pinned June source, exact decode and alias boundaries, actual source329 public wrapper fullstate/native and usable original subsets. Actual current342 complete emitted bytes/profile/ABI/maps transfer and current2+2/strict pass; declared-control/API tests remain distinct from same-PE hardware proof. SSSE3 public CALL timing selects the retained recipe, with model-only FFR/FPMR and eight MOVT original limitations explicit.",
+      "smoke_samples": [
+        {
+          "word": "0xc04f33ff",
+          "expected_mnemonics": [
+            "movt"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3,
+          "consumed_source_bytes": 4
+        }
+      ],
+      "profiles": []
     }
   ],
   "execution_profiles": {
@@ -88343,6 +88497,57 @@
         "General non-streaming SVE or undeclared optional features and controls.",
         "Device/M0 memory, general stage1, full guest exception delivery, signal/concurrency recovery.",
         "Captured Apple hardware, complete processes/macOS or application performance."
+      ]
+    },
+    "sme-streaming-v2-lut7": {
+      "id": "sme-streaming-v2",
+      "svl_bytes": 16,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME_LUTv2"
+      ],
+      "dit": false,
+      "zt0_enabled": true,
+      "max_svl_bytes": 256,
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "decoder_mattrs": [
+        "+sme2",
+        "+sve2p1",
+        "+sme-lutv2",
+        "+sme2p1"
+      ],
+      "description": "Streaming active-ZA and enabled-ZT0 LUTv2 declaration; SME2 supplies bounded ZT0 storage separately from canonical LUTv2 feature clauses. Strided LUTI4 additionally requires SME2p1.",
+      "outside_scope": [
+        "Persistent contextual cache, complete same-PE feature/access authority, fixed SIMD inside scalable context, general numerical or guest-memory effects."
+      ]
+    },
+    "sme-streaming-v2-lut7-strided": {
+      "id": "sme-streaming-v2",
+      "svl_bytes": 16,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME2p1",
+        "FEAT_SME_LUTv2"
+      ],
+      "dit": false,
+      "zt0_enabled": true,
+      "max_svl_bytes": 256,
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "decoder_mattrs": [
+        "+sme2",
+        "+sve2p1",
+        "+sme-lutv2",
+        "+sme2p1"
+      ],
+      "description": "Streaming active-ZA and enabled-ZT0 LUTv2 declaration; SME2 supplies bounded ZT0 storage separately from canonical LUTv2 feature clauses. Strided LUTI4 additionally requires SME2p1.",
+      "outside_scope": [
+        "Persistent contextual cache, complete same-PE feature/access authority, fixed SIMD inside scalable context, general numerical or guest-memory effects."
       ]
     }
   }

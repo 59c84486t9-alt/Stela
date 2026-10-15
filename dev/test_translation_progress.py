@@ -45,6 +45,115 @@ def fixtures():
                      'report': 'carry.json', 'kind': 'add_sub_carry_arm_vs_native_x86'}}}
 
 
+class LeafIndependentDecodingTests(unittest.TestCase):
+    def forms(self):
+        row = fixtures()['forms'][0]
+        return {row['id']: row}
+
+    def facts(self, forms):
+        return {identity: {**row, 'features': [], 'mnemonic': 'ADC'}
+                for identity, row in forms.items()}
+
+    def decoded(self, word=0x1a000000, mnemonic='adc'):
+        return {'word': word, 'offset': 0, 'mnemonic': mnemonic, 'operands': 'w0, w0, w0',
+                'assembly': mnemonic + ' w0, w0, w0'}
+
+    def smoke(self, forms, facts, receipt, *, accepted_words=()):
+        instruction = type('Instruction', (), {'mnemonic': 'adc', 'op_str': 'w0, w0, w0'})()
+        decoder = type('Decoder', (), {'disasm': lambda self, data, address:
+            iter([instruction] if int.from_bytes(data, 'little') in accepted_words else [])})()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(progress, 'Cs', return_value=decoder), \
+             patch.object(disassembly, 'decode_words', return_value=receipt) as decode, \
+             patch.object(progress, 'compile_probe',
+                          return_value={'compiler_source_sha256': COMPILER}) as compile_call:
+            result = progress.smoke_forms('cli', forms, forms, Path(directory),
+                                          canonical_facts=facts)
+        return result, decode, compile_call
+
+    def test_declined_leaf_uses_exact_llvm_receipt_and_ordinary_compiler_lane(self):
+        forms = self.forms()
+        # Duplicate samples use one exact-word decode batch, without new profiles.
+        next(iter(forms.values()))['smoke_samples'] *= 2
+        receipt = {'rows': [self.decoded()], 'passed': True, 'tools': {'synthetic': True}}
+        (compiler, results), decode, compile_call = self.smoke(forms, self.facts(forms), receipt)
+        self.assertEqual(compiler, COMPILER)
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual(decode.call_args.args[0], [0x1a000000])
+        self.assertEqual(decode.call_args.args[1].name, 'llvm-leaf-decoding')
+        self.assertEqual(decode.call_args.kwargs, {'mattrs': progress.LEAF_DECODER_MATTRS})
+        self.assertEqual(compile_call.call_count, 2)
+        for call, result in zip(compile_call.call_args_list, results):
+            self.assertEqual(call.kwargs, {})
+            self.assertEqual(call.args[1], 0x1a000000)
+            self.assertEqual(result['independent_decode_basis'], disassembly.DECODE_BASIS)
+            self.assertEqual(result['independent_decode_receipt'], receipt)
+            self.assertNotIn('execution_profile', result)
+
+    def test_accepted_or_unsupported_leaf_never_requests_llvm(self):
+        forms = self.forms()
+        (compiler, results), decode, _compile = self.smoke(
+            forms, None, {}, accepted_words=[0x1a000000])
+        decode.assert_not_called()
+        self.assertEqual(compiler, COMPILER)
+        self.assertEqual(results[0]['independent_decode_basis'], 'capstone')
+        next(iter(forms.values()))['status'] = 'unsupported'
+        (_compiler, results), decode, _compile = self.smoke(forms, None, {})
+        decode.assert_not_called()
+        self.assertEqual(results, [])
+
+    def test_missing_facts_fail_before_llvm_or_compiler(self):
+        forms = self.forms()
+        with patch.object(disassembly, 'decode_words') as decode, \
+             patch.object(progress, 'compile_probe') as compile_call:
+            decoder = type('Decoder', (), {'disasm': lambda self, data, address: iter(())})()
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.object(progress, 'Cs', return_value=decoder), \
+                 self.assertRaisesRegex(ValueError, 'validated canonical facts'):
+                progress.smoke_forms('cli', forms, forms, Path(directory))
+        decode.assert_not_called()
+        compile_call.assert_not_called()
+
+    def test_unknown_or_mismatched_llvm_leaf_refuses_before_compilation(self):
+        forms = self.forms()
+        facts = self.facts(forms)
+        for rows in ([], [self.decoded(mnemonic='<unknown>')],
+                     [self.decoded(mnemonic='sub')], [self.decoded(word=0x1a000001)],
+                     [{**self.decoded(), 'assembly': 'adc changed framing'}]):
+            with self.subTest(rows=rows), patch.object(progress, 'compile_probe') as compile_call:
+                decoder = type('Decoder', (), {'disasm': lambda self, data, address: iter(())})()
+                with tempfile.TemporaryDirectory() as directory, \
+                     patch.object(progress, 'Cs', return_value=decoder), \
+                     patch.object(disassembly, 'decode_words', return_value={'rows': rows}), \
+                     self.assertRaises(ValueError):
+                    progress.smoke_forms('cli', forms, forms, Path(directory), canonical_facts=facts)
+                compile_call.assert_not_called()
+        decoder = type('Decoder', (), {'disasm': lambda self, data, address: iter(())})()
+        with self.assertRaisesRegex(ValueError, 'exact source word'):
+            progress.smoke_decoding(decoder, 0x1a000000, next(iter(forms)), facts,
+                                    {0x1a000000: self.decoded(word=0x1a000001)})
+        changed = copy.deepcopy(facts)
+        next(iter(changed.values()))['encoding_value'] = '0x3a000000'
+        with self.assertRaisesRegex(ValueError, 'canonical fixed bits'):
+            self.smoke(forms, changed, {'rows': [self.decoded()]})
+
+    def test_cssc_leaf_exception_never_requires_llvm(self):
+        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        facts = progress.a64_checklist.validate(catalog)
+        cssc = [fact for fact in facts.values()
+                if any(feature['feature'] == 'FEAT_CSSC' for feature in fact['features'])]
+        forms = {fact['id']: {**fact, 'status': 'implemented', 'smoke_samples': [{
+            'word': fact['encoding_value'], 'expected_mnemonics': [fact['mnemonic'].lower()]}]}
+            for fact in cssc}
+        (compiler, results), decode, compile_call = self.smoke(forms, facts, {})
+        decode.assert_not_called()
+        self.assertEqual(compiler, COMPILER)
+        self.assertEqual(len(results), 22)
+        self.assertEqual(compile_call.call_count, 22)
+        self.assertEqual({result['independent_decode_basis'] for result in results},
+                         {'pinned_arm_cssc_fixed_encoding'})
+
+
 class IsaProgressTests(unittest.TestCase):
     def test_cssc_fixed_encoding_alternative_is_explicit_and_canonical(self):
         catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())

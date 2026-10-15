@@ -30,6 +30,8 @@ MOVABS_RAX_IMM64 = b'\x48\xb8'
 MOV_EDX_IMM32 = b'\xba'
 X86_RET = b'\xc3'
 SYSTEM_DECODER_MATTRS = ('+mte',)
+# Independent decoding attributes never grant guest execution features.
+LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut')
 SYSTEM_GUEST_BASE = 0x10000000
 SERVICE_BINDINGS = {
     SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
@@ -690,6 +692,11 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
                                                'guest_base', 'target_cpu')} if mode == 'scalable' else {})}
 
 
+def cssc_fixed_encoding(word, fact):
+    return (fact is not None and any(feature['feature'] == 'FEAT_CSSC' for feature in fact['features'])
+            and word & int(fact['encoding_mask'], 16) == int(fact['encoding_value'], 16))
+
+
 def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_rows=None,
                    preferred_aliases=None):
     instruction = next(decoder.disasm(struct.pack('<I', word), 0), None)
@@ -699,14 +706,15 @@ def smoke_decoding(decoder, word, identity, canonical_facts=None, independent_ro
     # This limited alternative uses independently hash-validated Arm facts;
     # it does not claim that the installed Capstone decoded the instruction.
     fact = (canonical_facts or {}).get(identity)
-    if (fact is not None and any(feature['feature'] == 'FEAT_CSSC' for feature in fact['features'])
-            and word & int(fact['encoding_mask'], 16) == int(fact['encoding_value'], 16)):
+    if cssc_fixed_encoding(word, fact):
         mnemonic = fact['mnemonic'].lower()
         return mnemonic, mnemonic, 'pinned_arm_cssc_fixed_encoding'
     if word in (independent_rows or {}):
         import a64_disassembly
         if fact is None:
             raise ValueError('Independent LLVM decoding requires validated canonical facts')
+        if independent_rows[word].get('word') != word:
+            raise ValueError('Independent LLVM decoded word differs from exact source word')
         return a64_disassembly.validate_canonical(independent_rows[word], identity, fact,
                                                   preferred_aliases=preferred_aliases)
     raise ValueError(f'Independent decoder declined {identity}: {word:#x}')
@@ -760,6 +768,25 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
     results = []
     independent_receipts = {}
     preferred_aliases = None
+    if mode == 'leaf':
+        import a64_disassembly
+        declined = set()
+        for identity, row in overrides.items():
+            if row['status'] == 'unsupported':
+                continue
+            for sample in row['smoke_samples']:
+                word = validate_sample(forms[identity], sample)
+                if next(decoder.disasm(struct.pack('<I', word), 0), None) is not None:
+                    continue
+                fact = (canonical_facts or {}).get(identity)
+                if cssc_fixed_encoding(word, fact):
+                    continue
+                if fact is None:
+                    raise ValueError('Independent LLVM decoding requires validated canonical facts')
+                declined.add(word)
+        if declined:
+            independent_receipts[LEAF_DECODER_MATTRS] = a64_disassembly.decode_words(
+                sorted(declined), directory / 'llvm-leaf-decoding', mattrs=LEAF_DECODER_MATTRS)
     if mode == 'service':
         import a64_disassembly
         declined = sorted({validate_sample(forms[identity], sample)
@@ -809,7 +836,11 @@ def smoke_forms(cli, forms, overrides, directory, mode='leaf', canonical_facts=N
             word = validate_sample(forms[identity], sample)
             independent_receipt = None
             independent_rows = {}
-            if mode == 'scalable':
+            if mode == 'leaf':
+                independent_receipt = independent_receipts.get(LEAF_DECODER_MATTRS)
+                if independent_receipt is not None:
+                    independent_rows = {entry['word']: entry for entry in independent_receipt['rows']}
+            elif mode == 'scalable':
                 attrs = tuple(contract(row).get('decoder_mattrs', a64_disassembly.DEFAULT_MATTRS))
                 independent_receipt = independent_receipts.get(attrs)
                 if independent_receipt is not None:

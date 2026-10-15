@@ -18,6 +18,7 @@ mod halving;
 mod i8mm;
 mod immediates;
 mod integer_conversion;
+mod lut;
 pub(super) mod memory;
 mod minmax;
 pub(in crate::x86_64) mod numerical;
@@ -289,6 +290,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 }
 pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
     match *operand {
+        Operand::Lut(ref operand) => lut::emit(code, operand, target),
         Operand::Aes(ref operand) => aes::emit(code, operand, target),
         Operand::I8mm(ref operand) => i8mm::emit(code, operand, target),
         Operand::Sha1(ref operand) => sha1::emit(code, operand, target),

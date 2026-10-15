@@ -24,8 +24,8 @@ use crate::{
             profile::ScalableControls,
         },
         sme::{
-            integer_dots, integer_matrix, integer_vector, length, memory as sme_memory, movement,
-            tables,
+            integer_dots, integer_matrix, integer_vector, length, lut_v2, memory as sme_memory,
+            movement, tables,
         },
         sve::{
             address, dot, floating_copy, integer_arithmetic, integer_bits, integer_comparison,
@@ -262,6 +262,7 @@ pub(crate) enum Decoded {
     MemoryStructure(memory_structure::Operand),
     SmeTables(tables::Operand),
     SveTables(sve_tables::Operand),
+    SmeLutV2(lut_v2::Operand),
     SmeMovement(movement::Operand),
     SmeIntegerVector(integer_vector::Operand),
     SmeIntegerDots(integer_dots::Operand),
@@ -309,6 +310,10 @@ impl Decoded {
             Self::PredicateGeneration(_) => ScalableAccessRequirements::Unqualified,
             Self::PredicateLogic(_) => ScalableAccessRequirements::Unqualified,
             Self::Length(_) => ScalableAccessRequirements::Unqualified,
+            Self::SmeLutV2(_) => ScalableAccessRequirements::Known(Box::new([
+                ScalableAccessCheck::StreamingSveEnabled,
+                ScalableAccessCheck::SmeZt0Enabled,
+            ])),
             Self::SmeTables(_) => ScalableAccessRequirements::Unqualified,
             Self::SveTables(_) => ScalableAccessRequirements::Unqualified,
             Self::SmeMovement(_) => ScalableAccessRequirements::Unqualified,
@@ -354,6 +359,7 @@ impl Decoded {
             Self::PredicateGeneration(_) => GuestMemoryQuantity::Unqualified,
             Self::PredicateLogic(_) => GuestMemoryQuantity::Unqualified,
             Self::Length(_) => GuestMemoryQuantity::Unqualified,
+            Self::SmeLutV2(_) => GuestMemoryQuantity::None,
             Self::SmeTables(_) => GuestMemoryQuantity::Unqualified,
             Self::SveTables(_) => GuestMemoryQuantity::None,
             Self::SmeMovement(_) => GuestMemoryQuantity::Unqualified,
@@ -395,6 +401,7 @@ impl Decoded {
             Self::PredicateGeneration(_) => Default::default(),
             Self::PredicateLogic(_) => Default::default(),
             Self::Length(_) => Default::default(),
+            Self::SmeLutV2(_) => Default::default(),
             Self::SmeTables(_) => Default::default(),
             Self::SveTables(_) => Default::default(),
             Self::SmeMovement(_) => Default::default(),
@@ -438,6 +445,7 @@ impl Decoded {
             Self::PredicateGeneration(_) => Ok(None),
             Self::PredicateLogic(_) => Ok(None),
             Self::Length(_) => Ok(None),
+            Self::SmeLutV2(_) => Ok(None),
             Self::SmeTables(_) => Ok(None),
             Self::SveTables(_) => Ok(None),
             Self::SmeMovement(_) => Ok(None),
@@ -479,6 +487,7 @@ impl Decoded {
             | Self::PredicateGeneration(_)
             | Self::PredicateLogic(_)
             | Self::Length(_)
+            | Self::SmeLutV2(_)
             | Self::SmeTables(_)
             | Self::SveTables(_)
             | Self::SmeMovement(_)
@@ -561,6 +570,7 @@ impl Decoded {
             | Self::MemoryStore(_)
             | Self::MemoryStructure(_)
             | Self::Address(_)
+            | Self::SmeLutV2(_)
             | Self::SmeTables(_)
             | Self::SveTables(_)
             | Self::SmeMovement(_)
@@ -1358,6 +1368,27 @@ fn decode_recording_features(
         }
         return Ok(Decoded::SmeMovement(operand));
     }
+    if let Some(operand) = lut_v2::decode(word) {
+        let mut required =
+            ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::SmeLutV2);
+        if operand.requires_sme2p1() {
+            required = required.with(ScalableFeature::Sme2p1);
+        }
+        require_features(profile, clauses, FeatureRequirement::all(required), pc)?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        if !profile.mode.za_enabled() || !profile.controls().zt0_enabled() {
+            return Err(CompileError(format!(
+                "SME LUTv2 requires ZA and enabled ZT0 at {:#x}",
+                pc.0
+            )));
+        }
+        return Ok(Decoded::SmeLutV2(operand));
+    }
     if let Some(operand) = tables::decode(word) {
         if x86_64::sme::tables::requires_dit_zero(&operand, profile.length, target)
             && profile.required_dit() != Some(false)
@@ -1541,6 +1572,9 @@ fn emit_decoded(
         Decoded::SmeMovement(operand) => {
             x86_64::sme::movement::emit(code, &operand, profile.length, target)
                 .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+        }
+        Decoded::SmeLutV2(operand) => {
+            x86_64::sme::tables::emit_lut_v2(code, &operand, profile.length, target);
         }
         Decoded::SmeTables(operand) => {
             x86_64::sme::tables::emit(code, &operand, profile.length, target);

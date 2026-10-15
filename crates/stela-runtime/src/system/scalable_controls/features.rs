@@ -87,6 +87,7 @@ pub(super) fn derive(ids: &Snapshot) -> Result<ScalableFeatures, Error> {
         }
         for (bit, feature) in [
             (63, F::SmeFa64),
+            (60, F::SmeLutV2),
             (48, F::SmeF64F64),
             (43, F::SmeB16B16),
             (42, F::SmeF16F16),

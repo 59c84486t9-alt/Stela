@@ -385,3 +385,12 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
         } => select(code, operand, left, right, predicate, length, target),
     }
 }
+
+pub(crate) fn emit_lut_v2(
+    code: &mut Vec<u8>,
+    operand: &crate::aarch64::sme::lut_v2::Operand,
+    length: VectorLength,
+    target: TargetCpu,
+) {
+    lookup::lut_v2::emit(code, operand, length, target);
+}
