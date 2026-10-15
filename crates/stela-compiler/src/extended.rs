@@ -19,8 +19,8 @@ use crate::{
         sve::{
             address, dot, floating_copy, integer_arithmetic,
             integer_logic::{self, CopySource, Kind},
-            integer_products, integer_saturation, predicate_generation, rearrange_extract,
-            rearrange_widen, sign,
+            integer_products, integer_saturation, predicate_generation, predicate_logic,
+            rearrange_extract, rearrange_widen, sign,
         },
     },
     context::{ExecutionContext, ScalableStateView},
@@ -228,6 +228,7 @@ enum Decoded {
     FloatingCopy(floating_copy::Operand),
     IntegerArithmetic(integer_arithmetic::Operand),
     PredicateGeneration(predicate_generation::Operand),
+    PredicateLogic(predicate_logic::Operand),
     Length(length::Operand),
     SmeIntegerDots(integer_dots::Operand),
 }
@@ -523,6 +524,32 @@ fn decode(
         profile.require_features(FeatureRequirement::all(features), pc)?;
         return Ok(Decoded::PredicateGeneration(operand));
     }
+    if let Some(decoded) = predicate_logic::decode(word) {
+        let operand = decoded.map_err(|()| {
+            CompileError(format!(
+                "reserved streaming predicate logic encoding at {:#x}",
+                pc.0
+            ))
+        })?;
+        if !profile.mode.streaming() {
+            return Err(CompileError(format!(
+                "streaming mode required at {:#x}",
+                pc.0
+            )));
+        }
+        let mut features = ScalableFeatures::of(ScalableFeature::Sme);
+        match operand.kind {
+            predicate_logic::Kind::MoveVector { .. } => {
+                features = features.with(ScalableFeature::Sme2p1);
+            }
+            predicate_logic::Kind::ExtractCounter { .. } => {
+                features = features.with(ScalableFeature::Sme2);
+            }
+            _ => {}
+        }
+        profile.require_features(FeatureRequirement::all(features), pc)?;
+        return Ok(Decoded::PredicateLogic(operand));
+    }
     if let Some(operand) = length::decode(word) {
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme)),
@@ -607,6 +634,9 @@ fn emit_decoded(
         }
         Decoded::PredicateGeneration(operand) => {
             x86_64::sve::predicate_generation::emit(code, &operand, profile.length, target);
+        }
+        Decoded::PredicateLogic(operand) => {
+            x86_64::sve::predicate_logic::emit(code, &operand, profile.length, target);
         }
         Decoded::Length(operand) => {
             x86_64::sme::length::emit(code, &operand, profile.length);
@@ -1899,3 +1929,7 @@ mod rearrange_extract_tests;
 
 #[cfg(test)]
 mod predicate_generation_tests;
+
+#[cfg(test)]
+#[path = "extended/predicate_logic_tests.rs"]
+mod predicate_logic_tests;

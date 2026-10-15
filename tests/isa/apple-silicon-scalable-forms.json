@@ -46,6 +46,7 @@
     "crates/stela-compiler/src/aarch64/sve/integer_products.rs",
     "crates/stela-compiler/src/aarch64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/aarch64/sve/predicate_generation.rs",
+    "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/aarch64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/aarch64/sve/sign.rs",
@@ -73,6 +74,7 @@
     "crates/stela-compiler/src/x86_64/sve/integer_products/widening.rs",
     "crates/stela-compiler/src/x86_64/sve/integer_saturation.rs",
     "crates/stela-compiler/src/x86_64/sve/predicate_generation.rs",
+    "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_extract.rs",
     "crates/stela-compiler/src/x86_64/sve/rearrange_widen.rs",
     "crates/stela-compiler/src/x86_64/sve/sign.rs",
@@ -537,6 +539,33 @@
         "unique_original_cases_in_lineage": 17505,
         "current_llvm_decoded_words": 864,
         "actual_cli13_full_entry_transfers": 4
+      }
+    },
+    "sve-predicate-logic-v2": {
+      "kind": "arm64_scalable_predicate_logic_differential",
+      "report": ".stela/research/coverage-race/sve-integer/predicate-logic/integration-1/admission-evidence-6.json",
+      "harness": "dev/scalable_fixture_runner.py",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "comparison_field": "fresh_current_cli_native_full_snapshot_comparisons",
+      "required_shared_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs",
+        "dev/scalable_frame.py",
+        "dev/scalable_fixture_runner.py",
+        "dev/differential.py",
+        "dev/simd_fixtures/sve_memory/predicate_logic.py",
+        "dev/simd_fixtures/sve_memory/counter.py"
+      ],
+      "required_positive_counts": [
+        "caller_r15_preservation_probes"
+      ],
+      "required_measurements": {
+        "canonical_forms": 31,
+        "actual_cli_body_transfers": 2495,
+        "historical_same_input_original_model_native_transfers": 7545,
+        "unique_original_cases_in_lineage": 7545,
+        "current_llvm_decoded_words": 499,
+        "negative_cli_boundaries": 14
       }
     }
   },
@@ -28048,6 +28077,2424 @@
           "svcr": 3
         }
       ]
+    },
+    {
+      "id": "and_p_p_pp_z",
+      "instruction_id": "and_p_p_pp",
+      "mnemonic": "AND",
+      "category": "sve",
+      "source_file": "and_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25004000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2d9b9d1c4700033a5b27a8040d678bc96c481670b39e6af021299eb3564a8a7b",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25024c20",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c20",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c20",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c20",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c20",
+          "expected_mnemonics": [
+            "and"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25024c20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "ands_p_p_pp_z",
+      "instruction_id": "ands_p_p_pp",
+      "mnemonic": "ANDS",
+      "category": "sve",
+      "source_file": "ands_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25404000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "a5cccf3d62962da056aa7ce70bf8fa0d055e4535dfe921e36def6d9194810bf4",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25424c20",
+          "expected_mnemonics": [
+            "ands"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c20",
+          "expected_mnemonics": [
+            "ands"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c20",
+          "expected_mnemonics": [
+            "ands"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c20",
+          "expected_mnemonics": [
+            "ands"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c20",
+          "expected_mnemonics": [
+            "ands"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25424c20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "bic_p_p_pp_z",
+      "instruction_id": "bic_p_p_pp",
+      "mnemonic": "BIC",
+      "category": "sve",
+      "source_file": "bic_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25004010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "68ba49130a0802ab76b2c5f7784090f61f865cee71276f750b4a46ae2f8e59ff",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25024c30",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c30",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c30",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c30",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024c30",
+          "expected_mnemonics": [
+            "bic"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25024c30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "bics_p_p_pp_z",
+      "instruction_id": "bics_p_p_pp",
+      "mnemonic": "BICS",
+      "category": "sve",
+      "source_file": "bics_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25404010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "be71c8f0afd9c123fe213c93a650c189976bcffe4a48bca28236b61f0923e632",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25424c30",
+          "expected_mnemonics": [
+            "bics"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c30",
+          "expected_mnemonics": [
+            "bics"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c30",
+          "expected_mnemonics": [
+            "bics"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c30",
+          "expected_mnemonics": [
+            "bics"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424c30",
+          "expected_mnemonics": [
+            "bics"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25424c30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "eor_p_p_pp_z",
+      "instruction_id": "eor_p_p_pp",
+      "mnemonic": "EOR",
+      "category": "sve",
+      "source_file": "eor_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25004200",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "89dc0b336435b1b1a5254f1d1c89c6cd557506b8498c6a1dbad54e36b9783e2c",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25024e20",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e20",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e20",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e20",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e20",
+          "expected_mnemonics": [
+            "eor"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25024e20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "eors_p_p_pp_z",
+      "instruction_id": "eors_p_p_pp",
+      "mnemonic": "EORS",
+      "category": "sve",
+      "source_file": "eors_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25404200",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "81564d6d4e5e1a60b4240a2ece5c0da5a636e26974afb347b254d8d0383031e8",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25424e20",
+          "expected_mnemonics": [
+            "eors"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424e20",
+          "expected_mnemonics": [
+            "eors"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424e20",
+          "expected_mnemonics": [
+            "eors"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424e20",
+          "expected_mnemonics": [
+            "eors"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25424e20",
+          "expected_mnemonics": [
+            "eors"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25424e20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "nand_p_p_pp_z",
+      "instruction_id": "nand_p_p_pp",
+      "mnemonic": "NAND",
+      "category": "sve",
+      "source_file": "nand_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25804210",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "942b4c37711b2e41f8de66e2aa7986227c9dff207141b4599b57068ef6dec81a",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25824e30",
+          "expected_mnemonics": [
+            "nand"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e30",
+          "expected_mnemonics": [
+            "nand"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e30",
+          "expected_mnemonics": [
+            "nand"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e30",
+          "expected_mnemonics": [
+            "nand"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e30",
+          "expected_mnemonics": [
+            "nand"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25824e30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "nands_p_p_pp_z",
+      "instruction_id": "nands_p_p_pp",
+      "mnemonic": "NANDS",
+      "category": "sve",
+      "source_file": "nands_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25c04210",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f70469a0ba28c6bdcd4b8c4e0d6c101e7008bb64471f9db83e861d050d296d6d",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25c24e30",
+          "expected_mnemonics": [
+            "nands"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e30",
+          "expected_mnemonics": [
+            "nands"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e30",
+          "expected_mnemonics": [
+            "nands"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e30",
+          "expected_mnemonics": [
+            "nands"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e30",
+          "expected_mnemonics": [
+            "nands"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25c24e30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "nor_p_p_pp_z",
+      "instruction_id": "nor_p_p_pp",
+      "mnemonic": "NOR",
+      "category": "sve",
+      "source_file": "nor_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25804200",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "05eb0e327ffb77cf6778082566847f6cdff6f1d22d530e5708ec2415d888c469",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25824e20",
+          "expected_mnemonics": [
+            "nor"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e20",
+          "expected_mnemonics": [
+            "nor"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e20",
+          "expected_mnemonics": [
+            "nor"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e20",
+          "expected_mnemonics": [
+            "nor"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824e20",
+          "expected_mnemonics": [
+            "nor"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25824e20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "nors_p_p_pp_z",
+      "instruction_id": "nors_p_p_pp",
+      "mnemonic": "NORS",
+      "category": "sve",
+      "source_file": "nors_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25c04200",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "76983bc635db26c204413f55c52121d00981fe15b7be20076f224f1503c244a2",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25c24e20",
+          "expected_mnemonics": [
+            "nors"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e20",
+          "expected_mnemonics": [
+            "nors"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e20",
+          "expected_mnemonics": [
+            "nors"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e20",
+          "expected_mnemonics": [
+            "nors"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24e20",
+          "expected_mnemonics": [
+            "nors"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25c24e20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "orn_p_p_pp_z",
+      "instruction_id": "orn_p_p_pp",
+      "mnemonic": "ORN",
+      "category": "sve",
+      "source_file": "orn_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25804010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "3bc0f3dc655b42921b6c9f5a72673a13585304a125fcd3564b7b102a3589a246",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25824c30",
+          "expected_mnemonics": [
+            "orn"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c30",
+          "expected_mnemonics": [
+            "orn"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c30",
+          "expected_mnemonics": [
+            "orn"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c30",
+          "expected_mnemonics": [
+            "orn"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c30",
+          "expected_mnemonics": [
+            "orn"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25824c30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "orns_p_p_pp_z",
+      "instruction_id": "orns_p_p_pp",
+      "mnemonic": "ORNS",
+      "category": "sve",
+      "source_file": "orns_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25c04010",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "b12849f85acb1e84c0d4491ff64d4c949d9af47b0bfe29618c6f7209f5b51853",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25c24c30",
+          "expected_mnemonics": [
+            "orns"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c30",
+          "expected_mnemonics": [
+            "orns"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c30",
+          "expected_mnemonics": [
+            "orns"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c30",
+          "expected_mnemonics": [
+            "orns"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c30",
+          "expected_mnemonics": [
+            "orns"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25c24c30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "orr_p_p_pp_z",
+      "instruction_id": "orr_p_p_pp",
+      "mnemonic": "ORR",
+      "category": "sve",
+      "source_file": "orr_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25804000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "2ec2476c41cd2e571dcb7814fc77746a4bc2c03c1c5d391b9996c676808d849e",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25824c20",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c20",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c20",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c20",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25824c20",
+          "expected_mnemonics": [
+            "orr"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25824c20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "orrs_p_p_pp_z",
+      "instruction_id": "orrs_p_p_pp",
+      "mnemonic": "ORRS",
+      "category": "sve",
+      "source_file": "orrs_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25c04000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "aacd9a6e9acdaa6ab3b5af18f6848b30d6c6c56a2b6d67379b7dd7674e9dd9e3",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25c24c20",
+          "expected_mnemonics": [
+            "orrs"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c20",
+          "expected_mnemonics": [
+            "orrs"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c20",
+          "expected_mnemonics": [
+            "orrs"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c20",
+          "expected_mnemonics": [
+            "orrs"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25c24c20",
+          "expected_mnemonics": [
+            "orrs"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25c24c20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pext_pn_rr_",
+      "instruction_id": "pext_pn_rr",
+      "mnemonic": "PEXT",
+      "category": "sve",
+      "source_file": "pext_pn_rr.xml",
+      "encoding_mask": "0xff3ffc10",
+      "encoding_value": "0x25207010",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "51ab73887d0367a6134c650ceca600f25e3b87aaa35f0e19fc9d176bc3860c49",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25207010",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207010",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207010",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207010",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207010",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25207010",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pext_pp_rr_",
+      "instruction_id": "pext_pp_rr",
+      "mnemonic": "PEXT",
+      "category": "sve",
+      "source_file": "pext_pp_rr.xml",
+      "encoding_mask": "0xff3ffe10",
+      "encoding_value": "0x25207410",
+      "features": [
+        {
+          "feature": "FEAT_SME2 || FEAT_SVE2p1",
+          "name": "v9Ap3 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "a96010fb9f5e4864288afbba7ef348a262ed79305e1f2d160569f35c2bd96b2d",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25207410",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207410",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207410",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207410",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25207410",
+          "expected_mnemonics": [
+            "pext"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25207410",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pmov_p_zi_b",
+      "instruction_id": "pmov_p_zi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_p_zi.xml",
+      "encoding_mask": "0xfffffc10",
+      "encoding_value": "0x052a3800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "96c15555af032ff0519931908b7ece68ce376c2d58da072cb55f97cac09cfd4e",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x052a3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052a3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x052a3800",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pmov_p_zi_d",
+      "instruction_id": "pmov_p_zi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_p_zi.xml",
+      "encoding_mask": "0xffb9fc10",
+      "encoding_value": "0x05a83800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "96c15555af032ff0519931908b7ece68ce376c2d58da072cb55f97cac09cfd4e",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05a83800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05a83800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05a83800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05a83800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05a83800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05a83800",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pmov_p_zi_h",
+      "instruction_id": "pmov_p_zi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_p_zi.xml",
+      "encoding_mask": "0xfffdfc10",
+      "encoding_value": "0x052c3800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "96c15555af032ff0519931908b7ece68ce376c2d58da072cb55f97cac09cfd4e",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x052c3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x052c3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x052c3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x052c3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x052c3800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x052c3800",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "pmov_p_zi_s",
+      "instruction_id": "pmov_p_zi",
+      "mnemonic": "PMOV",
+      "category": "sve",
+      "source_file": "pmov_p_zi.xml",
+      "encoding_mask": "0xfff9fc10",
+      "encoding_value": "0x05683800",
+      "features": [
+        {
+          "feature": "FEAT_SVE2p1 || FEAT_SME2p1",
+          "name": "v9Ap4 || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "96c15555af032ff0519931908b7ece68ce376c2d58da072cb55f97cac09cfd4e",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05683800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05683800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05683800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05683800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05683800",
+          "expected_mnemonics": [
+            "pmov"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05683800",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "psel_p_ppi_",
+      "instruction_id": "psel_p_ppi",
+      "mnemonic": "PSEL",
+      "category": "sve",
+      "source_file": "psel_p_ppi.xml",
+      "encoding_mask": "0xff20c210",
+      "encoding_value": "0x25204000",
+      "features": [
+        {
+          "feature": "FEAT_SME || FEAT_SVE2p1",
+          "name": "(v9Ap2 && PROFILE_A) || v9Ap4"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "16e73f0ab70cb04270ab1acea33cae1426d3d8430a612b093175beaa0be0cb7b",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25244440",
+          "expected_mnemonics": [
+            "psel"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25244440",
+          "expected_mnemonics": [
+            "psel"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25244440",
+          "expected_mnemonics": [
+            "psel"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25244440",
+          "expected_mnemonics": [
+            "psel"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25244440",
+          "expected_mnemonics": [
+            "psel"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25244440",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "punpkhi_p_p_",
+      "instruction_id": "punpkhi_p_p",
+      "mnemonic": "PUNPKHI",
+      "category": "sve",
+      "source_file": "punpkhi_p_p.xml",
+      "encoding_mask": "0xfffffe10",
+      "encoding_value": "0x05314000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "07612d42a9c81241757d094c635f1ab575a10b34bc6c0e333b2833ddbb3f76cf",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05314020",
+          "expected_mnemonics": [
+            "punpkhi"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05314020",
+          "expected_mnemonics": [
+            "punpkhi"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05314020",
+          "expected_mnemonics": [
+            "punpkhi"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05314020",
+          "expected_mnemonics": [
+            "punpkhi"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05314020",
+          "expected_mnemonics": [
+            "punpkhi"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05314020",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "punpklo_p_p_",
+      "instruction_id": "punpkhi_p_p",
+      "mnemonic": "PUNPKLO",
+      "category": "sve",
+      "source_file": "punpkhi_p_p.xml",
+      "encoding_mask": "0xfffffe10",
+      "encoding_value": "0x05304000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "07612d42a9c81241757d094c635f1ab575a10b34bc6c0e333b2833ddbb3f76cf",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05304020",
+          "expected_mnemonics": [
+            "punpklo"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05304020",
+          "expected_mnemonics": [
+            "punpklo"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05304020",
+          "expected_mnemonics": [
+            "punpklo"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05304020",
+          "expected_mnemonics": [
+            "punpklo"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05304020",
+          "expected_mnemonics": [
+            "punpklo"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05304020",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "rev_p_p_",
+      "instruction_id": "rev_p_p",
+      "mnemonic": "REV",
+      "category": "sve",
+      "source_file": "rev_p_p.xml",
+      "encoding_mask": "0xff3ffe10",
+      "encoding_value": "0x05344000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "3723e0a1fbbc96939422cd86f34d8754d724e46e4a2e73564f6e3bb646d71050",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05344020",
+          "expected_mnemonics": [
+            "rev"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05344020",
+          "expected_mnemonics": [
+            "rev"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05344020",
+          "expected_mnemonics": [
+            "rev"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05344020",
+          "expected_mnemonics": [
+            "rev"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05344020",
+          "expected_mnemonics": [
+            "rev"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05344020",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "sel_p_p_pp_",
+      "instruction_id": "sel_p_p_pp",
+      "mnemonic": "SEL",
+      "category": "sve",
+      "source_file": "sel_p_p_pp.xml",
+      "encoding_mask": "0xfff0c210",
+      "encoding_value": "0x25004210",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "93e9e17a459ebcd69aec793a620c39bb03c7550b5a3ff7fff644b5d06aa8a3ac",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x25024e30",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e30",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e30",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e30",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x25024e30",
+          "expected_mnemonics": [
+            "sel"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x25024e30",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "trn1_p_pp_",
+      "instruction_id": "trn1_p_pp",
+      "mnemonic": "TRN1",
+      "category": "sve",
+      "source_file": "trn1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05205000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "fac4bcbbd1ae7ba3e33becbbb804365a936cc72591e21a8ce2561726b27974e8",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05225020",
+          "expected_mnemonics": [
+            "trn1"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225020",
+          "expected_mnemonics": [
+            "trn1"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225020",
+          "expected_mnemonics": [
+            "trn1"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225020",
+          "expected_mnemonics": [
+            "trn1"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225020",
+          "expected_mnemonics": [
+            "trn1"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05225020",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "trn2_p_pp_",
+      "instruction_id": "trn1_p_pp",
+      "mnemonic": "TRN2",
+      "category": "sve",
+      "source_file": "trn1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05205400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "fac4bcbbd1ae7ba3e33becbbb804365a936cc72591e21a8ce2561726b27974e8",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05225420",
+          "expected_mnemonics": [
+            "trn2"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225420",
+          "expected_mnemonics": [
+            "trn2"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225420",
+          "expected_mnemonics": [
+            "trn2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225420",
+          "expected_mnemonics": [
+            "trn2"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05225420",
+          "expected_mnemonics": [
+            "trn2"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05225420",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uzp1_p_pp_",
+      "instruction_id": "uzp1_p_pp",
+      "mnemonic": "UZP1",
+      "category": "sve",
+      "source_file": "uzp1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05204800",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f204ddb7033569bfd1fea25010aa6419ee77e5ded16660149e4fe5d715761361",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05224820",
+          "expected_mnemonics": [
+            "uzp1"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224820",
+          "expected_mnemonics": [
+            "uzp1"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224820",
+          "expected_mnemonics": [
+            "uzp1"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224820",
+          "expected_mnemonics": [
+            "uzp1"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224820",
+          "expected_mnemonics": [
+            "uzp1"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05224820",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "uzp2_p_pp_",
+      "instruction_id": "uzp1_p_pp",
+      "mnemonic": "UZP2",
+      "category": "sve",
+      "source_file": "uzp1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05204c00",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "f204ddb7033569bfd1fea25010aa6419ee77e5ded16660149e4fe5d715761361",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05224c20",
+          "expected_mnemonics": [
+            "uzp2"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224c20",
+          "expected_mnemonics": [
+            "uzp2"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224c20",
+          "expected_mnemonics": [
+            "uzp2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224c20",
+          "expected_mnemonics": [
+            "uzp2"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224c20",
+          "expected_mnemonics": [
+            "uzp2"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05224c20",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "zip1_p_pp_",
+      "instruction_id": "zip1_p_pp",
+      "mnemonic": "ZIP1",
+      "category": "sve",
+      "source_file": "zip1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05204000",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "1ceecfbd019c4bf5244b017a5992d6058d80e8cf6688e688b092f4339b7160a3",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05224020",
+          "expected_mnemonics": [
+            "zip1"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224020",
+          "expected_mnemonics": [
+            "zip1"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224020",
+          "expected_mnemonics": [
+            "zip1"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224020",
+          "expected_mnemonics": [
+            "zip1"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224020",
+          "expected_mnemonics": [
+            "zip1"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05224020",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
+    },
+    {
+      "id": "zip2_p_pp_",
+      "instruction_id": "zip1_p_pp",
+      "mnemonic": "ZIP2",
+      "category": "sve",
+      "source_file": "zip1_p_pp.xml",
+      "encoding_mask": "0xff30fe10",
+      "encoding_value": "0x05204400",
+      "features": [
+        {
+          "feature": "FEAT_SVE || FEAT_SME",
+          "name": "(v8Ap2 && PROFILE_A) || (v9Ap2 && PROFILE_A)"
+        }
+      ],
+      "alias": false,
+      "source_sha256": "1ceecfbd019c4bf5244b017a5992d6058d80e8cf6688e688b092f4339b7160a3",
+      "status": "implemented",
+      "profile": "sme-streaming-v2-sme2p1",
+      "scope": "All allocated operands of this canonical form at fixed SVL16/32/64/128/256, SM1/ZA1 with explicitly declared SME+SME2+SME2p1. No guest RAM or FP effects; only P destination(s) and declared Boolean NZCV31:28 outputs. Original/runtime limits remain explicit.",
+      "review": "Typed complete decoder with explicit reserved PSEL size; alias-safe packed predicate backend and shared counter/PredTest helpers. Preserve full groups in ZIP/TRN/UZP/REV, zero nonleading bits in PUNPK/PMOV/PEXT. PMOV uses packed Z slices; PSEL lowW12..15 modulo lanes; PEXT retains sparse encoded counter markers. Exact current CLI body/maps, fresh wrapper pilots and immutable original/model/native lineage bound by the evidence group.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/aarch64/sve/predicate_logic.rs",
+        "crates/stela-compiler/src/x86_64/sve/predicate_logic.rs"
+      ],
+      "evidence_groups": [
+        "sve-predicate-logic-v2"
+      ],
+      "smoke_samples": [
+        {
+          "word": "0x05224420",
+          "expected_mnemonics": [
+            "zip2"
+          ],
+          "svl_bytes": 16,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224420",
+          "expected_mnemonics": [
+            "zip2"
+          ],
+          "svl_bytes": 32,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224420",
+          "expected_mnemonics": [
+            "zip2"
+          ],
+          "svl_bytes": 64,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224420",
+          "expected_mnemonics": [
+            "zip2"
+          ],
+          "svl_bytes": 128,
+          "svcr": 3
+        },
+        {
+          "word": "0x05224420",
+          "expected_mnemonics": [
+            "zip2"
+          ],
+          "svl_bytes": 256,
+          "svcr": 3
+        }
+      ],
+      "rejected_samples": [
+        {
+          "word": "0x05224420",
+          "svl_bytes": 16,
+          "svcr": 2,
+          "reason": "streaming mode required"
+        }
+      ]
     }
   ],
   "execution_profiles": {
@@ -28117,6 +30564,33 @@
         "+sve2p1"
       ],
       "description": "Explicit SME/SME2 streaming leaf profile; each sample selects current SVL and SM/ZA state.",
+      "outside_scope": [
+        "general non-streaming SVE",
+        "implicit later guest ISA features",
+        "DIT=1",
+        "production block/cache context entry",
+        "full guest exception delivery",
+        "Apple hardware conformance, applications and macOS boot"
+      ]
+    },
+    "sme-streaming-v2-sme2p1": {
+      "id": "sme-streaming-v2",
+      "compiler_command": "compile-leaf",
+      "abi": "x86_64-sysv-guest-state-v1-context-direct-ram",
+      "svl_bytes": 32,
+      "svcr": 3,
+      "features": [
+        "FEAT_SME",
+        "FEAT_SME2",
+        "FEAT_SME2p1"
+      ],
+      "max_svl_bytes": 256,
+      "zt0_enabled": false,
+      "dit": false,
+      "decoder_mattrs": [
+        "+sme2p1"
+      ],
+      "description": "Explicit streaming leaf profile with FEAT_SME, FEAT_SME2, FEAT_SME2p1, SVL=32 bytes, SVCR=3, maximum SVL=256 bytes, ZT0 disabled and DIT=0.",
       "outside_scope": [
         "general non-streaming SVE",
         "implicit later guest ISA features",

@@ -9,6 +9,7 @@ pub(crate) mod integer_products;
 pub(crate) mod integer_saturation;
 pub(crate) mod predicate;
 pub(crate) mod predicate_generation;
+pub(crate) mod predicate_logic;
 pub(crate) mod rearrange_extract;
 pub(crate) mod rearrange_widen;
 pub(crate) mod sign;
