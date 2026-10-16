@@ -30,16 +30,12 @@ use stela_runtime::payload::{MAX_SLICE_BYTES, gpt::Guid, images_directory};
 const PINNED_BUILD: &str = "26A434";
 const PINNED_MODEL: &str = "Mac14,3";
 const RECORD: &str = "EFI/stela/setup.json";
-const GIB: u64 = 1024 * 1024 * 1024;
-/// Room for the boot bundles until they are prepared and measured, and a
-/// margin so no volume is filled to its last byte.
-const BUNDLE_ESTIMATE: u64 = GIB / 2;
+/// A margin so no volume is filled to its last byte.
 const MARGIN: u64 = 64 * 1024 * 1024;
 
-/// The boot bundles setup prepares, each a `boot prepare` run. The restore
-/// bundle joins this list as `("restore", &["--restore"])` once `boot
-/// prepare` accepts that option.
-const BUNDLES: &[(&str, &[&str])] = &[("installed", &["--variant", "macOS Customer"])];
+/// The boot bundles setup prepares, each a `boot prepare` run: the
+/// installed system, and the restore ramdisk that performs the installation.
+const BUNDLES: &[(&str, &[&str])] = &[("installed", &[]), ("restore", &["--restore"])];
 
 #[derive(Args)]
 pub(crate) struct Setup {
@@ -189,6 +185,9 @@ struct Plan {
     payload_volume: PathBuf,
     layout: PayloadLayout,
     payload_bytes: u64,
+    /// The prepared bundles, in a host directory until setup copies them.
+    bundles: tempfile::TempDir,
+    bundle_sizes: Vec<(String, u64)>,
     options: String,
     efi_image: PathBuf,
     notes: Vec<String>,
@@ -408,6 +407,7 @@ fn choose_payload_volume(
     usb: &Path,
     explicit: Option<&Path>,
     size: &restore::payload::Size,
+    bundle_bytes: u64,
 ) -> Result<(PathBuf, PayloadLayout, u64)> {
     let drivers = usb::opencore_drivers(esp);
     let esp_disk = host.volume(esp)?.disk;
@@ -448,7 +448,7 @@ fn choose_payload_volume(
         let need = match layout {
             PayloadLayout::Split => size.member_bytes,
             PayloadLayout::Archive => size.ipsw_bytes,
-        } + BUNDLE_ESTIMATE
+        } + bundle_bytes
             + MARGIN;
         if info.free_bytes < need {
             writeln!(
@@ -544,13 +544,6 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
             size.aea_members
         ));
     }
-    let (payload_volume, layout, payload_bytes) = choose_payload_volume(
-        host,
-        &esp,
-        &command.usb,
-        command.payload_volume.as_deref(),
-        &size,
-    )?;
     let efi_image = match &command.efi {
         Some(path) => path.clone(),
         None => default_efi_image().context(
@@ -565,6 +558,22 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         "{} is not a UEFI application",
         efi_image.display()
     );
+    // Bundles are prepared on this computer before the USB changes, which
+    // also measures them for the space check.
+    let bundles = tempfile::tempdir()?;
+    let bundle_sizes = if environment.bundles {
+        prepare_bundles(&ipsw, &command.model, bundles.path())?
+    } else {
+        Vec::new()
+    };
+    let (payload_volume, layout, payload_bytes) = choose_payload_volume(
+        host,
+        &esp,
+        &command.usb,
+        command.payload_volume.as_deref(),
+        &size,
+        bundle_sizes.iter().map(|(_, bytes)| bytes).sum(),
+    )?;
     let mode = if command.verify_only {
         "verify"
     } else {
@@ -588,10 +597,38 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         payload_volume,
         layout,
         payload_bytes,
+        bundles,
+        bundle_sizes,
         options,
         efi_image,
         notes,
     })
+}
+
+/// Run `boot prepare` for each bundle into `directory`; return their sizes.
+fn prepare_bundles(ipsw: &Path, model: &str, directory: &Path) -> Result<Vec<(String, u64)>> {
+    let mut sizes = Vec::new();
+    for (name, arguments) in BUNDLES {
+        let output = directory.join(name);
+        let mut line: Vec<String> = [
+            "--ipsw",
+            ipsw.to_str().context("IPSW path is not UTF-8")?,
+            "--model",
+            model,
+            "--output",
+            output.to_str().context("temporary path is not UTF-8")?,
+        ]
+        .map(str::to_owned)
+        .into();
+        line.extend(arguments.iter().map(|a| (*a).to_owned()));
+        boot::prepare(&line).with_context(|| format!("preparing the {name} boot bundle"))?;
+        let mut bytes = 0;
+        for file in fs::read_dir(&output)? {
+            bytes += file?.metadata()?.len();
+        }
+        sizes.push(((*name).to_owned(), bytes));
+    }
+    Ok(sizes)
 }
 
 fn describe(plan: &Plan, verify_only: bool) -> Result<String> {
@@ -618,6 +655,9 @@ fn describe(plan: &Plan, verify_only: bool) -> Result<String> {
         "  boot bundles   {}",
         plan.bundle_directory().display()
     )?;
+    for (name, bytes) in &plan.bundle_sizes {
+        writeln!(text, "    {name:<12} {:.1} MB", *bytes as f64 / 1e6)?;
+    }
     writeln!(
         text,
         "  OpenCore       adds the \"{}\" tool entry; keeps the old config.plist as {}",
@@ -663,7 +703,7 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
         report.push_str("Dry run: nothing was changed.\n");
         return Ok(report);
     }
-    apply(environment, &plan)?;
+    apply(&plan)?;
     writeln!(
         report,
         "Done. Boot the PC from this USB, choose \"{}\" in OpenCore's picker, and stela.efi \
@@ -699,27 +739,7 @@ fn write_record(esp: &Path, record: &Record) -> Result<()> {
     stela_runtime::write_json(&path, record)
 }
 
-fn apply(environment: &Environment<'_>, plan: &Plan) -> Result<()> {
-    // The bundles go to a host directory first, so a failure leaves the USB
-    // unchanged.
-    let staged = tempfile::tempdir()?;
-    if environment.bundles {
-        for (name, arguments) in BUNDLES {
-            let output = staged.path().join(name);
-            let mut line: Vec<String> = [
-                "--ipsw",
-                plan.ipsw.to_str().context("IPSW path is not UTF-8")?,
-                "--model",
-                &plan.model,
-                "--output",
-                output.to_str().context("temporary path is not UTF-8")?,
-            ]
-            .map(str::to_owned)
-            .into();
-            line.extend(arguments.iter().map(|a| (*a).to_owned()));
-            boot::prepare(&line).with_context(|| format!("preparing the {name} boot bundle"))?;
-        }
-    }
+fn apply(plan: &Plan) -> Result<()> {
     let mut created = missing_directories(&plan.payload_volume, &plan.payload_directory());
     created.extend(missing_directories(
         &plan.payload_volume,
@@ -751,7 +771,7 @@ fn apply(environment: &Environment<'_>, plan: &Plan) -> Result<()> {
         slice_bytes: MAX_SLICE_BYTES,
         fetch_keys: true,
     })?;
-    for entry in fs::read_dir(staged.path())? {
+    for entry in fs::read_dir(plan.bundles.path())? {
         let entry = entry?;
         let destination = plan.bundle_directory().join(entry.file_name());
         fs::create_dir_all(&destination)?;
@@ -845,6 +865,8 @@ mod tests {
     use host::{Disk, Partition, Volume};
     use std::collections::BTreeMap;
     use stela_runtime::payload::gpt::{DEFAULT_CACHE_BYTES, DEFAULT_MIN_APPLE_BYTES};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1057,14 +1079,14 @@ mod tests {
     #[test]
     fn a_small_esp_sends_the_payload_to_a_readable_data_volume_of_the_same_usb() {
         // No HFS+ driver: the data volume is unreadable and nothing fits.
-        let f = fixture(GIB / 4, false);
+        let f = fixture(GIB / 32, false);
         let error = setup(&environment(&f.host), command(&f, &f.data, Some("EMPTY2")))
             .unwrap_err()
             .to_string();
         assert!(error.contains("OpenHfsPlus"), "{error}");
         assert!(error.contains("payload needs"), "{error}");
         // With the driver, the HFS+ volume takes the whole IPSW.
-        let f = fixture(GIB / 4, true);
+        let f = fixture(GIB / 32, true);
         setup(&environment(&f.host), command(&f, &f.data, Some("EMPTY2"))).unwrap();
         let directory = f
             .data
