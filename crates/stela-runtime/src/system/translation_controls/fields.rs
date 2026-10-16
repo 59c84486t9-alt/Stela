@@ -501,5 +501,4 @@ impl RegisterPolicy {
 }
 
 #[cfg(test)]
-#[path = "fields_tests.rs"]
 mod tests;

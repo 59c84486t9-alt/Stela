@@ -259,9 +259,7 @@ mod numerical22_tests;
 mod sme_completion_tests;
 
 #[cfg(test)]
-#[path = "block/fp8_tests.rs"]
 mod fp8_tests;
 
 #[cfg(test)]
-#[path = "block/fp8_conversion_tests.rs"]
 mod fp8_conversion_tests;

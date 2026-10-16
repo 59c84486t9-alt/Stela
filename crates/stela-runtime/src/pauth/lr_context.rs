@@ -135,5 +135,4 @@ impl<'run, 'profile> LinkRegisterContext<'run, 'profile> {
 }
 
 #[cfg(test)]
-#[path = "lr_context/tests.rs"]
 mod tests;

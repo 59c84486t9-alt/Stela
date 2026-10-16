@@ -10,15 +10,10 @@ use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 use alloc::vec::Vec;
 
-#[path = "integer_products/complex.rs"]
 mod complex;
-#[path = "integer_products/complex_wrapping.rs"]
 mod complex_wrapping;
-#[path = "integer_products/polynomial.rs"]
 mod polynomial;
-#[path = "integer_products/saturating.rs"]
 mod saturating;
-#[path = "integer_products/widening.rs"]
 mod widening;
 
 pub(crate) use saturating::emit_chunk as emit_saturating_chunk;

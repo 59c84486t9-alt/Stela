@@ -264,5 +264,4 @@ fn memory_status(raw: u32) -> Result<MemoryStatus> {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "leaf/tests.rs"]
 mod tests;

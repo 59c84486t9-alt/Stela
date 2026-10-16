@@ -1,6 +1,5 @@
 //! Source-physical reads from genuinely materialized private loader RAM.
 //! Guest source memory type is not inferred from coherent host storage.
-#[path = "physical/completion.rs"]
 pub(crate) mod completion;
 
 use super::{
@@ -11,7 +10,6 @@ use crate::memory::{
     stage1::{PhysicalMemory, PhysicalReadError},
 };
 
-#[path = "physical/mutable_source.rs"]
 mod mutable_source;
 pub(in crate::memory) use mutable_source::RegionReload;
 
@@ -337,14 +335,11 @@ fn platform_error(status: MemoryStatus) -> PhysicalReadError {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "physical/source_ram_tests.rs"]
 mod source_ram_tests;
 
-#[path = "physical/fetch.rs"]
 mod fetch;
 pub(crate) use fetch::{BoundPhysicalInstruction, ImmutableCodeBacking};
 
-#[path = "physical/stores.rs"]
 mod stores;
 pub(crate) use stores::{
     M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
@@ -353,7 +348,6 @@ pub(crate) use stores::{
 
 // Fixture-only original RAM observations; no guest access permission.
 #[cfg(test)]
-#[path = "physical/source_diagnostic.rs"]
 mod source_diagnostic;
 
 // These fixture-only operations grant no memory access or CPU/source authority.
@@ -372,5 +366,4 @@ impl PhysicalAddressSpace {}
 ))]
 impl super::MemorySystem {}
 
-#[path = "physical/walked.rs"]
 mod walked;

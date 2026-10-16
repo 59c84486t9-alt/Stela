@@ -362,5 +362,4 @@ fn check_pe_binding<P: DataPolicy>(
 }
 
 #[cfg(test)]
-#[path = "fixed_execution/tests.rs"]
 mod tests;

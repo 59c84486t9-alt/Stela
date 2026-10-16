@@ -410,5 +410,4 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
 }
 
 #[cfg(test)]
-#[path = "checked_pair/tests.rs"]
 mod tests;

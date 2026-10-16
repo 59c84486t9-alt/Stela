@@ -374,5 +374,4 @@ fn poisoned_monitor_declines_before_publication() {
     assert_eq!(snapshot(&backing), [0; STORAGE_BYTES]);
 }
 
-#[path = "../../binding/reservation_tests.rs"]
 mod binding_reservation_tests;

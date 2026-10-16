@@ -138,5 +138,4 @@ impl InstalledEl1Owner {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "el1/walked_tests.rs"]
 mod walked_tests;

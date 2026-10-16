@@ -6,32 +6,24 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[path = "domain/scalar.rs"]
 mod scalar;
 pub use scalar::{MemoryFault, MemoryReader};
 
-#[path = "domain/publication.rs"]
 mod publication;
 pub use publication::PublicationFault;
 pub(in crate::memory) mod source_mutation;
 pub(crate) use source_mutation::SourceWriteReceipt;
-#[path = "domain/profile.rs"]
 mod profile;
-#[path = "domain/tag_transfer.rs"]
 mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
-#[path = "domain/lifecycle.rs"]
 mod lifecycle;
 pub(in crate::memory) use lifecycle::MemoryServiceLoan;
 use lifecycle::{DomainSnapshot, DomainState};
 pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
 
-#[path = "domain/exclusive.rs"]
 mod exclusive;
-#[path = "domain/m0_read.rs"]
 pub(crate) mod m0_read;
 pub(crate) mod m0_write;
-#[path = "domain/physical.rs"]
 pub(crate) mod physical;
 
 use crate::platform::sync::Mutex;
@@ -1025,5 +1017,4 @@ impl Iterator for AccessParts {
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "domain/tests.rs"]
 mod tests;

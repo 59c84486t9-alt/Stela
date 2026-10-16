@@ -48,9 +48,7 @@ use stela_compiler::{
 };
 use stela_core::sha256;
 
-#[path = "blocks/memory.rs"]
 mod checked_memory;
-#[path = "blocks/publication.rs"]
 mod publication;
 pub use publication::CodePublicationScope;
 
@@ -240,7 +238,6 @@ pub struct RunOutcome {
     pub thread_register_events: Vec<ThreadRegisterEvent>,
 }
 
-#[path = "blocks/translation.rs"]
 mod translation;
 pub(crate) use translation::{
     ControlCodeScope, InstalledEl1SourceScope, InstalledM0SourceScope, InstalledWalkedSource,

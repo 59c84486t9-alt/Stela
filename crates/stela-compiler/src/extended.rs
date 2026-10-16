@@ -1857,7 +1857,6 @@ fn emit_leaf(
 }
 
 #[cfg(test)]
-#[path = "extended/integer_dots_tests.rs"]
 mod integer_dots_tests;
 
 #[cfg(test)]
@@ -4226,23 +4225,18 @@ mod rearrange_extract_tests;
 mod predicate_generation_tests;
 
 #[cfg(test)]
-#[path = "extended/predicate_logic_tests.rs"]
 mod predicate_logic_tests;
 
 #[cfg(test)]
-#[path = "extended/rearrange_tests.rs"]
 mod rearrange_tests;
 
 #[cfg(test)]
-#[path = "extended/reductions_tests.rs"]
 mod reductions_tests;
 
 #[cfg(test)]
-#[path = "extended/sme2p1_tests.rs"]
 mod sme2p1_tests;
 
 #[cfg(test)]
-#[path = "extended/predicate_move_tests.rs"]
 mod predicate_move_tests;
 
 #[cfg(test)]
@@ -4346,25 +4340,19 @@ mod prefix_pair_tests {
 }
 
 #[cfg(test)]
-#[path = "extended/memory_load_tests.rs"]
 mod memory_load_tests;
 
 #[cfg(test)]
-#[path = "extended/memory_multi_tests.rs"]
 mod memory_multi_tests;
 
 #[cfg(test)]
-#[path = "extended/memory_store_tests.rs"]
 mod memory_store_tests;
 
 #[cfg(test)]
-#[path = "extended/memory_structure_tests.rs"]
 mod memory_structure_tests;
 
 #[cfg(test)]
-#[path = "extended/sme_memory_tests.rs"]
 mod sme_memory_tests;
 
 #[cfg(test)]
-#[path = "extended/checked_pair_tests.rs"]
 mod checked_pair_tests;

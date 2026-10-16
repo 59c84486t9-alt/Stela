@@ -13,18 +13,12 @@
 //! current controls eagerly. An ISB is still a real CSE/fetch publication, not
 //! a deferred-register-bank switch or an implicit TLBI.
 
-#[path = "translation_controls/branch_address.rs"]
 mod branch_address;
-#[path = "translation_controls/context_sync.rs"]
 mod context_sync;
 pub(crate) use context_sync::PreparedContextSynchronization;
-#[path = "translation_controls/effects.rs"]
 mod effects;
-#[path = "translation_controls/el1_source.rs"]
 mod el1_source;
-#[path = "translation_controls/fields.rs"]
 mod fields;
-#[path = "translation_controls/m0_data.rs"]
 pub(crate) mod m0_data;
 pub use effects::*;
 pub use fields::{
@@ -702,5 +696,4 @@ fn decode_register(word: u32, read: bool) -> Result<(Register, u8), ControlError
 }
 
 #[cfg(test)]
-#[path = "translation_controls/tests.rs"]
 mod tests;

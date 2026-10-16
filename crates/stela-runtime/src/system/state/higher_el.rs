@@ -283,5 +283,4 @@ impl HigherElState {
 }
 
 #[cfg(test)]
-#[path = "higher_el/tests.rs"]
 mod tests;

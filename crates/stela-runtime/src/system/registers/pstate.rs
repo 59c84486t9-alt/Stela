@@ -164,5 +164,4 @@ pub fn commit(
 }
 
 #[cfg(test)]
-#[path = "pstate/tests.rs"]
 mod tests;

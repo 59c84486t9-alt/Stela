@@ -144,7 +144,6 @@ struct Encoding {
     layout: Layout,
 }
 
-#[path = "arithmetic/encodings.rs"]
 mod encodings;
 use encodings::ENCODINGS;
 

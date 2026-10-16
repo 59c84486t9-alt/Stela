@@ -459,5 +459,4 @@ fn writeback(
 }
 
 #[cfg(test)]
-#[path = "tag_transfer/tests.rs"]
 mod tests;

@@ -163,5 +163,4 @@ fn host_entropy(_bytes: &mut [u8]) -> Result<(), TagGenerationError> {
 }
 
 #[cfg(test)]
-#[path = "tag_execution/tests.rs"]
 mod tests;

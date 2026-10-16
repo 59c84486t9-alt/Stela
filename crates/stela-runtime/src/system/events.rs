@@ -514,5 +514,4 @@ pub enum Error<E> {
 }
 
 #[cfg(test)]
-#[path = "events/tests.rs"]
 mod tests;

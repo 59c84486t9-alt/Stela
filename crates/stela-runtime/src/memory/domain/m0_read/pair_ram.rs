@@ -273,5 +273,4 @@ pub(crate) fn prepare_aligned_device_ram8_pair<'loan, 'owner>(
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "pair_ram/tests.rs"]
 pub(crate) mod tests;

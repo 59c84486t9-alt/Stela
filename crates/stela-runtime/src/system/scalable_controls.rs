@@ -563,5 +563,4 @@ fn trap(pc: GuestAddress, exception_class: u8, iss: u32) -> Error {
 }
 
 #[cfg(test)]
-#[path = "scalable_controls/tests.rs"]
 mod tests;

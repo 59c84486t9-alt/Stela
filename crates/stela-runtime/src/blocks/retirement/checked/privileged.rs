@@ -776,5 +776,4 @@ impl provider::Owner for PrivilegedOwner<'_> {
 }
 
 #[cfg(test)]
-#[path = "privileged/tests.rs"]
 pub(super) mod tests;

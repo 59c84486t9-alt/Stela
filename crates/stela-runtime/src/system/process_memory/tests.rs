@@ -298,7 +298,6 @@ fn callback_error_prepare_decline_and_unwind_restore_exact_baseline() {
     assert_eq!(*thread.policy_mut(), previous);
 }
 
-#[path = "tests/reservation.rs"]
 mod reservation;
 
 #[test]

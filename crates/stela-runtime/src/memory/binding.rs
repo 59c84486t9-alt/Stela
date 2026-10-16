@@ -444,10 +444,8 @@ impl OwnedMemory {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "binding/tests.rs"]
 pub(crate) mod tests;
 
-#[path = "binding/lifecycle.rs"]
 #[cfg(feature = "std")]
 mod lifecycle;
 

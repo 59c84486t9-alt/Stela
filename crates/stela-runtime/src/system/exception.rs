@@ -556,5 +556,4 @@ impl ReturnPlan {
 }
 
 #[cfg(test)]
-#[path = "exception/tests.rs"]
 mod tests;

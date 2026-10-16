@@ -12,7 +12,6 @@ use alloc::sync::Arc;
 use alloc::{string::String, string::ToString, vec::Vec};
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
-#[path = "source_ram/region.rs"]
 mod region;
 pub use region::InitializedRamRegion;
 
@@ -649,5 +648,4 @@ mod zeroed_tests {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "source_ram/region_tests.rs"]
 mod region_tests;

@@ -667,5 +667,4 @@ fn map_anonymous(
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "allocation/tests.rs"]
 mod tests;

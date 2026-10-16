@@ -305,5 +305,4 @@ impl<P: DataPolicy> MemoryThread<P> {
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "profile/tests.rs"]
 mod tests;

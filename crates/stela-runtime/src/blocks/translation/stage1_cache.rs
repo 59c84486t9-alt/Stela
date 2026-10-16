@@ -115,5 +115,4 @@ fn cell_index(access: Access) -> usize {
 }
 
 #[cfg(test)]
-#[path = "stage1_cache/tests.rs"]
 mod tests;

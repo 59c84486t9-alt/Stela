@@ -99,5 +99,4 @@ impl CheckedAddressProfile {
 }
 
 #[cfg(test)]
-#[path = "address/tests.rs"]
 mod tests;

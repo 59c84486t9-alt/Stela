@@ -1,5 +1,4 @@
 //! SEV/SEVL event delivery through the production runtime owners.
-#[path = "event_corpus/backend.rs"]
 mod backend;
 
 use crate::{

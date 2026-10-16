@@ -66,5 +66,4 @@ impl CheckedOperation {
 }
 
 #[cfg(test)]
-#[path = "pointer/tests.rs"]
 mod tests;

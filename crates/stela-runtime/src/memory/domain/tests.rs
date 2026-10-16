@@ -2223,7 +2223,6 @@ fn exclusive_service_dedicated_tag_entry_cannot_bypass_typed_class_preflight() {
     }
 }
 
-#[path = "checked_finalization_tests.rs"]
 mod checked_finalization;
 
 #[test]

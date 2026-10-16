@@ -39,7 +39,6 @@ pub(in crate::blocks) struct InstalledCodeSources {
 pub(in crate::blocks) type InstalledM0Sources = InstalledCodeSources;
 pub(in crate::blocks) type InstalledEl1Sources = InstalledCodeSources;
 
-#[path = "owner/el1.rs"]
 mod el1;
 pub(in crate::blocks) use el1::InstalledEl1Owner;
 

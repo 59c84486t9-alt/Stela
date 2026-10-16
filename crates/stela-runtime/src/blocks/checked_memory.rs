@@ -206,5 +206,4 @@ pub(super) unsafe fn call(
 }
 
 #[cfg(test)]
-#[path = "memory/tests.rs"]
 mod tests;

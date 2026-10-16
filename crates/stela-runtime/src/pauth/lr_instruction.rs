@@ -151,5 +151,4 @@ pub const fn pacm_effect(feature_present: bool, enabled: bool) -> PacmEffect {
 }
 
 #[cfg(test)]
-#[path = "pauth_lr_tests.rs"]
 mod tests;

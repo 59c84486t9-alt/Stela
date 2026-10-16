@@ -863,5 +863,4 @@ fn native_event_failure_preserves_original_terminal_and_completed_prefix() -> an
     Ok(())
 }
 
-#[path = "tests/event_corpus.rs"]
 mod event_corpus;

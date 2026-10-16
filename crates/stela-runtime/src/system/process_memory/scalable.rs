@@ -212,5 +212,4 @@ impl FixedProcessMemoryControls {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-#[path = "scalable/tests.rs"]
 mod tests;

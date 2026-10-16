@@ -443,5 +443,4 @@ impl DebugMachine {
 }
 
 #[cfg(test)]
-#[path = "halted/tests.rs"]
 mod tests;

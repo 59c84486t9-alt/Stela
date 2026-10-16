@@ -769,5 +769,4 @@ impl Drop for HostPorts {
 }
 
 #[cfg(test)]
-#[path = "ports/tests.rs"]
 mod tests;

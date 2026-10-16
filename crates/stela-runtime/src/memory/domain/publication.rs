@@ -208,5 +208,4 @@ impl Iterator for PublicationParts {
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "publication/tests.rs"]
 mod tests;

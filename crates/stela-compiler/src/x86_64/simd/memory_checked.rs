@@ -453,5 +453,4 @@ fn emit_transfer(
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "memory_checked/tests.rs"]
 mod tests;

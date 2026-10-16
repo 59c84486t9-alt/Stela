@@ -589,5 +589,4 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
 }
 
 #[cfg(test)]
-#[path = "execution/tests.rs"]
 mod tests;

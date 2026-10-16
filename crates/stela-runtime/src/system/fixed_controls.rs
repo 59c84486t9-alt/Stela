@@ -168,5 +168,4 @@ fn check_source_pstate(pstate: u64) -> Result<(), FixedControlsError> {
 }
 
 #[cfg(test)]
-#[path = "fixed_controls/tests.rs"]
 mod tests;

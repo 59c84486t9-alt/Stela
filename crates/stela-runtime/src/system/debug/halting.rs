@@ -420,5 +420,4 @@ fn set_bit(value: u32, mask: u32, enabled: bool) -> u32 {
 }
 
 #[cfg(test)]
-#[path = "halting/tests.rs"]
 mod tests;

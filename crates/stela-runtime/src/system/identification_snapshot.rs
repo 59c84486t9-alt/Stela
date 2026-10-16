@@ -259,5 +259,4 @@ impl Readbacks for Snapshot {
 }
 
 #[cfg(test)]
-#[path = "identification_snapshot/tests.rs"]
 mod tests;

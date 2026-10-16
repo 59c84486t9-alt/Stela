@@ -78,5 +78,4 @@ const fn pack_modifiers(modifier1: u64, modifier2: u64) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "two_modifier/tests.rs"]
 mod tests;

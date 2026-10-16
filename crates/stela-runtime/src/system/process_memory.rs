@@ -28,24 +28,19 @@ use stela_compiler::{
 };
 
 pub mod extended_controls;
-#[path = "process_memory/pointer.rs"]
 mod pointer;
-#[path = "process_memory/pointer_checks.rs"]
 mod pointer_checks;
-#[path = "process_memory/source.rs"]
 mod source;
 pub(crate) use pointer::PointerMemoryAuthorization;
 pub use pointer_checks::Error as PointerChecksError;
 pub(crate) use pointer_checks::ResolvedPointerChecks;
 pub use source::SourceNormalWbDomain;
-#[path = "process_memory/low128.rs"]
 #[cfg(feature = "std")]
 mod low128;
 #[cfg(feature = "std")]
 pub(crate) use low128::Low128ProcessMemoryAuthorization;
 #[cfg(feature = "std")]
 pub use low128::PreparedLow128ProcessMemory;
-#[path = "process_memory/scalable.rs"]
 mod scalable;
 pub use scalable::ScalableExecutionError;
 
@@ -665,9 +660,7 @@ impl<P: DataPolicy> Drop for PolicyLoan<'_, P> {
 }
 
 #[cfg(test)]
-#[path = "process_memory/tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "process_memory/identification_tests.rs"]
 mod identification_tests;

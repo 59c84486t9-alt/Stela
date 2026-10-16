@@ -180,20 +180,14 @@ impl BlockRuntime {
     }
 }
 
-#[path = "translation/owner.rs"]
 mod owner;
-#[path = "translation/profile.rs"]
 mod profile;
-#[path = "translation/scope.rs"]
 mod scope;
-#[path = "translation/source_lease.rs"]
 mod source_lease;
-#[path = "translation/stage1_cache.rs"]
 mod stage1_cache;
 pub(super) use owner::{
     InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
 };
-#[path = "translation/el1_source_lease.rs"]
 mod el1_source_lease;
 pub(crate) use el1_source_lease::{InstalledEl1SourceScope, walked::InstalledWalkedSource};
 pub(crate) use source_lease::InstalledM0SourceScope;

@@ -1,8 +1,6 @@
 //! Integer ZA vector arithmetic over the checked extended execution context.
 use alloc::vec::Vec;
-#[path = "integer_matrix/long.rs"]
 mod long;
-#[path = "integer_matrix/outer.rs"]
 mod outer;
 
 use crate::{

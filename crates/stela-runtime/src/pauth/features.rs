@@ -99,5 +99,4 @@ fn check_ids_for(
 }
 
 #[cfg(test)]
-#[path = "features/lr_tests.rs"]
 mod lr_tests;

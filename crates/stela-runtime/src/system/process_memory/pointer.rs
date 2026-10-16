@@ -175,5 +175,4 @@ impl FixedProcessMemoryControls {
 }
 
 #[cfg(test)]
-#[path = "pointer/tests.rs"]
 mod tests;

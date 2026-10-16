@@ -384,5 +384,4 @@ pub(crate) fn emit_context(
 }
 
 #[cfg(test)]
-#[path = "exclusive/tests.rs"]
 mod tests;

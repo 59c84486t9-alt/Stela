@@ -8,12 +8,9 @@ use super::pstate::{DAIF_MASK, MteFeature, NZCV_MASK, SP_SELECT_MASK, TCO_MASK};
 use crate::memory::tags::{TagGenerationControls, TagGenerationState, TagRandomization};
 use stela_compiler::GuestState;
 
-#[path = "state/pacm.rs"]
 mod pacm;
 pub use pacm::{PSTATE_PACM_MASK, PSTATE_PACM_SHIFT, Pacm, PacmStateFeature};
-#[path = "state/higher_el.rs"]
 pub mod higher_el;
-#[path = "state/stacks.rs"]
 mod stacks;
 use super::identification_snapshot::Snapshot;
 use alloc::sync::Arc;
@@ -737,5 +734,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "state/pacm_tests.rs"]
 mod pacm_tests;

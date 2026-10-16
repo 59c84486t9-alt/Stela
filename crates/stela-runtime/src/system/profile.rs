@@ -362,5 +362,4 @@ mod base_spe_tests {
 }
 
 #[cfg(test)]
-#[path = "profile/pfar_tests.rs"]
 mod pfar_tests;

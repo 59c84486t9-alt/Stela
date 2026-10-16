@@ -5,12 +5,9 @@
 
 use core::ffi::c_void;
 
-#[path = "memory/operation.rs"]
 mod operation;
 pub use operation::{MemoryOperationClass, MemoryOrder};
-#[path = "memory/address.rs"]
 pub mod address;
-#[path = "memory/exclusive.rs"]
 pub mod exclusive;
 
 pub const MEMORY_CONTEXT_VERSION: u32 = 1;

@@ -152,5 +152,4 @@ fn no_effect(error: String) -> EffectFailure<String> {
 }
 
 #[cfg(test)]
-#[path = "publication/tests.rs"]
 mod tests;

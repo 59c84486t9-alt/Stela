@@ -167,5 +167,4 @@ impl<P: DataPolicy> MemoryThread<P> {
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "scalar/tests.rs"]
 mod tests;

@@ -87,5 +87,4 @@ pub fn complete(
 }
 
 #[cfg(test)]
-#[path = "immediate/tests.rs"]
 mod tests;

@@ -360,5 +360,4 @@ impl Request {
 }
 
 #[cfg(test)]
-#[path = "barriers/tests.rs"]
 mod tests;

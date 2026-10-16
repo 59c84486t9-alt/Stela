@@ -4,10 +4,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-#[path = "memory/address.rs"]
 mod address;
 pub use address::CheckedAddressProfile;
-#[path = "memory/pointer.rs"]
 mod pointer;
 pub(crate) use pointer::CheckedOperation;
 

@@ -8,9 +8,7 @@ use fixture::*;
 use std::sync::Arc;
 use stela_compiler::{TargetCpu, aarch64::scalable::ScalableMode, context::memory::MemoryStatus};
 
-#[path = "tests/fixture.rs"]
 mod fixture;
-#[path = "tests/retained.rs"]
 mod retained;
 
 #[test]

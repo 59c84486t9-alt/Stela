@@ -6,9 +6,7 @@
 //! This leaf owns no architectural bank, RAM, callback or monitor and performs
 //! no memory access. It cannot replace PhysicalAddressSpace or read_descriptor.
 
-#[path = "m0_read/pair.rs"]
 pub(crate) mod pair;
-#[path = "m0_read/pair_ram.rs"]
 mod pair_ram;
 #[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) use pair_ram::tests as pair_read_fixtures;
@@ -274,16 +272,13 @@ impl M0ScalarReadIntent {
 }
 
 #[cfg(test)]
-#[path = "m0_read/tests.rs"]
 mod tests;
 
 // Private implementation remains unregistered until actual producers close.
-#[path = "m0_read/ram.rs"]
 mod ram;
 pub(crate) use ram::{
     M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram_scalar,
 };
 
 // Canonical shared-operand metadata only; no physical/source/PE authority.
-#[path = "m0_read/scalar.rs"]
 mod scalar;

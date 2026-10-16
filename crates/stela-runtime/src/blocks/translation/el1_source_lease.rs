@@ -130,7 +130,6 @@ impl<'run> InstalledEl1SourceScope<'run> {
     }
 }
 
-#[path = "el1_source_lease/walked.rs"]
 pub(super) mod walked;
 impl<'run> InstalledEl1SourceScope<'run> {
     /// Readonly enabled fetch/refill loan. Existing MMU-off admission is intact.

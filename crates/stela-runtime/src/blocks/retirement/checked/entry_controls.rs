@@ -145,5 +145,4 @@ impl ProcessEntryControls {
 }
 
 #[cfg(test)]
-#[path = "entry_controls/tests.rs"]
 mod tests;

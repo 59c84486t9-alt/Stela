@@ -233,5 +233,4 @@ fn tag_store_status(error: TagStoreError) -> MemoryStatus {
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
-#[path = "tag_transfer/tests.rs"]
 mod tests;

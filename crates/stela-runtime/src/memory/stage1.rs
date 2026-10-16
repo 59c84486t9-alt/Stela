@@ -26,11 +26,8 @@
 //! A fresh walk observes physical descriptors on every invocation; no TLB
 //! invalidation or architectural DSB/ISB effects are synthesized here.
 
-#[path = "stage1/config.rs"]
 mod config;
-#[path = "stage1/disabled.rs"]
 mod disabled;
-#[path = "stage1/walk.rs"]
 mod walk;
 
 pub use config::{
@@ -217,5 +214,4 @@ pub fn translate(
 }
 
 #[cfg(test)]
-#[path = "stage1/tests.rs"]
 mod tests;
