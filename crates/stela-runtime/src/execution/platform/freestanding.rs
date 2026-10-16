@@ -1,5 +1,5 @@
 //! Native-image calls in the freestanding build.
-use super::{
+use crate::execution::{
     boot_frames::{BootFrames, FrameError},
     native_image::NativeImage,
 };
@@ -28,8 +28,10 @@ impl Mapping {
         &self,
         state: &mut GuestState,
         context: &mut ExecutionContext,
-    ) -> core::result::Result<super::ObservedNativeCall<BlockExit, StorageError>, StorageError>
-    {
+    ) -> core::result::Result<
+        crate::execution::ObservedNativeCall<BlockExit, StorageError>,
+        StorageError,
+    > {
         // SAFETY: the caller upholds the ownership and ABI contract;
         // `NativeImage` borrows this checked frame allocation.
         unsafe { NativeImage::borrow(&self.frames).call_context_block(state, context) }
@@ -40,8 +42,10 @@ impl Mapping {
     pub(crate) unsafe fn call_block_observed(
         &self,
         state: &mut GuestState,
-    ) -> core::result::Result<super::ObservedNativeCall<BlockExit, StorageError>, StorageError>
-    {
+    ) -> core::result::Result<
+        crate::execution::ObservedNativeCall<BlockExit, StorageError>,
+        StorageError,
+    > {
         unsafe { NativeImage::borrow(&self.frames).call_block(state) }
     }
 
