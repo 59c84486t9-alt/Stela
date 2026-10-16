@@ -9,7 +9,15 @@ name = "stela"
 path = "src/main.rs"
 
 [workspace]
-members = ["crates/stela-core", "crates/stela-compiler", "crates/stela-runtime", "crates/stela-state"]
+members = [
+    "crates/stela-core",
+    "crates/stela-compiler",
+    "crates/stela-runtime",
+    "crates/stela-state",
+    "xtask",
+]
+# Freestanding x86_64-unknown-none image with its own linker script and lockfile.
+exclude = ["crates/stela-boot"]
 default-members = ["."]
 resolver = "2"
 

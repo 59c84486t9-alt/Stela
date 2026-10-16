@@ -1,5 +1,5 @@
 [package]
-name = "stela-boot-development"
+name = "stela-boot"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -8,9 +8,9 @@ build = "build.rs"
 [workspace]
 
 [dependencies]
-stela-runtime = { path = "../../crates/stela-runtime", default-features = false }
-stela-compiler = { path = "../../crates/stela-compiler", default-features = false }
-stela-core = { path = "../../crates/stela-core", default-features = false }
+stela-runtime = { path = "../stela-runtime", default-features = false }
+stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-core = { path = "../stela-core", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 # The none target cannot codegen the optional hardware intrinsics in the local
 # LLVM toolchain. Use the crate's real baseline SHA implementation.
