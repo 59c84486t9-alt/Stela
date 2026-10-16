@@ -6,7 +6,6 @@ use std::ptr::NonNull;
 mod callbacks;
 mod checked_finalization;
 mod exclusive;
-mod identity;
 mod quantities;
 mod reservations;
 
