@@ -3,6 +3,7 @@ pub mod aea;
 pub mod archive;
 pub mod disk;
 pub mod manifest;
+pub mod payload;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use reqwest::{Url, blocking::Client, header, redirect::Policy};

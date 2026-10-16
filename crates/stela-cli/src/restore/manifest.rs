@@ -16,6 +16,8 @@ pub struct Component {
 
 #[derive(Debug, Serialize)]
 pub struct Identity {
+    /// The identity's position in `BuildIdentities`.
+    pub index: u32,
     pub product_type: Option<String>,
     pub ap_chip_id: Option<String>,
     pub ap_board_id: Option<String>,
@@ -54,10 +56,12 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
         .as_dictionary()
         .context("restore manifest root is not a dictionary")?;
     let mut identities = vec![];
-    for identity in root
+    for (index, identity) in root
         .get("BuildIdentities")
         .and_then(Value::as_array)
         .context("missing restore identities")?
+        .iter()
+        .enumerate()
     {
         let identity = identity
             .as_dictionary()
@@ -113,6 +117,7 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
                 .map(str::to_owned)
         };
         identities.push(Identity {
+            index: u32::try_from(index)?,
             product_type,
             ap_chip_id: text("ApChipID"),
             ap_board_id: text("ApBoardID"),

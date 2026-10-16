@@ -7,6 +7,16 @@
 //! leaves that backup alone. Every other key keeps its value
 //! and order; only the XML layout is rewritten. `uninstall` removes the entry
 //! and those files.
+//!
+//! With `--ipsw`, `install` also writes a restore payload for `stela.efi`
+//! under `EFI/stela/images/<build>/` on the ESP or another volume of the
+//! same USB: FAT32-safe slices of the model's members, or the whole IPSW,
+//! and `payload.json` with every member's SHA-256 and the public AEA key
+//! responses. `uninstall` leaves payloads alone.
+pub use crate::restore::payload::{
+    PayloadLayout, SYNTHETIC_BUILD, SYNTHETIC_MODEL, WriteOptions as PayloadOptions,
+    synthetic_ipsw, write as write_payload,
+};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use plist::{Dictionary, Value};
@@ -16,6 +26,7 @@ use std::{
     io::{Cursor, Write},
     path::{Path, PathBuf},
 };
+use stela_runtime::payload::MAX_SLICE_BYTES;
 
 /// The tool's file name under `EFI/OC/Tools`, which identifies the entry.
 pub const TOOL: &str = "Stela.efi";
@@ -61,6 +72,23 @@ pub struct Install {
     /// Mount options for `stela.cfg`; omit to keep the installed file.
     #[arg(long, allow_hyphen_values = true)]
     pub options: Option<String>,
+    /// Write this IPSW's restore payload as well.
+    #[arg(long)]
+    pub ipsw: Option<PathBuf>,
+    /// The Mac model whose identities the payload carries.
+    #[arg(long, default_value = "Mac14,3", requires = "ipsw")]
+    pub model: String,
+    /// The volume root for the payload; defaults to `--esp`.
+    #[arg(long, requires = "ipsw")]
+    pub payload_root: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = PayloadLayout::Split, requires = "ipsw")]
+    pub payload_layout: PayloadLayout,
+    /// Largest slice of a split payload; FAT32 allows 4 GiB - 1.
+    #[arg(long, default_value_t = MAX_SLICE_BYTES, hide = true)]
+    pub slice_bytes: u64,
+    /// Leave out the public AEA keys; the restore then needs the network.
+    #[arg(long, requires = "ipsw")]
+    pub no_aea_keys: bool,
 }
 
 #[derive(Args)]
@@ -205,9 +233,25 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
     if let Some(options) = &command.options {
         fs::write(esp.join(OPTIONS), options)?;
     }
+    // The payload goes before the entry, so OpenCore never lists Stela with
+    // a half-written payload.
+    let payload = match &command.ipsw {
+        Some(ipsw) => Some(crate::restore::payload::write(
+            &crate::restore::payload::WriteOptions {
+                image: ipsw,
+                model: &command.model,
+                root: command.payload_root.as_deref().unwrap_or(esp),
+                layout: command.payload_layout,
+                slice_bytes: command.slice_bytes,
+                fetch_keys: !command.no_aea_keys,
+            },
+        )?),
+        None => None,
+    };
     // The entry goes in last, so OpenCore never lists a missing tool.
     config.write()?;
     Ok(json!({
+        "payload": payload,
         "config": config.path,
         "backup": esp.join(BACKUP),
         "entry": index,

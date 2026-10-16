@@ -183,6 +183,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 image: image.clone(),
                 source: Some(module),
                 options: Some(options.clone()),
+                ipsw: None,
+                model: "Mac14,3".into(),
+                payload_root: None,
+                payload_layout: efi::PayloadLayout::Split,
+                slice_bytes: stela_runtime::payload::MAX_SLICE_BYTES,
+                no_aea_keys: false,
             })?;
         }
     }

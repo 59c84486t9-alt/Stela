@@ -40,6 +40,14 @@ pub(crate) struct ImageManifest {
     /// Also read and hash every component member of the selected identities.
     #[arg(long)]
     hash_members: bool,
+    /// Also hash every member the model's identities name, list the global
+    /// `apticket` manifests and each AEA member's key URL. Needs `--model`.
+    #[arg(long, requires = "model")]
+    payload: bool,
+    /// Fetch each AEA member's public key response into this directory as
+    /// 0600 files; the report lists them by SHA-256 only.
+    #[arg(long, requires = "payload")]
+    aea_keys: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -122,13 +130,21 @@ impl ImageManifest {
             model,
             output,
             hash_members,
+            payload,
+            aea_keys,
         } = self;
         ensure!(
             !output.exists(),
             "report exists; choose a new --output path"
         );
         let report = restore::archive::manifest(&input, model.as_deref(), hash_members)?;
-        write_json(&output, &report)?;
+        if let (true, Some(model)) = (payload, model.as_deref()) {
+            let mut value = serde_json::to_value(&report)?;
+            value["payload"] = restore::payload::inventory(&input, model, aea_keys.as_deref())?;
+            write_json(&output, &value)?;
+        } else {
+            write_json(&output, &report)?;
+        }
         eprintln!(
             "macOS {} build {}: {} matching identities; {}",
             report.product_version,

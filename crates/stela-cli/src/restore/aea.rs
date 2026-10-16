@@ -164,17 +164,25 @@ pub fn inspect(path: &Path) -> Result<Metadata> {
         "AEA input is no longer a regular file"
     );
     let length = file.metadata()?.len();
+    inspect_stream(path.canonicalize()?, length, &mut file)
+}
+
+/// Read the metadata at the start of an AEA1 stream of `length` bytes, such
+/// as an IPSW member that is still inside its archive.
+pub fn inspect_stream(source: PathBuf, length: u64, stream: &mut impl Read) -> Result<Metadata> {
     let mut header = [0u8; 12];
-    file.read_exact(&mut header)
+    stream
+        .read_exact(&mut header)
         .context("truncated AEA1 header")?;
     ensure!(&header[..4] == b"AEA1", "expected AEA1 header");
     let size = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
     ensure!(size <= MAX_METADATA, "AEA metadata exceeds 64 KiB");
     let mut bytes = header.to_vec();
     bytes.resize(12 + size, 0);
-    file.read_exact(&mut bytes[12..])
+    stream
+        .read_exact(&mut bytes[12..])
         .context("truncated AEA metadata")?;
-    parse(path.canonicalize()?, length, &bytes)
+    parse(source, length, &bytes)
 }
 
 fn receipt_path(output: &Path) -> PathBuf {
@@ -216,6 +224,34 @@ pub fn fetch_key(input: &Path, output: &Path) -> Result<serde_json::Value> {
         "key output or receipt exists"
     );
     let metadata = inspect(input)?;
+    let key = fetch_public_key(&metadata)?;
+    ensure!(
+        inspect(input)?.header_sha256 == metadata.header_sha256,
+        "AEA metadata changed during key fetch"
+    );
+    let receipt = serde_json::json!({
+        "kind":"public_apple_aea_key_fetch", "schema_version":1, "metadata":metadata,
+        "request_url":key.request_url, "final_url":key.final_url, "content_type":key.content_type,
+        "key_bytes":key.body.len(), "key_file_sha256":sha256(&key.body), "key_body_omitted":true,
+        "cli_executable_sha256":sha256(&std::fs::read(std::env::current_exe()?)?),
+        "limits":"Verified HTTPS acquisition of a public FCS recipient key, not archive authentication or decryption. PEM shape only; the native CryptoKit decoder validates the P-256 private key. Key file publishes before its receipt without replacement; an interrupted publication can leave an unreceipted key file."
+    });
+    publish(output, &key.body, &receipt)?;
+    Ok(receipt)
+}
+
+/// A public FCS key response, as Apple's key server returned it.
+pub struct PublicKey {
+    pub request_url: String,
+    pub final_url: String,
+    pub content_type: Option<String>,
+    /// The PKCS8 PEM text.
+    pub body: Vec<u8>,
+}
+
+/// Fetch the public key an archive's metadata names. Only Apple's public
+/// key servers are contacted, and only for the identifier in the metadata.
+pub fn fetch_public_key(metadata: &Metadata) -> Result<PublicKey> {
     let url = key_url(
         metadata
             .public_key_url
@@ -258,19 +294,12 @@ pub fn fetch_key(input: &Path, output: &Path) -> Result<serde_json::Value> {
             && text.trim_end().ends_with("-----END PRIVATE KEY-----"),
         "unsupported public AEA key response; expected PKCS8 PEM"
     );
-    ensure!(
-        inspect(input)?.header_sha256 == metadata.header_sha256,
-        "AEA metadata changed during key fetch"
-    );
-    let receipt = serde_json::json!({
-        "kind":"public_apple_aea_key_fetch", "schema_version":1, "metadata":metadata,
-        "request_url":url.as_str(), "final_url":final_url, "content_type":content_type,
-        "key_bytes":body.len(), "key_file_sha256":sha256(&body), "key_body_omitted":true,
-        "cli_executable_sha256":sha256(&std::fs::read(std::env::current_exe()?)?),
-        "limits":"Verified HTTPS acquisition of a public FCS recipient key, not archive authentication or decryption. PEM shape only; the native CryptoKit decoder validates the P-256 private key. Key file publishes before its receipt without replacement; an interrupted publication can leave an unreceipted key file."
-    });
-    publish(output, &body, &receipt)?;
-    Ok(receipt)
+    Ok(PublicKey {
+        request_url: url.to_string(),
+        final_url,
+        content_type,
+        body,
+    })
 }
 
 /// The FCS response's encapsulated key and wrapped archive key.
