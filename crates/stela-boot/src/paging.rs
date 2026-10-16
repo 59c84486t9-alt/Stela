@@ -124,7 +124,7 @@ pub unsafe fn install(transport: &Transport) -> Result<(), &'static str> {
     let data_start = ptr::addr_of!(__data_start) as usize;
     let end = image_end();
     if end > IMAGE_TABLES * LARGE_PAGE || !transport.normal_ram(image_start, end - image_start)? {
-        return Err("linked boot image is outside actual RAM/window");
+        return Err("linked boot image is outside RAM/window");
     }
     if transport.overlaps(image_start, end - image_start)? {
         return Err("trusted-loader metadata/source overlaps boot image/heap/tables");

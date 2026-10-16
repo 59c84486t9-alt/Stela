@@ -143,7 +143,7 @@ pub(super) unsafe fn call(
                 ensure!(
                     loan.context().has_supported_header()
                         && loan.context().memory == core::ptr::from_mut(view).cast(),
-                    "actual checked context association changed after native call"
+                    "checked context association changed after native call"
                 );
                 let status = MemoryStatus::from_code(view.fault_kind).ok_or_else(|| {
                     anyhow::anyhow!("unknown checked memory status {}", view.fault_kind)

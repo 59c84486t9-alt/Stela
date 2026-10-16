@@ -154,7 +154,7 @@ impl Prepared {
                 let result: Result<GuestAddress> = (|| {
                     let process = thread
                         .process()
-                        .context("actual process identity owner disappeared")?;
+                        .context("process identity owner disappeared")?;
                     let completion = darwin::process::completion(pending.request(), process)?;
                     let pc = pending.complete_registers(registers, completion)?;
                     event.completion = Some(completion);

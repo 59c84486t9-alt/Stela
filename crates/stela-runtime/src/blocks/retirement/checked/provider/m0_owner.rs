@@ -172,19 +172,19 @@ impl<'pe> M0Owner<'pe> {
     fn check_resources(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.memory.address_space() == Some(self.address_space),
-            "actual M0 namespace differs"
+            "M0 namespace differs"
         );
         anyhow::ensure!(
             self.context.has_supported_header(),
-            "actual M0 execution context header differs"
+            "M0 execution context header differs"
         );
         self.execution.check()?;
         self.pending
             .check_registry()
-            .map_err(|error| anyhow::anyhow!("actual M0 producer registry: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 producer registry: {error:?}"))?;
         self.memory
             .check_event_endpoint(self.endpoint)
-            .map_err(|error| anyhow::anyhow!("actual M0 PE monitor: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 PE monitor: {error:?}"))?;
         if let Some(platform) = self.platform {
             platform.check()?;
         }
@@ -219,7 +219,7 @@ impl Owner for M0Owner<'_> {
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         self.memory
             .execution_loan()
-            .map_err(|error| anyhow::anyhow!("actual M0 exclusion: {error:?}"))
+            .map_err(|error| anyhow::anyhow!("M0 exclusion: {error:?}"))
     }
 
     fn prepare_source(
@@ -265,14 +265,14 @@ impl Owner for M0Owner<'_> {
     ) -> anyhow::Result<()> {
         system
             .check_lower_el_storage()
-            .map_err(|error| anyhow::anyhow!("actual M0 lower-EL storage: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 lower-EL storage: {error:?}"))?;
         // This EL1 profile has no LR or PACM lifecycle; re-check the storage
         // before native entry, including a zero PACM.
         self.execution.check_snapshot(None, system)?;
         self.check_resources()?;
         outer
             .check_thread_domain(&*self.memory)
-            .map_err(|error| anyhow::anyhow!("actual M0 outer domain: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 outer domain: {error:?}"))?;
         anyhow::ensure!(
             bound.runtime.profile()
                 == match self.cohort {
@@ -282,7 +282,7 @@ impl Owner for M0Owner<'_> {
                     InstalledCohort::El1Integer => BlockProfile::El1M0IntegerV1,
                     InstalledCohort::El1Platform => BlockProfile::El1PlatformV1,
                 },
-            "M0 backend requires actual staged M0 source profile"
+            "M0 backend requires staged M0 source profile"
         );
         anyhow::ensure!(
             bound.entry.address_space() == self.address_space,
@@ -397,7 +397,7 @@ impl Owner for M0Owner<'_> {
             controls: &mut *self.controls,
             platform: self
                 .platform
-                .ok_or_else(|| anyhow::anyhow!("actual context platform absent"))?,
+                .ok_or_else(|| anyhow::anyhow!("context platform absent"))?,
             memory: &mut *self.memory,
             execution: self.execution,
             pending: &self.pending,
@@ -422,7 +422,7 @@ impl Owner for M0Owner<'_> {
         _outer: Option<&MemoryExecutionLoan>,
     ) -> HelperOutcome {
         HelperOutcome::Indeterminate(anyhow::anyhow!(
-            "M0 backend has no helper service; actual PE must remain blocked"
+            "M0 backend has no helper service; PE must remain blocked"
         ))
     }
     fn complete_trap(

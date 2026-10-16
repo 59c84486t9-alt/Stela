@@ -87,9 +87,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 .ok_or_else(|| anyhow::anyhow!("context original execution exclusion absent"))?;
             let (instruction, prefix, blocks) = {
                 let bound = BoundSource::new(&*runtime, self.pe.thread.pc)?;
-                let instruction = bound.el1_carrier_intent()?.ok_or_else(|| {
-                    anyhow::anyhow!("actual context source has no System carrier")
-                })?;
+                let instruction = bound
+                    .el1_carrier_intent()?
+                    .ok_or_else(|| anyhow::anyhow!("context source has no System carrier"))?;
                 anyhow::ensure!(
                     instruction.is_el1_context_operation(),
                     "context operation has no mounted owner"
@@ -185,7 +185,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             let fetched = resources
                 .controls
                 .fetch(instruction.instruction_pc.0, self.pe.system, &mut scope)
-                .map_err(|error| anyhow::anyhow!("actual context source fetch: {error:?}"))?;
+                .map_err(|error| anyhow::anyhow!("context source fetch: {error:?}"))?;
             anyhow::ensure!(
                 fetched.pc() == instruction.instruction_pc.0
                     && fetched.word() == instruction.word
@@ -262,7 +262,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 self.pe.system,
                                 &self.pe.thread.registers,
                             )
-                            .map_err(|error| anyhow::anyhow!("actual ERET plan: {error:?}"))?,
+                            .map_err(|error| anyhow::anyhow!("ERET plan: {error:?}"))?,
                         ),
                         Operation::Undefined { .. }
                         | Operation::SupervisorCall { .. }
@@ -294,9 +294,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     &self.pe.thread.registers,
                                     event,
                                 )
-                                .map_err(|error| {
-                                    anyhow::anyhow!("actual exception plan: {error:?}")
-                                })?,
+                                .map_err(|error| anyhow::anyhow!("exception plan: {error:?}"))?,
                             )
                         }
                         _ => anyhow::bail!(
@@ -315,7 +313,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             &mut scope,
                         )
                         .map_err(|error| {
-                            anyhow::anyhow!("actual exception context preparation: {error:?}")
+                            anyhow::anyhow!("exception context preparation: {error:?}")
                         })?;
                     let mut services = BorrowedExceptionServices::new(
                         publication,
@@ -350,14 +348,14 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         .as_ref()
                         .copied()
                         .map(GuestAddress)
-                        .map_err(|error| anyhow::anyhow!("actual exception effect: {error:?}"));
+                        .map_err(|error| anyhow::anyhow!("exception effect: {error:?}"));
                     if let Some(report) = observation {
                         report.effects = core::mem::take(&mut services.effects);
                         report.exception_result = Some(result);
                     }
                     next?
                 }
-                _ => anyhow::bail!("source has no actual context effect owner"),
+                _ => anyhow::bail!("source has no context effect owner"),
             };
             // Effects and observations come before the single PC store.
             self.pe.thread.pc = next_pc;
@@ -415,7 +413,7 @@ fn control_continuation(
             Ok(GuestAddress(*next_pc))
         }
         Ok(Completion::FetchRequired { pc, .. }) => Ok(GuestAddress(*pc)),
-        Err(error) => anyhow::bail!("actual control publication: {error:?}"),
+        Err(error) => anyhow::bail!("control publication: {error:?}"),
     }
 }
 

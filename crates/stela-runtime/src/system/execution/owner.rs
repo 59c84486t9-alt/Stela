@@ -146,18 +146,15 @@ impl<'pe, 'backend>
     /// Queue software-debugger input (no hardware debugger). The PE must itself
     /// halt.
     pub(crate) fn queue_editr(&mut self, route_slot: usize, word: u32) -> anyhow::Result<()> {
-        anyhow::ensure!(self.authority.halted(), "actual PE is not Halted");
+        anyhow::ensure!(self.authority.halted(), "PE is not Halted");
         let debug = self
             .debug
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("debug lifecycle unavailable"))?;
-        anyhow::ensure!(
-            debug.external_access(),
-            "actual external debug access unavailable"
-        );
+        anyhow::ensure!(debug.external_access(), "external debug access unavailable");
         debug
             .qualify_halted_boundary()
-            .map_err(|e| anyhow::anyhow!("actual halted gate: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("halted gate: {e:?}"))?;
         self.backend.enqueue_editr(route_slot, word)
     }
     pub(crate) fn run_editr(&mut self) -> crate::blocks::retirement::checked::OwnedDebugOutcome {

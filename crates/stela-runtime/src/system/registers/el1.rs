@@ -143,7 +143,7 @@ pub fn resolve(
         return Resolution::Unsupported("EL1 register Rt exceeds five bits");
     }
     if context.profile.current_el != state.current_el() {
-        return Resolution::Unsupported("EL1 register context differs from actual PSTATE.EL");
+        return Resolution::Unsupported("EL1 register context differs from PSTATE.EL");
     }
     if !context.aa64 || context.profile.current_el == ExceptionLevel::El0 {
         return Resolution::Undefined;

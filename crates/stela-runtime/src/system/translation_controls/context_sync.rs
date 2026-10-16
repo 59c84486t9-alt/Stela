@@ -23,7 +23,7 @@ impl TranslationControls {
             // An authenticated return or failure needs the PAuth service before
             // it can be a synchronization cause.
             return Err(ControlError::Unavailable(
-                "exception source needs another actual context service",
+                "exception source needs another context service",
             ));
         }
         services

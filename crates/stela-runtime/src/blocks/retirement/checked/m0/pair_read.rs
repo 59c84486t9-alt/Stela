@@ -71,7 +71,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         );
         anyhow::ensure!(
             self.pe.thread.pc == bound.entry.entry(),
-            "M0 actual source PC differs"
+            "M0 source PC differs"
         );
         let word = u32::from_le_bytes(bound.source.try_into()?);
         let instruction = Decoder
@@ -80,14 +80,14 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let stela_compiler::block::el1_platform::Intent::Read64Pair(descriptor) =
             bound.el1_platform_intent()?
         else {
-            anyhow::bail!("actual EL1 source is not a canonical M0 pair read");
+            anyhow::bail!("EL1 source is not a canonical M0 pair read");
         };
         let source = M0ReadPairSource::from_source(&instruction, word)
             .map_err(|failure| anyhow::anyhow!("M0 pair read source shape: {failure:?}"))?;
         anyhow::ensure!(
             descriptor.source_pc() == instruction.pc
                 && descriptor.requirements() == source.requirements(),
-            "actual M0 pair read descriptor/requirements differ"
+            "M0 pair read descriptor/requirements differ"
         );
         anyhow::ensure!(
             bound.memory_requirements()? == source.requirements(),
@@ -118,9 +118,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             };
             checks.check(outer)?;
             let installed = sources.source_scope().map_err(anyhow::Error::msg)?;
-            let platform = platform.ok_or_else(|| {
-                anyhow::anyhow!("actual pair-read platform identification absent")
-            })?;
+            let platform = platform
+                .ok_or_else(|| anyhow::anyhow!("pair-read platform identification absent"))?;
             let input = M0PairReadSourceInput::new(
                 &ConsumerKey(()),
                 bound,
@@ -209,13 +208,13 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 anyhow::ensure!(next_pc == intent.next_pc, "M0 continuation differs");
                 anyhow::ensure!(
                     self.pe.thread.pc == bound.entry.entry(),
-                    "M0 actual PC changed before settlement"
+                    "M0 PC changed before settlement"
                 );
                 let mut permitted = self.pe.thread.registers.clone();
                 let values = retained
                     .session
                     .completed_values()
-                    .ok_or_else(|| anyhow::anyhow!("M0 actual pair results absent"))?;
+                    .ok_or_else(|| anyhow::anyhow!("M0 pair results absent"))?;
                 for (destination, value) in intent.destinations.into_iter().zip(values) {
                     match destination {
                         stela_compiler::aarch64::Register::X(index) => {
@@ -249,7 +248,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         precommit_failure, ..
                     }) => {
                         *precommit_failure = Some(failure);
-                        format!("M0 actual session precommit: {precommit_failure:?}")
+                        format!("M0 session precommit: {precommit_failure:?}")
                     }
                     _ => unreachable!("same invocation retained its native report"),
                 };

@@ -414,7 +414,7 @@ impl Fixture {
     ) -> Self {
         assert!(
             compiler_target.supported(),
-            "actual host lacks required native test recipe"
+            "host lacks required native test recipe"
         );
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         let code_offset = guest_base as usize & (CODE_PAGE_BYTES - 1);

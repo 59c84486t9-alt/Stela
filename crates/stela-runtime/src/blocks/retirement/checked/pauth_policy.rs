@@ -44,17 +44,17 @@ pub(super) fn qualify(
         (APA_QARMA5_FAULTING_COMBINED, 0, 0) => pauth::Version::FaultingCombined,
         _ => {
             pauth::features::LinkRegisterPauthCapability::from_profile(ids)
-                .map_err(|error| anyhow::anyhow!("actual LR tuple: {error:?}"))?;
+                .map_err(|error| anyhow::anyhow!("LR tuple: {error:?}"))?;
             pauth::Version::FaultingCombined
         }
     };
     anyhow::ensure!(
         context.version() == version,
-        "PAuth key algorithm differs from the actual identification owner"
+        "PAuth key algorithm differs from the identification owner"
     );
     anyhow::ensure!(
         tcr_el1 & TCR_T0SZ_MASK == TCR_VA47_T0SZ,
-        "PAuth requires actual lower VA47 controls"
+        "PAuth requires lower VA47 controls"
     );
     anyhow::ensure!(
         !matches!(operation, Op::GenericCode(_) | Op::Load(_)),
@@ -65,10 +65,7 @@ pub(super) fn qualify(
     if data {
         // Pointer admission separately requires bit 55 clear. Data helpers keep
         // the tag byte, matching TBI0 for the lower range.
-        anyhow::ensure!(
-            tcr_el1 & TCR_TBI0 != 0,
-            "PAuth data domain requires actual TBI0"
-        );
+        anyhow::ensure!(tcr_el1 & TCR_TBI0 != 0, "PAuth data domain requires TBI0");
     } else {
         // InsertPAC chooses its global selector from BOTH ranges' effective
         // instruction TBI, even for an input with invalid extension bits.
@@ -76,7 +73,7 @@ pub(super) fn qualify(
         let upper_itbi = tcr_el1 & TCR_TBI1 != 0 && tcr_el1 & TCR_TBID1 == 0;
         anyhow::ensure!(
             !lower_itbi && !upper_itbi,
-            "PAuth instruction domain requires both actual instruction TBI ranges off"
+            "PAuth instruction domain requires both instruction TBI ranges off"
         );
     }
     if let Some(key) = operation.required_key() {
@@ -88,7 +85,7 @@ pub(super) fn qualify(
         };
         anyhow::ensure!(
             sctlr_el1 & enable != 0 && context.has_key(key),
-            "PAuth disabled controls or unavailable actual key are unsupported"
+            "PAuth disabled controls or unavailable key are unsupported"
         );
     }
     Ok(())
@@ -108,7 +105,7 @@ pub(super) fn qualify_pointer(
     let register = match operation {
         Op::SignIbSp | Op::AuthenticateIbSp | Op::ReturnIbSp | Op::ReturnIaSp => LINK_REGISTER,
         Op::Sign1716 { .. } | Op::Authenticate1716 { .. } => HINT_POINTER_REGISTER,
-        Op::LinkRegister(_) => anyhow::bail!("LR operands require actual borrowed control service"),
+        Op::LinkRegister(_) => anyhow::bail!("LR operands require borrowed control service"),
         Op::Sign { destination, .. }
         | Op::Authenticate { destination, .. }
         | Op::Strip { destination, .. } => destination,

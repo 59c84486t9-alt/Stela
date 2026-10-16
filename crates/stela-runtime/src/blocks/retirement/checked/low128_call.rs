@@ -34,8 +34,8 @@ pub(super) fn qualify(
 ) -> anyhow::Result<()> {
     let requirements = bound.memory_requirements()?;
     let ids = fp.identification_snapshot();
-    let absent = NoSme::from_snapshot(ids)
-        .map_err(|error| anyhow::anyhow!("actual SME subset: {error:?}"))?;
+    let absent =
+        NoSme::from_snapshot(ids).map_err(|error| anyhow::anyhow!("SME subset: {error:?}"))?;
     fp_access::with_nonstreaming_low128(
         ids,
         fp,
@@ -48,10 +48,10 @@ pub(super) fn qualify(
                 bound.check_descriptor(&bound.entry)?;
                 context
                     .check_system(system)
-                    .map_err(|error| anyhow::anyhow!("actual FP System: {error:?}"))?;
+                    .map_err(|error| anyhow::anyhow!("FP System: {error:?}"))?;
                 context
                     .check_guest(actual_guest)
-                    .map_err(|error| anyhow::anyhow!("actual FP bank: {error:?}"))?;
+                    .map_err(|error| anyhow::anyhow!("FP bank: {error:?}"))?;
                 controls
                     .prepare_profile_with_low128(
                         &bound.entry,
@@ -64,12 +64,12 @@ pub(super) fn qualify(
                         memory,
                         Some(endpoint),
                     )
-                    .map_err(|error| anyhow::anyhow!("actual low128 preparation: {error:?}"))?;
+                    .map_err(|error| anyhow::anyhow!("low128 preparation: {error:?}"))?;
                 Ok(())
             })
         },
     )
-    .map_err(|error| anyhow::anyhow!("actual low128 access: {error:?}"))?
+    .map_err(|error| anyhow::anyhow!("low128 access: {error:?}"))?
 }
 
 /// The consumer already holds the native session and the domain exclusion, and
@@ -90,7 +90,7 @@ pub(super) fn call(
     let profile = bound.memory_profile()?;
     anyhow::ensure!(
         execution.has_supported_header(),
-        "unsupported actual checked context"
+        "unsupported checked context"
     );
     let requirements = bound.memory_requirements()?;
     let ids = fp.identification_snapshot();
@@ -98,7 +98,7 @@ pub(super) fn call(
         Ok(absent) => absent,
         Err(error) => {
             return Ok(NativeObservation::CpuDeclined(format!(
-                "actual SME subset: {error:?}"
+                "SME subset: {error:?}"
             )));
         }
     };
@@ -116,7 +116,7 @@ pub(super) fn call(
                 let prepared = match controls.prepare_profile_with_low128(&bound.entry,
                     profile, requirements, system, debug, context, actual_guest, memory, Some(endpoint)) {
                     Ok(prepared) => prepared,
-                    Err(error) => return NativeObservation::CpuDeclined(format!("actual low128 preparation: {error:?}")),
+                    Err(error) => return NativeObservation::CpuDeclined(format!("low128 preparation: {error:?}")),
                 };
                 if prepared.profile_id() != profile.process_memory_profile_id()
                     || prepared.requirements() != requirements {
@@ -140,8 +140,8 @@ pub(super) fn call(
                         // borrowed descriptor and bank still belong to the
                         // admitted source, requirements, map and native code.
                         bound.check_descriptor(actual_boundary)?;
-                        context.check_system(system).map_err(|error| anyhow::anyhow!("actual FP System: {error:?}"))?;
-                        context.check_guest(checked_guest).map_err(|error| anyhow::anyhow!("actual FP bank: {error:?}"))?;
+                        context.check_system(system).map_err(|error| anyhow::anyhow!("FP System: {error:?}"))?;
+                        context.check_guest(checked_guest).map_err(|error| anyhow::anyhow!("FP bank: {error:?}"))?;
                         let mut loan = ContextLoan::memory(execution, view);
                         native_invoked = true;
                         let carrier = bound.block.mapping.call_context_block(checked_guest, loan.context());
@@ -156,7 +156,7 @@ pub(super) fn call(
                         let carrier = carrier?;
                         anyhow::ensure!(loan.context().has_supported_header()
                             && loan.context().memory == core::ptr::from_mut(view).cast(),
-                            "actual checked context association changed after native call");
+                            "checked context association changed after native call");
                         let status = MemoryStatus::from_code(view.fault_kind)
                             .ok_or_else(|| anyhow::anyhow!("unknown checked status {}", view.fault_kind))?;
                         if status == MemoryStatus::Success {
@@ -184,7 +184,7 @@ pub(super) fn call(
                         native_invoked: Some(native_invoked), callback_failure, raw_memory, raw_returned_carrier,
                     },
                     // Before the callback no native/prefix effect happened.
-                    Err(error) if !callback_started => NativeObservation::CpuDeclined(format!("actual typed entry refused: {error:?}")),
+                    Err(error) if !callback_started => NativeObservation::CpuDeclined(format!("typed entry refused: {error:?}")),
                     // A context/owner failure after invocation is never converted
                     // into NoEffect, even if no valid ordinary carrier exists.
                     Err(error) => NativeObservation::InvocationFailed {
@@ -197,8 +197,6 @@ pub(super) fn call(
     );
     Ok(match result {
         Ok(observation) => observation,
-        Err(error) => {
-            NativeObservation::CpuDeclined(format!("actual low128 access refused: {error:?}"))
-        }
+        Err(error) => NativeObservation::CpuDeclined(format!("low128 access refused: {error:?}")),
     })
 }

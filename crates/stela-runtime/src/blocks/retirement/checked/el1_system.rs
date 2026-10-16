@@ -130,7 +130,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
     ) -> anyhow::Result<Option<OwnedStop>> {
         self.require_native()?;
         let Intent::System(instruction) = bound.el1_platform_intent()? else {
-            anyhow::bail!("actual source is not a mixed System carrier")
+            anyhow::bail!("source is not a mixed System carrier")
         };
         let outer = self
             .outer
@@ -145,9 +145,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 context,
                 checks,
             } = self.pe.backend.split_el1_resources()?;
-            let platform = platform.ok_or_else(|| {
-                anyhow::anyhow!("System effect actual implementation owner absent")
-            })?;
+            let platform = platform
+                .ok_or_else(|| anyhow::anyhow!("System effect implementation owner absent"))?;
             checks.check(outer)?;
             let context_snapshot = platform.context(self.pe.system)?;
             let scope = sources.el1_scope().map_err(anyhow::Error::msg)?;

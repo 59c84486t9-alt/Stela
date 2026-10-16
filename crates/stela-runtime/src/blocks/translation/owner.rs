@@ -61,7 +61,7 @@ impl InstalledCodeSources {
     ) -> Result<(Self, TranslationControls)> {
         ensure!(
             !immutable_sources.is_empty() || physical.owns_mutable_instruction_sources(),
-            "fresh source owner requires actual immutable or factory-owned mutable instruction owners"
+            "fresh source owner requires immutable or factory-owned mutable instruction owners"
         );
         super::super::platform::ensure_supported()?;
         physical
@@ -81,11 +81,11 @@ impl InstalledCodeSources {
                 _outer: None,
             };
             TranslationControls::install(readbacks, control_profile, memory, system, &mut initial)
-                .map_err(|error| anyhow::anyhow!("genuine M0 Initial installation: {error:?}"))?
+                .map_err(|error| anyhow::anyhow!("M0 Initial installation: {error:?}"))?
         };
         ensure!(
             matches!(context, ContextState::Installed(_)),
-            "genuine M0 Initial publication did not install its context"
+            "M0 Initial publication did not install its context"
         );
         Ok((
             Self {
@@ -248,11 +248,11 @@ impl InstalledM0Owner {
         ensure!(
             runtime.profile()
                 == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged),
-            "fresh M0 source owner requires the actual staged M0 compiler profile"
+            "fresh M0 source owner requires the staged M0 compiler profile"
         );
         ensure!(
             runtime.regions.is_empty() && runtime.loaded.is_empty(),
-            "fresh M0 source owner requires an unbound actual runtime"
+            "fresh M0 source owner requires an unbound runtime"
         );
         // SAFETY: this owner hands its physical and source resources to initial
         // publication under the contract above, after the profile and
@@ -292,7 +292,7 @@ impl InstalledM0Owner {
                 system,
                 source_pc.0,
             )
-            .map_err(|error| anyhow::anyhow!("genuine M0 initial source fetch: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 initial source fetch: {error:?}"))?;
         owner
             .runtime
             .bind_physical_instruction(scope.installed_snapshot(), reached)?;

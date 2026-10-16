@@ -74,11 +74,11 @@ impl PrivilegedOwner<'_> {
         self.qualify_debug_resources(system, debug, outer)?;
         debug
             .qualify_halted_boundary()
-            .map_err(|e| anyhow::anyhow!("actual halted boundary: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("halted boundary: {e:?}"))?;
         let Some(source) = self
             .producers
             .next_editr()
-            .map_err(|e| anyhow::anyhow!("actual queued EDITR: {e:?}"))?
+            .map_err(|e| anyhow::anyhow!("queued EDITR: {e:?}"))?
         else {
             return Ok(None);
         };
@@ -106,7 +106,7 @@ impl PrivilegedOwner<'_> {
             self.lower
                 .snapshot
                 .base_entry_effect_profile()
-                .map_err(|e| anyhow::anyhow!("DCPS actual optional state: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("DCPS optional state: {e:?}"))?;
             let halting::Preparation::Plan(plan) =
                 halting::prepare(instruction, context, debug.status(), debug.edscr())
                     .map_err(|e| anyhow::anyhow!("DCPS source preparation: {e:?}"))?
@@ -139,14 +139,14 @@ impl PrivilegedOwner<'_> {
             self.lower
                 .snapshot
                 .check_el10_regime()
-                .map_err(|e| anyhow::anyhow!("DRPS actual EL regime: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("DRPS EL regime: {e:?}"))?;
             self.lower
                 .snapshot
                 .base_entry_effect_profile()
                 .map_err(|e| anyhow::anyhow!("DRPS optional state: {e:?}"))?;
             let saved = system
                 .exception_registers(system.current_el())
-                .map_err(|e| anyhow::anyhow!("actual SPSR: {e:?}"))?
+                .map_err(|e| anyhow::anyhow!("SPSR: {e:?}"))?
                 .spsr();
             let drps::Preparation::Plan(plan) =
                 drps::prepare(source.word(), debug.status(), system.current_el(), saved)
@@ -159,7 +159,7 @@ impl PrivilegedOwner<'_> {
             let scalable = self
                 .scalable
                 .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("actual scalable owner unavailable"))?;
+                .ok_or_else(|| anyhow::anyhow!("scalable owner unavailable"))?;
             anyhow::ensure!(
                 self.lower
                     .snapshot
@@ -168,7 +168,7 @@ impl PrivilegedOwner<'_> {
             );
             anyhow::ensure!(
                 scalable.context.has_supported_header(),
-                "actual scalable context header"
+                "scalable context header"
             );
             let prepared =
                 debug_movement::prepare(source.word(), scalable.specialization, Recipe::Scalar)?;
@@ -182,9 +182,7 @@ impl PrivilegedOwner<'_> {
                     scalable.state,
                     |_, _, _| (),
                 )
-                .map_err(|e| {
-                    anyhow::anyhow!("actual MOVT access before EDITR consumption: {e:?}")
-                })?;
+                .map_err(|e| anyhow::anyhow!("MOVT access before EDITR consumption: {e:?}"))?;
             // W^X mapping and all metadata allocation precede source consumption,
             // ITE clear and first architectural instruction effect.
             let mapping = Mapping::new(prepared.code())?;
@@ -211,7 +209,7 @@ impl PrivilegedOwner<'_> {
         self.qualify_debug_resources(system, debug, outer)?;
         anyhow::ensure!(
             debug.editr_disposition() == prepared.disposition,
-            "actual EDITR disposition changed"
+            "EDITR disposition changed"
         );
         if let Some(Body::Drps(plan)) = &prepared.body {
             anyhow::ensure!(
@@ -221,7 +219,7 @@ impl PrivilegedOwner<'_> {
         }
         self.producers
             .consume_editr(&prepared.source)
-            .map_err(|e| anyhow::anyhow!("actual EDITR source: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("EDITR source: {e:?}"))?;
         prepared.record.last_effect = "EDITR consumed";
         match prepared.disposition {
             EditrDisposition::Ignored => return Ok(()),
@@ -234,7 +232,7 @@ impl PrivilegedOwner<'_> {
         }
         debug
             .begin_itr()
-            .map_err(|e| anyhow::anyhow!("actual ITR begin: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("ITR begin: {e:?}"))?;
         prepared.record.last_effect = "ITE cleared";
         match prepared
             .body
@@ -253,7 +251,7 @@ impl PrivilegedOwner<'_> {
                             self.lower
                                 .snapshot
                                 .base_entry_effect_profile()
-                                .map_err(|e| anyhow::anyhow!("actual absent uppers: {e:?}"))?;
+                                .map_err(|e| anyhow::anyhow!("absent uppers: {e:?}"))?;
                         }
                         halting::Step::SelectHandlerPstate { handler } => {
                             let context = self.halting_context(system, debug);
@@ -266,12 +264,12 @@ impl PrivilegedOwner<'_> {
                                         context,
                                     ),
                                 )
-                                .map_err(|e| anyhow::anyhow!("actual DCPS handler/SP: {e:?}"))?;
+                                .map_err(|e| anyhow::anyhow!("DCPS handler/SP: {e:?}"))?;
                         }
                         halting::Step::WriteHandlerArbitrary { handler } => {
                             let bank = system
                                 .exception_registers_mut(handler)
-                                .map_err(|e| anyhow::anyhow!("actual DCPS bank: {e:?}"))?;
+                                .map_err(|e| anyhow::anyhow!("DCPS bank: {e:?}"))?;
                             bank.set_elr(halting::ARBITRARY_REGISTER_ZERO);
                             bank.set_spsr(halting::ARBITRARY_REGISTER_ZERO);
                             bank.set_esr(halting::ARBITRARY_REGISTER_ZERO);
@@ -286,9 +284,7 @@ impl PrivilegedOwner<'_> {
                                         debug.halting_features(),
                                     ),
                                 )
-                                .map_err(|e| {
-                                    anyhow::anyhow!("actual DCPS optional state: {e:?}")
-                                })?;
+                                .map_err(|e| anyhow::anyhow!("DCPS optional state: {e:?}"))?;
                         }
                         halting::Step::UpdateEdscrFields => {
                             self.update_debug_fields(system, debug)?
@@ -322,11 +318,11 @@ impl PrivilegedOwner<'_> {
                             // the unapplied plan's earlier diagnostic is not restored.
                             let saved = system
                                 .exception_registers(system.current_el())
-                                .map_err(|e| anyhow::anyhow!("actual synchronized SPSR: {e:?}"))?
+                                .map_err(|e| anyhow::anyhow!("synchronized SPSR: {e:?}"))?
                                 .spsr();
-                            system.transition_pstate(registers, saved).map_err(|e| {
-                                anyhow::anyhow!("actual DRPS restored SP/PSTATE: {e:?}")
-                            })?;
+                            system
+                                .transition_pstate(registers, saved)
+                                .map_err(|e| anyhow::anyhow!("DRPS restored SP/PSTATE: {e:?}"))?;
                             prepared.record.last_effect = "SPSR restored";
                         }
                         drps::Step::ClearShouldAdvanceSs => {
@@ -339,9 +335,7 @@ impl PrivilegedOwner<'_> {
                                     registers,
                                     drps::arbitrary_pstate(system.pstate(registers)),
                                 )
-                                .map_err(|e| {
-                                    anyhow::anyhow!("actual DRPS arbitrary PSTATE: {e:?}")
-                                })?;
+                                .map_err(|e| anyhow::anyhow!("DRPS arbitrary PSTATE: {e:?}"))?;
                             prepared.record.last_effect = "DRPS arbitrary PSTATE written";
                         }
                         drps::Step::WriteDlrDspsrArbitrary => {
@@ -363,7 +357,7 @@ impl PrivilegedOwner<'_> {
                 let scalable = self
                     .scalable
                     .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("actual scalable resource lost"))?;
+                    .ok_or_else(|| anyhow::anyhow!("scalable resource lost"))?;
                 anyhow::ensure!(
                     movement.word() == prepared.source.word()
                         && prepared
@@ -373,7 +367,7 @@ impl PrivilegedOwner<'_> {
                             .is_some_and(|actual| actual == crate::compiler_source_sha256())
                         && prepared.record.native_sha256.as_deref()
                             == Some(stela_core::sha256(movement.code()).as_str()),
-                    "actual native capsule association changed"
+                    "native capsule association changed"
                 );
                 let context = &mut *scalable.context;
                 let original_memory = context.memory;
@@ -422,13 +416,13 @@ impl PrivilegedOwner<'_> {
                                             view.za,
                                             view.zt0
                                         ),
-                                    "actual MOVT scalable view finalization failed"
+                                    "MOVT scalable view finalization failed"
                                 );
                                 Ok::<(), anyhow::Error>(())
                             })
                         },
                     )
-                    .map_err(|e| anyhow::anyhow!("actual MOVT requalification: {e:?}"))?;
+                    .map_err(|e| anyhow::anyhow!("MOVT requalification: {e:?}"))?;
                 prepared.record.last_effect = if result.is_ok() {
                     "MOVT native returned"
                 } else {
@@ -444,19 +438,19 @@ impl PrivilegedOwner<'_> {
                         && context.system == original_system
                         && (context.version, context.bytes) == original_header
                         && context.has_supported_header(),
-                    "actual MOVT context finalization failed"
+                    "MOVT context finalization failed"
                 );
                 prepared.record.native_finalized = true;
             }
         }
         debug
             .complete_itr()
-            .map_err(|e| anyhow::anyhow!("actual ITR completion: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("ITR completion: {e:?}"))?;
         prepared.record.last_effect = "ITE restored";
         self.qualify_debug_resources(system, debug, outer)?;
         debug
             .qualify_halted_boundary()
-            .map_err(|e| anyhow::anyhow!("actual final halted gate: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("final halted gate: {e:?}"))?;
         Ok(())
     }
 }

@@ -263,7 +263,7 @@ pub(super) fn validate_operation(operation: &Operation) -> Result<(), CompileErr
         | Operation::AddSub { .. }
         | Operation::Nop => Ok(()),
         _ => Err(CompileError(
-            "operation requires another actual EL1 effect owner".into(),
+            "operation requires another EL1 effect owner".into(),
         )),
     }
 }
@@ -283,7 +283,7 @@ pub(super) fn validate_terminal(terminal: &Terminator) -> Result<(), CompileErro
         ) => Ok(()),
         Terminator::System(instruction) => validate_system(*instruction),
         _ => Err(CompileError(
-            "terminal requires another actual EL1 effect owner".into(),
+            "terminal requires another EL1 effect owner".into(),
         )),
     }
 }

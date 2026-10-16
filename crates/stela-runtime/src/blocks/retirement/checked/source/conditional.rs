@@ -103,7 +103,7 @@ pub(super) fn validate(
     );
     anyhow::ensure!(
         kind == expected_kind && next == expected_pc,
-        "conditional carrier contradicts actual predicate or source successor"
+        "conditional carrier contradicts predicate or source successor"
     );
     Ok(Some(()))
 }
@@ -114,7 +114,7 @@ fn read_register(registers: &GuestState, register: Register) -> anyhow::Result<u
             .x
             .get(usize::from(index))
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("conditional register outside actual bank")),
+            .ok_or_else(|| anyhow::anyhow!("conditional register outside bank")),
         Register::Zero => Ok(0),
         Register::Sp => anyhow::bail!("conditional source cannot test SP"),
     }

@@ -63,7 +63,7 @@ impl<'loan, 'run> InstalledWalkedSource<'loan, 'run> {
         .map_err(FetchFailure::Unavailable)?;
         if self.scope.installed_snapshot().consumer_inputs().sctlr_el1 & SCTLR_M == 0 {
             return Err(FetchFailure::Unavailable(
-                "walked source requires actual enabled MMU",
+                "walked source requires enabled MMU",
             ));
         }
         self.physical_space()

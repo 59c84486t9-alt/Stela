@@ -68,7 +68,7 @@ impl Transport {
         let info = unsafe { ptr::read_unaligned(address as *const Info) };
         if info.flags & (MEMORY_MAP | MODULES) != (MEMORY_MAP | MODULES) || info.modules_count != 1
         {
-            return Err("one unchanged source module and actual E820 map required");
+            return Err("one unchanged source module and E820 map required");
         }
         if extent(info.modules_address as usize, size_of::<Module>()).is_none() {
             return Err("invalid module descriptor extent");
@@ -107,7 +107,7 @@ impl Transport {
             transport.module_start,
             transport.module_end - transport.module_start,
         )? {
-            return Err("source module is outside actual normal RAM");
+            return Err("source module is outside normal RAM");
         }
         Ok(transport)
     }

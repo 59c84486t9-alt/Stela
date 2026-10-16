@@ -59,7 +59,7 @@ impl ProcessEntryControls {
     ) -> Result<Self> {
         snapshot.non_pauth_entry_absence()?;
         LinkRegisterPauthCapability::from_profile(snapshot)
-            .map_err(|error| anyhow::anyhow!("actual LR profile: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("LR profile: {error:?}"))?;
         let owner = Self {
             features: FeatureScope::LinkRegister(Arc::clone(snapshot)),
             _spe: spe,
@@ -103,7 +103,7 @@ impl ProcessEntryControls {
                 && debug.watchpoint_count == 0
                 && debug.raw_bank == 0
                 && debug.effective_bank == 0,
-            "unsupported actual debug/step producer state"
+            "unsupported debug/step producer state"
         );
         Ok(())
     }
@@ -124,17 +124,17 @@ impl ProcessEntryControls {
             }
             #[cfg(feature = "std")]
             FeatureScope::LinkRegister(snapshot) => {
-                let ids = identification.context("actual LR identification owner unavailable")?;
+                let ids = identification.context("LR identification owner unavailable")?;
                 ensure!(
                     snapshot.same_snapshot(ids),
-                    "actual LR feature and memory bank snapshots differ"
+                    "LR feature and memory bank snapshots differ"
                 );
                 snapshot.non_pauth_entry_absence()?;
                 LinkRegisterPauthCapability::from_profile(snapshot)
-                    .map_err(|error| anyhow::anyhow!("actual LR profile: {error:?}"))?;
+                    .map_err(|error| anyhow::anyhow!("LR profile: {error:?}"))?;
                 ensure!(
                     system.pacm_state_feature() == PacmStateFeature::Full,
-                    "actual full PACM storage unavailable"
+                    "full PACM storage unavailable"
                 );
             }
         }

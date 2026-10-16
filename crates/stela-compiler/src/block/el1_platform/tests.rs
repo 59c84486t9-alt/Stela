@@ -68,7 +68,7 @@ fn ordinary_dsb_has_one_effectless_carrier_without_stealing_other_hints() {
         assert_eq!(plan.source_bytes(), size_of::<u32>());
         assert!(plan.memory_requirements().is_none());
         let Some(Intent::System(instruction)) = plan.el1_platform_intent() else {
-            panic!("DSB actual source carrier absent");
+            panic!("DSB source carrier absent");
         };
         assert!(instruction.is_el1_ram_completion());
         assert!(instruction.matches_source(BASE, word));

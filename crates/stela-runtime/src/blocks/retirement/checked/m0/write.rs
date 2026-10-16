@@ -77,7 +77,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         );
         anyhow::ensure!(
             self.pe.thread.pc == bound.entry.entry(),
-            "M0 actual source PC differs"
+            "M0 source PC differs"
         );
         let word = u32::from_le_bytes(bound.source.try_into()?);
         let instruction = Decoder
@@ -86,14 +86,14 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let stela_compiler::block::el1_platform::Intent::Write64Pair(descriptor) =
             bound.el1_platform_intent()?
         else {
-            anyhow::bail!("actual EL1 source is not a canonical M0 pair write");
+            anyhow::bail!("EL1 source is not a canonical M0 pair write");
         };
         let source = M0WriteSource::from_source(&instruction, word)
             .map_err(|failure| anyhow::anyhow!("M0 write source shape: {failure:?}"))?;
         anyhow::ensure!(
             descriptor.source_pc() == instruction.pc
                 && descriptor.requirements() == source.requirements(),
-            "actual M0 write descriptor/requirements differ"
+            "M0 write descriptor/requirements differ"
         );
         anyhow::ensure!(
             bound.memory_requirements()? == source.requirements(),
@@ -211,7 +211,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 anyhow::ensure!(next_pc == intent.next_pc, "M0 continuation differs");
                 anyhow::ensure!(
                     self.pe.thread.pc == bound.entry.entry(),
-                    "M0 actual PC changed before settlement"
+                    "M0 PC changed before settlement"
                 );
                 let mut permitted = self.pe.thread.registers.clone();
                 if let Some((base, value)) = source.writeback(&self.pe.thread.registers) {
@@ -238,7 +238,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         precommit_failure, ..
                     }) => {
                         *precommit_failure = Some(failure);
-                        format!("M0 actual session precommit: {precommit_failure:?}")
+                        format!("M0 session precommit: {precommit_failure:?}")
                     }
                     _ => unreachable!("same invocation retained its native report"),
                 };

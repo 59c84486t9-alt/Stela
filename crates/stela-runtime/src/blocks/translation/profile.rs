@@ -21,10 +21,10 @@ pub(super) fn check_entry(state: &SystemState) -> Result<(), &'static str> {
         .check_lower_el_storage()
         .map_err(|_| "installed lower-EL profile does not own higher-EL storage")?;
     if state.current_el() != ExceptionLevel::El1 {
-        return Err("control-only execution requires actual EL1");
+        return Err("control-only execution requires EL1");
     }
     if state.pstate_misc() & (PSTATE_IL_MASK | PSTATE_SS_MASK) != 0 {
-        return Err("illegal or software-step state requires its actual execution owner");
+        return Err("illegal or software-step state requires its execution owner");
     }
     if state.mte().is_some() {
         return Err("control-only execution does not own MTE state");
@@ -127,7 +127,7 @@ pub(super) fn check_immutable_fetch(
         || access.raw_virtual_address != raw_pc
         || access.exception_level != stage1::ExceptionLevel::El1
     {
-        return Err("canonical result is not this actual EL1 instruction fetch");
+        return Err("canonical result is not this EL1 instruction fetch");
     }
     let attributes = translation.attributes();
     match attributes.memory_type {

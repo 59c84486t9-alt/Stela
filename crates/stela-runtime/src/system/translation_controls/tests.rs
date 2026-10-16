@@ -145,7 +145,7 @@ impl TranslationServices for Observer {
     ) -> Result<Self::Prepared<'a>, &'static str> {
         self.prepare_calls += 1;
         if self.unavailable {
-            return Err("actual effect unavailable");
+            return Err("effect unavailable");
         }
         let (after, event) = match request {
             PublicationRequest::Initial { snapshot, .. } => (Some(snapshot), "initial"),

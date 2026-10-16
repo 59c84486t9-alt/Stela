@@ -255,7 +255,7 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
         } = request;
         self.physical.check_fetch_execution()?;
         if !cause.matches_source(source.word) {
-            return Err("exception CSE cause differs from actual source operation");
+            return Err("exception CSE cause differs from source operation");
         }
         if self.current(&before)?.cpu != cpu
             || !before.same_pe(&after)
@@ -306,7 +306,7 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
         let reached = self.bound_instruction(snapshot, cpu, state, pc)?;
         self.runtime
             .bind_physical_instruction(snapshot, reached)
-            .map_err(|_| FetchFailure::Platform("actual physical source registration failed"))
+            .map_err(|_| FetchFailure::Platform("physical source registration failed"))
     }
 
     fn prepare<'a>(
@@ -411,7 +411,7 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
                 profile::check_instruction(source.pc, source.word)?;
                 if !matches!(profile::legacy_control_operation(source.word), Some(profile::LegacyControlOperation::Isb(actual)) if actual == operation)
                 {
-                    return Err("ISB operation differs from actual canonical source");
+                    return Err("ISB operation differs from canonical source");
                 }
                 (
                     PreparedAction::Synchronize {
@@ -479,7 +479,7 @@ impl PreparedPublication for PreparedCodePublication<'_, '_> {
                     scope.replace_current(snapshot, cpu, true)?;
                     progress = PublicationProgress::CurrentContextInstalled;
                     super::super::serialize_instruction_execution()
-                        .map_err(|_| "actual host instruction serialization failed")?;
+                        .map_err(|_| "host instruction serialization failed")?;
                     progress = PublicationProgress::InstructionExecutionSerialized;
                 }
             }

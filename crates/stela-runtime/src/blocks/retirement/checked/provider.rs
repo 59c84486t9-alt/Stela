@@ -103,25 +103,25 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 && self.pauth.address_space() == self.address_space
                 && self.clock.address_space() == self.address_space
                 && self.thread.address_space() == self.address_space,
-            "actual retained namespace differs"
+            "retained namespace differs"
         );
         anyhow::ensure!(
             self.context.has_supported_header(),
-            "unsupported actual context header"
+            "unsupported context header"
         );
         self.execution.check()?;
         self.pending
             .check_registry()
-            .map_err(|error| anyhow::anyhow!("actual producer registry: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("producer registry: {error:?}"))?;
         self.memory
             .check_event_endpoint(self.endpoint)
-            .map_err(|error| anyhow::anyhow!("actual PE monitor: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("PE monitor: {error:?}"))?;
         self.memory
             .validate_execution(0)
-            .map_err(|error| anyhow::anyhow!("actual memory domain: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("memory domain: {error:?}"))?;
         self.clock
             .check_execution_thread(self.memory)
-            .map_err(|error| anyhow::anyhow!("actual clock publication domain: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("clock publication domain: {error:?}"))?;
         Ok(())
     }
     fn qualify_current_resources(
@@ -179,7 +179,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
         {
             let fp = self
                 .fp
-                .ok_or_else(|| anyhow::anyhow!("actual low128 FP owner unavailable"))?;
+                .ok_or_else(|| anyhow::anyhow!("low128 FP owner unavailable"))?;
             return low128_call::qualify(
                 bound,
                 &*self.controls,
@@ -205,7 +205,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 self.memory,
                 Some(self.endpoint),
             )
-            .map_err(|error| anyhow::anyhow!("actual process controls: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("process controls: {error:?}"))?;
         Ok(())
     }
 }
@@ -231,7 +231,7 @@ pub(crate) trait Owner: sealed::Concrete {
         debug: Option<&crate::system::debug::halted::DebugMachine>,
         _system: &SystemState,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(debug.is_none(), "backend has no actual lifecycle consumer");
+        anyhow::ensure!(debug.is_none(), "backend has no lifecycle consumer");
         Ok(())
     }
     fn complete_system(
@@ -267,24 +267,24 @@ pub(crate) trait Owner: sealed::Concrete {
     /// source and control validation, preparation, the native call,
     /// finalization and PC settlement.
     fn split_m0_resources(&mut self) -> anyhow::Result<M0ExecutionResources<'_>> {
-        anyhow::bail!("actual M0 backend resources are unavailable")
+        anyhow::bail!("M0 backend resources are unavailable")
     }
 
     /// Only the installed EL1 owner lends these fields; other backends refuse
     /// before the call.
     fn split_el1_resources(&mut self) -> anyhow::Result<El1ExecutionResources<'_>> {
-        anyhow::bail!("actual installed branch backend resources are unavailable")
+        anyhow::bail!("installed branch backend resources are unavailable")
     }
 
     /// Mutable publication and monitor access, after all native borrows end.
     fn split_el1_system_effect_resources(
         &mut self,
     ) -> anyhow::Result<El1SystemEffectResources<'_>> {
-        anyhow::bail!("actual owner has no original System completion resources")
+        anyhow::bail!("owner has no original System completion resources")
     }
 
     fn split_el1_context_resources(&mut self) -> anyhow::Result<El1ContextResources<'_>> {
-        anyhow::bail!("actual EL1 context resources are unavailable")
+        anyhow::bail!("EL1 context resources are unavailable")
     }
 
     fn invoke(
@@ -321,7 +321,7 @@ impl Owner for CheckedProcessOwner<'_> {
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         self.memory
             .execution_loan()
-            .map_err(|error| anyhow::anyhow!("actual domain exclusion: {error:?}"))
+            .map_err(|error| anyhow::anyhow!("domain exclusion: {error:?}"))
     }
     fn qualify(
         &mut self,
@@ -348,7 +348,7 @@ impl Owner for CheckedProcessOwner<'_> {
         {
             let fp = self
                 .fp
-                .ok_or_else(|| anyhow::anyhow!("actual low128 FP owner unavailable"))?;
+                .ok_or_else(|| anyhow::anyhow!("low128 FP owner unavailable"))?;
             return low128_call::call(
                 bound,
                 &*self.controls,
@@ -464,9 +464,8 @@ impl Owner for CheckedProcessOwner<'_> {
                     && pauth_lr::conditional(instruction.operation)
                 {
                     let prepared = (|| -> anyhow::Result<pauth_lr::Prepared> {
-                        let outer = outer.ok_or_else(|| {
-                            anyhow::anyhow!("actual LR outer exclusion unavailable")
-                        })?;
+                        let outer = outer
+                            .ok_or_else(|| anyhow::anyhow!("LR outer exclusion unavailable"))?;
                         let service = pauth_lr::service(
                             &*self.controls,
                             self.pauth,
@@ -737,29 +736,29 @@ impl CheckedProcessOwner<'_> {
             self.memory.address_space() == Some(self.address_space)
                 && self.clock.address_space() == self.address_space
                 && self.thread.address_space() == self.address_space,
-            "actual retained observation namespace differs"
+            "retained observation namespace differs"
         );
         // Equal namespace numbers do not prove the clock alias still belongs to
         // this thread's domain and backing.
         self.clock
             .check_execution_thread(self.memory)
-            .map_err(|error| anyhow::anyhow!("actual observation clock binding: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("observation clock binding: {error:?}"))?;
         let region = self.clock.region();
         let full_virtual_bytes = usize::try_from(region.virtual_bytes)?;
         anyhow::ensure!(
             region.guest_address == crate::commpage::legacy::GUEST_BASE
                 && full_virtual_bytes == crate::commpage::legacy::GUEST_BYTES,
-            "actual retained clock facade extent differs"
+            "retained clock facade extent differs"
         );
         let loan = self
             .memory
             .observation_loan()
-            .map_err(|error| anyhow::anyhow!("actual observation domain exclusion: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("observation domain exclusion: {error:?}"))?;
         // Snapshot through the existing borrow; `clock.snapshot_bytes()` would
         // take a second, nested service borrow.
         let legacy_clock_bytes = loan
             .snapshot(region.guest_address, full_virtual_bytes)
-            .map_err(|error| anyhow::anyhow!("actual clock facade observation: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("clock facade observation: {error:?}"))?;
         let observation = super::observation::OwnedProcessObservation {
             actual_pc: actual.pc,
             registers: actual.registers.clone(),

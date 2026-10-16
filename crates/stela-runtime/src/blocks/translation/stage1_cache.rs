@@ -71,7 +71,7 @@ impl CacheEntries {
     ) -> Result<Translation, TranslationError> {
         if *config != self.config || config.asid().is_none() {
             return Err(TranslationError::Unsupported(stage1::Unsupported::Control(
-                "translation cache differs from actual enabled installed controls",
+                "translation cache differs from enabled installed controls",
             )));
         }
         let mut cells = self.cells.lock().map_err(|_| {

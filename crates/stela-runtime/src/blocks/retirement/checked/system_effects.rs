@@ -133,7 +133,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     carrier == Some((instruction.instruction_pc.0, ExitKind::System as u64))
                         && candidate == self.pe.thread.registers
                         && self.pe.thread.pc == instruction.instruction_pc,
-                    "effect-free carrier changed actual state or source exit"
+                    "effect-free carrier changed state or source exit"
                 );
                 retained.session.validate_current(self.pe.system)?;
                 checks.check(outer)?;

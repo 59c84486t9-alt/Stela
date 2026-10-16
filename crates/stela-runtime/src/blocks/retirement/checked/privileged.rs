@@ -97,7 +97,7 @@ impl<'pe> PrivilegedOwner<'pe> {
     pub(crate) fn enqueue_editr(&mut self, slot: usize, word: u32) -> anyhow::Result<()> {
         self.producers
             .enqueue_editr_slot(slot, word)
-            .map_err(|e| anyhow::anyhow!("actual software-debug input: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("software-debug input: {e:?}"))
     }
 
     /// # Safety
@@ -180,15 +180,15 @@ impl<'pe> PrivilegedOwner<'pe> {
             self.memory.address_space() == Some(self.address_space)
                 && self.memory.has_domain(&self.domain)
                 && outer.belongs_to(&self.domain),
-            "actual halted outer/domain differs"
+            "halted outer/domain differs"
         );
         self.domain
             .check_execution()
-            .map_err(|e| anyhow::anyhow!("actual privileged memory health: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("privileged memory health: {e:?}"))?;
         self.check_current_controls(system)?;
         self.producers
             .check_registry()
-            .map_err(|e| anyhow::anyhow!("actual halted producer universe: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("halted producer universe: {e:?}"))
     }
     pub(super) fn update_debug_fields(
         &self,
@@ -197,13 +197,13 @@ impl<'pe> PrivilegedOwner<'pe> {
     ) -> anyhow::Result<()> {
         self.producers
             .check_registry()
-            .map_err(|e| anyhow::anyhow!("actual SError universe: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("SError universe: {e:?}"))?;
         // Only the debug producer exists, and the controls exclude virtual and
         // delegated SError routing.
         let context = self.halting_context(system, debug);
         match halting::pending_serror_source(context) {
             halting::PendingSError::Physical => {}
-            selected => anyhow::bail!("actual {selected:?} SError source unavailable"),
+            selected => anyhow::bail!("{selected:?} SError source unavailable"),
         }
         debug.write_edscr_fields(halting::edscr_fields(debug.edscr(), context, false));
         Ok(())
@@ -227,15 +227,15 @@ impl<'pe> PrivilegedOwner<'pe> {
                 && self.memory.address_space() == Some(self.address_space)
                 && self.memory.has_domain(&self.domain)
                 && outer.belongs_to(&self.domain),
-            "actual outer/source domain differs"
+            "outer/source domain differs"
         );
         self.domain
             .check_execution()
-            .map_err(|e| anyhow::anyhow!("actual privileged memory health: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("privileged memory health: {e:?}"))?;
         self.check_current_controls(system)?;
         self.producers
             .check_registry()
-            .map_err(|e| anyhow::anyhow!("actual producer registry: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("producer registry: {e:?}"))?;
         Ok(())
     }
 
@@ -250,23 +250,23 @@ impl<'pe> PrivilegedOwner<'pe> {
         );
         anyhow::ensure!(
             self.lower.sctlr_el1 == 0 && self.lower.tcr_el1 == 0,
-            "first producer requires actual base EL1 controls"
+            "first producer requires base EL1 controls"
         );
         if let Some(higher) = system.higher_el() {
             anyhow::ensure!(
                 higher.same_snapshot(&self.lower.snapshot),
-                "actual higher Snapshot differs"
+                "higher Snapshot differs"
             );
             if let Some(hcr) = higher.hcr() {
                 anyhow::ensure!(
                     *hcr & !(HCR_HCD | HCR_TSC | HCR_RW) == 0,
-                    "unsupported actual HCR field"
+                    "unsupported HCR field"
                 );
             }
             if let Some(scr) = higher.scr() {
                 anyhow::ensure!(
                     *scr & !(SCR_NS | SCR_SMD | SCR_HCE | SCR_RW) == 0,
-                    "unsupported actual SCR field"
+                    "unsupported SCR field"
                 );
             }
             for el in [ExceptionLevel::El2, ExceptionLevel::El3] {
@@ -274,7 +274,7 @@ impl<'pe> PrivilegedOwner<'pe> {
                     anyhow::ensure!(
                         higher.sctlr(el).map_err(|e| anyhow::anyhow!("{e:?}"))? == 0
                             && higher.tcr(el).map_err(|e| anyhow::anyhow!("{e:?}"))? == 0,
-                        "unsupported actual target address controls"
+                        "unsupported target address controls"
                     );
                 }
             }
@@ -304,10 +304,10 @@ impl<'pe> PrivilegedOwner<'pe> {
             );
             debug
                 .qualify_normal_entry()
-                .map_err(|e| anyhow::anyhow!("actual debug gate: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("debug gate: {e:?}"))?;
             self.producers
                 .qualify_normal_boundary()
-                .map_err(|e| anyhow::anyhow!("actual pending source: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("pending source: {e:?}"))?;
             Ok(())
         })();
         if let Err(error) = prepared {
@@ -385,7 +385,7 @@ impl<'pe> PrivilegedOwner<'pe> {
                     && request.controls.scr_el3.map(core::ptr::from_ref)
                         == higher.scr().map(core::ptr::from_ref)
                     && request.target_security == higher.security(request.target_el),
-                "higher-EL intent does not belong to actual source/control/state owners"
+                "higher-EL intent does not belong to source/control/state owners"
             );
             let bank = system
                 .exception_registers(request.target_el)
@@ -397,7 +397,7 @@ impl<'pe> PrivilegedOwner<'pe> {
                     target_source.system_instruction()?.operation,
                     SystemOperation::Exception(Operation::Halt { .. })
                 ),
-                "first higher-EL consumer requires actual loaded HLT handler source"
+                "first higher-EL consumer requires loaded HLT handler source"
             );
             Ok((
                 request.target_el,
@@ -420,13 +420,13 @@ impl<'pe> PrivilegedOwner<'pe> {
                     committed = Committed::HypervisorStep;
                     debug
                         .ss_advance(system, registers)
-                        .map_err(|e| anyhow::anyhow!("actual SSAdvance: {e:?}"))?;
+                        .map_err(|e| anyhow::anyhow!("SSAdvance: {e:?}"))?;
                     committed = Committed::SoftwareStep;
                 }
                 CallPrefix::Hypervisor => {
                     debug
                         .ss_advance(system, registers)
-                        .map_err(|e| anyhow::anyhow!("actual SSAdvance: {e:?}"))?;
+                        .map_err(|e| anyhow::anyhow!("SSAdvance: {e:?}"))?;
                     committed = Committed::SoftwareStep;
                 }
                 CallPrefix::TrappedSecureMonitor => {}
@@ -442,11 +442,11 @@ impl<'pe> PrivilegedOwner<'pe> {
             };
             system
                 .transition_pstate(registers, (saved & NZCV_MASK) | DAIF_MASK | mode)
-                .map_err(|e| anyhow::anyhow!("actual target state: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("target state: {e:?}"))?;
             committed = Committed::PstateWritten;
             let bank = system
                 .exception_registers_mut(target_el)
-                .map_err(|e| anyhow::anyhow!("actual target bank: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("target bank: {e:?}"))?;
             bank.set_esr(esr);
             bank.set_spsr(saved);
             bank.set_elr(preferred);
@@ -486,7 +486,7 @@ impl<'pe> PrivilegedOwner<'pe> {
             );
             self.producers
                 .prepare_cross_halt(&self.cti)
-                .map_err(|e| anyhow::anyhow!("actual CTI preflight: {e:?}"))
+                .map_err(|e| anyhow::anyhow!("CTI preflight: {e:?}"))
         })();
         let cross = match prepared {
             Ok(v) => v,
@@ -499,7 +499,7 @@ impl<'pe> PrivilegedOwner<'pe> {
             let cti = self
                 .producers
                 .publish_cross_halt(cross)
-                .map_err(|e| anyhow::anyhow!("actual CTI signal: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("CTI signal: {e:?}"))?;
             self.last_cti_receipt = Some((cti.sequence, cti.delivered_targets));
             debug.save_halt_state(
                 boundary.instruction().instruction_pc.0,
@@ -512,18 +512,18 @@ impl<'pe> PrivilegedOwner<'pe> {
                     registers,
                     halting::halt_pstate(system.pstate(registers), context.features),
                 )
-                .map_err(|e| anyhow::anyhow!("actual Halt PSTATE: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("Halt PSTATE: {e:?}"))?;
             committed = Committed::PstateWritten;
             debug.stop_prefetch_enable_itr();
             debug
                 .publish_halt_instruction()
-                .map_err(|e| anyhow::anyhow!("actual halt publication: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("halt publication: {e:?}"))?;
             committed = Committed::HaltPublished;
             // Only debug producers are registered; HCR virtual-pending/AMO and
             // SCR delegated-SError controls were refused.
             self.producers
                 .check_registry()
-                .map_err(|e| anyhow::anyhow!("actual SError universe: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("SError universe: {e:?}"))?;
             debug.write_edscr_fields(halting::edscr_fields(
                 debug.edscr(),
                 self.halting_context(system, debug),
@@ -532,7 +532,7 @@ impl<'pe> PrivilegedOwner<'pe> {
             committed = Committed::FieldsUpdated;
             self.domain
                 .check_execution()
-                .map_err(|e| anyhow::anyhow!("actual halted domain finalization: {e:?}"))?;
+                .map_err(|e| anyhow::anyhow!("halted domain finalization: {e:?}"))?;
             Ok(())
         })();
         match result {
@@ -585,19 +585,16 @@ impl provider::Owner for PrivilegedOwner<'_> {
         pc: GuestAddress,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            outer.belongs_to(&self.domain),
-            "actual source outer differs"
-        );
+        anyhow::ensure!(outer.belongs_to(&self.domain), "source outer differs");
         self.domain
             .check_execution()
-            .map_err(|e| anyhow::anyhow!("actual source domain health: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("source domain health: {e:?}"))?;
         let (_, region) = runtime
             .region(pc)
-            .ok_or_else(|| anyhow::anyhow!("actual System source absent"))?;
+            .ok_or_else(|| anyhow::anyhow!("System source absent"))?;
         let base = runtime
             .region(pc)
-            .ok_or_else(|| anyhow::anyhow!("actual System source absent"))?
+            .ok_or_else(|| anyhow::anyhow!("System source absent"))?
             .0;
         let offset = usize::try_from(
             pc.0.checked_sub(base)
@@ -646,16 +643,16 @@ impl provider::Owner for PrivilegedOwner<'_> {
         debug: Option<&DebugMachine>,
         system: &SystemState,
     ) -> anyhow::Result<()> {
-        let debug = debug.ok_or_else(|| anyhow::anyhow!("actual debug lifecycle unavailable"))?;
+        let debug = debug.ok_or_else(|| anyhow::anyhow!("debug lifecycle unavailable"))?;
         self.qualify_lifecycle(debug, system)?;
         debug
             .qualify_normal_entry()
-            .map_err(|e| anyhow::anyhow!("actual normal instruction gate: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("normal instruction gate: {e:?}"))
     }
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         self.memory
             .execution_loan()
-            .map_err(|e| anyhow::anyhow!("actual privileged exclusion: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("privileged exclusion: {e:?}"))
     }
     fn qualify(
         &mut self,
@@ -667,7 +664,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
         self.check_resources(bound, system, outer)?;
         self.producers
             .qualify_normal_boundary()
-            .map_err(|e| anyhow::anyhow!("actual pending source: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("pending source: {e:?}"))
     }
     fn invoke(
         &mut self,
@@ -677,7 +674,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
     ) -> anyhow::Result<NativeObservation> {
         self.domain
             .check_execution()
-            .map_err(|e| anyhow::anyhow!("actual immediate native domain: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("immediate native domain: {e:?}"))?;
         // The one-word mapping returns only the terminal; this ABI uses no
         // guest RAM, execution context or memory callback.
         let exit = match unsafe { bound.block.mapping.call_block(registers) } {
@@ -699,11 +696,11 @@ impl provider::Owner for PrivilegedOwner<'_> {
         let finalized = self
             .domain
             .check_execution()
-            .map_err(|e| anyhow::anyhow!("actual native domain finalization: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("native domain finalization: {e:?}"))
             .and_then(|()| {
                 self.producers
                     .check_registry()
-                    .map_err(|e| anyhow::anyhow!("actual native producer finalization: {e:?}"))
+                    .map_err(|e| anyhow::anyhow!("native producer finalization: {e:?}"))
             });
         if let Err(error) = finalized {
             return Ok(NativeObservation::FinalizationFailed {
@@ -733,7 +730,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
         outer: &MemoryExecutionLoan,
     ) -> SystemOutcome {
         let Some(debug) = debug else {
-            return SystemOutcome::NoEffect(anyhow::anyhow!("actual debug lifecycle unavailable"));
+            return SystemOutcome::NoEffect(anyhow::anyhow!("debug lifecycle unavailable"));
         };
         PrivilegedOwner::complete_system(self, bound, boundary, system, registers, debug, outer)
     }
@@ -767,7 +764,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
         self.check_resources(bound, system, outer)?;
         self.producers
             .qualify_normal_boundary()
-            .map_err(|e| anyhow::anyhow!("actual retirement producers: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("retirement producers: {e:?}"))
     }
 }
 

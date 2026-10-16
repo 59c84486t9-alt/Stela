@@ -306,7 +306,7 @@ impl PhysicalAddressSpace {
             const SCTLR_DATA_CACHE: u64 = 1 << 2;
             const SCTLR_INSTRUCTION_CACHE: u64 = 1 << 12;
             if source_controls & (SCTLR_DATA_CACHE | SCTLR_INSTRUCTION_CACHE) != 0 {
-                return Err("mutable instruction visibility requires actual disabled I/C caches");
+                return Err("mutable instruction visibility requires disabled I/C caches");
             }
         } else if !immutable_sources
             .iter()

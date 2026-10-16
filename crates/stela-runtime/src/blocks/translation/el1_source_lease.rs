@@ -119,7 +119,7 @@ impl<'run> InstalledEl1SourceScope<'run> {
             GuestAddress(pc),
             self.sources.compiler_profile(),
         )
-        .map_err(|_| "installed EL1 source is outside the actual typed EL1 plan")?;
+        .map_err(|_| "installed EL1 source is outside the typed EL1 plan")?;
         if analysis.source_bytes != INSTRUCTION_BYTES as usize {
             return Err("installed EL1 analysis extent differs");
         }

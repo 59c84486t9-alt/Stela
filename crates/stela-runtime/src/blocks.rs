@@ -1701,7 +1701,7 @@ fn complete_pauth_with_memory(
     const HINT_MODIFIER_REGISTER: usize = 16;
     match instruction.operation {
         PointerAuthenticationOperation::LinkRegister(_) => {
-            anyhow::bail!("link-register authentication requires actual retained LR owners")
+            anyhow::bail!("link-register authentication requires retained LR owners")
         }
         PointerAuthenticationOperation::Sign1716 { key } => {
             let value = context.sign(

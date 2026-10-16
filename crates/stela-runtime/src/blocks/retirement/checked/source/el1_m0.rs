@@ -23,11 +23,11 @@ impl BoundSource<'_> {
         }
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1M0IntegerV1,
-            "actual source is not the typed EL1 integer profile"
+            "source is not the typed EL1 integer profile"
         );
         let intent = self
             .el1_m0
-            .ok_or_else(|| anyhow::anyhow!("actual typed EL1 intent absent"))?;
+            .ok_or_else(|| anyhow::anyhow!("typed EL1 intent absent"))?;
         match intent {
             Intent::Registers => anyhow::ensure!(
                 self.requirements.is_none(),
@@ -65,7 +65,7 @@ impl BoundSource<'_> {
                 self.el1_m0_intent()? == Intent::Registers,
                 "EL1 register consumer cannot read memory"
             ),
-            _ => anyhow::bail!("actual source is not a typed EL1 register profile"),
+            _ => anyhow::bail!("source is not a typed EL1 register profile"),
         }
         Ok(())
     }
@@ -77,7 +77,7 @@ impl BoundSource<'_> {
     ) -> anyhow::Result<stela_compiler::block::el1_platform::Intent> {
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1PlatformV1,
-            "source is not the actual mixed platform profile"
+            "source is not the mixed platform profile"
         );
         self.el1_platform
             .ok_or_else(|| anyhow::anyhow!("mixed EL1 source intent absent"))

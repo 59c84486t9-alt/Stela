@@ -163,7 +163,7 @@ pub trait TranslationServices {
         &'a mut self,
         _request: ContextSynchronizationRequest<'_>,
     ) -> Result<Self::Prepared<'a>, &'static str> {
-        Err("actual exception context publication is unavailable")
+        Err("exception context publication is unavailable")
     }
 
     type Prepared<'a>: PreparedPublication

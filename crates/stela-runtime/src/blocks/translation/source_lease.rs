@@ -176,14 +176,14 @@ impl<'run> InstalledM0SourceScope<'run> {
             || input.source_bytes() != reached.word().to_le_bytes()
         {
             return Err(FetchFailure::Unavailable(
-                "installed M0 original word differs from actual source input",
+                "installed M0 original word differs from source input",
             ));
         }
         input
             .validate_installed_fetch(self, &reached)
             .map_err(|_| {
                 FetchFailure::Unavailable(
-                    "installed M0 physical source differs from actual registered source/RX",
+                    "installed M0 physical source differs from registered source/RX",
                 )
             })?;
         self.check_installed(owner, input.actual_system())

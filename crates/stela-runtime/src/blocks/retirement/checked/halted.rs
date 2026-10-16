@@ -31,13 +31,13 @@ pub(crate) fn run_halted_owned(
     let mut pe = accept_retained_loan(loan);
     let mut record = None;
     let outcome = (|| -> anyhow::Result<DebugStop> {
-        anyhow::ensure!(pe.authority.halted(), "actual PE is not Halted");
+        anyhow::ensure!(pe.authority.halted(), "PE is not Halted");
         crate::execution::platform::ensure_supported()?;
         let outer = pe.backend.execution_loan()?;
         let debug = pe
             .debug
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("actual halted lifecycle unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("halted lifecycle unavailable"))?;
         let prepared =
             match pe
                 .backend
@@ -51,7 +51,7 @@ pub(crate) fn run_halted_owned(
             Ok(attempt) => attempt,
             Err(()) => {
                 return Ok(DebugStop::Indeterminate(
-                    "actual DebugActive admission poisoned authority".into(),
+                    "DebugActive admission poisoned authority".into(),
                 ));
             }
         };
@@ -79,31 +79,31 @@ impl Active<'_, '_, PrivilegedOwner<'_>> {
     pub(super) fn settle_debug(&mut self, source_pc: GuestAddress) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.pe.authority.debug_attempt(self.attempt),
-            "actual debug phase lost"
+            "debug phase lost"
         );
         anyhow::ensure!(
             self.pe.thread.pc == source_pc,
-            "halted instruction changed actual PC"
+            "halted instruction changed PC"
         );
         let debug = self
             .pe
             .debug
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("actual debug resource lost"))?;
+            .ok_or_else(|| anyhow::anyhow!("debug resource lost"))?;
         self.pe.backend.qualify_debug_resources(
             self.pe.system,
             debug,
             self.outer
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("actual debug outer lost"))?,
+                .ok_or_else(|| anyhow::anyhow!("debug outer lost"))?,
         )?;
         debug
             .qualify_halted_boundary()
-            .map_err(|e| anyhow::anyhow!("actual final halted resource: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("final halted resource: {e:?}"))?;
         self.pe
             .authority
             .finish_debug(&ConsumerKey(()), self.attempt)
-            .map_err(|()| anyhow::anyhow!("actual debug settlement failed"))?;
+            .map_err(|()| anyhow::anyhow!("debug settlement failed"))?;
         self.closed = true;
         Ok(())
     }
@@ -114,7 +114,7 @@ impl Active<'_, '_, PrivilegedOwner<'_>> {
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.pe.authority.debug_attempt(self.attempt),
-            "actual DebugActive attempt changed"
+            "DebugActive attempt changed"
         );
         let source_pc = self.pe.thread.pc;
         let result = (|| -> anyhow::Result<()> {
@@ -122,7 +122,7 @@ impl Active<'_, '_, PrivilegedOwner<'_>> {
                 .pe
                 .debug
                 .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("actual debug resource lost"))?;
+                .ok_or_else(|| anyhow::anyhow!("debug resource lost"))?;
             self.pe.backend.execute_debug(
                 &mut prepared,
                 self.pe.system,
@@ -130,7 +130,7 @@ impl Active<'_, '_, PrivilegedOwner<'_>> {
                 debug,
                 self.outer
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("actual debug outer lost"))?,
+                    .ok_or_else(|| anyhow::anyhow!("debug outer lost"))?,
             )?;
             self.settle_debug(source_pc)?;
             Ok(())

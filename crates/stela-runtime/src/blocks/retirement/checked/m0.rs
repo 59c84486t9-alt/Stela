@@ -460,7 +460,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         );
         anyhow::ensure!(
             self.pe.thread.pc == bound.entry.entry(),
-            "M0 actual source PC differs"
+            "M0 source PC differs"
         );
         let word = u32::from_le_bytes(bound.source.try_into()?);
         let instruction = Decoder
@@ -582,7 +582,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 anyhow::ensure!(next_pc == intent.next_pc, "M0 continuation differs");
                 anyhow::ensure!(
                     self.pe.thread.pc == bound.entry.entry(),
-                    "M0 actual PC changed before settlement"
+                    "M0 PC changed before settlement"
                 );
                 let mut permitted = self.pe.thread.registers.clone();
                 match intent.destination {
@@ -623,7 +623,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         precommit_failure, ..
                     }) => {
                         *precommit_failure = Some(failure);
-                        format!("M0 actual session precommit: {precommit_failure:?}")
+                        format!("M0 session precommit: {precommit_failure:?}")
                     }
                     _ => unreachable!("same invocation retained its native report"),
                 };

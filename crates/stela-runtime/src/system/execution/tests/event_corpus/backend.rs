@@ -119,7 +119,7 @@ impl Backend for EventBackend {
                 return Err("outside event corpus register/send source profile".into());
             }
             if matches!(word, SEV | SEVL) && (index + 1) * INSTRUCTION_BYTES != consumed.len() {
-                return Err("send must be the actual terminal".into());
+                return Err("send must be the terminal".into());
             }
         }
         self.admitted_source = Some((

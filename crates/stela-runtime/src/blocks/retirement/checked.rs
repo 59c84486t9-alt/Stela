@@ -193,7 +193,7 @@ impl BlockRuntime {
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
             if !pe.authority.ready() {
-                break OwnedStop::EntryDeclined("actual PE is not Ready".into());
+                break OwnedStop::EntryDeclined("PE is not Ready".into());
             }
             if request.stop_pc == Some(pe.thread.pc) {
                 break OwnedStop::StopAddress;
@@ -217,7 +217,7 @@ impl BlockRuntime {
                     pe.backend.supports_profile(self.profile),
                     "checked profile required"
                 );
-                anyhow::ensure!(pe.thread.pc.0.is_multiple_of(4), "unaligned actual PC");
+                anyhow::ensure!(pe.thread.pc.0.is_multiple_of(4), "unaligned PC");
                 pe.backend
                     .prepare_source(self, pe.system, pe.thread.pc, &outer)?;
                 self.load(pe.thread.pc, &mut accounting)?;
@@ -600,9 +600,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             bound,
                             self.pe.system,
                             &mut self.pe.thread.registers,
-                            self.outer.as_ref().ok_or_else(|| {
-                                anyhow::anyhow!("actual outer exclusion unavailable")
-                            })?,
+                            self.outer
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("outer exclusion unavailable"))?,
                         )?;
                         self.finish_retirement(false)?;
                         Ok(None)
@@ -634,13 +634,13 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
                                     self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("actual outer exclusion unavailable")
+                                        anyhow::anyhow!("outer exclusion unavailable")
                                     })?,
                                 )?;
                                 anyhow::ensure!(
                                     self.pe.thread.pc == helper.pc()
                                         && self.pe.authority.system_attempt(self.attempt),
-                                    "helper refusal lost actual terminal"
+                                    "helper refusal lost terminal"
                                 );
                                 self.pe
                                     .authority
@@ -682,9 +682,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     bound,
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
-                                    self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("actual LR outer unavailable")
-                                    })?,
+                                    self.outer
+                                        .as_ref()
+                                        .ok_or_else(|| anyhow::anyhow!("LR outer unavailable"))?,
                                 )?;
                                 self.finish_retirement(false)?;
                                 Ok(None)
@@ -694,7 +694,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 // Precise no-commit fault. No exception owner or destination/link write is fabricated.
                                 anyhow::ensure!(
                                     self.pe.thread.pc == instruction.instruction_pc,
-                                    "LR fault lost actual PC"
+                                    "LR fault lost PC"
                                 );
                                 self.pe
                                     .authority
@@ -707,9 +707,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     bound,
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
-                                    self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("actual LR outer unavailable")
-                                    })?,
+                                    self.outer
+                                        .as_ref()
+                                        .ok_or_else(|| anyhow::anyhow!("LR outer unavailable"))?,
                                 )?;
                                 self.finish_retirement(true)?;
                                 Ok(Some(OwnedStop::PointerAuthenticationFault {
@@ -740,7 +740,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
                                     self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("actual outer exclusion unavailable")
+                                        anyhow::anyhow!("outer exclusion unavailable")
                                     })?,
                                 )?;
                                 self.finish_retirement(poisoned_transfer.is_some())?;
@@ -809,7 +809,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                     self.pe.system,
                                     &mut self.pe.thread.registers,
                                     self.outer.as_ref().ok_or_else(|| {
-                                        anyhow::anyhow!("actual target outer unavailable")
+                                        anyhow::anyhow!("target outer unavailable")
                                     })?,
                                 )?;
                                 self.pe.backend.post_retirement(
@@ -886,7 +886,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 self.pe.system,
                                 &mut self.pe.thread.registers,
                                 self.outer.as_ref().ok_or_else(|| {
-                                    anyhow::anyhow!("actual outer exclusion unavailable")
+                                    anyhow::anyhow!("outer exclusion unavailable")
                                 })?,
                             )?;
                             self.finish_retirement(false)?;
@@ -905,7 +905,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         self.require_native()?;
         anyhow::ensure!(
             self.pe.thread.pc == bound.entry.entry(),
-            "entry refusal changed actual PC"
+            "entry refusal changed PC"
         );
         self.pe.backend.qualify(
             bound,
@@ -913,7 +913,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             &mut self.pe.thread.registers,
             self.outer
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("actual outer exclusion unavailable"))?,
+                .ok_or_else(|| anyhow::anyhow!("outer exclusion unavailable"))?,
         )?;
         self.pe
             .authority
@@ -926,7 +926,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
     fn require_native(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.pe.authority.native_attempt(self.attempt),
-            "actual NativeActive attempt lost"
+            "NativeActive attempt lost"
         );
         Ok(())
     }
@@ -978,13 +978,13 @@ mod observation;
 #[cfg(feature = "std")]
 pub(crate) use observation::OwnedProcessObservation;
 
-// ConsumerKey is constructed only by the canonical retirement consumer.
-// This check is immutable and grants no execution or service completion.
+/// Check that the PE is not executing, so it may be observed. Only the
+/// retirement module can construct the key this needs.
 #[cfg(feature = "std")]
 pub(crate) fn qualify_observation(
     authority: &crate::system::execution::authority::PeExecutionAuthority,
 ) -> anyhow::Result<()> {
     authority
         .check_observation(&super::ConsumerKey(()))
-        .map_err(|()| anyhow::anyhow!("actual retained PE observation is active"))
+        .map_err(|()| anyhow::anyhow!("the PE is executing and cannot be observed"))
 }

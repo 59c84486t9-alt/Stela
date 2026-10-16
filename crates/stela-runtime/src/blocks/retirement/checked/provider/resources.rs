@@ -42,18 +42,18 @@ impl M0ExecutionChecks<'_> {
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.memory.address_space() == Some(self.address_space),
-            "actual M0 memory namespace differs"
+            "M0 memory namespace differs"
         );
         self.execution.check()?;
         self.pending
             .check_registry()
-            .map_err(|error| anyhow::anyhow!("actual M0 producer registry: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 producer registry: {error:?}"))?;
         self.memory
             .check_event_endpoint(self.endpoint)
-            .map_err(|error| anyhow::anyhow!("actual M0 PE monitor: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 PE monitor: {error:?}"))?;
         outer
             .check_thread_domain(self.memory)
-            .map_err(|error| anyhow::anyhow!("actual M0 outer domain: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("M0 outer domain: {error:?}"))?;
         // A physical-role domain intentionally refuses the ordinary EL0
         // validate_execution path. Actual M0 source/control/physical producers
         // qualify its access instead; do not call or weaken that generic gate.
@@ -103,7 +103,7 @@ impl El1ContextResources<'_> {
             .map_err(|error| anyhow::anyhow!("context producer registry: {error:?}"))?;
         self.memory
             .check_event_endpoint(self.endpoint)
-            .map_err(|error| anyhow::anyhow!("context actual monitor: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("context monitor: {error:?}"))?;
         outer
             .check_thread_domain(&*self.memory)
             .map_err(|error| anyhow::anyhow!("context original outer: {error:?}"))?;

@@ -105,7 +105,7 @@ impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_,
             return Err("exception request differs from the original prepared plan".into());
         }
         if matches!(request.effects, RequiredEffects::Entry { irq: true }) {
-            return Err("IRQ needs its genuine pending-controller receipt".into());
+            return Err("IRQ needs its pending-controller receipt".into());
         }
         self.memory
             .check_event_endpoint(self.endpoint)
@@ -160,7 +160,7 @@ impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_,
                     ControlError::Publication { .. } => Completion::Partial,
                     _ => Completion::Unknown,
                 };
-                let detail = format!("actual exception context publication: {error:?}");
+                let detail = format!("exception context publication: {error:?}");
                 self.effects.push(ExceptionEffect::ContextFailed(error));
                 Err(EffectFailure {
                     error: detail,
@@ -230,7 +230,7 @@ impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_,
             .ok_or_else(|| no_effect("original synchronized controls unavailable"))?;
         let result = controls
             .branch_address(target, destination)
-            .map_err(|error| no_effect(format!("actual destination BranchAddr: {error:?}")))?;
+            .map_err(|error| no_effect(format!("destination BranchAddr: {error:?}")))?;
         self.effects.push(ExceptionEffect::BranchAddress {
             raw: target,
             result,

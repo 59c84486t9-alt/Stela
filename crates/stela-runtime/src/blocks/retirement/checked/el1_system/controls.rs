@@ -73,16 +73,16 @@ impl El1PlatformControls {
         self.identification.check_entry_profile(self.entry)?;
         ensure!(
             (self.identification.read(Register::IdAa64Isar3El1)? >> CPA_SHIFT) & ID_FIELD_MASK == 0,
-            "actual fresh EL1 base address arithmetic requires CPA absence"
+            "fresh EL1 base address arithmetic requires CPA absence"
         );
         let pfr0 = self.identification.read(Register::IdAa64Pfr0El1)?;
         ensure!(
             (pfr0 >> RME_SHIFT) & ID_FIELD_MASK == 0,
-            "actual fresh EL1 identification does not exclude RME"
+            "fresh EL1 identification does not exclude RME"
         );
         ensure!(
             !self.entry.features().contains(SystemEntryFeature::Gcs),
-            "actual fresh EL1 entry profile requires GCS ownership"
+            "fresh EL1 entry profile requires GCS ownership"
         );
         Ok(())
     }
@@ -97,7 +97,7 @@ impl El1PlatformControls {
         let value = self.identification.read(Register::IdAa64Mmfr2El1)?;
         ensure!(
             (value >> LSE2_SHIFT) & ID_FIELD_MASK == 0,
-            "actual same-PE pair read requires positively observed LSE2 absence"
+            "same-PE pair read requires positively observed LSE2 absence"
         );
         Ok(())
     }
@@ -107,12 +107,12 @@ impl El1PlatformControls {
     ) -> Result<Context> {
         self.check()?;
         system.check_lower_el_storage().map_err(|error| {
-            anyhow::anyhow!("actual EL1 profile does not own higher-EL storage: {error:?}")
+            anyhow::anyhow!("EL1 profile does not own higher-EL storage: {error:?}")
         })?;
         ensure!(
             system.current_el() == ExceptionLevel::El1
                 && system.pstate_misc() & (PSTATE_IL_MASK | PSTATE_SS_MASK) == 0,
-            "actual EL1 state requires another execution owner"
+            "EL1 state requires another execution owner"
         );
         let security = match self.security {
             SecurityImplementation::NonSecureOnly => SecurityState::NonSecure,

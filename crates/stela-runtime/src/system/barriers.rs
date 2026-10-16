@@ -119,7 +119,7 @@ pub fn resolve(word: u32, context: Context) -> Resolution<Request> {
                 match context.xs {
                     Xs::Absent => return Resolution::Undefined,
                     Xs::Unreported => {
-                        return Resolution::Unsupported("explicit nXS requires actual XS readback");
+                        return Resolution::Unsupported("explicit nXS requires XS readback");
                     }
                     Xs::Present => {}
                 }
@@ -144,9 +144,7 @@ pub fn resolve(word: u32, context: Context) -> Resolution<Request> {
                 && context.profile.el2_enabled
                 && context.hcrx == HcrxAccess::Unreported
             {
-                return Resolution::Unsupported(
-                    "effective nXS requires actual HCRX access readback",
-                );
+                return Resolution::Unsupported("effective nXS requires HCRX access readback");
             }
             let forcing_control = matches!(
                 context.profile.current_el,
@@ -154,7 +152,7 @@ pub fn resolve(word: u32, context: Context) -> Resolution<Request> {
             ) && matches!(context.hcrx,
                     HcrxAccess::Enabled { effective_value } if effective_value & HCRX_FNXS_MASK != 0);
             if !nxs && forcing_control && context.xs == Xs::Unreported {
-                return Resolution::Unsupported("effective nXS requires actual XS readback");
+                return Resolution::Unsupported("effective nXS requires XS readback");
             }
             let forced_nxs = context.xs == Xs::Present && forcing_control;
             RequestKind::Data(DataCompletion {
@@ -166,7 +164,7 @@ pub fn resolve(word: u32, context: Context) -> Resolution<Request> {
         }
         Operation::InstructionSynchronization { option } => {
             if context.brbe_isb == BrbeIsb::Unreported {
-                return Resolution::Unsupported("ISB requires actual BRBE feature/policy readback");
+                return Resolution::Unsupported("ISB requires BRBE feature/policy readback");
             }
             RequestKind::Instruction {
                 option,
@@ -196,13 +194,13 @@ pub fn resolve_ordinary_el2_disabled(word: u32, profile: Profile) -> Resolution<
         return Resolution::NotHandled;
     }
     if profile.el2_enabled {
-        return Resolution::Unsupported("ordinary no-EL2 route requires actual disabled EL2");
+        return Resolution::Unsupported("ordinary no-EL2 route requires disabled EL2");
     }
     if !matches!(
         profile.current_el,
         ExceptionLevel::El0 | ExceptionLevel::El1
     ) {
-        return Resolution::Unsupported("ordinary no-EL2 route requires actual EL0/EL1");
+        return Resolution::Unsupported("ordinary no-EL2 route requires EL0/EL1");
     }
     resolve(
         word,

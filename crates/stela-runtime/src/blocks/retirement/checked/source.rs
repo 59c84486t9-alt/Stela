@@ -100,7 +100,7 @@ impl<'code> BoundSource<'code> {
     /// never gets default memory access.
     pub(super) fn memory_requirements(&self) -> anyhow::Result<MemoryRequirements> {
         self.requirements
-            .ok_or_else(|| anyhow::anyhow!("actual source has no checked memory requirements"))
+            .ok_or_else(|| anyhow::anyhow!("source has no checked memory requirements"))
     }
 
     /// Exact typed source-derived direct target; output is intent, not a grant.
@@ -119,12 +119,12 @@ impl<'code> BoundSource<'code> {
                 && analysis.pointer_authentication.is_none()
                 && analysis.clock_instruction.is_none()
                 && analysis.thread_register_instruction.is_none(),
-            "actual source is not exact typed direct B"
+            "source is not exact typed direct B"
         );
         let edge = &analysis.static_successors[0];
         anyhow::ensure!(
             edge.kind == SuccessorKind::Direct,
-            "actual branch edge is not Direct"
+            "branch edge is not Direct"
         );
         Ok(edge.target)
     }
@@ -145,7 +145,7 @@ impl<'code> BoundSource<'code> {
                 && boundary.source_bytes() == self.entry.source_bytes()
                 && boundary.word() == self.entry.word()
                 && boundary.generation() == self.entry.generation(),
-            "prepared descriptor differs from actual source/RX association"
+            "prepared descriptor differs from source/RX association"
         );
         Ok(())
     }
@@ -179,16 +179,16 @@ impl<'code> BoundSource<'code> {
     pub(super) fn new(runtime: &'code BlockRuntime, pc: GuestAddress) -> anyhow::Result<Self> {
         let (base, region) = runtime
             .region(pc)
-            .ok_or_else(|| anyhow::anyhow!("actual source absent"))?;
+            .ok_or_else(|| anyhow::anyhow!("source absent"))?;
         let block = runtime
             .loaded
             .get(&pc.0)
-            .ok_or_else(|| anyhow::anyhow!("actual loaded block absent"))?;
+            .ok_or_else(|| anyhow::anyhow!("loaded block absent"))?;
         anyhow::ensure!(
             block.region_base == base
                 && block.generation == region.generation
                 && block.source_bytes > 0,
-            "actual loaded source association changed"
+            "loaded source association changed"
         );
         let offset = usize::try_from(
             pc.0.checked_sub(base)
@@ -248,7 +248,7 @@ impl<'code> BoundSource<'code> {
                 && identity.target_cpu == runtime.target_cpu().id()
                 && identity.source_sha256 == stela_core::sha256(source)
                 && identity.compiler_source_sha256 == crate::compiler_source_sha256(),
-            "actual source/compiler/profile/target differs"
+            "source/compiler/profile/target differs"
         );
         validate_source_map(&block.prepared.manifest, pc, block.source_bytes)?;
         // Re-parse without emitting, and compare that plan with the loaded one.

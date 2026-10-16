@@ -69,10 +69,10 @@ pub(super) fn service<'a>(
 ) -> Result<BorrowedLinkRegisterService<'a>> {
     let ids = controls
         .identification_snapshot()
-        .context("actual LR identification owner unavailable")?;
+        .context("LR identification owner unavailable")?;
     let loan = controls
         .extended_controls(ids, thread, outer)
-        .map_err(|error| anyhow::anyhow!("actual LR control loan: {error:?}"))?;
+        .map_err(|error| anyhow::anyhow!("LR control loan: {error:?}"))?;
     let service = BorrowedLinkRegisterService::new(
         loan,
         context,
@@ -80,7 +80,7 @@ pub(super) fn service<'a>(
         instruction.instruction_pc,
         system,
     )
-    .map_err(|error| anyhow::anyhow!("actual LR service: {error:?}"))?;
+    .map_err(|error| anyhow::anyhow!("LR service: {error:?}"))?;
     if let Some(key) = instruction.operation.required_key() {
         let (selected, actual) = match key {
             Key::Ia => (pauth::lr_context::InstructionKey::A, pauth::Key::Ia),
@@ -88,11 +88,11 @@ pub(super) fn service<'a>(
             _ => anyhow::bail!("LR service requires an instruction key"),
         };
         if service.key_selection(selected) == KeySelection::UseKey {
-            ensure!(context.has_key(actual), "actual enabled LR key unavailable");
+            ensure!(context.has_key(actual), "enabled LR key unavailable");
             let (tcr, tcr2) = service.tcr_controls();
             ensure!(
                 tcr2 == 0 && tcr & TCR_T0SZ_MASK == TCR_VA47_T0SZ,
-                "LR requires actual lower VA47 controls"
+                "LR requires lower VA47 controls"
             );
             let lower = tcr & TCR_TBI0 != 0 && tcr & TCR_TBID0 == 0;
             let upper = tcr & TCR_TBI1 != 0 && tcr & TCR_TBID1 == 0;
@@ -117,7 +117,7 @@ impl PreparedEffect {
     pub(super) fn validate(&self, system: &SystemState) -> Result<()> {
         ensure!(
             system.pacm_state_feature() == PacmStateFeature::Full,
-            "actual LR PACM storage changed"
+            "LR PACM storage changed"
         );
         if let Effect::Register { destination, .. } = self.effect {
             ensure!(destination < ZERO_REGISTER, "invalid staged LR destination");
@@ -135,7 +135,7 @@ impl PreparedEffect {
             }
             Effect::Pacm(value) => system
                 .set_pacm(value)
-                .map_err(|error| anyhow::anyhow!("actual PACM commit: {error:?}"))?,
+                .map_err(|error| anyhow::anyhow!("PACM commit: {error:?}"))?,
             Effect::Return { .. } | Effect::Discard => {}
         }
         Ok(())
@@ -156,14 +156,14 @@ pub(super) fn prepare(
     let operands = match instruction.operation {
         Operation::LinkRegister(decoded) => match service
             .stage(decoded)
-            .map_err(|error| anyhow::anyhow!("actual LR operands: {error:?}"))?
+            .map_err(|error| anyhow::anyhow!("LR operands: {error:?}"))?
         {
             Staged::Pointer(value) => Some((value.key, value.action, value.pointer)),
             Staged::Pacm => None,
         },
         operation => service
             .stage_conditional(operation)
-            .map_err(|error| anyhow::anyhow!("actual conditional operands: {error:?}"))?
+            .map_err(|error| anyhow::anyhow!("conditional operands: {error:?}"))?
             .map(|value| (value.key, value.action, value.pointer)),
     };
     let mut authenticated = None;
@@ -193,7 +193,7 @@ pub(super) fn prepare(
         operation => pauth::lr_effects::evaluate_conditional(operation, service)
             .and_then(|value| value.ok_or(pauth::lr_effects::Error::InvalidDestination)),
     }
-    .map_err(|error| anyhow::anyhow!("actual LR evaluation: {error:?}"))?;
+    .map_err(|error| anyhow::anyhow!("LR evaluation: {error:?}"))?;
     match result {
         Evaluation::AuthenticationFault { code } => Ok(Prepared::AuthenticationFault { code }),
         Evaluation::Candidate(effect) => {

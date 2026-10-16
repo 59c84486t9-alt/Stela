@@ -88,7 +88,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         let reached = scope
             .physical_space()
             .fetch_el1_instruction(outer, controls, scope, system, bound.entry.entry().0)
-            .map_err(|error| anyhow::anyhow!("EL1 register actual source fetch: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("EL1 register source fetch: {error:?}"))?;
         Self::check_binding(bound, scope, &reached)?;
         Ok(Self {
             bound,
@@ -133,10 +133,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         system: &SystemState,
     ) -> anyhow::Result<()> {
         self.bound.el1_carrier_intent()?;
-        anyhow::ensure!(
-            self.context_unchanged(),
-            "EL1 register actual context changed"
-        );
+        anyhow::ensure!(self.context_unchanged(), "EL1 register context changed");
         let reached = self
             .scope
             .physical_space()

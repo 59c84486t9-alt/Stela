@@ -18,7 +18,7 @@ impl TranslationControls {
         }
         if !matches!(destination, ExceptionLevel::El0 | ExceptionLevel::El1) {
             return Err(ControlError::Unavailable(
-                "BranchAddr needs the actual destination translation regime",
+                "BranchAddr needs the destination translation regime",
             ));
         }
         let control = self.profile.consumers(self.readbacks).tcr_el1;

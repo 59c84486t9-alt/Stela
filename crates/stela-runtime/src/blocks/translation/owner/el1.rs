@@ -42,11 +42,11 @@ impl InstalledEl1Owner {
                     | BlockProfile::El1M0IntegerV1
                     | BlockProfile::El1PlatformV1
             ),
-            "fresh EL1 source owner requires actual typed EL1 direct-B compiler profile"
+            "fresh EL1 source owner requires typed EL1 direct-B compiler profile"
         );
         ensure!(
             runtime.regions.is_empty() && runtime.loaded.is_empty(),
-            "fresh EL1 source owner requires an unbound actual runtime"
+            "fresh EL1 source owner requires an unbound runtime"
         );
         // SAFETY: this owner hands its source, physical and publication
         // resources to initial publication as described above.
@@ -77,7 +77,7 @@ impl InstalledEl1Owner {
         let reached = scope
             .physical_space()
             .fetch_el1_instruction(&execution, &owner.controls, &scope, system, source_pc.0)
-            .map_err(|error| anyhow::anyhow!("genuine EL1 initial source fetch: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("EL1 initial source fetch: {error:?}"))?;
         owner
             .runtime
             .bind_physical_instruction(scope.installed_snapshot(), reached)?;

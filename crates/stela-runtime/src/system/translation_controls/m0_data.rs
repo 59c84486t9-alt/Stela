@@ -243,7 +243,7 @@ impl TranslationControls {
             || self.profile.facts != installed.feature_facts()
             || self.profile.provenance != installed.policy_provenance()
         {
-            return Err("M0 installed context differs from the actual control owner");
+            return Err("M0 installed context differs from the control owner");
         }
         Ok(())
     }

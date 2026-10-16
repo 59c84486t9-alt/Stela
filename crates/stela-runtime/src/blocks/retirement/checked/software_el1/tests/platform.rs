@@ -63,7 +63,7 @@ fn context_publication_rejects_other_same_profile_cache_before_fetch() {
     let memory = machine.memory;
     let system = machine.system;
     let InstalledSource::El1(installed) = machine.installed else {
-        panic!("actual platform owner absent")
+        panic!("platform owner absent")
     };
     // Moving the installed owner keeps its cache allocation.
     installed

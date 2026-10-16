@@ -113,7 +113,7 @@ fn enter(runtime: &mut BlockRuntime, state: &mut ThreadState) -> Result<Synchron
     assert_state(state, &expected);
     match outcome.reason {
         StopReason::SynchronousTrap { trap } => Ok(trap),
-        other => bail!("expected genuine SVC boundary, got {other:?}"),
+        other => bail!("expected SVC boundary, got {other:?}"),
     }
 }
 fn resume(runtime: &mut BlockRuntime, state: &mut ThreadState, success: bool) -> Result<()> {

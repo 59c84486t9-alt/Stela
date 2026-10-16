@@ -73,7 +73,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         bound.el1_register_intent()?;
         anyhow::ensure!(
             self.pe.thread.pc == bound.entry.entry(),
-            "EL1 register actual PC differs before call"
+            "EL1 register PC differs before call"
         );
         {
             // Split the backend once; do not borrow `B` again until these
@@ -117,7 +117,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             let settled = (|| -> anyhow::Result<_> {
                 anyhow::ensure!(valid, "EL1 register reached call is not qualified");
                 let (next_pc, kind) =
-                    carrier.ok_or_else(|| anyhow::anyhow!("EL1 register actual carrier absent"))?;
+                    carrier.ok_or_else(|| anyhow::anyhow!("EL1 register carrier absent"))?;
                 let exit = BlockExit { next_pc, kind };
                 let ReturnedTerminal::Ordinary(next) = bound.validate_return(&exit, &candidate)?
                 else {

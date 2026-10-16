@@ -170,7 +170,7 @@ pub extern "C" fn stela_boot_main(address: u32, magic: u32) -> ! {
         Ok(value) => value,
         Err(error) => {
             serial::arguments(format_args!("mount refusal: {error:?}\n"));
-            serial::fatal("actual platform qualification failed")
+            serial::fatal("platform qualification failed")
         }
     };
     serial::arguments(format_args!("ACTUAL CPU {observed:?}\n"));
@@ -352,7 +352,7 @@ pub extern "C" fn stela_boot_main(address: u32, magic: u32) -> ! {
         )),
         Err(error) => {
             serial::arguments(format_args!("post-shutdown storage failure: {error:?}\n"));
-            serial::fatal("actual storage retirement or controls failed")
+            serial::fatal("storage retirement or controls failed")
         }
     }
     if matches!(report.accounting.reason, StopReason::StopAddress)
