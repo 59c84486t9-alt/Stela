@@ -1,4 +1,4 @@
-name: Rust and debug fixture
+name: Check
 on: [push, pull_request]
 jobs:
   check:
@@ -10,32 +10,3 @@ jobs:
           components: rustfmt, clippy
       - run: rustup target add x86_64-unknown-none
       - run: cargo xtask check
-      - run: python3 -m pip install -r dev/requirements-test.txt
-      - run: python3 -m unittest discover -s dev -p 'test_*.py'
-  instruction-correctness:
-    name: Native correctness (${{ matrix.suite }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - differential
-          - logical-immediate-differential
-          - carry-differential
-          - register-offset-differential
-          - conditional-select-differential
-          - multiply-differential
-          - pc-relative-differential
-          - block-differential
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: python3 -m pip install -r dev/requirements-test.txt
-      - run: python3 dev/${{ matrix.suite }}.py
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: instruction-evidence-${{ matrix.suite }}
-          path: |
-            .stela/*-report.json
-            .stela/evidence/

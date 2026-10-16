@@ -2,11 +2,9 @@
 /*.rcgu.o
 /.stela/
 /.tools/
-/.venv/
 *.ipsw
 *.dmg
 *.part
 *.part.json
-__pycache__/
 .DS_Store
 /GOAL.md
