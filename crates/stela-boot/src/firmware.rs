@@ -256,6 +256,8 @@ fn tables(
 /// returned tables are not active yet.
 pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
     let (options, source) = files()?;
+    // Install mode stages a payload and stops here; otherwise nothing changes.
+    let options = crate::payload::run(options)?;
     let storage = crate::storage::prepare(&options)?;
     let native = arenas::<NATIVE_ARENAS>()?;
     let ram = arenas::<RAM_ARENAS>()?;

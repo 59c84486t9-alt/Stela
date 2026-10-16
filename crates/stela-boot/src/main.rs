@@ -30,6 +30,7 @@ mod firmware;
 mod heap;
 mod output;
 mod paging;
+mod payload;
 mod serial;
 mod storage;
 #[global_allocator]

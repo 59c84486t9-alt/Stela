@@ -6,6 +6,12 @@
 //! edk2 firmware. A boot manager such as OpenCore uses the same layout:
 //! `--opencore` boots a copy of an existing OpenCore EFI with the mount added
 //! by `stela efi install`, and picks its entry in the boot picker.
+//!
+//! `--payload` runs install mode on a synthetic IPSW (no Apple bytes) split
+//! onto the boot volume: `verify` checks every Erase member,
+//! `verify-archive` does so from the whole IPSW instead, and `stage`
+//! also partitions a blank second disk and copies them into staging, which
+//! the run then reads back on the host.
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},
@@ -22,6 +28,9 @@ use std::{
     time::{Duration, Instant},
 };
 use stela_cli::efi;
+use stela_runtime::payload::{
+    PayloadError, PayloadSource, ReadAt, copy_verified, gpt, staging::StagedSource,
+};
 
 mod disks;
 
@@ -37,6 +46,12 @@ const PICKER_KEY_INTERVAL: Duration = Duration::from_secs(2);
 /// add x2, x0, x1; b .`, run at EL1 with the MMU off up to the branch.
 const SMOKE: [u32; 4] = [0xd282_4680, 0xd28a_cf01, 0x8b01_0002, 0x1400_0000];
 const SMOKE_OPTIONS: &str = "--entry 0x100000 --stop 0x10000c --budget 16";
+/// The blank target disk of a staging run, sparse on the host.
+const TARGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Its PCI slot, which fixes its UEFI device path.
+const TARGET_SLOT: u8 = 5;
+/// Small slices, so the synthetic members span several.
+const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -85,6 +100,19 @@ pub struct Run {
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
+    /// Run install mode on a synthetic restore payload.
+    #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
+    payload: Option<PayloadMode>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PayloadMode {
+    /// Verify the Erase members and write nothing.
+    Verify,
+    /// Verify them from the whole IPSW, read through its ZIP directory.
+    VerifyArchive,
+    /// Also partition a blank second disk and stage the members on it.
+    Stage,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -160,6 +188,44 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         false => Vec::new(),
     };
     options.extend(disks.iter().map(disks::Disk::option));
+    let target = output.join("target.img");
+    let options = match arguments.payload {
+        None => options,
+        Some(mode) => {
+            let ipsw = output.join("synthetic.ipsw");
+            fs::create_dir_all(&output)?;
+            efi::synthetic_ipsw(&ipsw)?;
+            efi::write_payload(&efi::PayloadOptions {
+                image: &ipsw,
+                model: efi::SYNTHETIC_MODEL,
+                root: &volume,
+                layout: match mode {
+                    PayloadMode::VerifyArchive => efi::PayloadLayout::Archive,
+                    _ => efi::PayloadLayout::Split,
+                },
+                slice_bytes: SYNTHETIC_SLICE_BYTES,
+                fetch_keys: false,
+            })?;
+            let mut install = format!(
+                "{options} --install-build {} --install-mode ",
+                efi::SYNTHETIC_BUILD
+            );
+            match mode {
+                PayloadMode::Verify | PayloadMode::VerifyArchive => install.push_str("verify"),
+                PayloadMode::Stage => {
+                    fs::File::create_new(&target)?.set_len(TARGET_BYTES)?;
+                    // A 4 GiB disk: 1 GiB cache, and an Apple region of at
+                    // least 1 GiB instead of a real restore's 64 GiB.
+                    install.push_str(&format!(
+                        "stage --install-target-path PciRoot(0x0)/Pci({TARGET_SLOT:#x},0x0) \
+                         --install-target-bytes {TARGET_BYTES} \
+                         --install-cache-bytes 0x40000000 --install-min-apple-bytes 0x40000000"
+                    ));
+                }
+            }
+            install
+        }
+    };
     match &arguments.opencore {
         None => {
             fs::create_dir_all(volume.join("EFI/BOOT"))?;
@@ -231,6 +297,16 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .args(["-device", "virtio-blk-pci,drive=volume"]);
     for (index, disk) in disks.iter().enumerate() {
         disk.attach(index, &mut command);
+    }
+    if target.exists() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=target,format=raw,file={}",
+                target.display()
+            ))
+            .arg("-device")
+            .arg(format!("virtio-blk-pci,drive=target,addr={TARGET_SLOT:#x}"));
     }
     if picker {
         command.args(["-device", "VGA"]);
@@ -326,6 +402,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "options": options,
         "opencore": arguments.opencore,
         "returncode": code,
+        "payload": arguments.payload.map(|mode| mode == PayloadMode::Stage),
+        "staging": target.exists().then(|| staged(&target)).transpose()?,
         "timed_out": status.is_none(),
         "wall_seconds": started.elapsed().as_secs_f64(),
         "outputs": outputs,
@@ -340,6 +418,78 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         return Err(error.context("host storage check failed"));
     }
     Ok(ExitCode::from(code))
+}
+
+/// A byte range of a host disk image.
+struct Range {
+    file: fs::File,
+    start: u64,
+    bytes: u64,
+}
+
+impl ReadAt for Range {
+    type Error = std::io::Error;
+    fn len(&self) -> u64 {
+        self.bytes
+    }
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.file.read_exact_at(buffer, self.start + offset)
+    }
+}
+
+/// Read a staging run's target disk back: its GPT, and every staged member
+/// checked against the staging header's SHA-256.
+fn staged(target: &Path) -> Result<Value> {
+    let disk = gpt::Disk {
+        block_bytes: 512,
+        blocks: fs::metadata(target)?.len() / 512,
+    };
+    let mut whole = Range {
+        file: fs::File::open(target)?,
+        start: 0,
+        bytes: disk.blocks * 512,
+    };
+    let mut header = vec![0u8; 512];
+    whole.read_at(512, &mut header)?;
+    let error = |e: PayloadError| anyhow::anyhow!("{e}");
+    let Some(info) = gpt::parse_header(disk, 1, &header).map_err(error)? else {
+        return Ok(json!({"gpt": false}));
+    };
+    let mut entries = vec![0u8; info.entry_array_bytes() as usize];
+    whole.read_at(info.entries_lba * 512, &mut entries)?;
+    let table = gpt::parse_entries(&info, &entries).map_err(error)?;
+    let partitions: Vec<Value> = table
+        .partitions
+        .iter()
+        .map(|p| {
+            json!({"role": format!("{:?}", p.role()), "first_lba": p.first_lba,
+            "last_lba": p.last_lba, "guid": p.unique_guid.to_string()})
+        })
+        .collect();
+    let staging = table
+        .partitions
+        .iter()
+        .find(|p| p.role() == Some(gpt::Role::Staging))
+        .context("no staging partition")?;
+    let mut source = StagedSource::open(Range {
+        file: fs::File::open(target)?,
+        start: staging.first_lba * 512,
+        bytes: staging.blocks() * 512,
+    })
+    .map_err(error)?;
+    let members = source.manifest().members.clone();
+    let mut buffer = vec![0u8; 1 << 20];
+    for member in &members {
+        copy_verified(&mut source, member, &mut buffer, |_| Ok::<(), ()>(()))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(json!({
+        "gpt": true,
+        "disk_guid": table.disk_guid.to_string(),
+        "partitions": partitions,
+        "members_verified": members.iter().map(|m| &m.name).collect::<Vec<_>>(),
+    }))
 }
 
 /// Copy an EFI directory tree; at its top, leave out Windows' boot files.
