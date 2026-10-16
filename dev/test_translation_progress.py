@@ -918,7 +918,8 @@ class DeclaredScalableProgressTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 progress.validate_scalable_profile({**self.profile(), **change})
-        for key in progress.SCALABLE_DECLARATION_FIELDS:
+        # FPMR access is optional: omission declares it disabled.
+        for key in set(progress.SCALABLE_DECLARATION_FIELDS) - {'fpmr_enabled'}:
             profile = self.profile()
             profile.pop(key)
             with self.subTest(missing=key), self.assertRaises(ValueError):
