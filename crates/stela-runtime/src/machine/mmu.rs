@@ -76,7 +76,8 @@ const AP_EL0: u64 = 1 << 6;
 const AP_READ_ONLY: u64 = 1 << 7;
 const ACCESS_FLAG: u64 = 1 << 10;
 const NOT_GLOBAL: u64 = 1 << 11;
-const GUARDED_PAGE: u64 = 1 << 50;
+// Bit 50 (GP) is RES0 because the engine does not implement FEAT_BTI
+// (ID_AA64PFR1_EL1.BT reads 0), so the walker ignores it.
 const DIRTY_BIT_MODIFIER: u64 = 1 << 51;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
@@ -159,8 +160,6 @@ pub struct Translation {
     pub asid: u16,
     /// Bytes mapped by the descriptor (page or block size).
     pub size: u64,
-    /// The descriptor's GP bit (FEAT_BTI guarded page).
-    pub guarded_page: bool,
 }
 
 /// Physical memory the walker reads descriptors from and, for hardware
@@ -309,7 +308,6 @@ pub fn translate(
             global: true,
             asid: 0,
             size: 1 << 12,
-            guarded_page: false,
         });
     }
     let upper = address & (1 << 55) != 0;
@@ -479,7 +477,6 @@ fn sprr_leaf(
         global,
         asid: if global { 0 } else { current_asid(controls) },
         size: leaf.size,
-        guarded_page: descriptor & GUARDED_PAGE != 0,
     })
 }
 
@@ -587,7 +584,6 @@ fn leaf(
         global,
         asid: if global { 0 } else { current_asid(controls) },
         size: leaf.size,
-        guarded_page: descriptor & GUARDED_PAGE != 0,
     })
 }
 

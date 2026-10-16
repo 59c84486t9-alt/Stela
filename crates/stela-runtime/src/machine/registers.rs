@@ -207,8 +207,8 @@ const SCTLR_DZE: u64 = 1 << 14;
 const SCTLR_UCT: u64 = 1 << 15;
 /// Bits of SCTLR_EL1 the engine accepts: everything below bit 32 except
 /// alignment checking (A) and big-endian data (E0E, EE), plus DSSBS.
-/// BT0/BT1 (bits 35/36) are accepted because the engine refuses to execute
-/// pages whose descriptors set GP, so no BTI check can be skipped.
+/// BT0/BT1 (bits 35/36) are accepted and have no effect: without FEAT_BTI
+/// (ID_AA64PFR1_EL1.BT reads 0) they are RES0 and descriptor GP is ignored.
 const SCTLR_SUPPORTED: u64 = 0x0000_1018_fcff_fffd;
 /// APSTS_EL1.MKEYVld: the hardware master key is ready. This machine has no
 /// key-generation delay, so the bit always reads as set.
@@ -376,6 +376,7 @@ impl Cpu {
             _ => {
                 return match environment.profile.fixed(encoding) {
                     Some(value) => Outcome::Read(value),
+                    None if is_higher_el(encoding) => Outcome::Undefined,
                     None if is_identification(encoding) => {
                         Outcome::Refused(Refusal::NoProfileValue)
                     }
@@ -515,7 +516,9 @@ impl Cpu {
             CNTPCT_EL0 | CNTVCT_EL0 | CNTPCTSS_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 => {
                 return Outcome::Undefined;
             }
-            _ if is_identification(encoding) => return Outcome::Undefined,
+            _ if is_identification(encoding) || is_higher_el(encoding) => {
+                return Outcome::Undefined;
+            }
             _ => return Outcome::Refused(Refusal::Unimplemented),
         }
         Outcome::Written(changes)
@@ -717,6 +720,14 @@ impl Cpu {
 }
 
 /// The read-only identification space: op0=3, op1 in {0,1,3}, CRn=0.
+/// Architectural EL2, EL12/EL02 and EL3 registers (op1 4, 5 and 6 outside
+/// the implementation-defined CRn=15 space). With no EL2 or EL3 they are
+/// UNDEFINED at EL1 (Arm ARM D19 access pseudocode, `EL2Enabled()` and
+/// `HaveEL(EL3)` false).
+fn is_higher_el(encoding: Encoding) -> bool {
+    encoding.op0() == 3 && encoding.crn() != 15 && matches!(encoding.op1(), 4..=6)
+}
+
 fn is_identification(encoding: Encoding) -> bool {
     encoding.op0() == 3 && encoding.crn() == 0 && matches!(encoding.op1(), 0 | 1 | 3)
 }
@@ -796,6 +807,17 @@ mod tests {
             cpu.access_register(mrs(0, Encoding::new(3, 0, 15, 0, 0)), &environment),
             Outcome::Refused(Refusal::Unimplemented)
         );
+        // TPIDR_EL2 and TPIDR_EL3 are UNDEFINED without EL2 and EL3.
+        for higher in [Encoding::new(3, 4, 13, 0, 2), Encoding::new(3, 6, 13, 0, 2)] {
+            assert_eq!(
+                cpu.access_register(msr(0, higher), &environment),
+                Outcome::Undefined
+            );
+            assert_eq!(
+                cpu.access_register(mrs(0, higher), &environment),
+                Outcome::Undefined
+            );
+        }
         assert_eq!(
             cpu.access_register(mrs(0, CURRENTEL), &environment),
             Outcome::Read(4)

@@ -528,10 +528,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let controls = self.cpu.system.translation;
         let mut tables = RamTables(&mut self.host);
         match mmu::translate(&controls, pc, Access::Execute, requester, &mut tables) {
-            Translated::Mapped(translation) if translation.guarded_page => Err(Err(self
-                .unsupported(RequirementKind::Native(
-                    "execution from a BTI guarded page (GP set) needs BTYPE checking",
-                )))),
             Translated::Mapped(translation) => {
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
