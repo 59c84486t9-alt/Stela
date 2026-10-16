@@ -128,6 +128,35 @@ impl InstalledCodeSources {
         }
     }
 
+    /// Retain the original complete synchronous RAM/source participants while
+    /// the canonical fresh EL1 owner completes a DSB. The immutable source and
+    /// runtime borrows exclude another publication/cache/context mutation.
+    /// Fresh construction owns ALL physical aliases and excludes external
+    /// memory masters; this does not certify arbitrary MMIO or DMA completion.
+    pub(in crate::blocks) fn ram_completion_scope<'run>(
+        &'run self,
+        runtime: &'run BlockRuntime,
+        controls: &TranslationControls,
+        system: &SystemState,
+        outer: &crate::memory::domain::MemoryExecutionLoan,
+    ) -> Result<super::el1_source_lease::InstalledEl1SourceScope<'run>, &'static str> {
+        if !Arc::ptr_eq(&runtime.identity, &self.runtime_identity)
+            || runtime.profile() != self.compiler_profile
+            || self.compiler_profile != BlockProfile::El1PlatformV1
+        {
+            return Err("RAM completion requires the original installed platform/cache");
+        }
+        self.physical
+            .check_execution_loan(outer)
+            .map_err(|_| "RAM completion original physical/outer differs")?;
+        // Installed excludes Unbound/Failed. All successful context publication
+        // producers finish synchronously before returning to the original PE;
+        // no separate deferred maintenance producer exists in this fixed factory.
+        let scope = self.el1_scope()?;
+        scope.check_installed(controls, system)?;
+        Ok(scope)
+    }
+
     /// Loan the SAME installed context/physical/code owners after native return.
     /// The canonical consumer separately binds the exact returned source and
     /// retains its original PE, outer and control loans through publication.

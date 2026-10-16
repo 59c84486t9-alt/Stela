@@ -32,6 +32,8 @@ CHECKED_MEMORY_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-
 BASELINE_CPU_TARGET = 'x86_64-baseline'
 SYSTEM_ABI = 'x86_64-sysv-guest-state-v2-block-exit-system-v1'
 SYSTEM_EXIT_KIND = 11
+EL1_PLATFORM_PROFILE = 'el1-platform-v1'
+EL1_PLATFORM_ABI = 'x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1'
 MOVABS_RAX_IMM64 = b'\x48\xb8'
 MOV_EDX_IMM32 = b'\xba'
 X86_RET = b'\xc3'
@@ -45,6 +47,7 @@ SERVICE_DECODERS = {
 LEAF_DECODER_MATTRS = ('+sme2', '+sve2p1', '+lut', '+faminmax', '+fp8')
 SYSTEM_GUEST_BASE = 0x10000000
 SERVICE_BINDINGS = {
+    EL1_PLATFORM_PROFILE: (EL1_PLATFORM_ABI, ('--el1-platform', '--cpu-target', BASELINE_CPU_TARGET)),
     SERVICE_PROFILE: (SERVICE_ABI, ('--software-pauth', '--software-clock')),
     SYSTEM_PROFILE: (SYSTEM_ABI, ('--system-boundaries', '--cpu-target', BASELINE_CPU_TARGET)),
     CHECKED_MEMORY_PROFILE: (CHECKED_MEMORY_ABI, ('--checked-memory-sa0-off', '--cpu-target', BASELINE_CPU_TARGET)),
@@ -678,11 +681,13 @@ def compile_probe(cli, word, directory, expect_failure=None, run=subprocess.run,
     native = output / 'native.bin'
     if manifest.get('native_sha256') != sha256(native) or native.stat().st_size == 0:
         raise ValueError('Compiler probe native output identity mismatch')
-    if mode == 'service' and selected_service == SYSTEM_PROFILE:
+    if mode == 'service' and selected_service in (SYSTEM_PROFILE, EL1_PLATFORM_PROFILE):
         expected_native = (MOVABS_RAX_IMM64 + struct.pack('<Q', SYSTEM_GUEST_BASE)
                            + MOV_EDX_IMM32 + struct.pack('<I', SYSTEM_EXIT_KIND) + X86_RET)
         if (native.read_bytes() != expected_native or manifest.get('target_cpu') != BASELINE_CPU_TARGET
-                or manifest.get('source_map') != [[SYSTEM_GUEST_BASE, 0]] or consumed != 4):
+                or manifest.get('source_map') != [[SYSTEM_GUEST_BASE, 0]] or consumed != 4
+                or (selected_service == EL1_PLATFORM_PROFILE
+                    and ('memory_requirements' not in manifest or manifest['memory_requirements'] is not None))):
             raise ValueError('System probe must preserve the exact source-bound baseline System exit')
     if mode == 'scalable':
         validate_context_manifest(manifest, source_data, native.stat().st_size, svl_bytes, svcr,

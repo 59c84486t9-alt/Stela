@@ -15,6 +15,7 @@ mod pauth_policy;
 mod privileged;
 mod privileged_debug;
 mod provider;
+pub(crate) mod system_effects;
 pub(crate) use halted::{OwnedDebugOutcome, run_halted_owned};
 pub(crate) use privileged::PrivilegedOwner;
 pub(crate) mod software_el1;
@@ -80,6 +81,7 @@ pub(crate) struct OwnedRunOutcome {
     pub last_m0_write_observation: Option<m0::M0WriteObservation>,
     pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
     pub last_el1_system_observation: Option<el1_system::SystemObservation>,
+    pub last_system_effect_observation: Option<system_effects::SystemEffectObservation>,
     pub last_el1_context_observation: Option<el1_context::ContextObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
@@ -175,6 +177,7 @@ impl BlockRuntime {
         let mut last_m0_write_observation = None;
         let mut last_el1_register_observation = None;
         let mut last_el1_system_observation = None;
+        let mut last_system_effect_observation = None;
         let mut last_el1_context_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
@@ -234,6 +237,22 @@ impl BlockRuntime {
                 attempt,
                 closed: false,
             };
+            if self.profile == BlockProfile::El1PlatformV1
+                && matches!(bound.el1_platform_intent(),
+                    Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
+                        if instruction.is_el1_ram_completion())
+            {
+                match active.execute_system_effects(
+                    &bound,
+                    &mut accounting,
+                    &mut last_system_effect_observation,
+                    &mut settled_prefixes,
+                ) {
+                    Ok(None) => continue,
+                    Ok(Some(stop)) => break stop,
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
             if self.profile == BlockProfile::El1PlatformV1
                 && matches!(bound.el1_platform_intent(),
                     Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
@@ -408,6 +427,7 @@ impl BlockRuntime {
             last_m0_write_observation,
             last_el1_register_observation,
             last_el1_system_observation,
+            last_system_effect_observation,
             last_el1_context_observation,
             settled_prefixes,
             service_events,

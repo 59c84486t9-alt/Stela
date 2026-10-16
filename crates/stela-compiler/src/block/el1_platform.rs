@@ -127,7 +127,7 @@ pub(super) fn validate_terminal(terminal: &Terminator) -> Result<(), CompileErro
 }
 
 pub(super) fn validate_system(instruction: system::SystemInstruction) -> Result<(), CompileError> {
-    if instruction.is_el1_context_operation() {
+    if instruction.is_el1_context_operation() || instruction.is_el1_ram_completion() {
         return Ok(());
     }
     match instruction.operation {
@@ -289,6 +289,60 @@ mod tests {
         .unwrap();
         assert_eq!(compare.el1_platform_intent(), Some(Intent::Registers));
     }
+    #[test]
+    fn ordinary_dsb_has_one_effectless_carrier_without_stealing_other_hints() {
+        const DSB_SY: u32 = 0xd503_3f9f;
+        const DSB_ISH: u32 = 0xd503_3b9f;
+        const DSB_ISHLD: u32 = 0xd503_399f;
+        const DSB_ISHST: u32 = 0xd503_3a9f;
+        const NOP: u32 = 0xd503_201f;
+        const SSBB: u32 = 0xd503_309f;
+        const PSSBB: u32 = 0xd503_349f;
+        const DSB_NXS: u32 = 0xd503_323f;
+        for word in [DSB_SY, DSB_ISH, DSB_ISHLD, DSB_ISHST] {
+            let plan = CompilationPlan::new(
+                &word.to_le_bytes(),
+                BASE,
+                BlockProfile::El1PlatformV1,
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            assert_eq!(plan.source_bytes(), size_of::<u32>());
+            assert!(plan.memory_requirements().is_none());
+            let Some(Intent::System(instruction)) = plan.el1_platform_intent() else {
+                panic!("DSB actual source carrier absent");
+            };
+            assert!(instruction.is_el1_ram_completion());
+            assert!(instruction.matches_source(BASE, word));
+            let compiled = plan.compile().unwrap();
+            assert_eq!(compiled.native.source_map.len(), 1);
+        }
+        let nop = CompilationPlan::new(
+            &NOP.to_le_bytes(),
+            BASE,
+            BlockProfile::El1PlatformV1,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        assert_eq!(nop.el1_platform_intent(), Some(Intent::Registers));
+        for word in [SSBB, PSSBB, DSB_NXS] {
+            assert!(
+                super::system::decode_el1_system_instruction(BASE, word)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let prefix = CompilationPlan::new(
+            &bytes(&[ADD_X0, DSB_SY]),
+            BASE,
+            BlockProfile::El1PlatformV1,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        assert_eq!(prefix.source_bytes(), size_of::<u32>());
+        assert_eq!(prefix.el1_platform_intent(), Some(Intent::Registers));
+    }
+
     #[test]
     fn canonical_branch_operations_reach_existing_terminal_plan() {
         for word in [0x14000002u32, 0x54000040, 0x34000040, 0x36000040] {

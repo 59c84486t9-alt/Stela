@@ -1,6 +1,7 @@
 //! Shared A64 system decisions, authoritative state and checked effect dispatch.
 
 pub mod access;
+pub mod barriers;
 pub mod debug;
 pub mod events;
 pub mod exception;

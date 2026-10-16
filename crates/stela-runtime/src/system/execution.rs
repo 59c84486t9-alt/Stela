@@ -579,6 +579,9 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             SystemOperation::InstructionSynchronization { .. } => Err(Failure::Unsupported(
                 "instruction synchronization requires the actual source publication owner",
             )),
+            SystemOperation::Synchronization(_) => Err(Failure::Unsupported(
+                "synchronization requires the retained resource-specific System owner",
+            )),
         }
     }
 }

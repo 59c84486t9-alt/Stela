@@ -371,6 +371,30 @@ impl Owner for M0Owner<'_> {
         })
     }
 
+    fn split_el1_system_effect_resources(
+        &mut self,
+    ) -> anyhow::Result<super::El1SystemEffectResources<'_>> {
+        anyhow::ensure!(
+            self.cohort == InstalledCohort::El1Platform,
+            "System completion requires original fixed fresh platform"
+        );
+        self.check_resources()?;
+        Ok(super::El1SystemEffectResources {
+            sources: &*self.sources,
+            controls: &*self.controls,
+            platform: self
+                .platform
+                .ok_or_else(|| anyhow::anyhow!("System completion original platform absent"))?,
+            checks: M0ExecutionChecks {
+                execution: self.execution,
+                pending: &self.pending,
+                memory: &*self.memory,
+                endpoint: self.endpoint,
+                address_space: self.address_space,
+            },
+        })
+    }
+
     fn split_el1_context_resources(&mut self) -> anyhow::Result<super::El1ContextResources<'_>> {
         anyhow::ensure!(
             self.cohort == InstalledCohort::El1Platform,

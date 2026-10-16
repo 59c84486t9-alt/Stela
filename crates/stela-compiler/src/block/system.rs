@@ -20,11 +20,17 @@ const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemOperation {
     Exception(exception::Operation),
+    /// Canonical effect description; the actual retained owner grants admission.
+    Synchronization(synchronization::Operation),
     TagMemory(tag_memory::Operand),
     Register(registers::RegisterAccess),
     PstateImmediate(registers::Encoding),
-    SendEvent { local: bool },
-    InstructionSynchronization { option: u8 },
+    SendEvent {
+        local: bool,
+    },
+    InstructionSynchronization {
+        option: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +48,7 @@ fn serialize_family<S: Serializer>(
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(match operation {
         SystemOperation::Exception(_) => "exception",
+        SystemOperation::Synchronization(_) => "synchronization",
         SystemOperation::TagMemory(_) => "tag_memory",
         SystemOperation::Register(_) => "system_register",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
@@ -96,7 +103,42 @@ pub fn decode_system_instruction(
     }))
 }
 
+/// Extend the fixed EL1 cohort only for its actual mounted RAM completion.
+/// Existing NOP, PAuth aliases and unmounted hints keep their original selection.
+pub(super) fn decode_el1_system_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<SystemInstruction>, CompileError> {
+    if let Some(instruction) = decode_system_instruction(pc, word)? {
+        return Ok(Some(instruction));
+    }
+    let Some(operation @ synchronization::Operation::DataCompletion { nxs: false, .. }) =
+        synchronization::decode(word)
+    else {
+        return Ok(None);
+    };
+    let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
+        CompileError("system continuation PC overflows guest address range".into())
+    })?);
+    Ok(Some(SystemInstruction {
+        instruction_pc: pc,
+        next_pc,
+        word,
+        operation: SystemOperation::Synchronization(operation),
+    }))
+}
+
 impl SystemInstruction {
+    pub fn is_el1_ram_completion(self) -> bool {
+        matches!(
+            self.operation,
+            SystemOperation::Synchronization(synchronization::Operation::DataCompletion {
+                nxs: false,
+                ..
+            })
+        )
+    }
+
     /// Source classification only. This grants no PE/control/publication loan.
     /// The actual lifetime-fixed platform must mount the corresponding owner.
     pub fn is_el1_context_operation(self) -> bool {
@@ -120,7 +162,7 @@ impl SystemInstruction {
     pub fn matches_source(self, pc: GuestAddress, word: u32) -> bool {
         self.instruction_pc == pc
             && self.word == word
-            && decode_system_instruction(pc, word).ok().flatten() == Some(self)
+            && decode_el1_system_instruction(pc, word).ok().flatten() == Some(self)
     }
 }
 

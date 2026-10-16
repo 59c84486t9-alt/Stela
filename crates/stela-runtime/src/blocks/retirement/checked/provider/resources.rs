@@ -119,3 +119,15 @@ impl El1ContextResources<'_> {
             .map_err(anyhow::Error::msg)
     }
 }
+
+/// Borrowed only from the fixed fresh platform backend. The source/physical
+/// envelope owns the complete RAM participants and all aliases for its entire
+/// executable lifetime. NoAsyncSources below checks IRQ/debug producers only;
+/// it is never the memory-participant closure proof.
+pub(crate) struct El1SystemEffectResources<'pe> {
+    pub(in crate::blocks::retirement::checked) sources: &'pe InstalledM0Sources,
+    pub(in crate::blocks::retirement::checked) controls: &'pe TranslationControls,
+    pub(in crate::blocks::retirement::checked) platform:
+        &'pe super::super::el1_system::El1PlatformControls,
+    pub(in crate::blocks::retirement::checked) checks: M0ExecutionChecks<'pe>,
+}

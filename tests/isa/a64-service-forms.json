@@ -462,6 +462,14 @@
         "CPA2 entry through legacy or scalable preparation, unsupported controls/modes and asynchronous tag checks",
         "Guest exception delivery, external writers or fabricated source/PE authority"
       ]
+    },
+    "el1-platform-v1": {
+      "id": "el1-platform-v1",
+      "compiler_mode": "service",
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1",
+      "outside_scope": [
+        "Other System effects require separately mounted actual owners; nXS unavailable; arbitraryMMIO/DMA/otherPE/completeOS not qualified."
+      ]
     }
   },
   "status_policy": "Block and leaf counts are separate profile assessments of canonical forms. Nine forms overlap; counts must not be added. No Apple ISA or compatibility denominator is established.",
@@ -817,6 +825,55 @@
       ],
       "review_status": "Substantive source and fixture reviews passed; final current publication review pending.",
       "limits": "Derived model/native scope, current whole-body transfer distinct from historical inner-body lineage; no physical original or OS claim."
+    },
+    "el1_ordinary_dsb_current": {
+      "harness": ".stela/research/crash-recovery-2026-10-15/scalar-system/system8-current5787-1/gate-plan-2/bridge.py",
+      "report": ".stela/research/crash-recovery-2026-10-15/scalar-system/system8-current5787-1/publication-3/evidence.json",
+      "kind": "el1_ordinary_dsb_original_native_v1",
+      "comparison_field": "state_and_memory_comparisons",
+      "required_positive_counts": [
+        "state_and_memory_comparisons",
+        "current_cli_whole_body_transfers",
+        "original_executions"
+      ],
+      "required_measurements": {
+        "canonical_forms": 1,
+        "state_and_memory_comparisons": 4,
+        "current_cli_whole_body_transfers": 4,
+        "original_executions": 4,
+        "architectural_cpu_bytes": 780,
+        "current_cpu_preservation_bytes": 784,
+        "ram_comparison_bytes": 32
+      },
+      "abi": "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1",
+      "require_current_executable": true,
+      "require_runtime_executable": true,
+      "required_shared_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/el1_platform.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/mod.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider/m0_owner.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/provider/resources.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/software_el1.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects/commit.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects/dsb.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects/fixture.rs",
+        "crates/stela-runtime/src/blocks/translation/owner.rs",
+        "crates/stela-runtime/src/memory/domain/physical.rs",
+        "crates/stela-runtime/src/memory/domain/physical/completion.rs",
+        "crates/stela-runtime/src/memory/domain/physical/source_ram_tests.rs",
+        "crates/stela-runtime/src/system.rs",
+        "crates/stela-runtime/src/system/barriers.rs",
+        "crates/stela-runtime/src/system/barriers/tests.rs",
+        "crates/stela-runtime/src/system/execution.rs",
+        "crates/stela-runtime/src/system/execution/authority.rs",
+        "crates/stela-runtime/src/blocks/translation/owner/el1.rs",
+        "dev/translation-progress.py"
+      ],
+      "limits": "Retained current source/native/original780+RAM/wholeCLI carrier; transport4 and originalCPU/control/order limits explicit in report."
     }
   },
   "forms": [
@@ -4881,6 +4938,60 @@
             "subpt"
           ],
           "consumed_source_bytes": 8
+        }
+      ]
+    },
+    {
+      "id": "DSB_BO_barriers",
+      "category": "base_integer_system",
+      "source_file": "dsb.xml",
+      "encoding_mask": "0xfffff0ff",
+      "encoding_value": "0xd503309f",
+      "alias": false,
+      "source_sha256": "ea9c8ce596136c20e22b54244735ee1552521d06209ce65f77e3a2e78900b845",
+      "profile": "el1-platform-v1",
+      "status": "implemented",
+      "review": "June2026 ordinary completion semantics reviewed; actual same-owner native/store/completion vs4stockQEMU originals and current wholeCLI carrier, actualMFENCE and closed synchronous originalRAM/source participant loans.",
+      "compiler_sources": [
+        "crates/stela-compiler/src/block.rs",
+        "crates/stela-compiler/src/block/system.rs",
+        "crates/stela-compiler/src/block/el1_platform.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects.rs",
+        "crates/stela-runtime/src/blocks/retirement/checked/system_effects/dsb.rs",
+        "crates/stela-runtime/src/memory/domain/physical/completion.rs"
+      ],
+      "evidence_groups": [
+        "el1_ordinary_dsb_current"
+      ],
+      "scope": "All ordinary option encodings within fixed EL1/noEL2/closed synchronous privateRAM+CSE participant profile; same original controls/source/outer/phase. Stronger full completion satisfies subset operands. Aliases/nXS and arbitraryMMIO/DMA unqualified.",
+      "smoke_samples": [
+        {
+          "word": "0xd5033f9f",
+          "expected_mnemonics": [
+            "dsb"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xd5033b9f",
+          "expected_mnemonics": [
+            "dsb"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xd503399f",
+          "expected_mnemonics": [
+            "dsb"
+          ],
+          "consumed_source_bytes": 4
+        },
+        {
+          "word": "0xd5033a9f",
+          "expected_mnemonics": [
+            "dsb"
+          ],
+          "consumed_source_bytes": 4
         }
       ]
     }

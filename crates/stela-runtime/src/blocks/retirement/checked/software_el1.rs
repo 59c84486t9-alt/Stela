@@ -104,6 +104,8 @@ pub struct SoftwareEl1InitialRam {
 
 pub struct SoftwareEl1Report {
     #[cfg(all(test, target_arch = "x86_64"))]
+    system_effect_fixture_observation: Option<super::system_effects::SystemEffectObservation>,
+    #[cfg(all(test, target_arch = "x86_64"))]
     exception_fixture_probe: Option<exception_fixture::ProbeObservation>,
     #[cfg(all(test, target_arch = "x86_64"))]
     context_fixture_observation: Option<super::el1_context::ContextObservation>,
@@ -126,6 +128,7 @@ pub struct SoftwareEl1Report {
         Option<crate::memory::domain::physical::M0RamWriteProgress>,
     pub register_observation: Option<String>,
     pub system_observation: Option<String>,
+    pub system_effect_observation: Option<String>,
     pub context_observation: Option<String>,
     pub platform_identification_sha256: Option<String>,
     pub compiler_source_sha256: String,
@@ -663,10 +666,16 @@ impl SoftwareEl1Machine {
             last_m0_write_observation,
             last_el1_register_observation,
             last_el1_system_observation,
+            last_system_effect_observation,
             last_el1_context_observation,
             ..
         } = outcome;
+        let system_effect_observation = last_system_effect_observation
+            .as_ref()
+            .map(|value| format!("{value:?}"));
         Ok(SoftwareEl1Report {
+            #[cfg(all(test, target_arch = "x86_64"))]
+            system_effect_fixture_observation: last_system_effect_observation,
             #[cfg(all(test, target_arch = "x86_64"))]
             exception_fixture_probe,
             declared_capacity,
@@ -687,6 +696,7 @@ impl SoftwareEl1Machine {
             write_progress_observation,
             register_observation: last_el1_register_observation.map(|value| format!("{value:?}")),
             system_observation: last_el1_system_observation.map(|value| format!("{value:?}")),
+            system_effect_observation,
             context_observation: last_el1_context_observation
                 .as_ref()
                 .map(|value| format!("{value:?}")),
@@ -1274,3 +1284,7 @@ mod platform_tests {
 #[cfg(all(test, target_arch = "x86_64"))]
 #[path = "el1_context/fixture.rs"]
 mod exception_fixture;
+
+#[cfg(all(test, target_arch = "x86_64"))]
+#[path = "system_effects/fixture.rs"]
+mod system_effect_fixture;

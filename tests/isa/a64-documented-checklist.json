@@ -2138,16 +2138,16 @@
   },
   "facts_sha256": "fff5ee6ca3eb54bc4c9d52f749373725a0261175d843ab23cebfaa5dd87d0db3",
   "assessment": {
-    "implemented": 3200,
+    "implemented": 3201,
     "partial": 5,
-    "unsupported": 1127,
+    "unsupported": 1126,
     "total": 4332,
-    "implementation_percentage": 73.86888273314867,
+    "implementation_percentage": 73.89196675900277,
     "categories": {
       "base_integer_system": {
-        "implemented": 603,
+        "implemented": 604,
         "partial": 5,
-        "unsupported": 346
+        "unsupported": 345
       },
       "fp_simd": {
         "implemented": 993,
@@ -2163,7 +2163,7 @@
       }
     }
   },
-  "compiler_source_sha256": "284ff8d1175f5e3fdecd41df4e9be69aa9657b6bacf01412629439c76796f2ec",
+  "compiler_source_sha256": "257a1be90a300f8262496e1001e047c62128c5530d3d82d5af83634c154e3ac2",
   "evidence_reports": [],
   "assessment_basis": "reviewed_implementation_and_emission_smoke",
   "last_verified_checkpoint": {
@@ -2514,7 +2514,7 @@
     {"id":"DGH_HI_hints","instruction_id":"DGH","mnemonic":"DGH","category":"base_integer_system","source_file":"dgh.xml","encoding_mask":"0xffffffff","encoding_value":"0xd50320df","features":[{"feature":"FEAT_DGH","name":"v8Ap6 || (v8Ap4 && PROFILE_R)"}],"status":"unsupported","profiles":[]},
     {"id":"DMB_BO_barriers","instruction_id":"DMB","mnemonic":"DMB","category":"base_integer_system","source_file":"dmb.xml","encoding_mask":"0xfffff0ff","encoding_value":"0xd50330bf","features":[],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"EL0 little-endian coherent shared Normal-WB RAM, LSE2 with a 16-byte SCA granule, A=0/nAA=0, disabled tags/checked pointers and enabled SP alignment policy. All allocated widths/orders/aliases/ZR roles; exact-width atomic updates. Generic-base H/W/X LDAR/LDAPR require checked AtomicLoad16; byte/SP-aligned loads do not. Native fault boundaries do not deliver guest exceptions or establish whole-program concurrent runtime/complete Arm ordering."}]},
     {"id":"DRPS_64E_branch_reg","instruction_id":"DRPS","mnemonic":"DRPS","category":"base_integer_system","source_file":"drps.xml","encoding_mask":"0xffffffff","encoding_value":"0xd6bf03e0","features":[],"status":"unsupported","profiles":[]},
-    {"id":"DSB_BO_barriers","instruction_id":"DSB","mnemonic":"DSB","category":"base_integer_system","source_file":"dsb.xml","encoding_mask":"0xfffff0ff","encoding_value":"0xd503309f","features":[],"status":"unsupported","profiles":[]},
+    {"id":"DSB_BO_barriers","instruction_id":"DSB","mnemonic":"DSB","category":"base_integer_system","source_file":"dsb.xml","encoding_mask":"0xfffff0ff","encoding_value":"0xd503309f","features":[],"status":"implemented","profiles":[{"profile":"el1-platform-v1","status":"implemented","scope":"All ordinary option encodings within fixed EL1/noEL2/closed synchronous privateRAM+CSE participant profile; same original controls/source/outer/phase. Stronger full completion satisfies subset operands. Aliases/nXS and arbitraryMMIO/DMA unqualified."}]},
     {"id":"DSB_BOn_barriers","instruction_id":"DSB","mnemonic":"DSB","category":"base_integer_system","source_file":"dsb.xml","encoding_mask":"0xfffff3ff","encoding_value":"0xd503323f","features":[{"feature":"FEAT_XS","name":"v8Ap7"}],"status":"unsupported","profiles":[]},
     {"id":"DUP_asimdins_DR_r","instruction_id":"DUP_advsimd_gen","mnemonic":"DUP","category":"fp_simd","source_file":"dup_advsimd_gen.xml","encoding_mask":"0xbfe0fc00","encoding_value":"0x0e000c00","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim."}]},
     {"id":"DUP_asimdins_DV_v","instruction_id":"DUP_advsimd_elt","mnemonic":"DUP","category":"fp_simd","source_file":"dup_advsimd_elt.xml","encoding_mask":"0xbfe0fc00","encoding_value":"0x0e000400","features":[{"feature":"FEAT_AdvSIMD","name":"v8Ap0"}],"status":"implemented","profiles":[{"profile":"direct-private-ram-leaf-v2","status":"implemented","scope":"Enabled FP/AdvSIMD. All allocated vector widths, lane sizes, indices and source-spec ignored bits; GPR31 is ZR and V31 ordinary data. Scalar/Q=0 upper clearing, INS unselected lanes, signed/unsigned GPR transfer width, all aliases, table register modulo-32 wrapping and unsigned OOB zero/preservation. NZCV/FPCR/FPSR and guest RAM unchanged. No disabled-FP traps, SME streaming or application execution claim."}]},

@@ -843,11 +843,15 @@ fn parse(
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
         if profile.supports_system()
-            && let Some(decoded) =
-                decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
-                    pc,
-                    detail: error.0,
-                })?
+            && let Some(decoded) = (if profile == BlockProfile::El1PlatformV1 {
+                system::decode_el1_system_instruction(pc, word)
+            } else {
+                decode_system_instruction(pc, word)
+            })
+            .map_err(|error| BlockAnalysisError {
+                pc,
+                detail: error.0,
+            })?
             && (profile.supports_system_registers()
                 || !matches!(
                     decoded.operation,

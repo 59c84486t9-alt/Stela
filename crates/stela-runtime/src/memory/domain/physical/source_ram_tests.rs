@@ -1,3 +1,4 @@
+use super::completion::{RamCompletionError, RamCompletionProgress};
 use super::*;
 use crate::memory::{
     policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
@@ -320,4 +321,46 @@ fn test_alias_factory_rejects_invalid_extent_ranges_rights_and_alignment() {
             Err(SourceRamBuildError::Declaration(_))
         ));
     }
+}
+
+#[test]
+fn actual_ram_completion_retains_same_order_owner_and_cannot_be_replayed() {
+    let actual = physical();
+    let outer = actual.domain().execution_loan().unwrap();
+    let mut prepared = actual.prepare_ram_completion(&outer).unwrap();
+    assert_eq!(prepared.progress(), RamCompletionProgress::Unattempted);
+    // A second session cannot bypass this SAME machine's live serializer.
+    assert!(matches!(
+        actual.prepare_ram_completion(&outer),
+        Err(RamCompletionError::Ordering(_))
+    ));
+    prepared.complete().unwrap();
+    assert_eq!(prepared.progress(), RamCompletionProgress::Completed);
+    assert!(matches!(
+        prepared.complete(),
+        Err(RamCompletionError::AlreadyAttempted(
+            RamCompletionProgress::Completed
+        ))
+    ));
+    // Completion doesn't release original loans before architectural settlement.
+    assert!(matches!(
+        actual.prepare_ram_completion(&outer),
+        Err(RamCompletionError::Ordering(_))
+    ));
+    drop(prepared);
+    drop(actual.prepare_ram_completion(&outer).unwrap());
+}
+
+#[test]
+fn ram_completion_rejects_another_actual_domain_before_any_fence() {
+    let actual = physical();
+    let foreign = physical();
+    let wrong_outer = foreign.domain().execution_loan().unwrap();
+    assert!(matches!(
+        actual.prepare_ram_completion(&wrong_outer),
+        Err(RamCompletionError::Physical(_))
+    ));
+    let outer = actual.domain().execution_loan().unwrap();
+    let mut prepared = actual.prepare_ram_completion(&outer).unwrap();
+    prepared.complete().unwrap();
 }

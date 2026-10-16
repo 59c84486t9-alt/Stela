@@ -1,5 +1,8 @@
 //! Source-physical reads from genuinely materialized private loader RAM.
 //! Guest source memory type is not inferred from coherent host storage.
+#[path = "physical/completion.rs"]
+pub(crate) mod completion;
+
 use super::{
     AccessKind, Arc, MemoryDomain, MemoryExecutionLoan, MemoryStatus, PhysicalAccess, access,
 };

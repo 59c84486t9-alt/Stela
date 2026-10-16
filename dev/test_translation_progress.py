@@ -2186,6 +2186,44 @@ class SystemServiceProfileTests(unittest.TestCase):
                 progress.compile_probe('cli', 0x9ac21020, Path(directory), mode='service',
                     service_profile=progress.SYSTEM_PROFILE, run=self.fake_compiler(mutation))
 
+    def test_el1_platform_profile_keeps_source_bound_carrier_and_distinct_flags(self):
+        default, additional = self.contracts()
+        additional[progress.EL1_PLATFORM_PROFILE] = {
+            'id': progress.EL1_PLATFORM_PROFILE, 'compiler_mode': 'service',
+            'abi': progress.EL1_PLATFORM_ABI, 'outside_scope': ['Unowned platform effects']}
+        self.assertIn(progress.EL1_PLATFORM_PROFILE,
+                      progress.validate_service_profiles(default, additional))
+        def el1_manifest(manifest, native):
+            manifest['abi'] = progress.EL1_PLATFORM_ABI
+            manifest['memory_requirements'] = None
+            return native
+        with tempfile.TemporaryDirectory() as directory:
+            result = progress.compile_probe('cli', 0xd5033f9f, Path(directory), mode='service',
+                service_profile=progress.EL1_PLATFORM_PROFILE, run=self.fake_compiler(el1_manifest))
+        self.assertIn('--el1-platform', self.command)
+        self.assertNotIn('--system-boundaries', self.command)
+        self.assertNotIn('--software-pauth', self.command)
+        self.assertEqual(result['abi'], progress.EL1_PLATFORM_ABI)
+
+    def test_el1_platform_probe_refuses_wrong_body_abi_map_target_or_memory_contract(self):
+        for field in ('body', 'abi', 'source_map', 'target_cpu', 'memory_requirements',
+                      'missing_memory_requirements'):
+            def mutation(manifest, native):
+                manifest['abi'] = progress.EL1_PLATFORM_ABI
+                manifest['memory_requirements'] = None
+                if field == 'body':
+                    return native[:-1] + bytes([0x90])
+                if field == 'missing_memory_requirements':
+                    del manifest['memory_requirements']
+                    return native
+                manifest[field] = {'abi': progress.SYSTEM_ABI,
+                    'source_map': [[progress.SYSTEM_GUEST_BASE + 4, 0]],
+                    'target_cpu': 'x86_64-baseline+cx16', 'memory_requirements': {}}[field]
+                return native
+            with tempfile.TemporaryDirectory() as directory, self.subTest(field=field), self.assertRaises(ValueError):
+                progress.compile_probe('cli', 0xd5033f9f, Path(directory), mode='service',
+                    service_profile=progress.EL1_PLATFORM_PROFILE, run=self.fake_compiler(mutation))
+
     def test_service_profile_cannot_leak_into_leaf_or_unknown_lane(self):
         for mode, profile in [('leaf', progress.SYSTEM_PROFILE), ('service', 'unknown')]:
             with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
