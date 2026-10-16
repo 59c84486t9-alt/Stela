@@ -7,6 +7,7 @@ pub mod dependency_paths;
 pub mod exports;
 pub mod im4p;
 pub mod inventory;
+pub mod kernel_collection;
 pub mod linked_images;
 pub mod load_plan;
 pub mod mapped_image;
