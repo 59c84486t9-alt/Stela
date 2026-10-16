@@ -294,6 +294,14 @@ pub(crate) fn report(event: &Event) {
         Event::Return { to_el, pc } => {
             output::arguments(format_args!("ERET to=EL{to_el} pc={pc:#x}\n"))
         }
+        Event::Guarded { entered, pc } => output::arguments(format_args!(
+            "{} pc={pc:#x}\n",
+            if *entered {
+                "GENTER now=GL1"
+            } else {
+                "GEXIT now=EL"
+            }
+        )),
     }
 }
 
@@ -453,6 +461,12 @@ fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -
         cpu.system.far,
         cpu.system.vbar,
     ));
+    for (entry, reads, writes) in cpu.system.impdef.used() {
+        output::arguments(format_args!(
+            "IMPDEF {} {:?} reads={reads} writes={writes}: {}\n",
+            entry.name, entry.class, entry.evidence
+        ));
+    }
     for (index, pair) in cpu.state.x.chunks(4).enumerate() {
         output::arguments(format_args!("X{}:", index * 4));
         for value in pair {

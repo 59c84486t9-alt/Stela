@@ -6,6 +6,7 @@ pub mod apple;
 pub mod cpu;
 pub mod engine;
 pub mod exception;
+pub mod impdef;
 pub mod mmu;
 pub mod registers;
 pub mod timer;

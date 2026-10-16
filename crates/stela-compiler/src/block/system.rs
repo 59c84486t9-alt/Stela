@@ -24,6 +24,9 @@ pub enum SystemOperation {
     /// SYS/SYSL (op0=1): address translation, cache and TLB maintenance.
     /// Only the system-mode profile produces it.
     Maintenance(registers::RegisterAccess),
+    /// Apple GXF guarded-level transitions. Only the system-mode profile
+    /// produces it.
+    Guarded(GuardedOperation),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -36,6 +39,21 @@ pub enum SystemOperation {
         timeout_register: Option<u8>,
     },
 }
+
+/// Apple GXF instructions, exact words from Asahi Linux "SPRR and GXF" and
+/// m1n1 `gxf_asm.S` (`#define genter .long 0x00201420`, `gexit .long
+/// 0x00201400`). They sit in the A64 reserved space, so no other decoder
+/// claims them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedOperation {
+    /// GENTER: enter the guarded level at GXF_ENTER_EL1.
+    Enter,
+    /// GEXIT: return through ELR/SPSR/ASPSR of the guarded level.
+    Exit,
+}
+
+pub const GENTER: u32 = 0x0020_1420;
+pub const GEXIT: u32 = 0x0020_1400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SystemInstruction {
@@ -56,6 +74,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::TagMemory(_) => "tag_memory",
         SystemOperation::Register(_) => "system_register",
         SystemOperation::Maintenance(_) => "maintenance",
+        SystemOperation::Guarded(_) => "guarded",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -157,7 +176,11 @@ pub fn decode_system_mode_instruction(
     if let Some(instruction) = decode_system_instruction(pc, word)? {
         return Ok(Some(instruction));
     }
-    let operation = if let Some(access) = registers::decode_sys(word) {
+    let operation = if word == GENTER {
+        SystemOperation::Guarded(GuardedOperation::Enter)
+    } else if word == GEXIT {
+        SystemOperation::Guarded(GuardedOperation::Exit)
+    } else if let Some(access) = registers::decode_sys(word) {
         SystemOperation::Maintenance(access)
     } else {
         match synchronization::decode(word) {

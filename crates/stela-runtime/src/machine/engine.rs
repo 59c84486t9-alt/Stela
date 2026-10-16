@@ -22,7 +22,7 @@ use stela_compiler::{
     block::{
         self, BlockProfile, CompilationPlan, ExitKind,
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
-        system::SystemOperation,
+        system::{GuardedOperation, SystemOperation},
     },
 };
 
@@ -164,6 +164,11 @@ pub enum Event {
     },
     Return {
         to_el: u8,
+        pc: u64,
+    },
+    /// GENTER or GEXIT; `entered` tells whether the PE is now guarded.
+    Guarded {
+        entered: bool,
         pc: u64,
     },
 }
@@ -508,7 +513,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn fetch_physical(&mut self, pc: u64) -> Result<u64, Result<Exception, Stop>> {
         let page = pc & !(FETCH_PAGE - 1);
         let slot = (page / FETCH_PAGE) as usize % FETCH_CACHE;
-        let el = self.cpu.pstate.el;
+        // The cache key folds the guarded level in with the EL.
+        let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         if let Some(entry) = self.fetch[slot]
             && entry.page == page
             && entry.el == el
@@ -520,6 +526,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let controls = self.cpu.system.translation;
         let mut tables = RamTables(&mut self.host);
         match mmu::translate(&controls, pc, Access::Execute, requester, &mut tables) {
+            Translated::Mapped(translation) if translation.guarded_page => Err(Err(self
+                .unsupported(RequirementKind::Native(
+                    "execution from a BTI guarded page (GP set) needs BTYPE checking",
+                )))),
             Translated::Mapped(translation) => {
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
@@ -530,8 +540,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 });
                 Ok(translation.physical)
             }
+            Translated::Fault(fault)
+                if fault.kind == mmu::FaultKind::Permission
+                    && requester.el == 1
+                    && !requester.guarded
+                    && controls.sprr.enabled()
+                    && matches!(
+                        mmu::translate(
+                            &controls,
+                            pc,
+                            Access::Execute,
+                            mmu::Requester {
+                                guarded: true,
+                                ..requester
+                            },
+                            &mut RamTables(&mut self.host),
+                        ),
+                        Translated::Mapped(_)
+                    ) =>
+            {
+                // On hardware an EL fetch of GL-only code enters GL at
+                // GXF_ABORT_EL1 (Sven Peter, for GL2); the saved state is
+                // not documented.
+                Err(Err(self.unsupported(RequirementKind::Native(
+                    "EL1 fetch of guarded-only code (GXF abort entry)",
+                ))))
+            }
             Translated::Fault(fault) => {
-                let class = if el == 0 {
+                let class = if requester.el == 0 {
                     Class::InstructionAbortLower
                 } else {
                     Class::InstructionAbortSame
@@ -1042,6 +1078,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 timeout_register,
             } => self.wait(word, kind, timeout_register),
             SystemOperation::TagMemory(_) => self.undefined(),
+            SystemOperation::Guarded(GuardedOperation::Enter) => {
+                if self.cpu.guarded_enter().is_err() {
+                    return self.undefined();
+                }
+                self.host.report(&Event::Guarded {
+                    entered: true,
+                    pc: self.cpu.pc,
+                });
+                self.sync_regime();
+                Ok(())
+            }
+            SystemOperation::Guarded(GuardedOperation::Exit) => match self.cpu.guarded_exit() {
+                Err(_) => self.undefined(),
+                Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
+                Ok(Ok(())) => {
+                    self.host.report(&Event::Guarded {
+                        entered: self.cpu.pstate.guarded,
+                        pc: self.cpu.pc,
+                    });
+                    self.sync_regime();
+                    Ok(())
+                }
+            },
         }
     }
 
@@ -1607,6 +1666,77 @@ mod tests {
         machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
         assert_eq!(machine.cpu.system.par & 0x0000_ffff_ffff_f000, BASE);
         assert_eq!(machine.cpu.system.par & 1, 0);
+    }
+
+    #[test]
+    fn genter_gexit_and_guarded_exceptions_use_the_gl1_bank() {
+        let mut machine = machine(&[]);
+        let cpu = &mut machine.cpu;
+        cpu.state.x[0] = 1;
+        cpu.state.x[1] = 0x9000;
+        cpu.state.x[2] = 0xa000;
+        cpu.state.sp = 0x7000;
+        // GENTER is UNDEFINED until SPRR and GXF are enabled.
+        machine.system_instruction(0x0020_1420).unwrap();
+        assert_eq!(machine.cpu.system.esr, 0x0200_0000);
+        machine.cpu.pc = BASE;
+        for word in [
+            0xd51e_f100, // msr SPRR_CONFIG_EL1, x0
+            0xd51e_f140, // msr GXF_CONFIG_EL1, x0
+            0xd51e_f821, // msr GXF_ENTER_EL1, x1
+        ] {
+            machine.system_instruction(word).unwrap();
+        }
+        // GL1 bank registers are refused outside the guarded level.
+        assert!(matches!(
+            machine.system_instruction(0xd51e_fa42),
+            Err(Stop::Unsupported(_))
+        ));
+        let genter_pc = machine.cpu.pc;
+        machine.system_instruction(0x0020_1420).unwrap();
+        assert!(machine.cpu.pstate.guarded);
+        assert_eq!(machine.cpu.pc, 0x9000);
+        assert_eq!(machine.cpu.system.guarded.elr, genter_pc + 4);
+        assert_eq!(machine.cpu.system.guarded.aspsr, 0);
+        assert!(machine.host.regimes.last().unwrap().requester.guarded);
+        // A fresh GL1 stack; EL1's is banked.
+        assert_eq!(
+            (machine.cpu.state.sp, machine.cpu.system.sp_el1),
+            (0, 0x7000)
+        );
+        machine.cpu.state.sp = 0x8000;
+        machine.system_instruction(0xd51e_fa42).unwrap(); // msr VBAR_GL1, x2
+        machine.system_instruction(0xd53e_f803).unwrap(); // mrs x3, GXF_STATUS_EL1
+        assert_eq!(machine.cpu.state.x[3], 1);
+        // An SVC at GL1 is taken at VBAR_GL1 and records a GL return.
+        let svc_pc = machine.cpu.pc;
+        let el1_elr = machine.cpu.system.elr;
+        machine.system_instruction(0xd400_0001).unwrap();
+        assert_eq!(machine.cpu.pc, 0xa200);
+        assert_eq!(machine.cpu.system.guarded.elr, svc_pc + 4);
+        assert_eq!(machine.cpu.system.guarded.esr, 0x5600_0000);
+        assert_eq!(machine.cpu.system.guarded.aspsr, 1);
+        assert_eq!(machine.cpu.system.elr, el1_elr, "EL1's ELR is untouched");
+        // GEXIT returns to GL1, then (with ASPSR clear) to EL1.
+        machine.system_instruction(0x0020_1400).unwrap();
+        assert!(machine.cpu.pstate.guarded);
+        assert_eq!(machine.cpu.pc, svc_pc + 4);
+        machine.cpu.system.guarded.aspsr = 0;
+        machine.cpu.system.guarded.elr = genter_pc + 4;
+        machine.cpu.system.guarded.spsr = 0x3c5;
+        machine.system_instruction(0x0020_1400).unwrap();
+        assert!(!machine.cpu.pstate.guarded);
+        assert_eq!(
+            (machine.cpu.pc, machine.cpu.state.sp),
+            (genter_pc + 4, 0x7000)
+        );
+        assert_eq!(machine.cpu.system.guarded.sp, 0x8000);
+        // GEXIT outside GL is UNDEFINED; APSTS reports the master key ready.
+        machine.system_instruction(0x0020_1400).unwrap();
+        assert_eq!(machine.cpu.system.esr, 0x0200_0000);
+        machine.cpu.pstate = Pstate::RESET_EL1;
+        machine.system_instruction(0xd53e_fc85).unwrap(); // mrs x5, APSTS_EL1
+        assert_eq!(machine.cpu.state.x[5], 1);
     }
 
     #[test]

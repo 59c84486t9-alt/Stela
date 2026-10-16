@@ -3,7 +3,7 @@
 //!
 //! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
 //! halves and whose entry 64 is the shared window. There is one root per
-//! permission view (EL0, EL1, EL1 with PAN), filled on demand by the #PF
+//! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
 //! handler from the software walk of the guest's tables.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
@@ -76,7 +76,7 @@ impl Pool {
     }
 }
 
-const ROOTS: usize = 3;
+const ROOTS: usize = 4;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
 const GUEST_LOW: usize = 0;
@@ -227,7 +227,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         Ok(frame)
     };
     let host_root = root()?;
-    let roots = [root()?, root()?, root()?];
+    let roots = [root()?, root()?, root()?, root()?];
     load_root(host_root);
     let x2 = config.apic_base & (1 << 10) != 0;
     let apic = Apic {
@@ -584,10 +584,16 @@ impl Host for BareHost {
             state.reset_shadow();
         }
         state.regime = Some(*regime);
-        let view = match (regime.requester.el, regime.requester.pan) {
-            (0, _) => 0,
-            (_, false) => 1,
-            (_, true) => 2,
+        // EL0, EL1, EL1 with PAN, and the GXF guarded level (GL1).
+        let view = match (
+            regime.requester.el,
+            regime.requester.pan,
+            regime.requester.guarded,
+        ) {
+            (0, _, _) => 0,
+            (_, _, true) => 3,
+            (_, false, false) => 1,
+            (_, true, false) => 2,
         };
         if state.current != view {
             state.current = view;

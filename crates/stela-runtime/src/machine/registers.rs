@@ -8,6 +8,7 @@
 use super::{
     cpu::Cpu,
     exception::{DAIF_ALL, Pstate},
+    impdef,
 };
 use alloc::vec::Vec;
 use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAccess};
@@ -121,6 +122,31 @@ pub mod encodings {
         OSLAR_EL1 = 2, 0, 1, 0, 4;
         OSLSR_EL1 = 2, 0, 1, 1, 4;
         OSDLR_EL1 = 2, 0, 1, 3, 4;
+        // Apple SPRR and GXF (m1n1 `cpu_regs.h`; Asahi "SPRR and GXF").
+        SPRR_CONFIG_EL1 = 3, 6, 15, 1, 0;
+        GXF_CONFIG_EL1 = 3, 6, 15, 1, 2;
+        SPRR_PERM_EL0 = 3, 6, 15, 1, 5;
+        SPRR_PERM_EL1 = 3, 6, 15, 1, 6;
+        SPRR_PERM_EL12 = 3, 6, 15, 15, 7;
+        SPRR_PERM_EL02 = 3, 4, 15, 5, 2;
+        GXF_STATUS_EL1 = 3, 6, 15, 8, 0;
+        GXF_ENTER_EL1 = 3, 6, 15, 8, 1;
+        GXF_ABORT_EL1 = 3, 6, 15, 8, 2;
+        GXF_ENTER_EL12 = 3, 6, 15, 15, 2;
+        GXF_ABORT_EL12 = 3, 6, 15, 15, 3;
+        SP_GL12 = 3, 6, 15, 10, 0;
+        TPIDR_GL1 = 3, 6, 15, 10, 1;
+        VBAR_GL1 = 3, 6, 15, 10, 2;
+        SPSR_GL1 = 3, 6, 15, 10, 3;
+        ASPSR_GL1 = 3, 6, 15, 10, 4;
+        ESR_GL1 = 3, 6, 15, 10, 5;
+        ELR_GL1 = 3, 6, 15, 10, 6;
+        FAR_GL1 = 3, 6, 15, 10, 7;
+        // Apple PAC (XNU `xnu-6153.141.1` `pexpert/pexpert/arm64/arm64_common.h`).
+        APCTL_EL1 = 3, 4, 15, 0, 4;
+        APSTS_EL1 = 3, 6, 15, 12, 4;
+        KERNELKEYLO_EL1 = 3, 4, 15, 1, 0;
+        KERNELKEYHI_EL1 = 3, 4, 15, 1, 1;
     }
 }
 use encodings::*;
@@ -177,7 +203,20 @@ const SCTLR_DZE: u64 = 1 << 14;
 const SCTLR_UCT: u64 = 1 << 15;
 /// Bits of SCTLR_EL1 the engine accepts: everything below bit 32 except
 /// alignment checking (A) and big-endian data (E0E, EE), plus DSSBS.
-const SCTLR_SUPPORTED: u64 = 0x0000_1000_fcff_fffd;
+/// BT0/BT1 (bits 35/36) are accepted because the engine refuses to execute
+/// pages whose descriptors set GP, so no BTI check can be skipped.
+const SCTLR_SUPPORTED: u64 = 0x0000_1018_fcff_fffd;
+/// APSTS_EL1.MKEYVld: the hardware master key is ready. This machine has no
+/// key-generation delay, so the bit always reads as set.
+const APSTS_MKEYVLD: u64 = 1;
+/// The GL12 aliases and the EL12/EL02 SPRR and GXF views exist only for EL2.
+const EL2_ONLY: [Encoding; 5] = [
+    SPRR_PERM_EL12,
+    SPRR_PERM_EL02,
+    GXF_ENTER_EL12,
+    GXF_ABORT_EL12,
+    SP_GL12,
+];
 const CNTKCTL_EL0PCTEN: u64 = 1 << 0;
 const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
 const CNTKCTL_EL0VTEN: u64 = 1 << 8;
@@ -233,6 +272,9 @@ impl Cpu {
         let read_only = direction == Direction::Write;
         match encoding {
             NZCV | FPCR | FPSR | DIT | SSBS | TPIDR_EL0 => None,
+            // The user JIT toggle (Sven Peter, "Apple Silicon Hardware
+            // Secrets: SPRR and Guarded Exception Levels").
+            SPRR_PERM_EL0 => None,
             TPIDRRO_EL0 | DCZID_EL0 if read_only => Some(Outcome::Undefined),
             TPIDRRO_EL0 | DCZID_EL0 => None,
             DAIF => allowed(sctlr & SCTLR_UMA != 0),
@@ -250,7 +292,7 @@ impl Cpu {
         }
     }
 
-    fn read(&self, encoding: Encoding, environment: &Environment) -> Outcome {
+    fn read(&mut self, encoding: Encoding, environment: &Environment) -> Outcome {
         let system = &self.system;
         let now = environment.now;
         let value = match encoding {
@@ -313,6 +355,18 @@ impl Cpu {
             APDBKEYHI_EL1 => system.keys[3][1],
             APGAKEYLO_EL1 => system.keys[4][0],
             APGAKEYHI_EL1 => system.keys[4][1],
+            encoding if self.apple(encoding).is_some() => {
+                return self.apple(encoding).expect("checked").read(self);
+            }
+            encoding if impdef::lookup(encoding).is_some() => {
+                let entry = impdef::lookup(encoding).expect("checked");
+                return match self.system.impdef.read(entry) {
+                    Some(value) => Outcome::Read(value),
+                    None => Outcome::Refused(Refusal::UnsupportedSetting(
+                        "read of an implementation-defined storage register before its first write",
+                    )),
+                };
+            }
             _ => {
                 return match environment.profile.fixed(encoding) {
                     Some(value) => Outcome::Read(value),
@@ -445,6 +499,13 @@ impl Cpu {
             APDBKEYHI_EL1 => system.keys[3][1] = value,
             APGAKEYLO_EL1 => system.keys[4][0] = value,
             APGAKEYHI_EL1 => system.keys[4][1] = value,
+            encoding if self.apple(encoding).is_some() => {
+                return self.apple(encoding).expect("checked").write(self, value);
+            }
+            encoding if impdef::lookup(encoding).is_some() => {
+                let entry = impdef::lookup(encoding).expect("checked");
+                self.system.impdef.write(entry, value);
+            }
             _ if is_identification(encoding) => return Outcome::Undefined,
             _ => return Outcome::Refused(Refusal::Unimplemented),
         }
@@ -494,6 +555,155 @@ impl Cpu {
     /// DC ZVA is permitted at EL0 only with SCTLR_EL1.DZE.
     pub fn zva_permitted(&self) -> bool {
         self.pstate.el == 1 || self.system.translation.sctlr & SCTLR_DZE != 0
+    }
+}
+
+/// Apple implementation-defined registers with modeled behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Apple {
+    SprrConfig,
+    SprrPermEl1,
+    SprrPermEl0,
+    GxfConfig,
+    GxfStatus,
+    GxfEnter,
+    GxfAbort,
+    /// A GL1 bank register, only reachable at the guarded level.
+    Guarded(Encoding),
+    El2Only,
+    ApStatus,
+    ApControl,
+    KernelKey(usize),
+}
+
+impl Apple {
+    fn read(self, cpu: &Cpu) -> Outcome {
+        let sprr = cpu.system.translation.sprr;
+        let gl = &cpu.system.guarded;
+        Outcome::Read(match self {
+            Self::SprrConfig => sprr.config,
+            Self::SprrPermEl1 | Self::SprrPermEl0 if !sprr.enabled() => {
+                return Outcome::Undefined;
+            }
+            Self::SprrPermEl1 => sprr.el1,
+            Self::SprrPermEl0 => sprr.el0,
+            Self::GxfConfig => gl.config,
+            Self::GxfStatus => u64::from(cpu.pstate.guarded),
+            Self::GxfEnter => gl.enter,
+            Self::GxfAbort => gl.abort,
+            Self::Guarded(_) if !cpu.pstate.guarded => {
+                return Outcome::Refused(Refusal::UnsupportedSetting(
+                    "GL1 bank register outside the guarded level",
+                ));
+            }
+            Self::Guarded(encoding) => match encoding {
+                TPIDR_GL1 => gl.tpidr,
+                VBAR_GL1 => gl.vbar,
+                SPSR_GL1 => gl.spsr,
+                ASPSR_GL1 => gl.aspsr,
+                ESR_GL1 => gl.esr,
+                ELR_GL1 => gl.elr,
+                _ => gl.far,
+            },
+            Self::El2Only => return Outcome::Undefined,
+            Self::ApStatus => APSTS_MKEYVLD,
+            Self::ApControl => cpu.system.apctl,
+            Self::KernelKey(index) => cpu.system.kernel_key[index],
+        })
+    }
+
+    fn write(self, cpu: &mut Cpu, value: u64) -> Outcome {
+        use super::mmu::{
+            SPRR_CONFIG_EN, SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0,
+            SPRR_CONFIG_LOCK_PERM_EL1,
+        };
+        let mut changes = Changes::default();
+        let sprr = &mut cpu.system.translation.sprr;
+        let refuse = |reason| Outcome::Refused(Refusal::UnsupportedSetting(reason));
+        match self {
+            Self::SprrConfig => {
+                if sprr.config & SPRR_CONFIG_LOCK_CONFIG != 0 {
+                    return refuse("SPRR_CONFIG_EL1 write after LOCK_CONFIG");
+                }
+                let known = SPRR_CONFIG_EN
+                    | SPRR_CONFIG_LOCK_CONFIG
+                    | SPRR_CONFIG_LOCK_PERM_EL0
+                    | SPRR_CONFIG_LOCK_PERM_EL1;
+                if value & !known != 0 {
+                    return refuse("SPRR_CONFIG_EL1 bit without documented meaning");
+                }
+                sprr.config = value;
+                changes.translation = true;
+            }
+            Self::SprrPermEl1 | Self::SprrPermEl0 if !sprr.enabled() => {
+                return Outcome::Undefined;
+            }
+            Self::SprrPermEl1 => {
+                if sprr.config & SPRR_CONFIG_LOCK_PERM_EL1 != 0 {
+                    return refuse("SPRR_PERM_EL1 write after LOCK_KERNEL_PERM");
+                }
+                sprr.el1 = value;
+                changes.translation = true;
+            }
+            Self::SprrPermEl0 => {
+                if sprr.config & SPRR_CONFIG_LOCK_PERM_EL0 != 0 {
+                    return refuse("SPRR_PERM_EL0 write after LOCK_PERM");
+                }
+                sprr.el0 = value;
+                changes.translation = true;
+            }
+            Self::GxfConfig => {
+                if value & !super::cpu::GXF_CONFIG_EN != 0 {
+                    return refuse("GXF_CONFIG_EL1 bit without documented meaning");
+                }
+                cpu.system.guarded.config = value;
+            }
+            Self::GxfStatus | Self::ApStatus => return Outcome::Undefined,
+            Self::GxfEnter => cpu.system.guarded.enter = value,
+            Self::GxfAbort => cpu.system.guarded.abort = value,
+            Self::Guarded(_) if !cpu.pstate.guarded => {
+                return refuse("GL1 bank register outside the guarded level");
+            }
+            Self::Guarded(encoding) => {
+                let gl = &mut cpu.system.guarded;
+                match encoding {
+                    TPIDR_GL1 => gl.tpidr = value,
+                    VBAR_GL1 => gl.vbar = value & !0x7ff,
+                    SPSR_GL1 => gl.spsr = value,
+                    ASPSR_GL1 => gl.aspsr = value,
+                    ESR_GL1 => gl.esr = value,
+                    ELR_GL1 => gl.elr = value,
+                    _ => gl.far = value,
+                }
+            }
+            Self::El2Only => return Outcome::Undefined,
+            Self::ApControl => cpu.system.apctl = value,
+            Self::KernelKey(index) => cpu.system.kernel_key[index] = value,
+        }
+        Outcome::Written(changes)
+    }
+}
+
+impl Cpu {
+    fn apple(&self, encoding: Encoding) -> Option<Apple> {
+        Some(match encoding {
+            SPRR_CONFIG_EL1 => Apple::SprrConfig,
+            SPRR_PERM_EL1 => Apple::SprrPermEl1,
+            SPRR_PERM_EL0 => Apple::SprrPermEl0,
+            GXF_CONFIG_EL1 => Apple::GxfConfig,
+            GXF_STATUS_EL1 => Apple::GxfStatus,
+            GXF_ENTER_EL1 => Apple::GxfEnter,
+            GXF_ABORT_EL1 => Apple::GxfAbort,
+            TPIDR_GL1 | VBAR_GL1 | SPSR_GL1 | ASPSR_GL1 | ESR_GL1 | ELR_GL1 | FAR_GL1 => {
+                Apple::Guarded(encoding)
+            }
+            APSTS_EL1 => Apple::ApStatus,
+            APCTL_EL1 => Apple::ApControl,
+            KERNELKEYLO_EL1 => Apple::KernelKey(0),
+            KERNELKEYHI_EL1 => Apple::KernelKey(1),
+            encoding if EL2_ONLY.contains(&encoding) => Apple::El2Only,
+            _ => return None,
+        })
     }
 }
 

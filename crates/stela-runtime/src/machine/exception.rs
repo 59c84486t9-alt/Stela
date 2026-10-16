@@ -17,6 +17,9 @@ pub struct Pstate {
     pub dit: bool,
     pub ssbs: bool,
     pub tco: bool,
+    /// Apple GXF: executing at the guarded level beside `el` (GL1). SPSR
+    /// does not encode it; the GL bank's ASPSR does.
+    pub guarded: bool,
 }
 
 pub const DAIF_D: u8 = 8;
@@ -47,6 +50,7 @@ impl Pstate {
         dit: false,
         ssbs: false,
         tco: false,
+        guarded: false,
     };
 
     /// SPSR_EL1 for an exception taken from this state.
@@ -99,6 +103,7 @@ pub fn from_spsr(spsr: u64) -> Result<(Pstate, u32), IllegalReturn> {
             dit: spsr & SPSR_DIT != 0,
             ssbs: spsr & SPSR_SSBS != 0,
             tco: spsr & SPSR_TCO != 0,
+            guarded: false,
         },
         (spsr & NZCV_MASK) as u32,
     ))
@@ -159,7 +164,9 @@ const SCTLR_SPAN: u64 = 1 << 23;
 const SCTLR_DSSBS: u64 = 1 << 44;
 
 /// PSTATE after taking an exception to EL1: SCTLR_EL1.SPAN clear sets PAN and
-/// DSSBS gives SSBS. TCO is untouched because the profile has no MTE.
+/// DSSBS gives SSBS. TCO is untouched because the profile has no MTE. An
+/// exception taken at the guarded level stays there (m1n1 `gxf_asm.S` handles
+/// GL exceptions at VBAR_GL1 and returns with GEXIT).
 pub fn entry_pstate(from: Pstate, sctlr: u64) -> Pstate {
     Pstate {
         el: 1,
@@ -170,6 +177,7 @@ pub fn entry_pstate(from: Pstate, sctlr: u64) -> Pstate {
         dit: from.dit,
         ssbs: sctlr & SCTLR_DSSBS != 0,
         tco: from.tco,
+        guarded: from.guarded,
     }
 }
 
@@ -190,6 +198,7 @@ mod tests {
                     dit: daif & 2 != 0,
                     ssbs: daif & 4 != 0,
                     tco: daif & 8 != 0,
+                    guarded: false,
                 };
                 let spsr = state.to_spsr(0xa000_0000);
                 assert_eq!(from_spsr(spsr), Ok((state, 0xa000_0000)));

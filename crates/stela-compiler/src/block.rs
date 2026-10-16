@@ -695,6 +695,8 @@ mod tests {
             (0xd400_0002, ExitKind::System),     // hvc #0
             (0xd69f_03e0, ExitKind::System),     // eret
             (0x0000_0000, ExitKind::System),     // udf #0
+            (0x0020_1420, ExitKind::System),     // genter (Apple GXF)
+            (0x0020_1400, ExitKind::System),     // gexit (Apple GXF)
             (0xd503_237f, ExitKind::PointerAuthentication), // pacibsp
         ] {
             let source: Vec<u8> = prefix

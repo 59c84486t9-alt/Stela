@@ -13,6 +13,44 @@ pub struct Controls {
     pub ttbr0: u64,
     pub ttbr1: u64,
     pub mair: u64,
+    pub sprr: Sprr,
+}
+
+/// Apple SPRR: page permissions indirected through per-index registers
+/// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`). With SPRR enabled the
+/// descriptor bits AP[1], AP[0], UXN and PXN form a 4-bit index (bit 3 down
+/// to bit 0), and nibble `index` of SPRR_PERM_EL1 holds GL[1:0], EL[1:0].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sprr {
+    /// SPRR_CONFIG_EL1: EN bit 0, LOCK_CONFIG bit 1, LOCK_PERM (EL0) bit 4,
+    /// LOCK_KERNEL_PERM bit 5.
+    pub config: u64,
+    /// SPRR_PERM_EL1 (EL1 and GL1 permissions).
+    pub el1: u64,
+    /// SPRR_PERM_EL0.
+    pub el0: u64,
+}
+
+pub const SPRR_CONFIG_EN: u64 = 1 << 0;
+pub const SPRR_CONFIG_LOCK_CONFIG: u64 = 1 << 1;
+pub const SPRR_CONFIG_LOCK_PERM_EL0: u64 = 1 << 4;
+pub const SPRR_CONFIG_LOCK_PERM_EL1: u64 = 1 << 5;
+
+impl Sprr {
+    pub fn enabled(self) -> bool {
+        self.config & SPRR_CONFIG_EN != 0
+    }
+}
+
+/// (readable, writable, executable) of a 2-bit SPRR permission: `---`,
+/// `r-x`, `r--`, `rw-`.
+fn sprr_rights(bits: u64) -> (bool, bool, bool) {
+    match bits & 3 {
+        0 => (false, false, false),
+        1 => (true, false, true),
+        2 => (true, false, false),
+        _ => (true, true, false),
+    }
 }
 
 pub const SCTLR_M: u64 = 1 << 0;
@@ -38,6 +76,7 @@ const AP_EL0: u64 = 1 << 6;
 const AP_READ_ONLY: u64 = 1 << 7;
 const ACCESS_FLAG: u64 = 1 << 10;
 const NOT_GLOBAL: u64 = 1 << 11;
+const GUARDED_PAGE: u64 = 1 << 50;
 const DIRTY_BIT_MODIFIER: u64 = 1 << 51;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
@@ -65,6 +104,8 @@ pub struct Requester {
     pub pan: bool,
     /// LDTR/STTR and AT S1E0*: an EL1 access checked with EL0 permissions.
     pub unprivileged: bool,
+    /// At the Apple GXF guarded level (GL1 permissions under SPRR).
+    pub guarded: bool,
 }
 
 /// The architectural fault, with the level it was found at.
@@ -118,6 +159,8 @@ pub struct Translation {
     pub asid: u16,
     /// Bytes mapped by the descriptor (page or block size).
     pub size: u64,
+    /// The descriptor's GP bit (FEAT_BTI guarded page).
+    pub guarded_page: bool,
 }
 
 /// Physical memory the walker reads descriptors from and, for hardware
@@ -135,6 +178,10 @@ pub enum Unsupported {
     Granule { bits: u32 },
     /// TnSZ outside 16..=39 (no LVA/LPA2 or ST support).
     RegionSize { tnsz: u32 },
+    /// SPRR with hierarchical table permissions, PAN, hardware dirty state
+    /// or an EL0 nibble beyond the documented values: their composition
+    /// with SPRR is not documented.
+    Sprr(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +309,7 @@ pub fn translate(
             global: true,
             asid: 0,
             size: 1 << 12,
+            guarded_page: false,
         });
     }
     let upper = address & (1 << 55) != 0;
@@ -364,6 +412,77 @@ pub fn translate(
     }
 }
 
+/// Permissions of a leaf under SPRR. The two special GL/EL combinations
+/// follow the Asahi table: GL `r-x` with EL `rw-` gives EL `---`, and GL
+/// `r--` with EL `r-x` gives EL `--x`.
+fn sprr_leaf(
+    controls: &Controls,
+    access: Access,
+    requester: Requester,
+    leaf: &Leaf,
+    descriptor: u64,
+    output: u64,
+    address: u64,
+) -> Outcome {
+    let level = leaf.level;
+    if leaf.no_el0 || leaf.read_only || leaf.pxn_table || leaf.uxn_table {
+        return Outcome::Unsupported(Unsupported::Sprr("hierarchical table permissions"));
+    }
+    if controls.tcr & TCR_HD != 0 && descriptor & DIRTY_BIT_MODIFIER != 0 {
+        return Outcome::Unsupported(Unsupported::Sprr("hardware dirty state"));
+    }
+    let index = ((descriptor >> 7) & 1) << 3
+        | ((descriptor >> 6) & 1) << 2
+        | ((descriptor >> 54) & 1) << 1
+        | ((descriptor >> 53) & 1);
+    let as_el0 = requester.el == 0 || requester.unprivileged;
+    let (readable, writable, executable) = if as_el0 {
+        let nibble = (controls.sprr.el0 >> (4 * index)) & 0xf;
+        if nibble > 3 {
+            return Outcome::Unsupported(Unsupported::Sprr("EL0 permission nibble above 3"));
+        }
+        sprr_rights(nibble)
+    } else {
+        if requester.pan && !requester.guarded {
+            return Outcome::Unsupported(Unsupported::Sprr("PAN"));
+        }
+        let nibble = (controls.sprr.el1 >> (4 * index)) & 0xf;
+        let (guarded, el) = (nibble >> 2, nibble & 3);
+        if requester.guarded {
+            sprr_rights(guarded)
+        } else {
+            match (guarded, el) {
+                (1, 3) => (false, false, false),
+                (2, 1) => (false, false, true),
+                (_, el) => sprr_rights(el),
+            }
+        }
+    };
+    let permitted = match access {
+        Access::Read => readable,
+        Access::Write => writable,
+        Access::Execute => executable,
+    };
+    if !permitted {
+        return Outcome::Fault(Fault {
+            kind: FaultKind::Permission,
+            level,
+        });
+    }
+    let global = descriptor & NOT_GLOBAL == 0;
+    Outcome::Mapped(Translation {
+        physical: output | (address & (leaf.size - 1) & ((1u64 << 48) - 1)),
+        memory: memory_type(controls.mair, descriptor),
+        readable,
+        writable,
+        executable,
+        global,
+        asid: if global { 0 } else { current_asid(controls) },
+        size: leaf.size,
+        guarded_page: descriptor & GUARDED_PAGE != 0,
+    })
+}
+
 struct Leaf {
     descriptor: u64,
     descriptor_address: u64,
@@ -407,6 +526,11 @@ fn leaf(
             Some(false) => return translate(controls, address, access, requester, memory),
             None => return fault(FaultKind::ExternalOnWalk),
         }
+    }
+    if controls.sprr.enabled() {
+        return sprr_leaf(
+            controls, access, requester, &leaf, descriptor, output, address,
+        );
     }
     let el0_access = descriptor & AP_EL0 != 0 && !leaf.no_el0;
     let read_only = descriptor & AP_READ_ONLY != 0 || leaf.read_only;
@@ -463,6 +587,7 @@ fn leaf(
         global,
         asid: if global { 0 } else { current_asid(controls) },
         size: leaf.size,
+        guarded_page: descriptor & GUARDED_PAGE != 0,
     })
 }
 
@@ -492,11 +617,13 @@ mod tests {
         el: 1,
         pan: false,
         unprivileged: false,
+        guarded: false,
     };
     const USER: Requester = Requester {
         el: 0,
         pan: false,
         unprivileged: false,
+        guarded: false,
     };
     // 16 KiB granules for both halves, 47-bit low and 36-bit high regions.
     const TCR: u64 = (2 << 14) | 17 | (1 << 30) | (28 << 16) | TCR_TBI0;
@@ -510,6 +637,7 @@ mod tests {
             ttbr0: 0x10_0000 | (5 << 48),
             ttbr1: 0x20_0000,
             mair: 0xff00, // index 0 Device-nGnRnE, index 1 Normal WB
+            sprr: Sprr::default(),
         }
     }
 
@@ -709,6 +837,112 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn sprr_indexes_ap_and_execute_never_bits_into_el_and_gl_permissions() {
+        let mut controls = controls();
+        let mut tables = Tables::default();
+        // SPTM's SPRR_PERM_EL1 value. Nibbles: index 0 is 5 (EL r-x, GL
+        // r-x), index 3 (UXN, PXN) is 0xb (EL rw-, GL r--) and index 5
+        // (AP[0], PXN) is 2 (EL r--, GL ---).
+        controls.sprr = Sprr {
+            config: SPRR_CONFIG_EN,
+            el1: 0x2020_a52a_302a_baf5,
+            el0: 0,
+        };
+        let va = 0x4_0000_0000_u64;
+        map(&mut tables, &controls, va, 0x8_0000_0000, ATTRS);
+        let guarded = Requester {
+            guarded: true,
+            ..KERNEL
+        };
+        for requester in [KERNEL, guarded] {
+            assert!(matches!(
+                translate(&controls, va, Access::Execute, requester, &mut tables),
+                Outcome::Mapped(Translation {
+                    readable: true,
+                    writable: false,
+                    executable: true,
+                    ..
+                })
+            ));
+        }
+        let data = 0x5_0000_0000_u64;
+        map(
+            &mut tables,
+            &controls,
+            data,
+            0x8_0000_4000,
+            ATTRS | UXN | PXN,
+        );
+        assert!(matches!(
+            translate(&controls, data, Access::Write, KERNEL, &mut tables),
+            Outcome::Mapped(Translation {
+                writable: true,
+                executable: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            translate(&controls, data, Access::Write, guarded, &mut tables),
+            Outcome::Fault(Fault {
+                kind: FaultKind::Permission,
+                level: 3
+            })
+        );
+        let el_only = 0x7_0000_0000_u64;
+        map(
+            &mut tables,
+            &controls,
+            el_only,
+            0x8_0000_c000,
+            ATTRS | AP_EL0 | PXN,
+        );
+        assert!(matches!(
+            translate(&controls, el_only, Access::Read, KERNEL, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        assert!(matches!(
+            translate(&controls, el_only, Access::Read, guarded, &mut tables),
+            Outcome::Fault(_)
+        ));
+        // The special combinations: GL r-x with EL rw- is EL ---, GL r-- with
+        // EL r-x is EL --x.
+        controls.sprr.el1 = 0x7 | 0x9 << 4;
+        assert!(matches!(
+            translate(&controls, va, Access::Read, KERNEL, &mut tables),
+            Outcome::Fault(_)
+        ));
+        map(
+            &mut tables,
+            &controls,
+            0x4_0000_4000,
+            0x8_0001_0000,
+            ATTRS | PXN,
+        );
+        assert!(matches!(
+            translate(
+                &controls,
+                0x4_0000_4000,
+                Access::Execute,
+                KERNEL,
+                &mut tables
+            ),
+            Outcome::Mapped(Translation {
+                readable: false,
+                executable: true,
+                ..
+            })
+        ));
+        let pan = Requester {
+            pan: true,
+            ..KERNEL
+        };
+        assert_eq!(
+            translate(&controls, va, Access::Read, pan, &mut tables),
+            Outcome::Unsupported(Unsupported::Sprr("PAN"))
+        );
     }
 
     #[test]
