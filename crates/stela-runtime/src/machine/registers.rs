@@ -2,11 +2,21 @@
 //!
 //! Every encoding either has modeled behavior here or is refused with its
 //! fields; nothing reads as an unimplemented zero. EL0 accesses follow the
-//! Arm ARM DDI0487 (June 2026) D19 access tables for a PE without EL2/EL3:
-//! registers EL0 may not reach are UNDEFINED, and the ones EL1 controls trap
-//! with EC 0x18 when disabled.
+//! Arm ARM DDI0487 (June 2026) D19 access tables: registers EL0 may not reach
+//! are UNDEFINED, and the ones the kernel level controls trap with EC 0x18
+//! when disabled.
+//!
+//! The kernel level is EL1 on a PE without EL2 and EL3, or EL2 as a VHE host
+//! (HCR_EL2.E2H set, EL1 never executing). At EL2 the `*_EL1` encodings that
+//! FEAT_VHE redirects name the EL2 registers, as do their `*_EL2` encodings,
+//! so both reach one register file (Arm ARM D8.13 "Virtualization Host
+//! Extensions" register redirection); Apple's `*_GL1` bank encodings likewise
+//! name the GL2 bank at GL2 (m1n1 `gxf_asm.S` programs GL2 through
+//! `VBAR_GL1` and GL1 through `VBAR_GL12`). The EL1 and GL1 copies, reached
+//! through `*_EL12`, `*_EL02` and `*_GL12`, and the EL2 controls that only act
+//! on a guest are kept as inactive values.
 use super::{
-    cpu::Cpu,
+    cpu::{Cpu, HCR_E2H},
     exception::{DAIF_ALL, Pstate},
     impdef,
 };
@@ -151,6 +161,75 @@ pub mod encodings {
         // KERNEL_CNTVCTSS_EL0: "S3_4_C15_C10_6 and ACNTVCT_EL0 have identical
         // encodings"; m1n1 CNTVCT_ALIAS_EL0).
         CNTVCT_ALIAS_EL0 = 3, 4, 15, 10, 6;
+        // EL2 (Arm ARM D24.2).
+        VPIDR_EL2 = 3, 4, 0, 0, 0;
+        VMPIDR_EL2 = 3, 4, 0, 0, 5;
+        SCTLR_EL2 = 3, 4, 1, 0, 0;
+        ACTLR_EL2 = 3, 4, 1, 0, 1;
+        HCR_EL2 = 3, 4, 1, 1, 0;
+        MDCR_EL2 = 3, 4, 1, 1, 1;
+        CPTR_EL2 = 3, 4, 1, 1, 2;
+        HSTR_EL2 = 3, 4, 1, 1, 3;
+        HACR_EL2 = 3, 4, 1, 1, 7;
+        TTBR0_EL2 = 3, 4, 2, 0, 0;
+        TTBR1_EL2 = 3, 4, 2, 0, 1;
+        TCR_EL2 = 3, 4, 2, 0, 2;
+        VTTBR_EL2 = 3, 4, 2, 1, 0;
+        VTCR_EL2 = 3, 4, 2, 1, 2;
+        SPSR_EL2 = 3, 4, 4, 0, 0;
+        ELR_EL2 = 3, 4, 4, 0, 1;
+        SP_EL1 = 3, 4, 4, 1, 0;
+        AFSR0_EL2 = 3, 4, 5, 1, 0;
+        AFSR1_EL2 = 3, 4, 5, 1, 1;
+        ESR_EL2 = 3, 4, 5, 2, 0;
+        FAR_EL2 = 3, 4, 6, 0, 0;
+        HPFAR_EL2 = 3, 4, 6, 0, 4;
+        MAIR_EL2 = 3, 4, 10, 2, 0;
+        AMAIR_EL2 = 3, 4, 10, 3, 0;
+        VBAR_EL2 = 3, 4, 12, 0, 0;
+        CONTEXTIDR_EL2 = 3, 4, 13, 0, 1;
+        TPIDR_EL2 = 3, 4, 13, 0, 2;
+        CNTVOFF_EL2 = 3, 4, 14, 0, 3;
+        CNTHCTL_EL2 = 3, 4, 14, 1, 0;
+        CNTHP_TVAL_EL2 = 3, 4, 14, 2, 0;
+        CNTHP_CTL_EL2 = 3, 4, 14, 2, 1;
+        CNTHP_CVAL_EL2 = 3, 4, 14, 2, 2;
+        CNTHV_TVAL_EL2 = 3, 4, 14, 3, 0;
+        CNTHV_CTL_EL2 = 3, 4, 14, 3, 1;
+        CNTHV_CVAL_EL2 = 3, 4, 14, 3, 2;
+        // EL1 and EL0 registers reached from EL2 with E2H set.
+        SCTLR_EL12 = 3, 5, 1, 0, 0;
+        CPACR_EL12 = 3, 5, 1, 0, 2;
+        TTBR0_EL12 = 3, 5, 2, 0, 0;
+        TTBR1_EL12 = 3, 5, 2, 0, 1;
+        TCR_EL12 = 3, 5, 2, 0, 2;
+        SPSR_EL12 = 3, 5, 4, 0, 0;
+        ELR_EL12 = 3, 5, 4, 0, 1;
+        AFSR0_EL12 = 3, 5, 5, 1, 0;
+        AFSR1_EL12 = 3, 5, 5, 1, 1;
+        ESR_EL12 = 3, 5, 5, 2, 0;
+        FAR_EL12 = 3, 5, 6, 0, 0;
+        MAIR_EL12 = 3, 5, 10, 2, 0;
+        AMAIR_EL12 = 3, 5, 10, 3, 0;
+        VBAR_EL12 = 3, 5, 12, 0, 0;
+        CONTEXTIDR_EL12 = 3, 5, 13, 0, 1;
+        CNTKCTL_EL12 = 3, 5, 14, 1, 0;
+        CNTP_CTL_EL02 = 3, 5, 14, 2, 1;
+        CNTP_CVAL_EL02 = 3, 5, 14, 2, 2;
+        CNTV_CTL_EL02 = 3, 5, 14, 3, 1;
+        CNTV_CVAL_EL02 = 3, 5, 14, 3, 2;
+        // Apple GL2 and GL12 (m1n1 `cpu_regs.h`).
+        TPIDR_GL2 = 3, 6, 15, 11, 1;
+        VBAR_GL12 = 3, 6, 15, 9, 2;
+        SPSR_GL12 = 3, 6, 15, 9, 3;
+        ASPSR_GL12 = 3, 6, 15, 9, 4;
+        ESR_GL12 = 3, 6, 15, 9, 5;
+        ELR_GL12 = 3, 6, 15, 9, 6;
+        APCTL_EL2 = 3, 6, 15, 12, 2;
+        APCTL_EL12 = 3, 6, 15, 15, 0;
+        // FIQ enables for a guest's virtual (bit 0) and physical (bit 1)
+        // timers (m1n1 `cpu_regs.h` VM_TMR_FIQ_ENA_EL2).
+        VM_TMR_FIQ_ENA_EL2 = 3, 5, 15, 1, 3;
     }
 }
 use encodings::*;
@@ -213,14 +292,105 @@ const SCTLR_SUPPORTED: u64 = 0x0000_1018_fcff_fffd;
 /// APSTS_EL1.MKEYVld: the hardware master key is ready. This machine has no
 /// key-generation delay, so the bit always reads as set.
 const APSTS_MKEYVLD: u64 = 1;
-/// The GL12 aliases and the EL12/EL02 SPRR and GXF views exist only for EL2.
-const EL2_ONLY: [Encoding; 5] = [
+/// Apple encodings that exist only with EL2: the GL2 and GL12 banks and the
+/// EL2, EL12 and EL02 SPRR, GXF and PAC views.
+const APPLE_EL2: [Encoding; 14] = [
     SPRR_PERM_EL12,
     SPRR_PERM_EL02,
     GXF_ENTER_EL12,
     GXF_ABORT_EL12,
     SP_GL12,
+    TPIDR_GL2,
+    VBAR_GL12,
+    SPSR_GL12,
+    ASPSR_GL12,
+    ESR_GL12,
+    ELR_GL12,
+    APCTL_EL2,
+    APCTL_EL12,
+    VM_TMR_FIQ_ENA_EL2,
 ];
+/// At EL2 with E2H set, these EL2 encodings name the register the first
+/// `*_EL1` (or `*_EL0` timer, or GL1 bank) encoding redirects to; the engine
+/// keeps each once, under the redirected encoding.
+const VHE_ALIASES: [(Encoding, Encoding); 24] = [
+    (SCTLR_EL2, SCTLR_EL1),
+    (CPTR_EL2, CPACR_EL1),
+    (TTBR0_EL2, TTBR0_EL1),
+    (TTBR1_EL2, TTBR1_EL1),
+    (TCR_EL2, TCR_EL1),
+    (SPSR_EL2, SPSR_EL1),
+    (ELR_EL2, ELR_EL1),
+    (AFSR0_EL2, AFSR0_EL1),
+    (AFSR1_EL2, AFSR1_EL1),
+    (ESR_EL2, ESR_EL1),
+    (FAR_EL2, FAR_EL1),
+    (MAIR_EL2, MAIR_EL1),
+    (AMAIR_EL2, AMAIR_EL1),
+    (VBAR_EL2, VBAR_EL1),
+    (CONTEXTIDR_EL2, CONTEXTIDR_EL1),
+    (CNTHCTL_EL2, CNTKCTL_EL1),
+    (CNTHP_TVAL_EL2, CNTP_TVAL_EL0),
+    (CNTHP_CTL_EL2, CNTP_CTL_EL0),
+    (CNTHP_CVAL_EL2, CNTP_CVAL_EL0),
+    (CNTHV_TVAL_EL2, CNTV_TVAL_EL0),
+    (CNTHV_CTL_EL2, CNTV_CTL_EL0),
+    (CNTHV_CVAL_EL2, CNTV_CVAL_EL0),
+    (APCTL_EL2, APCTL_EL1),
+    (TPIDR_GL2, TPIDR_GL1),
+];
+/// Registers that never act under a VHE host whose EL1 does not run: the EL1
+/// and GL1 copies and the EL2 controls of a guest's execution. ACTLR_EL1 is
+/// not redirected by E2H, so ACTLR_EL2 is a separate register here; neither
+/// has an effect. TPIDR_GL1 is GL1's own, beside TPIDR_GL2.
+const INACTIVE: [Encoding; 44] = [
+    SCTLR_EL12,
+    CPACR_EL12,
+    TTBR0_EL12,
+    TTBR1_EL12,
+    TCR_EL12,
+    SPSR_EL12,
+    ELR_EL12,
+    AFSR0_EL12,
+    AFSR1_EL12,
+    ESR_EL12,
+    FAR_EL12,
+    MAIR_EL12,
+    AMAIR_EL12,
+    VBAR_EL12,
+    CONTEXTIDR_EL12,
+    CNTKCTL_EL12,
+    CNTP_CTL_EL02,
+    CNTP_CVAL_EL02,
+    CNTV_CTL_EL02,
+    CNTV_CVAL_EL02,
+    SP_EL1,
+    ACTLR_EL2,
+    VPIDR_EL2,
+    VMPIDR_EL2,
+    MDCR_EL2,
+    HSTR_EL2,
+    HACR_EL2,
+    VTTBR_EL2,
+    VTCR_EL2,
+    HPFAR_EL2,
+    CNTVOFF_EL2,
+    SPRR_PERM_EL12,
+    SPRR_PERM_EL02,
+    GXF_ENTER_EL12,
+    GXF_ABORT_EL12,
+    SP_GL12,
+    TPIDR_GL1,
+    VBAR_GL12,
+    SPSR_GL12,
+    ASPSR_GL12,
+    ESR_GL12,
+    ELR_GL12,
+    APCTL_EL12,
+    VM_TMR_FIQ_ENA_EL2,
+];
+/// CNTx_CTL.ENABLE.
+const TIMER_ENABLE: u64 = 1;
 const CNTKCTL_EL0PCTEN: u64 = 1 << 0;
 const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
 const CNTKCTL_EL0VTEN: u64 = 1 << 8;
@@ -242,6 +412,13 @@ pub struct Environment<'a> {
     pub lines: Lines,
 }
 
+/// Where an encoding leads at the current kernel level.
+enum Route {
+    Register(Encoding),
+    Inactive,
+    Undefined,
+}
+
 impl Cpu {
     /// Perform MRS or MSR. `Read` results are not yet written to Rt.
     pub fn access_register(
@@ -255,15 +432,57 @@ impl Cpu {
         {
             return outcome;
         }
+        let value = if access.rt() == 31 {
+            0
+        } else {
+            self.state.x[usize::from(access.rt())]
+        };
+        let encoding = match self.route(encoding) {
+            Route::Register(encoding) => encoding,
+            Route::Undefined => return Outcome::Undefined,
+            Route::Inactive => return self.inactive(encoding, access.direction(), value),
+        };
         match access.direction() {
             Direction::Read => self.read(encoding, environment),
+            Direction::Write => self.write(encoding, value, environment.now),
+        }
+    }
+
+    fn route(&self, encoding: Encoding) -> Route {
+        if self.kernel_el == 1 {
+            return if is_higher_el(encoding, 1) || APPLE_EL2.contains(&encoding) {
+                Route::Undefined
+            } else {
+                Route::Register(encoding)
+            };
+        }
+        if let Some(&(_, redirected)) = VHE_ALIASES.iter().find(|(name, _)| *name == encoding) {
+            return Route::Register(redirected);
+        }
+        if INACTIVE.contains(&encoding) {
+            return Route::Inactive;
+        }
+        Route::Register(encoding)
+    }
+
+    fn inactive(&mut self, encoding: Encoding, direction: Direction, value: u64) -> Outcome {
+        let key = encoding.selector();
+        match direction {
+            // Their reset values are UNKNOWN; 0 is one of the permitted values.
+            Direction::Read => Outcome::Read(self.system.inactive.get(&key).copied().unwrap_or(0)),
             Direction::Write => {
-                let value = if access.rt() == 31 {
-                    0
-                } else {
-                    self.state.x[usize::from(access.rt())]
-                };
-                self.write(encoding, value, environment.now)
+                if matches!(encoding, CNTP_CTL_EL02 | CNTV_CTL_EL02) && value & TIMER_ENABLE != 0 {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "EL1 timer enabled under a VHE host (a guest's timer)",
+                    ));
+                }
+                if encoding == VM_TMR_FIQ_ENA_EL2 && value & !0b11 != 0 {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "VM_TMR_FIQ_ENA_EL2 bit without documented meaning",
+                    ));
+                }
+                self.system.inactive.insert(key, value);
+                Outcome::Written(Changes::default())
             }
         }
     }
@@ -361,6 +580,8 @@ impl Cpu {
             APDBKEYHI_EL1 => system.keys[3][1],
             APGAKEYLO_EL1 => system.keys[4][0],
             APGAKEYHI_EL1 => system.keys[4][1],
+            HCR_EL2 => system.hcr,
+            TPIDR_EL2 => system.tpidr_el2,
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").read(self);
             }
@@ -376,7 +597,7 @@ impl Cpu {
             _ => {
                 return match environment.profile.fixed(encoding) {
                     Some(value) => Outcome::Read(value),
-                    None if is_higher_el(encoding) => Outcome::Undefined,
+                    None if is_higher_el(encoding, self.kernel_el) => Outcome::Undefined,
                     None if is_identification(encoding) => {
                         Outcome::Refused(Refusal::NoProfileValue)
                     }
@@ -506,6 +727,26 @@ impl Cpu {
             APDBKEYHI_EL1 => system.keys[3][1] = value,
             APGAKEYLO_EL1 => system.keys[4][0] = value,
             APGAKEYHI_EL1 => system.keys[4][1] = value,
+            HCR_EL2 => {
+                if value & HCR_E2H == 0 {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "HCR_EL2.E2H clear (EL2 without VHE)",
+                    ));
+                }
+                // Once GXF is enabled, HCR_EL2 is writable only from GL2
+                // (m1n1 `gxf.c` and `exception_asm.S`); what a write from EL2
+                // does then is not documented.
+                if self.guarded_enabled() && !pstate.guarded {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "HCR_EL2 write outside GL2 with GXF enabled",
+                    ));
+                }
+                // Bits that act only on EL1 or a guest's stage 2 are kept;
+                // TGE and the interrupt routing bits act here.
+                self.system.hcr = value;
+                changes.interrupts = true;
+            }
+            TPIDR_EL2 => system.tpidr_el2 = value,
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").write(self, value);
             }
@@ -516,7 +757,7 @@ impl Cpu {
             CNTPCT_EL0 | CNTVCT_EL0 | CNTPCTSS_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 => {
                 return Outcome::Undefined;
             }
-            _ if is_identification(encoding) || is_higher_el(encoding) => {
+            _ if is_identification(encoding) || is_higher_el(encoding, self.kernel_el) => {
                 return Outcome::Undefined;
             }
             _ => return Outcome::Refused(Refusal::Unimplemented),
@@ -564,9 +805,9 @@ impl Cpu {
         Outcome::Written(changes)
     }
 
-    /// DC ZVA is permitted at EL0 only with SCTLR_EL1.DZE.
+    /// DC ZVA is permitted at EL0 only with SCTLR_ELx.DZE.
     pub fn zva_permitted(&self) -> bool {
-        self.pstate.el == 1 || self.system.translation.sctlr & SCTLR_DZE != 0
+        self.pstate.el != 0 || self.system.translation.sctlr & SCTLR_DZE != 0
     }
 }
 
@@ -580,9 +821,8 @@ enum Apple {
     GxfStatus,
     GxfEnter,
     GxfAbort,
-    /// A GL1 bank register, only reachable at the guarded level.
+    /// A GL bank register, only reachable at the guarded level.
     Guarded(Encoding),
-    El2Only,
     ApStatus,
     ApControl,
     KernelKey(usize),
@@ -605,7 +845,7 @@ impl Apple {
             Self::GxfAbort => gl.abort,
             Self::Guarded(_) if !cpu.pstate.guarded => {
                 return Outcome::Refused(Refusal::UnsupportedSetting(
-                    "GL1 bank register outside the guarded level",
+                    "GL bank register outside the guarded level",
                 ));
             }
             Self::Guarded(encoding) => match encoding {
@@ -617,7 +857,6 @@ impl Apple {
                 ELR_GL1 => gl.elr,
                 _ => gl.far,
             },
-            Self::El2Only => return Outcome::Undefined,
             Self::ApStatus => APSTS_MKEYVLD,
             Self::ApControl => cpu.system.apctl,
             Self::KernelKey(index) => cpu.system.kernel_key[index],
@@ -674,7 +913,7 @@ impl Apple {
             Self::GxfEnter => cpu.system.guarded.enter = value,
             Self::GxfAbort => cpu.system.guarded.abort = value,
             Self::Guarded(_) if !cpu.pstate.guarded => {
-                return refuse("GL1 bank register outside the guarded level");
+                return refuse("GL bank register outside the guarded level");
             }
             Self::Guarded(encoding) => {
                 let gl = &mut cpu.system.guarded;
@@ -688,7 +927,6 @@ impl Apple {
                     _ => gl.far = value,
                 }
             }
-            Self::El2Only => return Outcome::Undefined,
             Self::ApControl => cpu.system.apctl = value,
             Self::KernelKey(index) => cpu.system.kernel_key[index] = value,
         }
@@ -713,19 +951,20 @@ impl Cpu {
             APCTL_EL1 => Apple::ApControl,
             KERNELKEYLO_EL1 => Apple::KernelKey(0),
             KERNELKEYHI_EL1 => Apple::KernelKey(1),
-            encoding if EL2_ONLY.contains(&encoding) => Apple::El2Only,
             _ => return None,
         })
     }
 }
 
 /// The read-only identification space: op0=3, op1 in {0,1,3}, CRn=0.
-/// Architectural EL2, EL12/EL02 and EL3 registers (op1 4, 5 and 6 outside
-/// the implementation-defined CRn=15 space). With no EL2 or EL3 they are
-/// UNDEFINED at EL1 (Arm ARM D19 access pseudocode, `EL2Enabled()` and
-/// `HaveEL(EL3)` false).
-fn is_higher_el(encoding: Encoding) -> bool {
-    encoding.op0() == 3 && encoding.crn() != 15 && matches!(encoding.op1(), 4..=6)
+/// Architectural registers of a level this machine lacks: EL3 (op1 6
+/// outside the implementation-defined CRn=15 space) always, and EL2 and
+/// EL12/EL02 (op1 4 and 5) under an EL1 kernel. They are UNDEFINED (Arm ARM
+/// D19 access pseudocode, `HaveEL(EL2)` and `HaveEL(EL3)` false). Under an
+/// EL2 kernel an EL2 register without a model refuses instead.
+fn is_higher_el(encoding: Encoding, kernel_el: u8) -> bool {
+    let absent = if kernel_el == 1 { 4..=6 } else { 6..=6 };
+    encoding.op0() == 3 && encoding.crn() != 15 && absent.contains(&encoding.op1())
 }
 
 fn is_identification(encoding: Encoding) -> bool {
@@ -888,5 +1127,100 @@ mod tests {
         );
         let access = mrs(4, CNTVCT_EL0);
         assert_eq!(trap_iss(access), 0x0034_f881);
+    }
+
+    #[test]
+    fn a_vhe_host_redirects_el1_names_and_keeps_inactive_copies() {
+        use crate::machine::cpu::{GXF_CONFIG_EN, HCR_TGE};
+        let profile = profile();
+        let environment = Environment {
+            profile: &profile,
+            now: 100,
+            lines: Lines::default(),
+        };
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        cpu.system.hcr = HCR_E2H;
+        let write = |cpu: &mut Cpu, encoding, value| {
+            cpu.state.x[5] = value;
+            cpu.access_register(msr(5, encoding), &environment)
+        };
+        // *_EL1 and *_EL2 name one register; *_EL12 is EL1's own.
+        write(&mut cpu, VBAR_EL1, 0x8000);
+        assert_eq!(
+            cpu.access_register(mrs(0, VBAR_EL2), &environment),
+            Outcome::Read(0x8000)
+        );
+        write(&mut cpu, VBAR_EL12, 0x9000);
+        assert_eq!(cpu.system.vbar, 0x8000);
+        assert_eq!(
+            cpu.access_register(mrs(0, VBAR_EL12), &environment),
+            Outcome::Read(0x9000)
+        );
+        assert_eq!(
+            cpu.access_register(mrs(0, SCTLR_EL12), &environment),
+            Outcome::Read(0),
+            "an unwritten inactive register reads its UNKNOWN reset value as 0"
+        );
+        // The hypervisor timers are the CNTP/CNTV registers.
+        write(&mut cpu, CNTHP_CVAL_EL2, 500);
+        assert_eq!(cpu.system.physical_timer.compare(), 500);
+        assert_eq!(
+            write(&mut cpu, CNTV_CTL_EL02, 1),
+            Outcome::Refused(Refusal::UnsupportedSetting(
+                "EL1 timer enabled under a VHE host (a guest's timer)"
+            ))
+        );
+        // TPIDR_EL1 is not redirected; TPIDR_EL2 is its own register.
+        write(&mut cpu, TPIDR_EL2, 2);
+        write(&mut cpu, TPIDR_EL1, 1);
+        assert_eq!((cpu.system.tpidr_el2, cpu.system.tpidr_el1), (2, 1));
+        assert_eq!(
+            cpu.access_register(mrs(0, CURRENTEL), &environment),
+            Outcome::Read(8)
+        );
+        // HCR_EL2: VHE only, and only from GL2 once GXF is on.
+        assert!(matches!(
+            write(&mut cpu, HCR_EL2, 0),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        assert!(matches!(
+            write(&mut cpu, HCR_EL2, HCR_E2H | HCR_TGE),
+            Outcome::Written(Changes {
+                interrupts: true,
+                ..
+            })
+        ));
+        cpu.system.translation.sprr.config = super::super::mmu::SPRR_CONFIG_EN;
+        cpu.system.guarded.config = GXF_CONFIG_EN;
+        assert!(matches!(
+            write(&mut cpu, HCR_EL2, HCR_E2H),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        cpu.pstate.guarded = true;
+        assert!(matches!(
+            write(&mut cpu, HCR_EL2, HCR_E2H),
+            Outcome::Written(_)
+        ));
+        // At GL2, TPIDR_GL2 is the GL bank's; TPIDR_GL1 is GL1's.
+        write(&mut cpu, TPIDR_GL2, 7);
+        write(&mut cpu, TPIDR_GL1, 6);
+        assert_eq!(cpu.system.guarded.tpidr, 7);
+        // EL3 stays UNDEFINED; unmodeled EL2 registers refuse.
+        assert_eq!(
+            cpu.access_register(mrs(0, Encoding::new(3, 6, 13, 0, 2)), &environment),
+            Outcome::Undefined
+        );
+        assert_eq!(
+            cpu.access_register(mrs(0, Encoding::new(3, 4, 1, 2, 0)), &environment),
+            Outcome::Refused(Refusal::Unimplemented)
+        );
+        // Under an EL1 kernel the EL2 names do not exist.
+        let mut el1 = Cpu::new(0, Pstate::RESET_EL1);
+        for encoding in [HCR_EL2, VBAR_EL12, TPIDR_GL2, SP_EL1] {
+            assert_eq!(
+                el1.access_register(mrs(0, encoding), &environment),
+                Outcome::Undefined
+            );
+        }
     }
 }

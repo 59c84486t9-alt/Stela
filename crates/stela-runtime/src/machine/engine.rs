@@ -1,7 +1,7 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
 use super::{
-    cpu::{Cpu, Exception},
+    cpu::{Cpu, Exception, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE},
     exception::{Class, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Environment, Lines, Outcome as RegisterOutcome, Refusal},
@@ -438,9 +438,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn deliver_interrupts(&mut self) -> bool {
         let lines = self.lines();
         let daif = self.cpu.pstate.daif;
-        let vector = if lines.fiq && daif & DAIF_F == 0 {
+        // An EL2 kernel takes physical interrupts only while they route to
+        // EL2: with HCR_EL2.TGE, or with FMO/IMO for FIQ/IRQ. Otherwise they
+        // route to EL1, which is not entered from EL2 (Arm ARM D1.3.5).
+        let hcr = self.cpu.system.hcr;
+        let routed = |bit: u64| self.cpu.kernel_el == 1 || hcr & (HCR_TGE | bit) != 0;
+        let vector = if lines.fiq && daif & DAIF_F == 0 && routed(HCR_FMO) {
             Vector::Fiq
-        } else if lines.irq && daif & DAIF_I == 0 {
+        } else if lines.irq && daif & DAIF_I == 0 && routed(HCR_IMO) {
             Vector::Irq
         } else {
             return false;
@@ -540,7 +545,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Translated::Fault(fault)
                 if fault.kind == mmu::FaultKind::Permission
-                    && requester.el == 1
+                    && requester.el != 0
                     && !requester.guarded
                     && controls.sprr.enabled()
                     && matches!(
@@ -561,7 +566,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // GXF_ABORT_EL1 (Sven Peter, for GL2); the saved state is
                 // not documented.
                 Err(Err(self.unsupported(RequirementKind::Native(
-                    "EL1 fetch of guarded-only code (GXF abort entry)",
+                    "kernel-level fetch of guarded-only code (GXF abort entry)",
                 ))))
             }
             Translated::Fault(fault) => {
@@ -583,7 +588,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn floating_point_enabled(&self) -> bool {
         match (self.cpu.system.cpacr >> 20) & 3 {
             0b11 => true,
-            0b01 => self.cpu.pstate.el == 1,
+            0b01 => self.cpu.pstate.el != 0,
             _ => false,
         }
     }
@@ -1320,7 +1325,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 word,
                 "ERETAA/ERETAB need pointer authentication in the system engine",
             )),
-            // No EL2, EL3, debug state or halting: all UNDEFINED.
+            // HVC at an EL2 kernel, unless HCR_EL2.HCD disables it.
+            ExceptionOperation::HypervisorCall { immediate }
+                if self.cpu.pstate.el == 2 && self.cpu.system.hcr & HCR_HCD == 0 =>
+            {
+                self.take(Exception::synchronous(
+                    Class::HypervisorCall,
+                    u32::from(immediate),
+                    pc + INSTRUCTION,
+                ));
+                Ok(())
+            }
+            // No EL3, debug state or halting, and HVC elsewhere: all UNDEFINED.
             ExceptionOperation::HypervisorCall { .. }
             | ExceptionOperation::SecureMonitorCall { .. }
             | ExceptionOperation::Halt { .. }
@@ -1456,9 +1472,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             encoding.crm(),
             encoding.op2(),
         ) {
-            // TLBI at EL1 (op1=0, CRn=8 or 9); EL2/EL3 forms do not exist.
-            (0, 8 | 9, _, _) => {
-                if el == 0 {
+            // TLBI at the kernel level (op1=0, CRn=8 or 9), and the EL2 forms
+            // (op1=4) at an EL2 kernel. Every form discards all shadow
+            // translations, a superset of what it requires. EL3 forms do not
+            // exist.
+            (0, 8 | 9, _, _) | (4, 8 | 9, _, _) => {
+                if el == 0 || encoding.op1() == 4 && el != 2 {
                     return self.undefined();
                 }
                 self.translations_changed();
@@ -1511,6 +1530,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return self.undefined();
                 }
                 self.address_translation(encoding, operand)
+            }
+            // AT S1E2R/W at an EL2 kernel: the EL2&0 regime, like S1E1R/W
+            // there under E2H.
+            (4, 7, 8, 0 | 1) => {
+                if el != 2 {
+                    return self.undefined();
+                }
+                let privileged = Encoding::new(1, 0, 7, 8, encoding.op2());
+                self.address_translation(privileged, operand)
             }
             _ => Err(self.refuse_system(word, "SYS operation without a model")),
         }

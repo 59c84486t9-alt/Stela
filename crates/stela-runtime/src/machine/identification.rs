@@ -7,8 +7,9 @@
 //! --print-enabled-extensions`) and whose basis must hold here. An
 //! instruction feature holds when its sample encodings compile for the
 //! system-mode block profile on the host target; any other feature is an
-//! engine property stated with its reason. A field with no satisfied row reads
-//! its "not implemented" value.
+//! engine property stated with its reason, or holds only when the kernel
+//! level is EL2 as a VHE host. A field with no satisfied row reads its "not
+//! implemented" value.
 use super::registers::encodings::*;
 use alloc::vec::Vec;
 use stela_compiler::{
@@ -83,6 +84,9 @@ pub enum Basis {
     Instructions(&'static [u32]),
     /// An engine property, true or false, and why.
     Engine(bool, &'static str),
+    /// Holds when the profile has EL2, which runs only as a VHE host
+    /// (HCR_EL2.E2H set, EL1 never executing).
+    Host(&'static str),
 }
 
 /// One level of one field. A field's rows are listed in increasing level;
@@ -135,7 +139,8 @@ const fn engine(holds: bool, reason: &'static str) -> Basis {
     Basis::Engine(holds, reason)
 }
 
-const NO_EL2: &str = "the machine has no EL2";
+const NO_GUEST: &str = "EL2 runs only as a VHE host; EL1 never executes";
+const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
 const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
 
@@ -162,6 +167,7 @@ pub const TABLE: &[Row] = &[
     // ID_AA64PFR0_EL1
     fixed(ID_AA64PFR0_EL1, 0, 1, "EL0 is AArch64-only"),
     fixed(ID_AA64PFR0_EL1, 4, 1, "EL1 is AArch64-only"),
+    row(ID_AA64PFR0_EL1, 8, 1, 0, None, Basis::Host(VHE_HOST)),
     row(
         ID_AA64PFR0_EL1,
         16,
@@ -199,7 +205,13 @@ pub const TABLE: &[Row] = &[
         "FEAT_RAS",
         engine(false, "no RAS error records are modeled"),
     ),
-    feature(ID_AA64PFR0_EL1, 36, 1, "FEAT_SEL2", engine(false, NO_EL2)),
+    feature(
+        ID_AA64PFR0_EL1,
+        36,
+        1,
+        "FEAT_SEL2",
+        engine(false, "no Secure state"),
+    ),
     feature(
         ID_AA64PFR0_EL1,
         40,
@@ -479,7 +491,7 @@ pub const TABLE: &[Row] = &[
     fixed(ID_AA64MMFR0_EL1, 32, 1, "no stage 2"),
     fixed(ID_AA64MMFR0_EL1, 36, 1, "no stage 2"),
     fixed(ID_AA64MMFR0_EL1, 40, 1, "no stage 2"),
-    feature(ID_AA64MMFR0_EL1, 56, 1, "FEAT_FGT", engine(false, NO_EL2)),
+    feature(ID_AA64MMFR0_EL1, 56, 1, "FEAT_FGT", engine(false, NO_GUEST)),
     feature(
         ID_AA64MMFR0_EL1,
         60,
@@ -488,7 +500,7 @@ pub const TABLE: &[Row] = &[
         engine(false, "the CNTKCTL event stream is not modeled"),
     ),
     // ID_AA64MMFR1_EL1
-    feature(ID_AA64MMFR1_EL1, 8, 1, "FEAT_VHE", engine(false, NO_EL2)),
+    feature(ID_AA64MMFR1_EL1, 8, 1, "FEAT_VHE", Basis::Host(VHE_HOST)),
     feature(
         ID_AA64MMFR1_EL1,
         16,
@@ -518,7 +530,7 @@ pub const TABLE: &[Row] = &[
         "FEAT_UAO",
         engine(false, "LDTR/STTR permission checks are not modeled"),
     ),
-    feature(ID_AA64MMFR2_EL1, 24, 1, "FEAT_NV", engine(false, NO_EL2)),
+    feature(ID_AA64MMFR2_EL1, 24, 1, "FEAT_NV", engine(false, NO_GUEST)),
     feature(
         ID_AA64MMFR2_EL1,
         32,
@@ -566,7 +578,7 @@ pub const TABLE: &[Row] = &[
     fixed(CTR_EL0, 31, 1, "RES1"),
 ];
 
-fn holds(row: &Row, target: TargetCpu) -> bool {
+fn holds(row: &Row, target: TargetCpu, el2: bool) -> bool {
     if row
         .feature
         .is_some_and(|feature| !APPLE_M2_FEATURES.contains(&feature))
@@ -575,6 +587,7 @@ fn holds(row: &Row, target: TargetCpu) -> bool {
     }
     match row.basis {
         Basis::Engine(holds, _) => holds,
+        Basis::Host(_) => el2,
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),
@@ -588,8 +601,9 @@ fn holds(row: &Row, target: TargetCpu) -> bool {
     }
 }
 
-/// Every register of [`REGISTERS`] with its value for this host target.
-pub fn derive(target: TargetCpu) -> Vec<(Encoding, u64)> {
+/// Every register of [`REGISTERS`] with its value for this host target, with
+/// or without EL2.
+pub fn derive(target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> {
     REGISTERS
         .iter()
         .map(|&register| {
@@ -603,7 +617,7 @@ pub fn derive(target: TargetCpu) -> Vec<(Encoding, u64)> {
                         fields.last_mut().expect("just pushed")
                     }
                 };
-                if holds(row, target) {
+                if holds(row, target, el2) {
                     current.1 = row.level;
                 }
             }
@@ -662,7 +676,7 @@ mod tests {
     #[test]
     fn advertised_instruction_fields_match_what_the_decoder_compiles() {
         let target = TargetCpu::detect();
-        let values = derive(target);
+        let values = derive(target, false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         for row in TABLE {
             let field = (value(row.register) >> row.shift) & 0xf;
@@ -706,7 +720,7 @@ mod tests {
 
     #[test]
     fn fixed_and_engine_fields() {
-        let values = derive(TargetCpu::detect());
+        let values = derive(TargetCpu::detect(), false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         // EL0/EL1 AArch64, no EL2/EL3; 48-bit PA, 16-bit ASID, 16K and 4K but
         // not 64K granules; PAN2; Armv8.0 debug without double lock.
@@ -715,5 +729,16 @@ mod tests {
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 20 & 0xf, 2);
         assert_eq!(value(ID_AA64DFR0_EL1) & 0xf, 6);
         assert_eq!(value(CTR_EL0), 0x9444_c004);
+        assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
+        // With EL2: AArch64 EL2 and VHE, and nothing else changes.
+        let hosted = derive(TargetCpu::detect(), true);
+        let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
+        assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
+        assert_eq!(host(ID_AA64MMFR1_EL1), value(ID_AA64MMFR1_EL1) | 0x100);
+        for &register in REGISTERS {
+            if !matches!(register, ID_AA64PFR0_EL1 | ID_AA64MMFR1_EL1) {
+                assert_eq!(host(register), value(register));
+            }
+        }
     }
 }

@@ -533,7 +533,7 @@ fn leaf(
     let read_only = descriptor & AP_READ_ONLY != 0 || leaf.read_only;
     let el0_writable = el0_access && !read_only;
     let as_el0 = requester.el == 0 || requester.unprivileged;
-    let pan_blocks = requester.el == 1 && requester.pan && !requester.unprivileged && el0_access;
+    let pan_blocks = requester.el != 0 && requester.pan && !requester.unprivileged && el0_access;
     let (mut readable, mut writable) = if as_el0 {
         (el0_access, el0_writable)
     } else {

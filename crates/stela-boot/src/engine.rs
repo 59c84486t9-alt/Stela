@@ -21,6 +21,7 @@ use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
     Cpu, CpuProfile, Event, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
+    cpu::HCR_E2H,
     exception::Pstate,
     registers::encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
 };
@@ -163,12 +164,12 @@ fn test_profile() -> CpuProfile {
     }
 }
 
-/// The M2 Mac mini (J473AP) profile, running as cpu0. The ID_AA64* and
-/// CTR_EL0 registers advertise what this engine implements, capped at the
-/// M2's features (`machine::identification`); MIDR, MPIDR and DCZID are the
-/// board's own values. Every other identification read refuses.
+/// The M2 Mac mini (J473AP) profile, running as cpu0 with EL2 as a VHE host.
+/// The ID_AA64* and CTR_EL0 registers advertise what this engine implements,
+/// capped at the M2's features (`machine::identification`); MIDR, MPIDR and
+/// DCZID are the board's own values. Every other identification read refuses.
 fn j473_profile(target: TargetCpu) -> CpuProfile {
-    let mut fixed = stela_runtime::machine::identification::derive(target);
+    let mut fixed = stela_runtime::machine::identification::derive(target, true);
     fixed.extend([
         // Apple's DeviceTree gives cpu0 `reg` 0 (cpu4 is 0x100: Aff1 is
         // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
@@ -468,18 +469,26 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         (options.entry, options.x0, test_profile())
     };
+    // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
+    // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is set at hand-off: SPTM
+    // installs its vectors through VBAR_EL1 before it ORs TGE and E2H into
+    // HCR_EL2, which reaches VBAR_EL2 only with E2H already set. The other
+    // HCR_EL2 bits are unknown and taken as 0 (inferred). Stela's test
+    // kernel runs at EL1.
+    let el = if options.bundle { 2 } else { 1 };
     output::arguments(format_args!(
-        "ENTRY pc={entry:#x} x0={x0:#x} el=1 mmu=off profile={} target={} apic_hz={apic_hz}\n",
+        "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz}\n",
         profile.name,
         target.id(),
     ));
-    let mut cpu = Cpu::new(entry, Pstate::RESET_EL1);
+    let mut cpu = Cpu::new(entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
     if options.bundle {
-        // The bootloader hands SPTM FP/SIMD enabled at EL1: SPTM uses
-        // FP/SIMD before it would write CPACR_EL1 and never writes it at EL1
-        // (only CPACR_EL12), and public XNU `start.s` notes that a monitor
-        // sets CPACR_EL1 up for its client. Inferred hand-off value.
+        cpu.system.hcr = HCR_E2H;
+        // The bootloader hands SPTM FP/SIMD enabled: SPTM uses FP/SIMD
+        // before it writes CPTR_EL2 (CPACR_EL1 names it at EL2), and public
+        // XNU `start.s` notes that a monitor sets CPACR up for its client.
+        // Inferred hand-off value.
         cpu.system.cpacr = 0b11 << 20;
     }
     let tree = options.bundle.then(|| {

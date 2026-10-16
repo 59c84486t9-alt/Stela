@@ -1,6 +1,6 @@
 //! The architectural state of one PE: `GuestState` for the registers native
-//! blocks use, plus PC, PSTATE, banked stack pointers and the EL1 system
-//! registers that only the engine touches.
+//! blocks use, plus PC, PSTATE, banked stack pointers and the kernel level's
+//! system registers that only the engine touches.
 use super::{
     exception::{self, Class, IllegalReturn, Pstate, Vector},
     mmu::{self, Controls},
@@ -51,7 +51,23 @@ pub struct SystemRegisters {
     pub kernel_key: [u64; 2],
     /// Implementation-defined registers without architectural effect here.
     pub impdef: super::impdef::Registers,
+    /// HCR_EL2 when the profile has EL2. Only VHE is modeled, so E2H stays
+    /// set; TGE selects the host configuration.
+    pub hcr: u64,
+    /// TPIDR_EL2 when the profile has EL2.
+    pub tpidr_el2: u64,
+    /// Registers of levels that never execute under a VHE host: EL1 and GL1
+    /// copies reached through `*_EL12`, `*_EL02` and `*_GL12` encodings, and
+    /// EL2 virtualization controls that only act on guests. Values are kept;
+    /// UNKNOWN reset values read as 0.
+    pub inactive: alloc::collections::BTreeMap<u16, u64>,
 }
+
+pub const HCR_FMO: u64 = 1 << 3;
+pub const HCR_IMO: u64 = 1 << 4;
+pub const HCR_TGE: u64 = 1 << 27;
+pub const HCR_HCD: u64 = 1 << 29;
+pub const HCR_E2H: u64 = 1 << 34;
 
 /// Apple GXF state: configuration, entry points and the GL1 bank
 /// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h` and `gxf_asm.S`).
@@ -78,26 +94,28 @@ pub struct GuardedRegisters {
 pub const GXF_CONFIG_EN: u64 = 1;
 pub const ASPSR_GUARDED: u64 = 1;
 
-/// Which stack pointer a PSTATE selects.
+/// Which stack pointer a PSTATE selects: SP_EL0, the kernel level's own
+/// (SP_EL1, or SP_EL2 for a VHE host), or the guarded level's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stack {
     El0,
-    El1,
-    Gl1,
+    Kernel,
+    Guarded,
 }
 
 fn stack(pstate: Pstate) -> Stack {
     match (pstate.el, pstate.sp_el1, pstate.guarded) {
-        (1, true, true) => Stack::Gl1,
-        (1, true, false) => Stack::El1,
-        _ => Stack::El0,
+        (0, _, _) | (_, false, _) => Stack::El0,
+        (_, true, true) => Stack::Guarded,
+        (_, true, false) => Stack::Kernel,
     }
 }
 
 /// Why a GXF instruction cannot run here; each is UNDEFINED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedRefusal {
-    /// GENTER outside EL1, at the guarded level, or with GXF or SPRR disabled.
+    /// GENTER outside the kernel level, at the guarded level, or with GXF or
+    /// SPRR disabled.
     Enter,
     /// GEXIT outside the guarded level.
     Exit,
@@ -109,6 +127,10 @@ pub struct Cpu {
     pub pc: u64,
     pub pstate: Pstate,
     pub system: SystemRegisters,
+    /// The EL exceptions are taken to: 1, or 2 when the profile has EL2 and
+    /// runs as a VHE host. The `system` registers belong to this level; the
+    /// guarded level beside it is GL1 or GL2.
+    pub kernel_el: u8,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -146,14 +168,15 @@ impl Cpu {
                 oslsr_locked: true,
                 ..SystemRegisters::default()
             },
+            kernel_el: pstate.el.max(1),
         }
     }
 
     fn bank(&mut self, which: Stack) -> &mut u64 {
         match which {
             Stack::El0 => &mut self.system.sp_el0,
-            Stack::El1 => &mut self.system.sp_el1,
-            Stack::Gl1 => &mut self.system.guarded.sp,
+            Stack::Kernel => &mut self.system.sp_el1,
+            Stack::Guarded => &mut self.system.guarded.sp,
         }
     }
 
@@ -197,7 +220,7 @@ impl Cpu {
     /// Masking follows exception entry; it is an inference, as is the
     /// SP_GL1 selection (m1n1 sets `sp` after GENTER).
     pub fn guarded_enter(&mut self) -> Result<(), GuardedRefusal> {
-        if self.pstate.el != 1 || self.pstate.guarded || !self.guarded_enabled() {
+        if self.pstate.el != self.kernel_el || self.pstate.guarded || !self.guarded_enabled() {
             return Err(GuardedRefusal::Enter);
         }
         let from = self.pstate;
@@ -220,18 +243,31 @@ impl Cpu {
         if !self.pstate.guarded {
             return Err(GuardedRefusal::Exit);
         }
-        let (mut next, nzcv) = match exception::from_spsr(self.system.guarded.spsr) {
+        let (mut next, nzcv) = match exception::from_spsr(self.system.guarded.spsr, self.kernel_el)
+        {
             Ok(value) => value,
             Err(illegal) => return Ok(Err(illegal)),
         };
         next.guarded = self.system.guarded.aspsr & ASPSR_GUARDED != 0;
-        if next.guarded && next.el != 1 {
+        if next.guarded && next.el != self.kernel_el {
             return Ok(Err(IllegalReturn::Mode(0)));
+        }
+        if let Err(illegal) = self.host_regime(next) {
+            return Ok(Err(illegal));
         }
         self.state.nzcv = nzcv;
         self.set_pstate(next);
         self.pc = self.system.guarded.elr;
         Ok(Ok(()))
+    }
+
+    /// EL0 under an EL2 kernel runs in the host's EL2&0 regime only while
+    /// HCR_EL2.TGE is set.
+    fn host_regime(&self, next: Pstate) -> Result<(), IllegalReturn> {
+        if self.kernel_el == 2 && next.el == 0 && self.system.hcr & HCR_TGE == 0 {
+            return Err(IllegalReturn::GuestRegime);
+        }
+        Ok(())
     }
 
     pub fn requester(&self) -> mmu::Requester {
@@ -243,8 +279,9 @@ impl Cpu {
         }
     }
 
-    /// Take an exception to EL1 and continue at its vector. At the guarded
-    /// level it is taken to GL1 through VBAR_GL1 and the GL1 bank instead.
+    /// Take an exception to the kernel level and continue at its vector. At
+    /// the guarded level it is taken to that GL through VBAR_GLx and the GL
+    /// bank instead.
     pub fn take(&mut self, exception: Exception) {
         let from = self.pstate;
         if from.guarded {
@@ -259,7 +296,11 @@ impl Cpu {
                 bank.far = address;
             }
             let vbar = bank.vbar;
-            self.set_pstate(exception::entry_pstate(from, self.system.translation.sctlr));
+            self.set_pstate(exception::entry_pstate(
+                from,
+                self.system.translation.sctlr,
+                self.kernel_el,
+            ));
             self.pc = vbar.wrapping_add(exception::vector_offset(from, exception.vector));
             return;
         }
@@ -271,16 +312,22 @@ impl Cpu {
         if let Some(address) = exception.fault_address {
             self.system.far = address;
         }
-        self.set_pstate(exception::entry_pstate(from, self.system.translation.sctlr));
+        self.set_pstate(exception::entry_pstate(
+            from,
+            self.system.translation.sctlr,
+            self.kernel_el,
+        ));
         self.pc = self
             .system
             .vbar
             .wrapping_add(exception::vector_offset(from, exception.vector));
     }
 
-    /// ERET from EL1. EL0 ERET is undefined and must not reach here.
+    /// ERET from the kernel level. EL0 ERET is undefined and must not reach
+    /// here.
     pub fn exception_return(&mut self) -> Result<(), IllegalReturn> {
-        let (next, nzcv) = exception::from_spsr(self.system.spsr)?;
+        let (next, nzcv) = exception::from_spsr(self.system.spsr, self.kernel_el)?;
+        self.host_regime(next)?;
         self.state.nzcv = nzcv;
         self.set_pstate(next);
         self.pc = self.system.elr;
@@ -344,5 +391,32 @@ mod tests {
         });
         assert_eq!(cpu.pc, 0x1_0300);
         assert_eq!(cpu.system.esr, 0x1234, "interrupts leave ESR unchanged");
+    }
+
+    #[test]
+    fn an_el2_kernel_takes_exceptions_to_el2_and_returns_to_el0_only_with_tge() {
+        let mut cpu = Cpu::new(0x8000, Pstate::reset(2));
+        assert_eq!(cpu.kernel_el, 2);
+        cpu.system.hcr = HCR_E2H;
+        cpu.system.vbar = 0x1_0000;
+        cpu.system.sp_el1 = 0xa000;
+        cpu.state.sp = 0xa000;
+        cpu.take(Exception::synchronous(Class::HypervisorCall, 3, 0x8004));
+        assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0200, 2));
+        assert_eq!(cpu.system.spsr & 0xf, 0b1001, "EL2h");
+        assert_eq!(cpu.system.esr, 0x5a00_0003);
+        cpu.exception_return().unwrap();
+        assert_eq!((cpu.pc, cpu.pstate.el), (0x8004, 2));
+        // EL0 would run in the guest's EL1&0 regime without TGE.
+        cpu.system.spsr = 0;
+        assert_eq!(cpu.exception_return(), Err(IllegalReturn::GuestRegime));
+        cpu.system.hcr |= HCR_TGE;
+        cpu.exception_return().unwrap();
+        assert_eq!(cpu.pstate.el, 0);
+        // EL1 does not run under a VHE host.
+        cpu.take(Exception::synchronous(Class::SupervisorCall, 0, 0x8008));
+        assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0400, 2));
+        cpu.system.spsr = 0b0101;
+        assert_eq!(cpu.exception_return(), Err(IllegalReturn::Mode(5)));
     }
 }
