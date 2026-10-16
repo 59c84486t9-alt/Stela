@@ -267,11 +267,12 @@ mod pair_source_tests {
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn installed_pair_classifier_preserves_canonical_rejected_source_rows() {
+        // Rows the pair consumer refuses stay refused by the Platform cohort,
+        // except the scalar load that the generic scalar consumer now owns.
+        const SCALAR_CONSUMER_ROW: &str = "scalar_load";
         for (name, word) in crate::memory::domain::m0_read::pair_read_fixtures::rejected_sources() {
-            assert!(
-                check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, word).is_err(),
-                "{name}"
-            );
+            let classified = check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, word);
+            assert_eq!(classified.is_ok(), name == SCALAR_CONSUMER_ROW, "{name}");
         }
     }
 }
