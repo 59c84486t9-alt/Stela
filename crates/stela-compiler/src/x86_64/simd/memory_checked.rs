@@ -14,6 +14,7 @@ use crate::context::memory::{
     profile_requirements,
 };
 use crate::x86_64::{memory_context as service, offset, store};
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = size_of::<u8>() as u8;
 const HALFWORD_BYTES: u8 = size_of::<u16>() as u8;

@@ -1,6 +1,7 @@
 //! Predicate logic production dispatch, feature boundaries and exact source maps.
 use super::*;
 use crate::aarch64::sve::predicate_logic;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const RESERVED_PSEL_SIZE: u32 = 0x2520_4000;

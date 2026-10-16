@@ -863,12 +863,18 @@ mod tests {
                             right: Register::Zero,
                         }
                     );
-                    // Bits 15:10 are fixed, not a shift or ignored field.
+                    // Bits 15:10 are fixed in the carry family. Neighboring
+                    // encodings may belong to other allocated families, such as CPA.
                     for reserved in 1..64 {
+                        let neighbor = word | (reserved << 10);
                         assert!(
-                            Decoder
-                                .lift(GuestAddress(0), word | (reserved << 10))
-                                .is_err()
+                            !matches!(
+                                Decoder
+                                    .lift(GuestAddress(0), neighbor)
+                                    .map(|instruction| instruction.operation),
+                                Ok(Operation::AddSubCarry { .. })
+                            ),
+                            "neighbor {neighbor:#010x} must not decode as carry"
                         );
                     }
                 }
@@ -893,7 +899,7 @@ mod tests {
     #[test]
     fn logical_immediate_masks_match_all_rotated_runs_and_reserved_encodings() {
         for (width, bits) in [(Width::W32, 32), (Width::X64, 64)] {
-            let mut expected = std::collections::BTreeMap::new();
+            let mut expected = alloc::collections::BTreeMap::new();
             for element_bits in [2, 4, 8, 16, 32, 64] {
                 if element_bits > bits {
                     continue;

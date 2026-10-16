@@ -1,5 +1,9 @@
 use super::*;
 use crate::aarch64::scalable::{ScalableMode, VectorLength};
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
 const BASE: GuestAddress = GuestAddress(0x1000);
 const ADD_X5_ONE: u32 = 0x9100_04a5;

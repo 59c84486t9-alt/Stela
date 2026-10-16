@@ -12,6 +12,10 @@ use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock,
     aarch64::{Decoder, Instruction, Operation, Register},
 };
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use serde::Serialize;
 
 pub mod el1_m0;
@@ -623,12 +627,12 @@ pub struct BlockAnalysisError {
     pub pc: GuestAddress,
     pub detail: String,
 }
-impl std::fmt::Display for BlockAnalysisError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BlockAnalysisError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{} at {:#x}", self.detail, self.pc.0)
     }
 }
-impl std::error::Error for BlockAnalysisError {}
+impl core::error::Error for BlockAnalysisError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuccessorKind {
@@ -1206,6 +1210,8 @@ impl CompilationPlan {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
     #[test]
     fn el1_direct_branch_profile_is_exact_no_memory_and_source_derived() {
         let profile = BlockProfile::El1DirectBranchV1;
@@ -1552,9 +1558,9 @@ mod tests {
 
     #[test]
     fn exit_layout_and_kind_validation_are_explicit() {
-        assert_eq!(std::mem::size_of::<BlockExit>(), 16);
-        assert_eq!(std::mem::offset_of!(BlockExit, next_pc), 0);
-        assert_eq!(std::mem::offset_of!(BlockExit, kind), 8);
+        assert_eq!(core::mem::size_of::<BlockExit>(), 16);
+        assert_eq!(core::mem::offset_of!(BlockExit, next_pc), 0);
+        assert_eq!(core::mem::offset_of!(BlockExit, kind), 8);
         for kind in 0..=ExitKind::System as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }

@@ -10,6 +10,7 @@ use crate::{
     aarch64::simd::sha256::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const EAX: u8 = 0;
 const ECX: u8 = 1;
@@ -231,6 +232,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn schedule_gathers_require_ssse3_independently_of_sha() {

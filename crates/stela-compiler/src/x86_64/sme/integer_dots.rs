@@ -15,6 +15,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const ACCUMULATOR: u8 = 2;
 const TEMPORARY: u8 = 5;
@@ -29,7 +30,7 @@ const REPEAT_LOW_DWORD: u8 = 0;
 const REPEAT_LOW_QWORD: u8 = 0x44;
 const REPEAT_HIGH_QWORD: u8 = 0xee;
 const DWORD_SIGN_SHIFT: u8 = 31;
-const GPR_BYTES: u32 = std::mem::size_of::<u64>() as u32;
+const GPR_BYTES: u32 = core::mem::size_of::<u64>() as u32;
 const BROADCAST_DWORD_INDEX: u8 = 0x55;
 const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
 const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
@@ -56,7 +57,7 @@ fn za_pointer(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
     load_za_pointer_r8(code);
     code.extend(MOV_ECX_STATE_DISP32);
     code.extend(
-        (std::mem::offset_of!(GuestState, x) as u32 + u32::from(operand.selector) * GPR_BYTES)
+        (core::mem::offset_of!(GuestState, x) as u32 + u32::from(operand.selector) * GPR_BYTES)
             .to_le_bytes(),
     );
     // Partition rows are powers of two dividing 2^32. ECX wrap therefore

@@ -15,6 +15,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const FIRST_RESIDUAL: u8 = 2;
 const SECOND_RESIDUAL: u8 = 3;

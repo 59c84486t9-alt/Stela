@@ -1,5 +1,7 @@
 use super::*;
 use crate::aarch64::{Logical, Shift};
+use alloc::vec;
+use alloc::vec::Vec;
 fn instruction(index: u64, operation: Operation) -> Instruction {
     Instruction {
         pc: GuestAddress(0x1000 + index * 4),

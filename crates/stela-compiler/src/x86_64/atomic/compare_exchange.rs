@@ -1,6 +1,7 @@
 //! Scalar CAS uses the host's exact-width locked compare-and-exchange operation.
 use super::{ValueRegister, commit_rax, input_rax, input_rcx, locked_compare_exchange};
 use crate::aarch64::atomic::{Kind, Operand};
+use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     let Kind::CompareExchange { compare, source } = operand.kind else {

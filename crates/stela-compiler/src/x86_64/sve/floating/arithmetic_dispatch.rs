@@ -8,6 +8,7 @@ use crate::{
         sve::floating::arithmetic::{self as guest, Inputs, Kind, Operand, ResultShape},
     },
 };
+use alloc::vec::Vec;
 
 use super::{
     add_reductions, arithmetic_remaining, complex, estimate_exponent, floating_estimates, fused,

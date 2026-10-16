@@ -7,6 +7,7 @@
 //! or guest MMU/user-permission checks.
 use super::{AddressMode, memory};
 use crate::aarch64::unprivileged::Operand;
+use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     memory(

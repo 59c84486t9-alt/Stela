@@ -24,6 +24,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -66,7 +67,7 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
 
 fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
@@ -250,6 +251,7 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn addends_are_exact_two_and_one_point_five() {

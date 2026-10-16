@@ -1,6 +1,7 @@
 //! Scalar reduction dispatch, allocated widths, exact body maps and admission limits.
 use super::*;
 use crate::aarch64::sve::reductions::{self, Output};
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const NOP: u32 = 0xd503_201f;

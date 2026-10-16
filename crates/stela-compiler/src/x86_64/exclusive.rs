@@ -22,6 +22,7 @@ use crate::{
         flags, host_caps, profile_requirements,
     },
 };
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;

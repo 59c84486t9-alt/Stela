@@ -15,6 +15,7 @@ use crate::{
         simd::{absolute_selection, exponent_scale},
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -56,7 +57,7 @@ pub(crate) fn emit(
     let mut failures = Vec::new();
     if features.full_a64() {
         code.extend(TEST_STATE_IMMEDIATE);
-        code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
         code.extend(FPCR_EXCEPTION_ENABLE_MASK.to_le_bytes());
         code.extend(JNZ);
         failures.push(code.len());

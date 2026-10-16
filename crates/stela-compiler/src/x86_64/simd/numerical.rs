@@ -1,4 +1,5 @@
 //! Shared numerical block emission: integer lane classification and private MXCSR.
+use alloc::vec::Vec;
 mod control;
 
 use super::super::isa::ShiftOpcode;
@@ -212,7 +213,7 @@ pub(super) fn commit_ah0_inexact(code: &mut Vec<u8>) {
 
 pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMM32);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
@@ -288,7 +289,7 @@ pub(super) fn environment_round(code: &mut Vec<u8>, rounding: Rounding) {
     code.extend(STMXCSR_SAVED);
     if matches!(rounding, Rounding::Fpcr) {
         code.extend(MOV_ECX_STATE);
-        code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
         code.extend(MOV_EAX_ECX);
         code.extend(SHR_EAX_IMM8);
         code.push(FPCR_POSITIVE_TO_MXCSR_SHIFT);
@@ -341,7 +342,7 @@ pub(super) fn commit_inexact(code: &mut Vec<u8>) {
     code.extend(SHR_ECX_IMM8);
     code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
     code.extend(OR_STATE_ECX);
-    code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
 /// Extract exponent magnitudes into words/dwords and compare an open range.

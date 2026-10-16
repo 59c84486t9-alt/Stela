@@ -21,6 +21,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 const SINGLE_PREFIX: u8 = 0xf3;
 const DOUBLE_PREFIX: u8 = 0xf2;
@@ -497,5 +498,5 @@ pub(in crate::x86_64) fn javascript(
     code.extend(SHL_ECX_IMMEDIATE);
     code.push(INEXACT_TO_NZCV_SHIFT);
     code.extend(MOV_STATE_ECX);
-    code.extend((std::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
 }

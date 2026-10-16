@@ -10,6 +10,7 @@ use crate::aarch64::{
 };
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
+use alloc::vec::Vec;
 
 const MOV_EAX_IMM32: u8 = 0xb8;
 const MOV_RAX_IMM32: &[u8] = &[0x48, 0xc7, 0xc0];

@@ -5,6 +5,7 @@ use crate::{
     TargetCpu,
     aarch64::simd::rearrange::{LaneSource, Operand},
 };
+use alloc::vec::Vec;
 
 pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.

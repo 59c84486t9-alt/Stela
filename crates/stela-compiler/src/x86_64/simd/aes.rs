@@ -1,6 +1,7 @@
 //! Fixed-work SSE2 AES transformations and independently gated legacy AES-NI.
 //! All guest sources are read before the sole 128-bit destination commit.
 //! There are no secret-indexed loads, host FP operations or guest memory effects.
+use alloc::vec::Vec;
 mod sbox;
 
 use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
@@ -160,6 +161,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn occurrences(code: &[u8], opcode: Host) -> usize {
         code.windows(opcode.encoding().len())

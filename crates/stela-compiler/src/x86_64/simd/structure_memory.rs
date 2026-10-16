@@ -5,6 +5,7 @@ use crate::aarch64::simd::structure_memory::{
     Access, Direction, Layout, LoadCommit, Operand, PostIndex,
 };
 use crate::aarch64::{AddressMode, Register};
+use alloc::vec::Vec;
 
 mod multiple;
 mod single;

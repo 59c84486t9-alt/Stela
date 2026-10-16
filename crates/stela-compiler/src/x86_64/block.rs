@@ -1,4 +1,6 @@
 //! Guest control transfers return to the native dispatcher with canonical state.
+use alloc::vec;
+use alloc::vec::Vec;
 pub(crate) mod checked_memory;
 pub(crate) mod el1_m0;
 pub(crate) use super::region::ResidentLoopPlan;
@@ -281,8 +283,11 @@ fn emit_terminal(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::block::{SynchronousTrap, TrapKind};
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn clock_exit_requests_runtime_service_without_counter_or_guest_writes() {
@@ -365,7 +370,7 @@ mod tests {
         let base = GuestAddress(0x4000);
         let instruction = Decoder.lift(base, 0xd2800020).unwrap();
         let pc = GuestAddress(base.0 + 4);
-        let ordinary = emit(std::slice::from_ref(&instruction), None, pc);
+        let ordinary = emit(core::slice::from_ref(&instruction), None, pc);
         let request = PointerAuthentication {
             operation: PointerAuthenticationOperation::SignIbSp,
             instruction_pc: pc,

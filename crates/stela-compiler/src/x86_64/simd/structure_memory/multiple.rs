@@ -5,6 +5,7 @@ use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::simd::structure_memory::{Direction, Layout, Operand};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::routing;
+use alloc::vec::Vec;
 
 const QWORD_BYTES: u8 = 8;
 const VECTOR_BYTES: u8 = 16;

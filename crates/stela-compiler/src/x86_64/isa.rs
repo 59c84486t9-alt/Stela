@@ -2,6 +2,7 @@
 //! Intel SDM instruction entries define these SSE/VEX forms. Operand fields
 //! (ModRM, displacement and immediates) are supplied separately by the emitter.
 use crate::TargetCpu;
+use alloc::vec::Vec;
 
 macro_rules! catalog {
     ($($name:ident => ($mnemonic:literal, $cpu:ident, [$($byte:expr),+])),+ $(,)?) => {
@@ -351,6 +352,7 @@ impl CrcTableInstruction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn avx2_shift_encodings_keep_data_count_and_destination_fields_distinct() {

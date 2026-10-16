@@ -5,6 +5,7 @@ use crate::{
     TargetCpu,
     aarch64::crc::{DataSize, Operand, Polynomial},
 };
+use alloc::vec::Vec;
 
 const TABLE_ENTRIES: u32 = 256;
 const ENTRY_BYTES: u32 = 4;
@@ -73,6 +74,7 @@ fn emit_bytes(code: &mut Vec<u8>, count: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn optional_hardware_is_castagnoli_only_and_discard_preserves_map_interval() {

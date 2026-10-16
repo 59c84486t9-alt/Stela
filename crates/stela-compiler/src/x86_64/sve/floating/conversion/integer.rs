@@ -2,6 +2,7 @@
 //! Compute leaves own no environment, architectural access, status commit or exit.
 
 use super::{half_integer, unsigned64};
+use alloc::vec::Vec;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

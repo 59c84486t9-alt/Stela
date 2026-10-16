@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::aarch64::sme::movement;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const NOP: u32 = 0xd503_201f;
@@ -277,11 +279,11 @@ fn sme1_nonstreaming_za_zero_needs_no_zt0_or_streaming_banks() {
         svcr: ScalableMode::new(false, true).svcr(),
         tpidr2_el0: 0,
         fpmr: 0,
-        z_upper: std::ptr::null_mut(),
-        predicates: std::ptr::null_mut(),
-        ffr: std::ptr::null_mut(),
+        z_upper: core::ptr::null_mut(),
+        predicates: core::ptr::null_mut(),
+        ffr: core::ptr::null_mut(),
         za: za.as_mut_ptr(),
-        zt0: std::ptr::null_mut(),
+        zt0: core::ptr::null_mut(),
     };
     let context = ExecutionContext {
         scalable: &mut view,

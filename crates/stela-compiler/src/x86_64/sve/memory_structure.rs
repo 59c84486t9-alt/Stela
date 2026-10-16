@@ -19,6 +19,7 @@ use crate::{
         SpAlignmentRequirement, flags, host_caps, profile_requirements,
     },
 };
+use alloc::vec::Vec;
 
 const POINTER_BYTES: u32 = size_of::<u64>() as u32;
 const STACK_ALIGNMENT: u32 = 16;
@@ -245,6 +246,7 @@ pub(crate) fn emit(
 mod tests {
     use super::*;
     use crate::aarch64::{scalable::ElementSize, sve::memory_structure};
+    use alloc::vec::Vec;
 
     const LENGTHS: [usize; 5] = [16, 32, 64, 128, 256];
     const TEST_PC: u64 = 0x1_4000_1000;

@@ -4,6 +4,7 @@ use crate::aarch64::{
     Shift, Width,
     conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
 };
+use alloc::vec::Vec;
 
 pub(super) fn emit_compare(code: &mut Vec<u8>, operand: &CompareOperand) {
     let branch = condition(code, operand.condition).map(|jcc| {

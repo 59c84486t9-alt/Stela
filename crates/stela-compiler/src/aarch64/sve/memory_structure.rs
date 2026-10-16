@@ -7,6 +7,7 @@ use crate::aarch64::{
         execution::{GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements},
     },
 };
+use alloc::boxed::Box;
 
 const IMMEDIATE_MASK: u32 = 0xfe10_e000;
 const IMMEDIATE_CLASS: u32 = 0xa400_e000;

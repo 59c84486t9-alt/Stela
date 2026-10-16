@@ -14,6 +14,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const MIXED_CORRECTION: u8 = 5;
 const WORD_SIGN_SHIFT: u8 = 15;
@@ -59,7 +60,7 @@ const HIGH: u8 = 4;
 const WORK: u8 = 5;
 const SAVED: u8 = 6;
 const MASK_SCRATCH: u8 = 7;
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const REPEAT_LOW_DWORD: u8 = 0x00;
 const REPEAT_LOW_QWORD: u8 = 0x44;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;

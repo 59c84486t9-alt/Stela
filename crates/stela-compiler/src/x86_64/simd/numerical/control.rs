@@ -1,6 +1,7 @@
 //! Encode guest FPCR rounding bits for a caller-owned private MXCSR.
 
 use crate::{GuestState, aarch64::floating::FPCR_ROUNDING_SHIFT};
+use alloc::vec::Vec;
 
 const MXCSR_POSITIVE_ROUNDING_SHIFT: u8 = 14;
 const MXCSR_NEGATIVE_ROUNDING_SHIFT: u8 = 13;
@@ -23,7 +24,7 @@ const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
 /// responsibilities. This helper neither installs nor reads host MXCSR.
 pub(in crate::x86_64) fn rounding_control(code: &mut Vec<u8>) {
     code.extend(MOV_EAX_STATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(MOV_ECX_EAX);
     code.extend(SHR_EAX_IMMEDIATE);
     code.push(FPCR_POSITIVE_TO_MXCSR_SHIFT);

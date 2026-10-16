@@ -10,6 +10,7 @@ use crate::aarch64::sme::lut_v2::Operand;
 use crate::context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZT0_OFFSET};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, lut, store_z_chunk};
+use alloc::vec::Vec;
 
 const INDEX_BITS: u8 = 4;
 const RESULT_XMM: u8 = 6;

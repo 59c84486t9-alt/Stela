@@ -1,6 +1,7 @@
 //! Expansion of compressed PN counters into packed predicate chunks.
 use super::{CHUNK_BITS, bind, jump};
 use crate::aarch64::scalable::VectorLength;
+use alloc::vec::Vec;
 
 const XOR_R9D_R9D: &[u8] = &[0x45, 0x31, 0xc9];
 const XOR_R10D_R10D: &[u8] = &[0x45, 0x31, 0xd2];
@@ -132,6 +133,7 @@ pub(crate) fn emit_prepared_counter_chunk(code: &mut Vec<u8>, chunk: usize, leng
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn every_streaming_length_emits_bounded_chunks_without_optional_instructions() {

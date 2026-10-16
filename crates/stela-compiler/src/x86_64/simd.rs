@@ -4,6 +4,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
+use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
 pub(super) mod arithmetic;
@@ -44,7 +45,7 @@ mod structure_memory;
 mod widening;
 
 fn vector_offset(vector: u8) -> u32 {
-    (std::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
+    (core::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
 }
 
 fn commit(code: &mut Vec<u8>, vector: u8, xmm: u8) {
@@ -260,6 +261,7 @@ pub(super) fn emit_numerical(
 #[cfg(test)]
 mod numerical_boundary_tests {
     use crate::{GuestAddress, block};
+    use alloc::vec::Vec;
 
     const FCVT_H_S: u32 = 0x1e23c020;
     const SCVTF_H_W: u32 = 0x1ee20020;
@@ -530,6 +532,7 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
 mod tests {
     use super::*;
     use crate::aarch64::{AddressMode, Register};
+    use alloc::vec;
 
     #[test]
     fn q_load_is_unaligned_staged_and_committed_before_writeback() {

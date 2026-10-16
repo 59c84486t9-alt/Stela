@@ -4,6 +4,7 @@ use crate::{
     aarch64::{scalable::ElementSize, sve::shifts::Kind},
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
 };
+use alloc::vec::Vec;
 const MOV_RAX_IMM64: [u8; 2] = [0x48, 0xb8];
 const SOURCE_SLOT: u8 = 0;
 const COUNTS_SLOT: u8 = 16;
@@ -23,8 +24,8 @@ fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
 }
 fn constant(code: &mut Vec<u8>, xmm: u8, element: ElementSize, value: u64) {
     let limbs = value.to_le_bytes();
-    let repeated: [u8; std::mem::size_of::<u64>()] =
-        std::array::from_fn(|i| limbs[i % element.bytes()]);
+    let repeated: [u8; core::mem::size_of::<u64>()] =
+        core::array::from_fn(|i| limbs[i % element.bytes()]);
     code.extend(MOV_RAX_IMM64);
     code.extend(repeated);
     packed(code, Host::MoveGprQword, xmm, 0);

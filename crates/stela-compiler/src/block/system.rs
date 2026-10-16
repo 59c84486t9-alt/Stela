@@ -15,7 +15,7 @@ use crate::{
 };
 use serde::{Serialize, Serializer};
 
-const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
+const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemOperation {

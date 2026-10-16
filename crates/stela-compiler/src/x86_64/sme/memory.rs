@@ -2,6 +2,7 @@
 //!
 //! Architectural loads commit only after every reached access succeeds. Stores
 //! submit one active element at a time; the service owns its exact atomic parts.
+use alloc::vec::Vec;
 mod za;
 
 use za::emit_za_body;
@@ -447,6 +448,7 @@ fn emit_vectors(
 mod tests {
     use super::*;
     use crate::aarch64::sme::memory::decode;
+    use alloc::vec;
 
     const GENERIC_HALFWORD_LOAD: u32 = 0xa140_2000;
     const SP_HALFWORD_LOAD: u32 = 0xa140_23e0;

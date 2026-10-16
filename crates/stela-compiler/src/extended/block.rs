@@ -17,6 +17,9 @@ use crate::{
     context::memory::MemoryRequirements,
     x86_64,
 };
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
 const MOV_EDX_IMMEDIATE: u8 = 0xba;

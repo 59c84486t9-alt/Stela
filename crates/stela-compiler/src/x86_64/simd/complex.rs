@@ -1,4 +1,5 @@
 //! Complex component staging with transactional, guarded numerical mappings.
+use alloc::vec::Vec;
 mod half;
 
 use super::super::isa::ShiftOpcode;

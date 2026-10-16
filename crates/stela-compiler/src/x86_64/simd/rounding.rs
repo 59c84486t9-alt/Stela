@@ -1,4 +1,5 @@
 //! Integral rounding: compact integer baseline and checked, nontrapping ROUND.
+use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
@@ -766,7 +767,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
         code.extend(SHL_R10D);
         code.push(INEXACT_SHIFT);
         code.extend(OR_STATE_R10D);
-        code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
     }
     let result = if operand.shape == Shape::Scalar {
         read_vector(code, operand.destination, SAVED_HALF);

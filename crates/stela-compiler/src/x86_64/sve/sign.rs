@@ -12,6 +12,7 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
+use alloc::vec::Vec;
 
 const SOURCE: u8 = 0;
 const SIGN: u8 = 1;
@@ -64,7 +65,7 @@ fn infinity(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 
 fn suppress_nan_sign(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
     code.extend(TEST_STATE_IMM32);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(FPCR_AH.to_le_bytes());
     code.extend(JZ_REL32);
     let ordinary_patch = code.len();

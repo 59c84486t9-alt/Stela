@@ -5,6 +5,7 @@ use crate::aarch64::{
     prefetch::{Address, Hint, Operand},
     register_offset::IndexExtend,
 };
+use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
@@ -118,6 +119,8 @@ fn immediate(code: &mut Vec<u8>, locality: Locality, displacement: i32) {
 mod tests {
     use super::*;
     use crate::{GuestAddress, aarch64::prefetch};
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn emitted(word: u32) -> Vec<u8> {
         let operand = prefetch::decode(GuestAddress(0), word).unwrap().unwrap();

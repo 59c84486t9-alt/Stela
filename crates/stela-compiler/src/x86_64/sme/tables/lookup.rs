@@ -4,6 +4,7 @@
 //! 32-bit stride, including Byte/Halfword results. All scratch SIMD operands are
 //! XMM0..7; the private frame contains architectural register storage only.
 
+use alloc::vec::Vec;
 pub(super) mod lut_v2;
 
 use super::{

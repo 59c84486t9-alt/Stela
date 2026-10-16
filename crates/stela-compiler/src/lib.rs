@@ -1,6 +1,15 @@
 //! Ahead-of-time native translation of supported Apple-silicon ARM64 semantics.
 //! Unsupported instructions are errors; no interpreter fallback is emitted.
+#![no_std]
 
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 pub mod aarch64;
 pub mod block;
 pub mod context;
@@ -311,6 +320,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("../../stela-state/src/lib.rs"),
     include_str!("../../stela-state/Cargo.toml"),
     include_str!("../Cargo.toml"),
+    include_str!("../../../Cargo.toml"),
     include_str!("../../../Cargo.lock"),
     include_str!("aarch64/floating/estimate/precision.rs"),
     include_str!("aarch64/floating/exponent.rs"),
@@ -436,12 +446,12 @@ pub struct NativeBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError(pub String);
 
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.0)
     }
 }
-impl std::error::Error for CompileError {}
+impl core::error::Error for CompileError {}
 
 /// Compile one raw ARM64 leaf region ending in RET X30.
 /// Input addresses are retained in the output map. No Mach-O loading, external
@@ -505,7 +515,10 @@ pub mod platform {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
     #[test]
     fn polynomial64_lowering_requires_independent_pclmul_and_selects_original_halves() {
         use x86_64::isa::SimdOpcode;
@@ -572,16 +585,16 @@ mod tests {
     }
     #[test]
     fn guest_state_layout_is_the_native_abi() {
-        assert_eq!(std::mem::size_of::<GuestState>(), 784);
-        assert_eq!(std::mem::align_of::<GuestState>(), 8);
-        assert_eq!(std::mem::offset_of!(GuestState, x), 0);
-        assert_eq!(std::mem::offset_of!(GuestState, sp), 248);
-        assert_eq!(std::mem::offset_of!(GuestState, nzcv), 256);
-        assert_eq!(std::mem::offset_of!(GuestState, reserved), 260);
-        assert_eq!(std::mem::offset_of!(GuestState, v), 264);
-        assert_eq!(std::mem::size_of::<[[u64; 2]; 32]>(), 512);
-        assert_eq!(std::mem::offset_of!(GuestState, fpcr), 776);
-        assert_eq!(std::mem::offset_of!(GuestState, fpsr), 780);
+        assert_eq!(core::mem::size_of::<GuestState>(), 784);
+        assert_eq!(core::mem::align_of::<GuestState>(), 8);
+        assert_eq!(core::mem::offset_of!(GuestState, x), 0);
+        assert_eq!(core::mem::offset_of!(GuestState, sp), 248);
+        assert_eq!(core::mem::offset_of!(GuestState, nzcv), 256);
+        assert_eq!(core::mem::offset_of!(GuestState, reserved), 260);
+        assert_eq!(core::mem::offset_of!(GuestState, v), 264);
+        assert_eq!(core::mem::size_of::<[[u64; 2]; 32]>(), 512);
+        assert_eq!(core::mem::offset_of!(GuestState, fpcr), 776);
+        assert_eq!(core::mem::offset_of!(GuestState, fpsr), 780);
     }
     #[test]
     fn ordered_load_host_requirements_gate_leaf_and_block_before_output() {

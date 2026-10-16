@@ -4,6 +4,7 @@ use crate::{
     block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
     context::memory::{SpAlignmentRequirement, flags, host_caps},
 };
+use alloc::vec::Vec;
 
 const BASE: GuestAddress = GuestAddress(0x1000);
 const RET: u32 = 0xd65f_03c0;

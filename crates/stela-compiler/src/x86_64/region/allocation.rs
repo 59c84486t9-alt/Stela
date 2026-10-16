@@ -5,6 +5,8 @@
 //! never permits discarding a final output or crossing a faultable boundary.
 use super::{Emitter, Resident, analysis::Effects, encoding, flags, recovery::GPR_SLOTS};
 use crate::aarch64::{Register, Width};
+use alloc::vec;
+use alloc::vec::Vec;
 use encoding::{CALLEE_POOL, HostGpr, POOL, RESULT};
 
 pub(super) type ValueMask = u64;
@@ -459,7 +461,7 @@ pub(super) fn prefix(
     for (index, instruction) in instructions.iter().take(analyzed.len()).enumerate() {
         let expected = entry
             .0
-            .checked_add((index as u64) * u64::from(std::mem::size_of::<u32>() as u32))
+            .checked_add((index as u64) * u64::from(core::mem::size_of::<u32>() as u32))
             .ok_or(RegionError::AddressOverflow)?;
         if instruction.pc.0 != expected {
             return Err(RegionError::NonContiguous);
@@ -468,7 +470,7 @@ pub(super) fn prefix(
     }
     let exit = entry
         .0
-        .checked_add((analyzed.len() as u64) * std::mem::size_of::<u32>() as u64)
+        .checked_add((analyzed.len() as u64) * core::mem::size_of::<u32>() as u64)
         .ok_or(RegionError::AddressOverflow)?;
     if instructions
         .get(analyzed.len())

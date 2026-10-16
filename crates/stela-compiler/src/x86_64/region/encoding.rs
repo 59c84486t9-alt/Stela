@@ -2,6 +2,8 @@
 //! Conditional recipes require caller-owned arithmetic flag provenance.
 use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{Logical, Shift, Width};
+use alloc::vec;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -134,7 +136,7 @@ pub fn store(code: &mut Vec<u8>, source: HostGpr, slot: usize) {
 }
 
 fn nzcv_access(code: &mut Vec<u8>, register: HostGpr, opcode: u8) {
-    const NZCV_OFFSET: u32 = std::mem::offset_of!(crate::GuestState, nzcv) as u32;
+    const NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     rex(code, Width::W32, register, FRAME);
     code.extend([
         opcode,
@@ -324,7 +326,7 @@ pub fn invert(code: &mut Vec<u8>, width: Width) {
 
 const ORDINARY_ADDRESS_BYTES: usize = 17;
 const FRAME_STORE_BYTES: usize = 7;
-const GPR_BYTES: usize = std::mem::size_of::<u64>();
+const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const ECX_FROM_RAX_MEMORY: u8 = 0x08;
 const FRAME_DISP32_FROM_RCX: u8 = 0x8f;
 const FRAME_DISP32_FROM_R8: u8 = 0x87;
@@ -514,7 +516,7 @@ const POP_REGISTER: u8 = 0x58;
 const LEA: u8 = 0x8d;
 const INC_DEC_GROUP: u8 = 0xff;
 const DEC_EXTENSION: u8 = 1;
-const RELATIVE_BYTES: usize = std::mem::size_of::<i32>();
+const RELATIVE_BYTES: usize = core::mem::size_of::<i32>();
 const NEAR_JUMP_BYTES: u8 = 1 + RELATIVE_BYTES as u8;
 
 pub fn near_jump(code: &mut Vec<u8>) -> usize {

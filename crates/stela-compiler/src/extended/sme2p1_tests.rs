@@ -1,6 +1,7 @@
 //! Exact Q16 typed dispatch, declared features, modes and source-map boundaries.
 use super::*;
 use crate::aarch64::sve::{rearrange, reductions};
+use alloc::vec::Vec;
 const RET_X30: u32 = 0xd65f_03c0;
 const NOP: u32 = 0xd503_201f;
 const PARENT_Q_WORDS: [u32; 105] = [

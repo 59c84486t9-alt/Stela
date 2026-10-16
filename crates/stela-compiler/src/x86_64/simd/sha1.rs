@@ -10,6 +10,7 @@ use crate::{
     aarch64::simd::sha1::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const EAX: u8 = 0;
 const ECX: u8 = 1;
@@ -167,6 +168,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn baseline_has_no_sha_and_checked_rounds_cancel_the_selected_constant() {

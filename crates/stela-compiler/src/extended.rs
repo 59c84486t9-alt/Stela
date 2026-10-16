@@ -4,12 +4,16 @@
 //! admitted after guest feature and execution-mode checks. Unsupported
 //! effects remain explicit declines.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 pub mod block;
 pub mod debug_movement;
 
 mod prefix;
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock, TargetCpu,
@@ -206,7 +210,7 @@ impl ScalableProfile {
         view: &ScalableStateView,
     ) -> Result<(), CompileError> {
         let valid = context.has_supported_header()
-            && std::ptr::eq(context.scalable.cast_const(), view)
+            && core::ptr::eq(context.scalable.cast_const(), view)
             && usize::from(view.svl_bytes) == self.length.bytes()
             && view.reserved == [0; 6]
             && view.svcr == self.mode.svcr()
@@ -1862,6 +1866,8 @@ mod movement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn integer_bits_register_exact_bodies_and_source_maps() {
@@ -2112,11 +2118,11 @@ mod tests {
             svcr: mode.svcr(),
             tpidr2_el0: 0,
             fpmr: 0,
-            z_upper: std::ptr::null_mut(),
-            predicates: std::ptr::null_mut(),
-            ffr: std::ptr::null_mut(),
+            z_upper: core::ptr::null_mut(),
+            predicates: core::ptr::null_mut(),
+            ffr: core::ptr::null_mut(),
             za: za.as_mut_ptr(),
-            zt0: std::ptr::null_mut(),
+            zt0: core::ptr::null_mut(),
         };
         let context = ExecutionContext {
             scalable: &mut view,
@@ -2146,7 +2152,7 @@ mod tests {
         view.zt0 = zt0.as_mut_ptr();
         assert!(zt0_profile.validate_view(&context, &view).is_ok());
         assert!(original.validate_view(&context, &view).is_ok());
-        view.za = std::ptr::null_mut();
+        view.za = core::ptr::null_mut();
         assert!(profile.validate_view(&context, &view).is_err());
         assert!(zt0_profile.validate_view(&context, &view).is_err());
     }
@@ -4242,6 +4248,7 @@ mod predicate_move_tests;
 #[cfg(test)]
 mod prefix_pair_tests {
     use super::*;
+    use alloc::vec::Vec;
 
     const BASE: GuestAddress = GuestAddress(0x1000);
     const UNPREDICATED_PREFIX: u32 = 0x0420_bc20;

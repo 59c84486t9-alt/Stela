@@ -8,6 +8,7 @@ use crate::{
     },
     x86_64::isa::SimdOpcode as Host,
 };
+use alloc::vec::Vec;
 
 pub(in crate::x86_64) const SOURCE_XMM: u8 = super::SOURCE;
 pub(in crate::x86_64) const RESULT_XMM: u8 = super::RESULT;

@@ -7,6 +7,7 @@ use crate::aarch64::{
     sve::memory::{Address, Offset, Scale},
 };
 use crate::context::memory::MemoryStatus;
+use alloc::vec::Vec;
 
 const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
 const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];

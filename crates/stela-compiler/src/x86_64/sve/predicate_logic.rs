@@ -8,6 +8,7 @@ use crate::{
         sve::predicate_logic::{Boolean, Kind, Operand, Permutation},
     },
 };
+use alloc::vec::Vec;
 
 const CHUNK_BITS: usize = 64;
 const CHUNK_BYTES: usize = 8;
@@ -132,7 +133,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
             snapshot(code, selector, 0, length);
             code.extend(MOV_ECX_STATE);
             code.extend(
-                ((std::mem::offset_of!(crate::GuestState, x)
+                ((core::mem::offset_of!(crate::GuestState, x)
                     + usize::from(index_register) * CHUNK_BYTES) as u32)
                     .to_le_bytes(),
             );

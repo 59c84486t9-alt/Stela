@@ -1,6 +1,7 @@
 //! Production-root rearrangement dispatch and exact body/source-map contracts.
 use super::*;
 use crate::aarch64::sve::rearrange;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const NOP: u32 = 0xd503_201f;

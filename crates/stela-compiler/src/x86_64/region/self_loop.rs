@@ -12,9 +12,11 @@ use crate::{
     aarch64::{Instruction, Operation},
     block::{ExitKind, Terminator},
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 const ARM_CONDITION_INVERSE_BIT: u8 = 1;
-const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
+const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
 
 pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) -> NativeBlock {
     let mut code = vec![];

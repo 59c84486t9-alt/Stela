@@ -24,6 +24,7 @@ use crate::{
         scalable::{load_z_chunk, memory, read_predicate_chunk},
     },
 };
+use alloc::vec::Vec;
 
 const REQUEST_OFFSET: u32 = 0;
 const ADDRESS_OFFSET: u32 = MEMORY_REQUEST_BYTES as u32;

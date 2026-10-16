@@ -3,6 +3,7 @@ use crate::{
     GuestAddress, TargetCpu,
     block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
 };
+use alloc::vec::Vec;
 
 const SOURCE_PC: GuestAddress = GuestAddress(0x4000);
 const RET_X30: u32 = 0xd65f_03c0;

@@ -14,6 +14,7 @@ use crate::{
     },
     x86_64::isa::SimdOpcode as Host,
 };
+use alloc::vec::Vec;
 
 const ZA_PACKED_PREDICATE_BYTES: usize = size_of::<u64>();
 const ZA_LEA_R9_RSP_DISP32: &[u8] = &[0x4c, 0x8d, 0x8c, 0x24];

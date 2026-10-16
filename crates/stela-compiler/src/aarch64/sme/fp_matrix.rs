@@ -924,6 +924,7 @@ impl Operand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn subtraction_bits_follow_the_source_layout() {

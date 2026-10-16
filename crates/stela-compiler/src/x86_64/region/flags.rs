@@ -10,6 +10,7 @@ use crate::aarch64::{
     conditional_select::{Operand, Otherwise},
     flags::{NZCV_C, NZCV_N, NZCV_V, NZCV_Z},
 };
+use alloc::vec::Vec;
 use encoding::{NativeCondition, RESULT, RIGHT};
 
 const ARM_CS: u8 = 0b0010;
@@ -179,34 +180,18 @@ fn emit_select(emitter: &mut Emitter<'_>, pc: crate::GuestAddress, operand: Oper
     if operand.width == Width::W32 {
         emitter.emit(|code| encoding::copy(code, RIGHT, RIGHT, Width::W32));
     }
-    emitter.emit(|code| match operand.otherwise {
+    match operand.otherwise {
         Otherwise::Unchanged => {}
-        Otherwise::Increment => encoding::increment_preserving_flags(code, RIGHT, operand.width),
-        Otherwise::Invert => encoding::invert(code, operand.width),
+        Otherwise::Increment => {
+            emitter.emit(|code| encoding::increment_preserving_flags(code, RIGHT, operand.width))
+        }
+        Otherwise::Invert => emitter.emit(|code| encoding::invert(code, operand.width)),
         Otherwise::Negate => {
-            encoding::invert(code, operand.width);
-            encoding::increment_preserving_flags(code, RIGHT, operand.width);
+            emitter.emit(|code| encoding::invert(code, operand.width));
+            emitter.emit(|code| encoding::increment_preserving_flags(code, RIGHT, operand.width));
         }
-    });
-    emitter.emit(|code| match predicate(operand.condition, carry) {
-        Predicate::Constant(true) => {}
-        Predicate::Constant(false) => encoding::copy(code, RESULT, RIGHT, operand.width),
-        Predicate::One(condition) => {
-            encoding::conditional_copy(code, RESULT, RIGHT, condition.inverse(), operand.width)
-        }
-        Predicate::All(first, second) => {
-            encoding::conditional_copy(code, RESULT, RIGHT, first.inverse(), operand.width);
-            encoding::conditional_copy(code, RESULT, RIGHT, second.inverse(), operand.width);
-        }
-        Predicate::Any(first, second) => {
-            let keep_first = encoding::conditional_jump(code, first);
-            let keep_second = encoding::conditional_jump(code, second);
-            encoding::copy(code, RESULT, RIGHT, operand.width);
-            let end = code.len();
-            encoding::patch_relative(code, keep_first, end);
-            encoding::patch_relative(code, keep_second, end);
-        }
-    });
+    }
+    emit_predicate(emitter, predicate(operand.condition, carry), operand.width);
     emitter.commit(operand.destination, operand.width);
 }
 

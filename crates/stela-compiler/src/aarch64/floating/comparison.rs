@@ -1,5 +1,5 @@
 //! Exact Arm FP ordering and predicate lanes without host FP effects.
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 use super::{
     Class, Control, Format, INVALID, Outcome, UnsupportedControl, compare_operands,

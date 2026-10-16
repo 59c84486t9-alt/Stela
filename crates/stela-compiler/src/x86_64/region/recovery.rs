@@ -77,7 +77,7 @@ impl RecoveryPoint {
         if !self.validate() {
             return None;
         }
-        Some(std::array::from_fn(|index| match self.gprs[index] {
+        Some(core::array::from_fn(|index| match self.gprs[index] {
             Location::Frame { byte_offset } => frame[usize::from(byte_offset) / 8],
             Location::Host(register) => host[register as usize],
         }))

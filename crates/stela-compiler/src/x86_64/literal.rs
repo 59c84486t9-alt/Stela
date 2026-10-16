@@ -4,6 +4,7 @@ use crate::aarch64::{
     Width,
     literal::{Operand, Transfer},
 };
+use alloc::vec::Vec;
 
 /// Family-local baseline opcodes; address/state displacements follow separately.
 #[derive(Clone, Copy)]
@@ -54,6 +55,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 mod tests {
     use super::*;
     use crate::{GuestState, aarch64::Register};
+    use alloc::vec;
 
     #[test]
     fn integer_discard_still_loads_and_signed_load_has_exact_width() {
@@ -100,7 +102,7 @@ mod tests {
             );
             assert_eq!(&code[10..14], &expected);
             assert_eq!(&code[14..18], &[0xf3, 0x0f, 0x7f, 0x87]);
-            let vector31 = (std::mem::offset_of!(GuestState, v) + 31 * 16) as u32;
+            let vector31 = (core::mem::offset_of!(GuestState, v) + 31 * 16) as u32;
             assert_eq!(&code[18..], &vector31.to_le_bytes());
         }
     }

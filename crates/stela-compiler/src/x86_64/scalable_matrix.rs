@@ -9,6 +9,7 @@ use crate::{
     TargetCpu,
     context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZA_OFFSET},
 };
+use alloc::vec::Vec;
 
 const XMM_REGISTER_COUNT: u8 = 8;
 const REX_R8_BASE: u8 = 0x41;
@@ -78,6 +79,7 @@ pub(crate) fn store_za_chunk_at_r8(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn pointer_chase_uses_the_shared_context_contract() {

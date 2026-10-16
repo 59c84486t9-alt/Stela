@@ -13,6 +13,7 @@ use crate::{
         simd::half,
     },
 };
+use alloc::vec::Vec;
 
 const INPUT: u8 = 0;
 const ZERO_LANES: u8 = 1;

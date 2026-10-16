@@ -2,6 +2,7 @@
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu, context::memory::MemoryRequirements,
 };
+use alloc::vec::Vec;
 
 #[path = "memory/address.rs"]
 mod address;
@@ -232,6 +233,7 @@ impl CheckedPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     #[test]
     fn checked_process_helpers_use_distinct_immutable_abi_and_exact_terminals() {
         use crate::block::{BlockProfile, CompilationPlan};

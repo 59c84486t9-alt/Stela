@@ -7,6 +7,7 @@ use super::{
     emit_compare_chunk, emit_compare_mask, register_fields, shuffle,
 };
 use crate::x86_64::scalable::load_z_chunk;
+use alloc::vec::Vec;
 
 const XMM_WIDE_LEFT: u8 = 6;
 const XMM_WIDE_RIGHT: u8 = 7;

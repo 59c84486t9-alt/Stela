@@ -1,6 +1,7 @@
 //! Shared baseline checked-pointer result marking, without guest state effects.
 //! The caller retains actual feature/mode authority and original operands.
 
+use alloc::vec::Vec;
 const TOP_BYTE_SHIFT: u8 = 56;
 const POINTER_SIGN_BIT: u8 = 55;
 const DETECTION_BIT: u8 = 54;

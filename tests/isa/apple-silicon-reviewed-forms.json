@@ -48575,6 +48575,7 @@
     "crates/stela-state/src/lib.rs",
     "crates/stela-state/Cargo.toml",
     "crates/stela-compiler/Cargo.toml",
+    "Cargo.toml",
     "Cargo.lock",
     "crates/stela-compiler/src/aarch64/floating/estimate/precision.rs",
     "crates/stela-compiler/src/aarch64/floating/exponent.rs",

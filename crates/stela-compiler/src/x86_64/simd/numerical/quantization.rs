@@ -4,6 +4,7 @@ use super::{
     AND_ECX_IMM32, Condition, MOV_ECX_STATE, SHR_ECX_IMM8, TEST_ECX_IMM32, branch, resolve,
 };
 use crate::GuestState;
+use alloc::vec::Vec;
 
 const ROUND_TOWARD_POSITIVE: u8 = 1;
 const MOVD_XMM_EXTENDED_GPR_PREFIX: &[u8] = &[0x66, 0x41, 0x0f, 0x6e];
@@ -57,7 +58,7 @@ pub(in crate::x86_64) fn integer_rounding_policy(
     let discarded_mask = (1u32 << discarded_bits) - 1;
     let nearest_bias = discarded_mask >> 1;
     code.extend(MOV_ECX_STATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     if alternative_nearest {
         code.extend(TEST_ECX_IMM32);
         code.extend(FPCR_AH.to_le_bytes());

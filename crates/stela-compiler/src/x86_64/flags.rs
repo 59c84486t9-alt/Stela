@@ -5,8 +5,9 @@ use crate::{
     aarch64::Register,
     aarch64::flags::{Operand, SetWidth},
 };
+use alloc::vec::Vec;
 
-const NZCV_OFFSET: u32 = std::mem::offset_of!(GuestState, nzcv) as u32;
+const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
 const NZCV_SHIFT: u8 = 28;
 const NEGATIVE_BIT: u8 = 3;
 const ZERO_BIT: u8 = 2;
@@ -210,6 +211,7 @@ fn emit_conversion(code: &mut Vec<u8>, table: u32, index_shift: u8, index_mask: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn external_table_matches_all_architectural_flag_inputs() {

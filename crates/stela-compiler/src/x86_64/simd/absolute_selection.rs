@@ -5,6 +5,7 @@ use crate::{
     aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation},
     x86_64::isa::{ShiftOpcode, SimdOpcode as Host},
 };
+use alloc::vec::Vec;
 
 const REGISTER_DIRECT: u8 = 0xc0;
 const REGISTER_SHIFT: u8 = 3;

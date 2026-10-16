@@ -12,6 +12,7 @@ use crate::{
     },
     extended::ScalableProfile,
 };
+use alloc::format;
 
 const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 

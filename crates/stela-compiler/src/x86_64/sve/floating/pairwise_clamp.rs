@@ -18,6 +18,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
 const ACTIVE: u8 = 2;

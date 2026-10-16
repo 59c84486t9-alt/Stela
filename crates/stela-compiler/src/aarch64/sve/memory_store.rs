@@ -10,6 +10,7 @@ use crate::aarch64::{
         execution::{GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements},
     },
 };
+use alloc::boxed::Box;
 
 const GROUPED_IMMEDIATE_MASK: u32 = 0xfe10_e000;
 const GROUPED_IMMEDIATE_CLASS: u32 = 0xe410_e000;
@@ -420,6 +421,7 @@ pub(crate) const fn guest_memory_quantity(operand: &Operand) -> GuestMemoryQuant
 mod tests {
     use super::*;
     use crate::aarch64::Register;
+    use alloc::boxed::Box;
 
     #[test]
     fn every_store_class_preserves_registers_and_address_scale() {

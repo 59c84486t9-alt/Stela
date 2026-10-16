@@ -4,6 +4,7 @@ use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::reductions::{Kind, Operand, Output};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_mask, store_z_chunk};
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -15,8 +16,8 @@ const PREDICATE: u8 = 6;
 const PREDICATE_SCRATCH: u8 = 7;
 const REGISTER_MODE: u8 = 0xc0;
 const REGISTER_SHIFT: u8 = 3;
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
-const DWORD_BYTES: usize = std::mem::size_of::<u32>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
+const DWORD_BYTES: usize = core::mem::size_of::<u32>();
 const R8_FIELD: u8 = 0;
 const R9_FIELD: u8 = 1;
 const WORD_ONES: u64 = 0x0001_0001_0001_0001;

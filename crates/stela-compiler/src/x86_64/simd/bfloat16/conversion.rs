@@ -17,6 +17,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;
@@ -109,7 +110,7 @@ fn commit_inexact(code: &mut Vec<u8>) {
     code.extend(TEST_R10D_R10D);
     let exact = branch(code, Condition::Zero);
     code.extend(OR_STATE_IMM32);
-    code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
     code.extend(INEXACT.to_le_bytes());
     let ready = code.len();
     resolve(code, exact, ready);

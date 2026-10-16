@@ -1,5 +1,8 @@
 use super::*;
 use crate::aarch64::exclusive::{ConstrainedUndefined, decode};
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // The historical contracts retain the Enabled specialization. Production callers
 // must construct the immutable profile-bound operand explicitly.

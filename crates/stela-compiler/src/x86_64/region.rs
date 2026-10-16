@@ -2,6 +2,8 @@
 //! The private clean-load tier uses existing nonalias ordinary direct-RAM memory
 //! emission and settles every dirty value before its faultable access.
 //! Research rows do not provide general asynchronous/native-fault delivery.
+use alloc::vec;
+use alloc::vec::Vec;
 mod allocation;
 mod analysis;
 mod self_loop;

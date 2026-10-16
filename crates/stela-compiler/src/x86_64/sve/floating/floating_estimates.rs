@@ -20,6 +20,7 @@ use crate::{
         sve::floating::classify::guard_active_exception_enables,
     },
 };
+use alloc::vec::Vec;
 
 const SOURCE: u8 = 0;
 const RESULT: u8 = 1;
@@ -126,7 +127,7 @@ fn immediate(code: &mut Vec<u8>, opcode: &[u8], value: u32) {
 
 fn test_ah(code: &mut Vec<u8>) {
     code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(FPCR_AH.to_le_bytes());
 }
 

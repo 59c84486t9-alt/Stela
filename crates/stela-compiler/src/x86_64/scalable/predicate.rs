@@ -6,6 +6,7 @@ use super::{
     predicate_offset, storage_pointer,
 };
 use crate::{aarch64::scalable::VectorLength, context::SCALABLE_PREDICATES_OFFSET};
+use alloc::vec::Vec;
 
 const MOV_RDX_DISP32_AX: &[u8] = &[0x66, 0x89, 0x82];
 const MOV_RDX_DISP32_EAX: &[u8] = &[0x89, 0x82];

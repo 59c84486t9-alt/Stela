@@ -9,6 +9,7 @@
 //! discarded; caller must not add it to FPSR and must restore original MXCSR.
 
 use crate::x86_64::scalable::numerical;
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -24,7 +25,7 @@ const DOUBLE_SIGN_BIT: u8 = 63;
 const DWORD_BITS: u8 = 32;
 const REGISTER_MODRM: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const CONDITIONAL_ESCAPE: u8 = 0x0f;
 const EQUAL: u8 = 0x84;
 const NOT_EQUAL: u8 = 0x85;

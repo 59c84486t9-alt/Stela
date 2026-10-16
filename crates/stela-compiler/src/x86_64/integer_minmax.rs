@@ -1,6 +1,7 @@
 //! Scalar min/max selection without guest condition-flag changes.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::integer_minmax::{Kind, Operand, Right};
+use alloc::vec::Vec;
 
 const REX_W: u8 = 0x48;
 const NOP: u8 = 0x90;
@@ -61,6 +62,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn signed_x_immediates_sign_extend_but_unsigned_do_not() {

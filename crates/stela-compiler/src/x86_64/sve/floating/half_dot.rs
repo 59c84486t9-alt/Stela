@@ -28,6 +28,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -380,6 +381,7 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod mapping_tests {
     use super::*;
+    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const LEFT_SOURCE: u8 = 1;

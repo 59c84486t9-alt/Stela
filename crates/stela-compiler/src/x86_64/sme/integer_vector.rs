@@ -20,6 +20,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;

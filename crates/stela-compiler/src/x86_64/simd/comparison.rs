@@ -18,6 +18,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 const LEFT_VECTOR: u8 = 0;
 const RIGHT_VECTOR: u8 = 1;
@@ -226,7 +227,7 @@ fn select_flags(code: &mut Vec<u8>, condition: FlagSelect) {
 
 fn store_flags(code: &mut Vec<u8>) {
     code.extend(STORE_STATE_EAX);
-    code.extend((std::mem::offset_of!(GuestState, nzcv) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, nzcv) as u32).to_le_bytes());
 }
 
 fn ordered_flags(code: &mut Vec<u8>, integer: bool) {
@@ -336,7 +337,7 @@ fn emit_conditional_flags(
         let fallback_start = code.len();
         resolve(code, failed, fallback_start);
         code.extend(STORE_STATE_IMMEDIATE);
-        code.extend((std::mem::offset_of!(GuestState, nzcv) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(GuestState, nzcv) as u32).to_le_bytes());
         code.extend((u32::from(fallback) << NZCV_SHIFT).to_le_bytes());
         let completed_target = code.len();
         resolve(code, completed, completed_target);

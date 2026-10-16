@@ -1,5 +1,6 @@
 //! Baseline native mappings for reviewed instruction-execution barriers and hints.
 use crate::aarch64::system::synchronization::Operation;
+use alloc::vec::Vec;
 
 const MOV_R8_RBX: &[u8] = &[0x49, 0x89, 0xd8];
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
@@ -36,6 +37,8 @@ pub fn emit(code: &mut Vec<u8>, operation: &Operation) -> Result<(), EmitError> 
 mod tests {
     use super::*;
     use crate::aarch64::system::synchronization::{Requirement, Scope, WaitKind};
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn baseline_barriers_share_real_serialization() {

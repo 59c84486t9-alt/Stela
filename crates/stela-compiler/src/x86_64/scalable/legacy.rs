@@ -7,6 +7,7 @@ use crate::{
     aarch64::scalable::{VectorLength, is_z_register},
     context::SCALABLE_Z_UPPER_OFFSET,
 };
+use alloc::vec::Vec;
 
 /// Apply an accepted legacy V write's upper-Z clearing effect. The caller owns
 /// instruction legality and which destination(s) require this effect. Clobbers
@@ -40,6 +41,7 @@ pub(crate) fn clear_z_upper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn minimum_length_upper_clear_has_no_native_effects() {

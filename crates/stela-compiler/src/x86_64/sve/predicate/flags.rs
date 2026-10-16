@@ -1,6 +1,7 @@
 //! Incremental architectural predicate-test flags.
 
 use super::{CHUNK_BITS, bind, jump};
+use alloc::vec::Vec;
 
 const JZ: &[u8] = &[0x0f, 0x84];
 const MOV_R8D_IMM32: &[u8] = &[0x41, 0xb8];
@@ -94,5 +95,5 @@ pub(crate) fn finish_predtest(code: &mut Vec<u8>) {
     code.push(NZCV_Z_SHIFT);
     code.extend(OR_EAX_R8D);
     code.extend(MOV_STATE_DISP32_EAX);
-    code.extend((std::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
 }

@@ -11,6 +11,7 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask},
     },
 };
+use alloc::vec::Vec;
 
 use super::classify::{
     guard_active_exception_enables, guard_normal_zero_or_infinity, prepare_classification,
@@ -183,6 +184,7 @@ pub(crate) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn half_refusal_emits_no_frame_or_guard() {

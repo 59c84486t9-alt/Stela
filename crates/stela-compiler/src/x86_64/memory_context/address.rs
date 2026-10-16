@@ -8,6 +8,7 @@ use crate::{
     aarch64::{AddressMode, Register, Shift, Width, register_offset::IndexExtend},
     context::memory::{MemoryStatus, address::AddressAddChecks},
 };
+use alloc::vec::Vec;
 
 const STACK_ALIGNMENT_MASK: u8 = 15;
 const TEST_AL_IMM8: u8 = 0xa8;

@@ -1,4 +1,5 @@
 //! Guarded classic/enhanced BF dot and widening multiply-add/subtract, staged once.
+use alloc::vec::Vec;
 mod classic_dot;
 mod enhanced_dot;
 mod multiply_long;
@@ -34,7 +35,7 @@ const REL32_BYTES: usize = size_of::<i32>();
 
 fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 

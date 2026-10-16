@@ -11,6 +11,7 @@ use crate::{
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
+use alloc::vec::Vec;
 
 const SOURCE_XMM: u8 = 0;
 const TEMP_XMM: u8 = 1;

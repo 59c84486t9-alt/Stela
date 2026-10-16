@@ -30,4 +30,4 @@ impl LoopBudget {
     }
 }
 
-pub(crate) const REMAINING_OFFSET: usize = std::mem::offset_of!(LoopBudget, remaining);
+pub(crate) const REMAINING_OFFSET: usize = core::mem::offset_of!(LoopBudget, remaining);

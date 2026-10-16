@@ -17,6 +17,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const SOURCE: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -27,8 +28,8 @@ const OUTPUT_SLOT: usize = 0;
 const GPR_RAX: u8 = 0;
 const MODRM_REGISTER: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
-const DWORD_BYTES: usize = std::mem::size_of::<u32>();
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
+const DWORD_BYTES: usize = core::mem::size_of::<u32>();
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const ESTIMATE_FRACTION_BITS: u32 = 8;
 const ESTIMATE_UNIT: u32 = 1 << ESTIMATE_FRACTION_BITS;
 const ESTIMATE_INPUT_SHIFT: u8 = (u32::BITS - ESTIMATE_FRACTION_BITS - 1) as u8;

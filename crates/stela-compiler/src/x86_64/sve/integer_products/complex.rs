@@ -3,6 +3,7 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES};
 use crate::aarch64::sve::integer_products::Kind;
+use alloc::vec::Vec;
 
 use super::complex_wrapping::{blend_directions, prepare_products};
 use super::emit_saturating_chunk;

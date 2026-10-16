@@ -7,6 +7,7 @@ use crate::aarch64::scalable::{ElementSize, VECTOR_REGISTER_COUNT};
 use crate::aarch64::simd::lut::Operand;
 use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::scalable::lut;
+use alloc::vec::Vec;
 
 const INDICES_XMM: u8 = 0;
 const LOW_TABLE_XMM: u8 = 4;

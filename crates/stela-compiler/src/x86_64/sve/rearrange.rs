@@ -1,5 +1,6 @@
 //! Fixed-SVL rearrangement recipes using baseline SSE2 and checked SSSE3.
 //! Source snapshots are needed only for aliased permutations crossing chunks.
+use alloc::vec::Vec;
 mod dynamic;
 
 use crate::TargetCpu;

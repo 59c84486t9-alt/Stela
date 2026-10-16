@@ -9,6 +9,7 @@ use crate::{
     aarch64::floating::{FPCR_EXCEPTION_ENABLE_MASK, Format, features::NumericalFeatures},
     x86_64::isa::SimdOpcode as Host,
 };
+use alloc::vec::Vec;
 
 const XMM_REGISTER_COUNT: u8 = 8;
 const MODRM_REGISTER: u8 = 0xc0;
@@ -187,7 +188,7 @@ pub(in crate::x86_64) fn guard_active_exception_enables(
     code.extend(TEST_EAX_EAX);
     let inactive = branch(code, JZ_REL32);
     code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(FPCR_EXCEPTION_ENABLE_MASK.to_le_bytes());
     failures.push(branch(code, JNZ_REL32));
     let next = code.len();

@@ -5,6 +5,7 @@ use crate::{
     aarch64::simd::products::{Accumulate, Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 fn arithmetic(lane: u8, subtract: bool) -> Host {
     match (subtract, lane) {
@@ -138,7 +139,7 @@ fn absolute_difference(code: &mut Vec<u8>, lane: u8, signed: bool, target: Targe
             constant(
                 code,
                 4,
-                std::array::from_fn(|i| bits[i % usize::from(lane)]),
+                core::array::from_fn(|i| bits[i % usize::from(lane)]),
             );
             packed(code, Host::Xor, 0, 4);
             packed(code, Host::Xor, 1, 4);
@@ -171,7 +172,7 @@ fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
     constant(
         code,
         xmm,
-        std::array::from_fn(|i| bytes[i % usize::from(lane)]),
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
     );
 }
 fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
@@ -711,7 +712,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         constant(
             code,
             mask,
-            std::array::from_fn(|i| if i < usize::from(bytes) { 255 } else { 0 }),
+            core::array::from_fn(|i| if i < usize::from(bytes) { 255 } else { 0 }),
         );
         packed(code, Host::And, result, mask);
     }
@@ -721,6 +722,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn dot_products_use_exact_unsaturated_pairs_on_every_target() {

@@ -1,4 +1,5 @@
 //! Integer ZA vector arithmetic over the checked extended execution context.
+use alloc::vec::Vec;
 #[path = "integer_matrix/long.rs"]
 mod long;
 #[path = "integer_matrix/outer.rs"]
@@ -19,7 +20,7 @@ use crate::{
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
-const GPR_BYTES: usize = std::mem::size_of::<u64>();
+const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
 const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
 const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
@@ -63,7 +64,7 @@ fn emit_add_sub(
     load_za_pointer_r8(code);
     code.extend(MOV_ECX_STATE_DISP32);
     code.extend(
-        ((std::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
+        ((core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
             .to_le_bytes(),
     );
     if operand.offset != 0 {

@@ -12,11 +12,12 @@ use crate::{
         scalable::{read_predicate_chunk, write_predicate_chunk, zero_predicate},
     },
 };
+use alloc::vec::Vec;
 
 const CHUNK_BITS: usize = u64::BITS as usize;
-const CHUNK_BYTES: usize = std::mem::size_of::<u64>();
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
-const NZCV_OFFSET: u32 = std::mem::offset_of!(GuestState, nzcv) as u32;
+const CHUNK_BYTES: usize = core::mem::size_of::<u64>();
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
+const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
 const N_FLAG: u32 = 1 << 31;
 const Z_FLAG: u32 = 1 << 30;
 const C_FLAG: u32 = 1 << 29;
@@ -434,17 +435,19 @@ mod breaks {
     //!
     //! Only packed P storage is read/written. RDI/R15 and the host stack survive.
     //! Results use XMM0..3; flagged non-Next forms keep original Pg in XMM4..7.
+
     use crate::aarch64::scalable::{ElementSize, VectorLength};
     use crate::aarch64::sve::predicate_generation::{Boundary, BreakKind, BreakOperand};
     use crate::x86_64::scalable::{read_predicate_chunk, write_predicate_chunk};
     use crate::x86_64::sve::predicate;
+    use alloc::vec::Vec;
 
     use crate::TargetCpu;
 
     const BLSMSK_RAX_R9: &[u8] = &[0xc4, 0xc2, 0xf8, 0xf3, 0xd1];
     const BLSI_RAX_R9: &[u8] = &[0xc4, 0xc2, 0xf8, 0xf3, 0xd9];
     const DEC_RAX: &[u8] = &[0x48, 0xff, 0xc8];
-    const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+    const QWORD_BYTES: usize = core::mem::size_of::<u64>();
     const BITS_PER_BYTE: usize = u8::BITS as usize;
     const ORIGINAL_GUARD_XMM_BASE: usize = 4;
     const MOV_R8_RAX: &[u8] = &[0x49, 0x89, 0xc0];
@@ -496,7 +499,7 @@ mod breaks {
     }
 
     fn patch(code: &mut [u8], displacement: usize, destination: usize) {
-        let after = displacement + std::mem::size_of::<i32>();
+        let after = displacement + core::mem::size_of::<i32>();
         let relative = i32::try_from(destination as isize - after as isize)
             .expect("predicate-break local branch must fit rel32");
         code[displacement..after].copy_from_slice(&relative.to_le_bytes());
@@ -638,6 +641,7 @@ mod whiles {
     //!
     //! Count is retained in R8D across state helpers; RAX/RCX/RDX are scratch.
     //! No callee-saved register is used. Scalar inputs are read before guest writes.
+
     use crate::{
         GuestState,
         aarch64::{
@@ -650,9 +654,10 @@ mod whiles {
             scalable::{write_predicate_chunk, zero_predicate},
         },
     };
+    use alloc::vec::Vec;
 
-    const GPR_BYTES: usize = std::mem::size_of::<u64>();
-    const NZCV_OFFSET: u32 = std::mem::offset_of!(GuestState, nzcv) as u32;
+    const GPR_BYTES: usize = core::mem::size_of::<u64>();
+    const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
     const NZCV_STATE_SHIFT: u8 = 28;
     const N_NIBBLE: u32 = 8;
     const C_NIBBLE: u32 = 2;
@@ -661,7 +666,7 @@ mod whiles {
     const Z_NIBBLE_SHIFT: u8 = 2;
     const PN_INVERT_BIT: u32 = 1 << 15;
     const PN_COUNT_SCALE_SHIFT: u32 = 1;
-    const REL32_BYTES: usize = std::mem::size_of::<i32>();
+    const REL32_BYTES: usize = core::mem::size_of::<i32>();
     const TWO_BYTE_OPCODE: u8 = 0x0f;
     const JMP_REL32: u8 = 0xe9;
 

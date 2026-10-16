@@ -10,6 +10,7 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
+use alloc::vec::Vec;
 
 mod scalar;
 
@@ -26,7 +27,7 @@ const PREDICATE_SCRATCH_XMM: u8 = 5;
 const BYTE_BITS: u8 = u8::BITS as u8;
 const NIBBLE_BITS: u8 = BYTE_BITS / 2;
 const DWORD_SIGN_SHIFT: u8 = u32::BITS as u8 - 1;
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const LOW_NIBBLE: u8 = 0x0f;
 const SWAP_ADJACENT: u8 = 0xb1;
 const REVERSE_FOUR: u8 = 0x1b;
@@ -44,7 +45,7 @@ fn constant_qword(code: &mut Vec<u8>, destination: u8, value: u64) {
 
 fn repeated_constant(code: &mut Vec<u8>, destination: u8, element: ElementSize, value: u64) {
     let source = value.to_le_bytes();
-    let repeated = std::array::from_fn(|i| source[i % element.bytes()]);
+    let repeated = core::array::from_fn(|i| source[i % element.bytes()]);
     constant_qword(code, destination, u64::from_le_bytes(repeated));
     packed(code, Host::UnpackLowQword, destination, destination);
 }
@@ -177,7 +178,7 @@ fn leading_count(code: &mut Vec<u8>, element: ElementSize, sign: bool, target: T
 }
 
 fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
-    let values = std::array::from_fn(|i| {
+    let values = core::array::from_fn(|i| {
         if reverse {
             (i as u8).reverse_bits() >> NIBBLE_BITS
         } else {

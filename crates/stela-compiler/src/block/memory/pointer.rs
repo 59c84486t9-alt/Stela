@@ -6,6 +6,7 @@ use crate::{
     context::{memory::MemoryRequirements, pointer::PointerArithmeticRequirement},
     extended::Decoded,
 };
+use alloc::vec::Vec;
 
 pub(crate) enum CheckedOperation {
     Ordinary(Decoded),

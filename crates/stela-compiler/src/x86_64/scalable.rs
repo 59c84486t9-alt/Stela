@@ -6,6 +6,7 @@
 //! access architectural state storage, never guest data RAM or monitor metadata.
 
 pub(crate) use super::memory_context as memory;
+use alloc::vec::Vec;
 
 mod legacy;
 pub(crate) mod lut;
@@ -34,9 +35,9 @@ const MODRM_DISP32: u8 = 0x80;
 const REGISTER_SHIFT: u8 = 3;
 const STATE_RDI: u8 = 7;
 const ADDRESS_RDX: u8 = 2;
-const HALFWORD_BYTES: usize = std::mem::size_of::<u16>();
-const DWORD_BYTES: usize = std::mem::size_of::<u32>();
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const HALFWORD_BYTES: usize = core::mem::size_of::<u16>();
+const DWORD_BYTES: usize = core::mem::size_of::<u32>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const PREDICATE_CHUNK_BYTES: usize = QWORD_BYTES;
 const PREDICATE_MASK_BYTES: usize = VECTOR_CHUNK_BYTES / BITS_PER_BYTE;
 const MOV_RDX_CONTEXT_DISP8: &[u8] = &[0x49, 0x8b, 0x57];
@@ -74,7 +75,7 @@ fn storage_pointer(code: &mut Vec<u8>, field: u32) {
 
 fn vector_offset(register: u8) -> u32 {
     assert!(is_z_register(register));
-    (std::mem::offset_of!(GuestState, v) + usize::from(register) * VECTOR_CHUNK_BYTES) as u32
+    (core::mem::offset_of!(GuestState, v) + usize::from(register) * VECTOR_CHUNK_BYTES) as u32
 }
 
 fn upper_offset(register: u8, chunk: usize, length: VectorLength) -> u32 {
@@ -278,7 +279,7 @@ mod tests {
 
     #[test]
     fn z_storage_segments_cover_each_register_without_overlap() {
-        assert_eq!(std::mem::offset_of!(GuestState, v), 264);
+        assert_eq!(core::mem::offset_of!(GuestState, v), 264);
         for bytes in LENGTHS {
             let length = VectorLength::from_bytes(bytes).unwrap();
             for register in 0..32 {

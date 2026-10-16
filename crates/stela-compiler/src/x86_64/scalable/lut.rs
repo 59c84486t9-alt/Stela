@@ -4,6 +4,7 @@ use crate::{
     aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES},
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
 };
+use alloc::vec::Vec;
 const MOV_EAX: u8 = 0xb8;
 const MOVD: &[u8] = &[0x66, 0x0f, 0x6e];
 const REGISTER: u8 = 0xc0;

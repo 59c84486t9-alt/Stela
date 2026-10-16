@@ -3,7 +3,7 @@ use super::{
     Class, Control, Format, INEXACT, INVALID, Outcome, UNDERFLOW, UnsupportedControl,
     compare_operands, nan, process_denormals, unpack,
 };
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MinMaxOperation {

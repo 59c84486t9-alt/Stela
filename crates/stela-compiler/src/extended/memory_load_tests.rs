@@ -1,6 +1,8 @@
 //! First memory group dispatch, source maps and complete-body requirements.
 use super::*;
 use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_requirements};
+use alloc::vec;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const NOP: u32 = 0xd503_201f;

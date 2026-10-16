@@ -7,9 +7,10 @@ use crate::{
         fp_register::{Operand, SystemRegister},
     },
 };
+use alloc::vec::Vec;
 
-const FPCR_OFFSET: u32 = std::mem::offset_of!(GuestState, fpcr) as u32;
-const FPSR_OFFSET: u32 = std::mem::offset_of!(GuestState, fpsr) as u32;
+const FPCR_OFFSET: u32 = core::mem::offset_of!(GuestState, fpcr) as u32;
+const FPSR_OFFSET: u32 = core::mem::offset_of!(GuestState, fpsr) as u32;
 const MOV_EAX_STATE_DISP32: &[u8] = &[0x8b, 0x87];
 const MOV_STATE_DISP32_EAX: &[u8] = &[0x89, 0x87];
 const AND_EAX_IMM32: u8 = 0x25;

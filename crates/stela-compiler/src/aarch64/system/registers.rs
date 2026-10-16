@@ -181,7 +181,7 @@ mod tests {
                     for crm in 0..=CRM_MASK {
                         for op2 in 0..=OP2_MASK {
                             let selector = Encoding::new(op0, op1, crn, crm, op2).selector();
-                            assert!(!std::mem::replace(&mut seen[usize::from(selector)], true));
+                            assert!(!core::mem::replace(&mut seen[usize::from(selector)], true));
                         }
                     }
                 }

@@ -29,6 +29,7 @@ use crate::{
         sve::floating::classify::guard_active_exception_enables,
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -436,6 +437,7 @@ fn selected_recipe(operand: Operand, length: VectorLength, target: TargetCpu) ->
 mod tests {
     use super::*;
     use crate::aarch64::sve::floating::arithmetic;
+    use alloc::vec::Vec;
 
     const INDEXED_FCMLA_HALF: u32 = 0x64a21020;
     const INDEXED_FMLA_HALF: u32 = 0x64220020;

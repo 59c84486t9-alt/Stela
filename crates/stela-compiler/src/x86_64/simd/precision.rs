@@ -18,6 +18,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 const RESULT_VECTOR: u8 = 0;
 const SOURCE_VECTOR: u8 = 1;

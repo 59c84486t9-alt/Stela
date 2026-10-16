@@ -1,5 +1,6 @@
 //! Exact normal-Half lane fields, private rounding and compact scratch loop.
 //! Callers own input classification, arithmetic, exception policy and guest commit.
+use alloc::vec::Vec;
 mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};
 use super::{Host, packed};
@@ -258,7 +259,7 @@ pub(super) fn finish_lanes(
 /// The caller applies instruction-specific AH status policy before this store.
 pub(super) fn commit_inexact(code: &mut Vec<u8>) {
     code.extend(OR_STATE_R10D);
-    code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
 /// Original Vn is XMM7. Scalar-pair callers skip NEP merging entirely.

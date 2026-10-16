@@ -1,6 +1,7 @@
 //! PMOV production dispatch, complete body/maps and feature/mode boundaries.
 use super::*;
 use crate::aarch64::sve::integer_predicate_move;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const BASES: [u32; 4] = [0x052b_3800, 0x052d_3800, 0x0569_3800, 0x05a9_3800];

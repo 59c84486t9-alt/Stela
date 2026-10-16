@@ -6,6 +6,7 @@ use crate::{
         pointer::{EffectivePointerChecks, PointerArithmeticRequirement},
     },
 };
+use alloc::vec::Vec;
 
 const SOURCE_PC: GuestAddress = GuestAddress(0x4000);
 const INSTRUCTION_BYTES: usize = size_of::<u32>();

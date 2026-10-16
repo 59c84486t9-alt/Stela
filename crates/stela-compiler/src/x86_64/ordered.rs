@@ -11,6 +11,7 @@ use crate::{
         ordered::{Barrier, Kind, LoadExtension, Operand},
     },
 };
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;

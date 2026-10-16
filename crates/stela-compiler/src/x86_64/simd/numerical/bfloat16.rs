@@ -3,6 +3,7 @@ use super::super::super::isa::ShiftOpcode;
 use super::super::{Host, packed};
 use super::quantization::{IntegerRoundingRegister, broadcast_integer_rounding};
 use crate::aarch64::floating::bfloat16::BFLOAT16_TO_SINGLE_SHIFT;
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SOURCE: u8 = 1;

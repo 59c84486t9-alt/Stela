@@ -1,4 +1,5 @@
 //! Binary numerical blocks: ordered input staging, normal SSE2 and exact fallback.
+use alloc::vec::Vec;
 mod half;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
@@ -322,6 +323,7 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn numerical_instructions_require_the_block_exit_protocol() {

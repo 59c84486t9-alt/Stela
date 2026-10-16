@@ -6,6 +6,8 @@
 
 use super::{ElementSize, features::FeatureRequirement};
 use crate::GuestAddress;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 pub const SCALABLE_EXECUTION_REQUIREMENTS_VERSION: u32 = 2;
 

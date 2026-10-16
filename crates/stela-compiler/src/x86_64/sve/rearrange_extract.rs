@@ -13,6 +13,7 @@ use crate::{
         store,
     },
 };
+use alloc::vec::Vec;
 
 const VALUE_XMM: u8 = 0;
 const INSERT_XMM: u8 = 1;
@@ -21,7 +22,7 @@ const ZERO_XMM: u8 = 3;
 const RAX_REGISTER: u8 = 0;
 const LOW_DWORD_CONTROL: u8 = 0;
 const PREDICATE_CHUNK_BITS: usize = u64::BITS as usize;
-const PREDICATE_CHUNK_BYTES: usize = std::mem::size_of::<u64>();
+const PREDICATE_CHUNK_BYTES: usize = core::mem::size_of::<u64>();
 const STAGING_FRAME_BYTES: u8 = VECTOR_CHUNK_BYTES as u8;
 const CHUNK_OFFSET_MASK: u8 = (VECTOR_CHUNK_BYTES - 1) as u8;
 const GOVERNING_PREDICATE_COUNT: u8 = 8;
@@ -62,7 +63,7 @@ fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
 }
 
 fn resolve(code: &mut [u8], displacement: usize, target: usize) {
-    let next = displacement + std::mem::size_of::<i32>();
+    let next = displacement + core::mem::size_of::<i32>();
     let offset = i32::try_from(target as i64 - next as i64).expect("bounded extraction body");
     code[displacement..next].copy_from_slice(&offset.to_le_bytes());
 }

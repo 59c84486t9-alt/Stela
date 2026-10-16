@@ -402,6 +402,7 @@ fn decode_encoding(word: u32, encoding: &Encoding) -> Option<Result<Operand, ()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     const SINGLE_SIZE: u32 = SINGLE_SIZE_ENCODING << SIZE_SHIFT;
     const ALL_REGISTERS_AND_PREDICATES: u32 = REGISTER_MASK

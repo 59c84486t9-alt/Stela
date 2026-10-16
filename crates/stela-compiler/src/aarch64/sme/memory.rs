@@ -6,6 +6,7 @@ use crate::aarch64::{
         execution::{GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements},
     },
 };
+use alloc::boxed::Box;
 
 const VECTOR_GROUP_MASK: u32 = 0xff80_0000;
 const VECTOR_GROUP_CLASS: u32 = 0xa100_0000;
@@ -396,6 +397,7 @@ mod tests {
 #[cfg(test)]
 mod execution_access_tests {
     use super::*;
+    use alloc::vec::Vec;
 
     const ORIGINAL_SP_BASE: u32 = REGISTER_MASK << BASE_SHIFT;
 

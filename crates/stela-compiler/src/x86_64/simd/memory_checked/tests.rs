@@ -6,7 +6,10 @@ use crate::{
         memory::{MemoryContextView, MemoryRequest, MemoryStatus},
     },
 };
-use std::ffi::c_void;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ffi::c_void;
 
 const GUEST_BASE: u64 = 0x1000;
 const GUEST_PC: u64 = 0x4000;
@@ -151,7 +154,7 @@ unsafe extern "C" fn callback(view: *mut MemoryContextView, request: *const Memo
             break;
         }
         // SAFETY: generated staging has32 bytes and all test RAM spans fit.
-        let data = unsafe { std::slice::from_raw_parts_mut(request.data.add(offset), part_bytes) };
+        let data = unsafe { core::slice::from_raw_parts_mut(request.data.add(offset), part_bytes) };
         let ram = &mut harness.ram[start + offset..start + offset + part_bytes];
         if request.flags & flags::WRITE != 0 {
             ram.copy_from_slice(data);
@@ -164,7 +167,7 @@ unsafe extern "C" fn callback(view: *mut MemoryContextView, request: *const Memo
     // SAFETY: all XMM registers are caller-saved; the deliberately changed
     // valid MXCSR is restored by the exact common callback wrapper under test.
     unsafe {
-        std::arch::asm!(
+        core::arch::asm!(
             "pxor xmm0, xmm0", "pxor xmm1, xmm1", "pxor xmm2, xmm2", "pxor xmm3, xmm3",
             "pxor xmm4, xmm4", "pxor xmm5, xmm5", "pxor xmm6, xmm6", "pxor xmm7, xmm7",
             "ldmxcsr [{control}]", control = in(reg) &poison_mxcsr,
@@ -205,7 +208,7 @@ impl NativeCode {
         code.extend(body);
         code.push(0xc3);
         if let Ok(directory) = std::env::var("STELA_ASIMD_COMPONENT_OUTPUT") {
-            use std::sync::atomic::{AtomicUsize, Ordering};
+            use core::sync::atomic::{AtomicUsize, Ordering};
             static NEXT_BODY: AtomicUsize = AtomicUsize::new(0);
             let number = NEXT_BODY.fetch_add(1, Ordering::Relaxed);
             std::fs::create_dir_all(&directory).unwrap();
@@ -218,7 +221,7 @@ impl NativeCode {
         // SAFETY: private test mapping is retained until all native calls end.
         let address = unsafe {
             mmap(
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
                 code.len(),
                 PROT_READ_WRITE_EXECUTE,
                 MAP_PRIVATE | MAP_ANONYMOUS,
@@ -228,7 +231,7 @@ impl NativeCode {
         };
         assert_ne!(address as usize, usize::MAX);
         unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), address.cast::<u8>(), code.len());
+            core::ptr::copy_nonoverlapping(code.as_ptr(), address.cast::<u8>(), code.len());
         }
         Self(address, code.len())
     }
@@ -240,7 +243,7 @@ impl NativeCode {
         };
         // SAFETY: exact generated entry implements this borrowed SystemV ABI.
         let entry: unsafe extern "C" fn(*mut GuestState, *mut ExecutionContext) -> u32 =
-            unsafe { std::mem::transmute(self.0) };
+            unsafe { core::mem::transmute(self.0) };
         let before = mxcsr();
         let status = unsafe { entry(state, &mut context) };
         assert_eq!(
@@ -256,7 +259,7 @@ fn mxcsr() -> u32 {
     let mut value = 0;
     // SAFETY: STMXCSR writes exactly one independently live32-bit scalar.
     unsafe {
-        std::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut value, options(nostack));
+        core::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut value, options(nostack));
     }
     value
 }
@@ -337,7 +340,7 @@ fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults()
                             let original = actual.clone();
                             let mut expected = original.clone();
                             let mut harness = Harness {
-                                ram: std::array::from_fn(|i| i as u8 ^ 0xa5),
+                                ram: core::array::from_fn(|i| i as u8 ^ 0xa5),
                                 fail_part,
                                 requests: vec![],
                             };
@@ -499,7 +502,7 @@ fn actual_register_extensions_and_zero_index_keep_original_inputs() {
                     emit_context(&mut body, &operation, GUEST_PC);
                     let code = NativeCode::new(&body);
                     let mut harness = Harness {
-                        ram: std::array::from_fn(|index| index as u8 ^ 0x59),
+                        ram: core::array::from_fn(|index| index as u8 ^ 0x59),
                         fail_part: None,
                         requests: vec![],
                     };
@@ -592,7 +595,7 @@ fn actual_non_temporal_pairs_stage_duplicate_store_sources() {
             let mut actual = state();
             let original = actual.clone();
             let mut harness = Harness {
-                ram: std::array::from_fn(|index| index as u8 ^ 0x59),
+                ram: core::array::from_fn(|index| index as u8 ^ 0x59),
                 fail_part: None,
                 requests: vec![],
             };

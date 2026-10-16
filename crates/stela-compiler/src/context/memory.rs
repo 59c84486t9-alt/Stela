@@ -3,7 +3,7 @@
 //! Requests describe one reached architectural element, never an instruction's
 //! speculative footprint. The runtime splits its exact atomic quantities. Data points to private staging, not guest RAM.
 
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 #[path = "memory/operation.rs"]
 mod operation;
@@ -265,7 +265,7 @@ impl MemoryContextView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::offset_of;
+    use core::mem::offset_of;
 
     #[test]
     fn named_stack_fault_preserves_old_codes_and_merge_rejects_opposite_sp_profiles() {
@@ -370,7 +370,7 @@ mod tests {
                 for bytes in [0, 1, 2, 4, 8, 16, 32, 64] {
                     let request = MemoryRequest {
                         address: 0,
-                        data: std::ptr::null_mut(),
+                        data: core::ptr::null_mut(),
                         bytes,
                         flags,
                         pc: 0,

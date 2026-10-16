@@ -6,6 +6,8 @@ use crate::{
         Shift, WideMove, Width,
     },
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub struct Emitter;
 
@@ -330,7 +332,7 @@ fn nzcv(code: &mut Vec<u8>, subtract: bool) {
     const ARM_CARRY_BIT: u8 = 29;
     const ARM_OVERFLOW_BIT: u8 = 28;
     const NEGATIVE_ZERO_MASK: u32 = (1 << ARM_NEGATIVE_BIT) | (1 << ARM_ZERO_BIT);
-    const STATE_NZCV_OFFSET: u32 = std::mem::offset_of!(crate::GuestState, nzcv) as u32;
+    const STATE_NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     const SIGN_ZERO_SHIFT: u8 = ARM_NEGATIVE_BIT - HOST_SIGN_BIT;
     const _: () = assert!(SIGN_ZERO_SHIFT == ARM_ZERO_BIT - HOST_ZERO_BIT);
 
@@ -670,7 +672,7 @@ impl Emitter {
             block.source_map.push((instruction.pc, code.len()));
             emit_instruction(code, instruction, &mut fixups, target);
         }
-        let offsets: std::collections::BTreeMap<_, _> = block
+        let offsets: alloc::collections::BTreeMap<_, _> = block
             .source_map
             .iter()
             .map(|(pc, offset)| (pc.0, *offset))

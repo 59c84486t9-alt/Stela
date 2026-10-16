@@ -21,6 +21,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const VALUE: u8 = 0;
 const BIAS_OR_EXPONENT_UNIT: u8 = 1;

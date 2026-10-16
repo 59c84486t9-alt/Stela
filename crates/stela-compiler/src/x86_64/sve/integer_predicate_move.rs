@@ -6,9 +6,10 @@ use crate::{
     TargetCpu,
     aarch64::scalable::{BITS_PER_BYTE, ElementSize, VECTOR_CHUNK_BYTES, VectorLength},
 };
+use alloc::vec::Vec;
 
 const QWORD_BITS: usize = u64::BITS as usize;
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const CHUNK_BITS: usize = VECTOR_CHUNK_BYTES * BITS_PER_BYTE;
 const RESULT: u8 = 0;
 const HIGH: u8 = 1;

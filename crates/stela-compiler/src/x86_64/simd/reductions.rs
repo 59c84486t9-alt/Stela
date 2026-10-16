@@ -7,6 +7,7 @@ use crate::{
     aarch64::simd::reductions::{BitCount, Combine, Kind, Operand, Shape},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 fn add_opcode(lane: u8) -> Host {
     match lane {
@@ -38,7 +39,7 @@ fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
     constant(
         code,
         xmm,
-        std::array::from_fn(|i| bytes[i % usize::from(lane)]),
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
     );
 }
 fn select_minmax(code: &mut Vec<u8>, lane: u8, signed: bool, maximum: bool, target: TargetCpu) {
@@ -206,13 +207,13 @@ fn across(code: &mut Vec<u8>, operation: Combine, mut lane: u8, mut bytes: u8, t
     constant(
         code,
         1,
-        std::array::from_fn(|i| if i < usize::from(lane) { 255 } else { 0 }),
+        core::array::from_fn(|i| if i < usize::from(lane) { 255 } else { 0 }),
     );
     packed(code, Host::And, 0, 1);
 }
 
 fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
-    let table = std::array::from_fn(|i| {
+    let table = core::array::from_fn(|i| {
         if reverse {
             (i as u8).reverse_bits() >> 4
         } else {

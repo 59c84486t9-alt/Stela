@@ -15,9 +15,10 @@ use crate::{
     aarch64::scalable::{VECTOR_CHUNK_BYTES, VectorLength, is_predicate_register, is_z_register},
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 const MAX_OUTPUTS: usize = 4;
-const CALL_ALIGNMENT_PAD: usize = std::mem::size_of::<usize>();
+const CALL_ALIGNMENT_PAD: usize = core::mem::size_of::<usize>();
 const PRIVATE_HEADER_BYTES: usize = 2 * VECTOR_CHUNK_BYTES;
 const MAX_FRAME_BYTES: usize = PRIVATE_HEADER_BYTES
     + MAX_OUTPUTS * crate::aarch64::scalable::MAX_VECTOR_BYTES
@@ -29,9 +30,9 @@ const PENDING_GUEST_FPSR: u32 = 12;
 const MXCSR_ROUNDING_MASK: u32 = 3 << 13;
 const MXCSR_EXCEPTION_MASKS: u32 = 0x1f80;
 const MXCSR_STATUS_MASK: u32 = 0x3f;
-const PACKED_P_CHUNK_BYTES: usize = std::mem::size_of::<u64>();
-const PREDICATE_BITS16_BYTES: usize = std::mem::size_of::<u16>();
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
+const PACKED_P_CHUNK_BYTES: usize = core::mem::size_of::<u64>();
+const PREDICATE_BITS16_BYTES: usize = core::mem::size_of::<u16>();
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
 const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
 const STMXCSR_RSP_DISP32: &[u8] = &[0x0f, 0xae, 0x9c, 0x24];
@@ -336,7 +337,7 @@ pub(crate) fn finish(
         memory(
             code,
             OR_STATE_FPSR_EAX,
-            std::mem::offset_of!(GuestState, fpsr) as u32,
+            core::mem::offset_of!(GuestState, fpsr) as u32,
         );
     }
     release(code, frame);
@@ -360,6 +361,8 @@ pub(crate) fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn invalid_layout_does_not_emit() {

@@ -8,6 +8,7 @@ use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::{Accumulate, Kind, Selection};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;

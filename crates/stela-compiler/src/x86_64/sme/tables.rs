@@ -9,6 +9,7 @@ use crate::aarch64::sme::tables::{Kind, Operand, PermuteSources};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, routing, store_z_chunk};
 use crate::x86_64::sve::predicate::{emit_prepared_counter_mask, prepare_counter};
+use alloc::vec::Vec;
 
 mod lookup;
 

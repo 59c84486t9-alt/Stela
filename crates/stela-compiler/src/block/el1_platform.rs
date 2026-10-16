@@ -6,6 +6,7 @@ use crate::{
     aarch64::{AddressMode, Instruction, Operation, Register, Width, literal},
     context::memory::MemoryRequirements,
 };
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -319,6 +320,7 @@ impl Plan {
 mod tests {
     use super::*;
     use crate::block::{BlockProfile, CompilationPlan};
+    use alloc::vec::Vec;
     const BASE: GuestAddress = GuestAddress(0x100000);
     const ADD_X0: u32 = 0x91000000;
     const CMP_X10_X11: u32 = 0xeb0b015f;

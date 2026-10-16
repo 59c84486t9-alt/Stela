@@ -4,6 +4,7 @@ use crate::{
     GuestState,
     aarch64::tag_arithmetic::{Kind, Operand},
 };
+use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const REX_W_PREFIX: u8 = 0x48;
@@ -14,7 +15,7 @@ const SIGN_EXTEND_SHIFT: u8 = 8;
 const TAG_MASK: u8 = 15;
 const MASK_BIT: u32 = 1;
 const TOP_NIBBLE_MASK: u8 = 0xf0;
-const NZCV_OFFSET: u32 = std::mem::offset_of!(GuestState, nzcv) as u32;
+const NZCV_OFFSET: u32 = core::mem::offset_of!(GuestState, nzcv) as u32;
 const N_SHIFT: u8 = 31;
 const Z_SHIFT: u8 = 30;
 const C_SHIFT: u8 = 29;

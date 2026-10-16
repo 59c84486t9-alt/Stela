@@ -3,7 +3,9 @@
 //! Sets preserve declarations exactly: construction does not infer dependencies,
 //! identify Apple hardware, or claim that an instruction mapping is implemented.
 
-use std::fmt;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,7 +98,7 @@ impl fmt::Display for FeatureNameError {
     }
 }
 
-impl std::error::Error for FeatureNameError {}
+impl core::error::Error for FeatureNameError {}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScalableFeatures(u64);

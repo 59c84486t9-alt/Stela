@@ -1,6 +1,7 @@
 //! Vector expansion of compressed counter masks for registered consumers.
 use super::{CHUNK_BITS, emit_prepared_counter_chunk};
 use crate::aarch64::scalable::VectorLength;
+use alloc::vec::Vec;
 
 const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
 const VECTOR_MASK_BYTES: usize = 16;

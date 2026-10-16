@@ -21,6 +21,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const VALUE: u8 = 0;
 const ACTIVE: u8 = 2;

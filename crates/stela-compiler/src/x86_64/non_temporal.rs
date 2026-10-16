@@ -6,6 +6,7 @@ use crate::aarch64::{
     non_temporal::{Data, Operand},
     simd::Operand as SimdOperand,
 };
+use alloc::vec::Vec;
 
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;

@@ -27,6 +27,7 @@ use crate::{
         sve::floating::classify::guard_active_exception_enables,
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;

@@ -66,6 +66,7 @@ pub(super) fn decode(word: u32) -> Option<Result<Operand, ()>> {
 mod tests {
     use super::*;
     use crate::aarch64::{Register, simd::structure_memory::PostIndex};
+    use alloc::vec::Vec;
 
     #[test]
     fn all_multiple_shapes_and_address_modes_decode() {

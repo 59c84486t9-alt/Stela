@@ -8,6 +8,7 @@ use crate::{
     },
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -138,6 +139,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn emitted(word: u32, target: TargetCpu) -> Vec<u8> {
         let operand = crate::aarch64::simd::i8mm::decode(word).unwrap().unwrap();

@@ -6,6 +6,7 @@ use crate::{
     context::memory::MEMORY_REQUEST_BYTES,
     x86_64::{self, memory_context as service},
 };
+use alloc::vec::Vec;
 
 const REQUEST_OFFSET: u32 = 0;
 const DATA_OFFSET: u32 = MEMORY_REQUEST_BYTES as u32;

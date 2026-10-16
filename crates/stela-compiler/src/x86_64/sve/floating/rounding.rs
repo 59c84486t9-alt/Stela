@@ -20,6 +20,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 use super::classify::guard_active_exception_enables;
 

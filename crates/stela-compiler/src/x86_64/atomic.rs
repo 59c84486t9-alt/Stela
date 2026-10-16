@@ -4,6 +4,7 @@ use crate::aarch64::{
     Register,
     atomic::{Kind, Operand},
 };
+use alloc::vec::Vec;
 
 mod compare_exchange;
 mod compare_exchange_pair;

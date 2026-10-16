@@ -5,6 +5,7 @@ use crate::aarch64::scalable::{
     ElementSize,
     execution::{GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements},
 };
+use alloc::boxed::Box;
 
 const CLASS_MASK: u32 = 0xff80_0000;
 const CLASS_VALUE: u32 = 0xa000_0000;

@@ -22,6 +22,7 @@ use crate::{
         sve::floating::classify::{guard_normal_zero_or_infinity, prepare_classification},
     },
 };
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -72,7 +73,7 @@ fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
 
 fn state_test(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 

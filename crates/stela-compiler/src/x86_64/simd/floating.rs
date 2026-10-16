@@ -6,10 +6,11 @@ use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},
 };
+use alloc::vec::Vec;
 
 fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend([0xf7, 0x87]); // test dword [rdi+fpcr],mask
-    code.extend((std::mem::offset_of!(crate::GuestState, fpcr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(crate::GuestState, fpcr) as u32).to_le_bytes());
     code.extend(mask.to_le_bytes());
 }
 
@@ -232,6 +233,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn checked_qword_classifier_and_no_numeric_host_fp() {

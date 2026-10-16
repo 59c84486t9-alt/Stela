@@ -11,6 +11,7 @@ use crate::{
     aarch64::simd::halving::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 fn arithmetic(lane: u8, subtract: bool) -> Host {
     match (subtract, lane) {
@@ -30,7 +31,7 @@ fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
     constant(
         code,
         xmm,
-        std::array::from_fn(|i| bytes[i % usize::from(lane)]),
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
     );
 }
 fn half(code: &mut Vec<u8>, lane: u8, signed: bool, subtract: bool, round: bool) {

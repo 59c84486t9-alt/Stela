@@ -5,6 +5,7 @@
 //! No environment, guest state, stack, commit or completion exit is emitted here.
 
 use crate::aarch64::floating::Format;
+use alloc::vec::Vec;
 
 const SCALAR: u8 = 0;
 const TEMPORARY: u8 = 7;

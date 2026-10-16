@@ -10,6 +10,7 @@ use crate::aarch64::sve::rearrange::{IndexOperand, Operand};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{GuestState, TargetCpu};
+use alloc::vec::Vec;
 
 const RAX: u8 = 0;
 const RCX: u8 = 1;
@@ -51,8 +52,8 @@ const JAE_REL32: &[u8] = &[0x0f, 0x83];
 const JBE_REL32: &[u8] = &[0x0f, 0x86];
 const JE_REL32: &[u8] = &[0x0f, 0x84];
 const JNE_REL32: &[u8] = &[0x0f, 0x85];
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
-const QWORD_BYTES: usize = std::mem::size_of::<u64>();
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
+const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const PREDICATE_CHUNK_BITS: usize = u64::BITS as usize;
 const FIRST: u8 = 0;
 const SECOND: u8 = 1;
@@ -647,7 +648,7 @@ fn read_index_operand(code: &mut Vec<u8>, operand: IndexOperand, destination: u8
                 MODRM_DISP32_RDI | (destination << REGISTER_SHIFT),
             ]);
             code.extend(
-                ((std::mem::offset_of!(GuestState, x) + usize::from(register) * QWORD_BYTES)
+                ((core::mem::offset_of!(GuestState, x) + usize::from(register) * QWORD_BYTES)
                     as u32)
                     .to_le_bytes(),
             );

@@ -6,6 +6,7 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
+use alloc::vec::Vec;
 
 const SECOND_EVEN_XMM: u8 = 6;
 const SECOND_ODD_XMM: u8 = 7;
@@ -162,8 +163,8 @@ const MODRM_RIP: u8 = 0x05;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 const SHUFFLE_ZERO: u8 = 0x80;
 const JMP_REL32: u8 = 0xe9;
-const REL32_BYTES: usize = std::mem::size_of::<i32>();
-const JUMP_BYTES: usize = std::mem::size_of::<u8>() + REL32_BYTES;
+const REL32_BYTES: usize = core::mem::size_of::<i32>();
+const JUMP_BYTES: usize = core::mem::size_of::<u8>() + REL32_BYTES;
 const CHUNK_BYTES: usize = crate::aarch64::scalable::VECTOR_CHUNK_BYTES;
 const HALF_CHUNK_BYTES: usize = CHUNK_BYTES / 2;
 
@@ -173,7 +174,8 @@ const HALF_CHUNK_BYTES: usize = CHUNK_BYTES / 2;
 pub(crate) fn prepare_split_masks(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     assert!(target.supports(TargetCpu::Ssse3));
     assert!(matches!(element, ElementSize::Byte | ElementSize::Halfword));
-    let load_bytes = Host::LoadUnaligned.encoding().len() + std::mem::size_of::<u8>() + REL32_BYTES;
+    let load_bytes =
+        Host::LoadUnaligned.encoding().len() + core::mem::size_of::<u8>() + REL32_BYTES;
     for (register, displacement) in [
         (EVEN_MASK_XMM, load_bytes + JUMP_BYTES),
         (ODD_MASK_XMM, JUMP_BYTES + CHUNK_BYTES),

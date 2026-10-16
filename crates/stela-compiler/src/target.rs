@@ -1,12 +1,15 @@
 //! Host requirements, detection and stable generated-code target identities.
 
-#[cfg(target_arch = "x86_64")]
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_BASIC_FEATURES: u32 = 1;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_CX16: u32 = 1 << 13;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_CX8: u32 = 1 << 8;
 
 /// Explicit host requirements bind generated code and persistent cache identity.
@@ -144,10 +147,13 @@ impl TargetCpu {
             && (!required.cx8 || self.cx8)
             && (!required.avx2 || self.avx2)
     }
+    /// Detect usable host capabilities in the hosted execution environment.
+    /// Freestanding callers supply a positively qualified explicit target.
+    #[cfg(any(feature = "std", test))]
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
-            let basic = std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES);
+            let basic = core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES);
             Self {
                 popcnt: std::is_x86_feature_detected!("popcnt"),
                 bmi1: std::is_x86_feature_detected!("bmi1"),
@@ -175,7 +181,7 @@ impl TargetCpu {
             Self::Baseline
         }
     }
-    #[cfg(any(target_arch = "x86_64", test))]
+    #[cfg(any(all(feature = "std", target_arch = "x86_64"), test))]
     fn for_features(ssse3: bool, sse41: bool, sse42: bool, pclmulqdq: bool) -> Self {
         let tier = match (ssse3, sse41, sse42) {
             (false, _, _) => SseTier::Baseline,
@@ -189,7 +195,7 @@ impl TargetCpu {
             ..Self::Baseline
         }
     }
-    #[cfg(any(target_arch = "x86_64", test))]
+    #[cfg(any(all(feature = "std", target_arch = "x86_64"), test))]
     fn for_features_with_vex(
         ssse3: bool,
         sse41: bool,
@@ -235,6 +241,8 @@ impl TargetCpu {
         }
         id
     }
+    /// Check this target against the hosted process's usable capabilities.
+    #[cfg(any(feature = "std", test))]
     pub fn supported(self) -> bool {
         cfg!(target_arch = "x86_64") && Self::detect().supports(self)
     }
@@ -242,17 +250,17 @@ impl TargetCpu {
 
 // Ordering means feature containment, not an arbitrary rank.
 impl PartialOrd for TargetCpu {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         match (self.supports(*other), other.supports(*self)) {
-            (true, true) => Some(std::cmp::Ordering::Equal),
-            (true, false) => Some(std::cmp::Ordering::Greater),
-            (false, true) => Some(std::cmp::Ordering::Less),
+            (true, true) => Some(core::cmp::Ordering::Equal),
+            (true, false) => Some(core::cmp::Ordering::Greater),
+            (false, true) => Some(core::cmp::Ordering::Less),
             (false, false) => None,
         }
     }
 }
 
-impl std::str::FromStr for TargetCpu {
+impl core::str::FromStr for TargetCpu {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut target = Self::Baseline;
@@ -291,6 +299,7 @@ impl std::str::FromStr for TargetCpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     const TIERS: [(TargetCpu, &str, &str); 4] = [
         (TargetCpu::Baseline, "baseline", "x86_64-baseline"),
@@ -359,7 +368,7 @@ mod tests {
 
     #[test]
     fn every_profile_has_one_canonical_identity_and_alias() {
-        let mut ids = std::collections::BTreeSet::new();
+        let mut ids = alloc::collections::BTreeSet::new();
         for target in profiles() {
             let id = target.id();
             assert!(ids.insert(id.clone()));
@@ -472,7 +481,7 @@ mod tests {
                 assert_eq!(
                     feature.partial_cmp(&other),
                     if feature == other {
-                        Some(std::cmp::Ordering::Equal)
+                        Some(core::cmp::Ordering::Equal)
                     } else {
                         None
                     }
@@ -485,11 +494,11 @@ mod tests {
         assert!(!combined.supports(TargetCpu::Sse41.with_popcnt().with_aes()));
         assert_eq!(
             combined.partial_cmp(&TargetCpu::Popcnt),
-            Some(std::cmp::Ordering::Greater)
+            Some(core::cmp::Ordering::Greater)
         );
         assert_eq!(
             TargetCpu::Aes.partial_cmp(&combined),
-            Some(std::cmp::Ordering::Less)
+            Some(core::cmp::Ordering::Less)
         );
     }
 
@@ -553,15 +562,15 @@ mod tests {
                 ),
                 (
                     TargetCpu::AtomicLoad16,
-                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
+                    core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
                 ),
                 (
                     TargetCpu::Cx16,
-                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_CX16 != 0,
+                    core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_CX16 != 0,
                 ),
                 (
                     TargetCpu::Cx8,
-                    std::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).edx & CPUID_CX8 != 0,
+                    core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).edx & CPUID_CX8 != 0,
                 ),
             ] {
                 assert_eq!(target.supports(required), detected);

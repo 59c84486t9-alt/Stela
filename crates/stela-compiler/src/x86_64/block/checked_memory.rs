@@ -4,6 +4,7 @@ use crate::{
     block::{Terminator, memory::CheckedOperation},
     extended,
 };
+use alloc::vec::Vec;
 
 pub(crate) fn emit(
     instructions: &[(GuestAddress, CheckedOperation)],

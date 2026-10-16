@@ -1,5 +1,6 @@
 //! Guarded native mappings for source-admitted streaming numerical families.
 
+use alloc::vec::Vec;
 mod add_reductions;
 mod arithmetic;
 mod arithmetic_dispatch;

@@ -5,6 +5,8 @@ use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub const MAX_INSTRUCTIONS: usize = 256;
 const PAIR_OFFSET_BITS: u32 = 7;
@@ -491,8 +493,8 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
 /// Every direct target and control-transfer fallthrough is a fresh region entry.
 /// Guest instructions and branch fixups remain original typed operations.
 #[cfg(test)]
-pub fn leaf_entries(instructions: &[Instruction]) -> std::collections::BTreeSet<u64> {
-    let mut entries = std::collections::BTreeSet::new();
+pub fn leaf_entries(instructions: &[Instruction]) -> alloc::collections::BTreeSet<u64> {
+    let mut entries = alloc::collections::BTreeSet::new();
     if let Some(first) = instructions.first() {
         entries.insert(first.pc.0);
     }

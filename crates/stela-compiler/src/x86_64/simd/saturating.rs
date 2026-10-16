@@ -6,13 +6,14 @@ use crate::{
     aarch64::simd::saturating::{FPSR_QC, Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 fn lane_constant(code: &mut Vec<u8>, xmm: u8, lane: u8, value: u64) {
     let bytes = value.to_le_bytes();
     constant(
         code,
         xmm,
-        std::array::from_fn(|i| bytes[i % usize::from(lane)]),
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
     );
 }
 fn arithmetic(lane: u8, sub: bool) -> Host {
@@ -246,7 +247,7 @@ pub(super) fn publish_qc(code: &mut Vec<u8>, active_bytes: u8) {
         FPSR_QC.trailing_zeros() as u8,
     ]); // setne cl; movzx ecx,cl; shl ecx,QC
     code.extend([0x09, 0x8f]); // or [rdi+FPSR],ecx: sticky QC, preserve every other bit
-    code.extend((std::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
 }
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
@@ -293,7 +294,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         constant(
             code,
             1,
-            std::array::from_fn(|i| if i < usize::from(bytes) { 255 } else { 0 }),
+            core::array::from_fn(|i| if i < usize::from(bytes) { 255 } else { 0 }),
         );
         packed(code, Host::And, 0, 1);
     }

@@ -8,6 +8,7 @@ use crate::{
     aarch64::simd::shifts::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const BITS_PER_BYTE: u8 = 8;
 const VECTOR_BYTES: u8 = 16;
@@ -19,7 +20,7 @@ fn lane_mask(code: &mut Vec<u8>, xmm: u8, lane_bytes: u8, value: u64) {
     constant(
         code,
         xmm,
-        std::array::from_fn(|i| bytes[i % usize::from(lane_bytes)]),
+        core::array::from_fn(|i| bytes[i % usize::from(lane_bytes)]),
     );
 }
 fn add(code: &mut Vec<u8>, destination: u8, source: u8, lane_bytes: u8) {
@@ -178,7 +179,7 @@ fn saturating_narrow(
             constant(
                 code,
                 1,
-                std::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
+                core::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
             );
             packed(code, Host::And, 6, 1);
         } else {
@@ -744,7 +745,7 @@ fn register_left(
             resolve_lane_branch(code, positive);
         }
         code.extend([0x81, 0x8f]); // or dword [rdi+fpsr],QC: sticky, other bits preserved
-        code.extend((std::mem::offset_of!(crate::GuestState, fpsr) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(crate::GuestState, fpsr) as u32).to_le_bytes());
         code.extend(crate::aarch64::simd::saturating::FPSR_QC.to_le_bytes());
     } else {
         finished.push(lane_branch(code, LaneBranch::Always));
@@ -802,6 +803,7 @@ fn register_shift(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn full_width_nonround_narrowing_omits_qc_only_when_bounds_prove_it() {

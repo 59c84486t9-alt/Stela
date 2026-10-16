@@ -12,6 +12,7 @@ use crate::{
     aarch64::{floating::Format, simd::arithmetic::Shape},
     x86_64::isa::ShiftOpcode,
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;

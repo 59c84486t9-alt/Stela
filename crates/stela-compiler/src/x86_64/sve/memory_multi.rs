@@ -17,6 +17,7 @@ use crate::{
         SpAlignmentRequirement, flags, host_caps, profile_requirements,
     },
 };
+use alloc::vec::Vec;
 
 const HOST_QWORD_BYTES: u32 = size_of::<u64>() as u32;
 const STACK_ALIGNMENT: u32 = 16;
@@ -272,6 +273,7 @@ pub(crate) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn private_scratch_is_bounded_aligned_and_disjoint() {

@@ -1,4 +1,5 @@
 //! BF16 numerical mappings, grouped by their distinct rounding contracts.
+use alloc::vec::Vec;
 mod conversion;
 mod dot;
 mod multiply;

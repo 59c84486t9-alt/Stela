@@ -3,6 +3,7 @@ use crate::aarch64::Register;
 use crate::aarch64::scalable::VectorLength;
 use crate::aarch64::sme::length::{Kind, Operand, Scale};
 use crate::x86_64::{load, offset, store};
+use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];

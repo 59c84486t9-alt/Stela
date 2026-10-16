@@ -2,6 +2,7 @@
 //! Guest NZCV remains memory-backed and untouched by incidental host flags.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::bitfield::{Kind, Operand};
+use alloc::vec::Vec;
 
 fn shift(code: &mut Vec<u8>, width: Width, opcode: u8, amount: u8) {
     if amount != 0 {
@@ -78,6 +79,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn code(width: Width, kind: Kind, rotation: u8, mask_end: u8) -> Vec<u8> {
         let mut result = vec![];

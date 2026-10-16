@@ -39,6 +39,7 @@ pub fn decode_thread_register_instruction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn admits_only_readonly_thread_pointer_and_all_destinations() {
@@ -67,7 +68,7 @@ mod tests {
             Lifter,
             block::{self, BlockProfile, SuccessorKind},
         };
-        use std::collections::BTreeSet;
+        use alloc::collections::BTreeSet;
         let base = GuestAddress(0x1000);
         const ADD_X0_X0_ONE: u32 = 0x91000400;
         const UNSUPPORTED_SUCCESSOR: u32 = 0;

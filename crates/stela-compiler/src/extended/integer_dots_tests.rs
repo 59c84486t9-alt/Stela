@@ -1,6 +1,7 @@
 //! Production registration and profile-boundary checks for SME integer dots.
 use super::*;
 use crate::aarch64::scalable::profile::ScalableControls;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const DOT_WORD: u32 = 0xc150_1000;

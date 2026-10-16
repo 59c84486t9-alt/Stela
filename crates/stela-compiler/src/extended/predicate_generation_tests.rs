@@ -1,6 +1,7 @@
 //! Predicate generation dispatch, feature boundaries and exact source maps.
 use super::*;
 use crate::aarch64::sve::predicate_generation;
+use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
 const WORDS: [u32; 45] = [

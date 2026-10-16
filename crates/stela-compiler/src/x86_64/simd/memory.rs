@@ -1,6 +1,7 @@
 //! Exact-width SIMD private-RAM transfers, shared by immediate/register offsets.
 use super::{commit, read_vector, vector_offset};
 use crate::aarch64::simd::memory::Operand;
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;

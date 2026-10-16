@@ -3,6 +3,7 @@ use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
+use alloc::vec::Vec;
 
 const XMM_LEFT: u8 = 0;
 const XMM_RIGHT: u8 = 1;
@@ -405,7 +406,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, t
     code.extend_from_slice(OR_EAX_R9D);
     code.extend_from_slice(OR_EAX_R11D);
     code.extend_from_slice(STORE_STATE_EAX);
-    code.extend((std::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
+    code.extend((core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes());
     for chunk in 0..length.predicate_bytes().div_ceil(QWORD_BYTES) {
         if single_chunk {
             code.extend_from_slice(MOV_EAX_R8D);
@@ -422,6 +423,8 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, t
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn optional_doubleword_opcodes_require_exact_tier() {

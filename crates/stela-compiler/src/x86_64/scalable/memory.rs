@@ -3,7 +3,8 @@
 //! Families own predicates, addresses and private load staging. The callback
 //! owns translation, exact access decomposition, tags and writer participation.
 
-use std::mem::offset_of;
+use alloc::vec::Vec;
+use core::mem::offset_of;
 
 use crate::context::{
     EXECUTION_CONTEXT_MEMORY_OFFSET,

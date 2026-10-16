@@ -3,6 +3,7 @@ use super::{multiply_low_for_target, packed};
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;

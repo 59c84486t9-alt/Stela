@@ -19,6 +19,8 @@ use crate::{
         MemoryRequirements, SpAlignmentRequirement, flags, host_caps, profile_requirements,
     },
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
 const REQUEST_OFFSET: u32 = 0;

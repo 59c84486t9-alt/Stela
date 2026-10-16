@@ -7,6 +7,7 @@ use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength, is
 use crate::aarch64::sve::dot::{Kind, Operand, Products, RightOperand, Signedness};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, store_z_chunk};
+use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -285,6 +286,8 @@ pub(crate) fn emit_integer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn floating_and_unallocated_operands_decline_without_partial_output() {

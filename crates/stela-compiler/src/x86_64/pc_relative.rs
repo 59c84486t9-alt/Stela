@@ -1,6 +1,7 @@
 //! Materialized guest addresses require only baseline x86-64 MOV instructions.
 use super::store;
 use crate::aarch64::{Register, pc_relative::Operand};
+use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     if operand.destination == Register::Zero {
@@ -16,6 +17,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn address_is_full_width_and_discarded_destination_keeps_map_interval() {

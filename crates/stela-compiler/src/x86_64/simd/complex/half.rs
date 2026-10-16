@@ -16,6 +16,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const HALF_BYTES: u8 = (Format::Half.bits() / u8::BITS) as u8;
 const HALF_TO_DOUBLE_FRACTION_SHIFT: u8 =

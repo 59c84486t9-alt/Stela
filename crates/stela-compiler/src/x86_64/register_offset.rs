@@ -4,6 +4,7 @@ use super::{
     right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
+use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     address(

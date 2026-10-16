@@ -20,6 +20,8 @@ use crate::{
     context::CONTEXT_LEAF_ABI,
     x86_64,
 };
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Required by the existing scalable-checker interface, solely as an external
 /// source-word diagnostic anchor. Zero denotes no fetched PC; it grants no fetch
@@ -144,6 +146,7 @@ pub fn prepare(
 mod tests {
     use super::*;
     use crate::aarch64::scalable::{ScalableMode, VectorLength};
+    use alloc::vec;
     const FROM_ZT0: u32 = 0xc04c03e0;
     const TO_ZT0: u32 = 0xc04e03e0;
     fn profile(streaming: bool) -> ScalableProfile {

@@ -7,6 +7,7 @@ use crate::{
     aarch64::simd::structure_memory::{Direction, Layout, Operand},
     x86_64::isa::SimdOpcode as Host,
 };
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;

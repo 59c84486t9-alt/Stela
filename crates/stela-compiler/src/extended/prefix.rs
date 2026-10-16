@@ -15,6 +15,8 @@ use crate::{
         },
     },
 };
+use alloc::format;
+use alloc::vec::Vec;
 
 pub(super) const PAIR_INSTRUCTIONS: usize = 2;
 pub(super) const PAIR_BYTES: usize = PAIR_INSTRUCTIONS * INSTRUCTION_BYTES;
@@ -157,6 +159,9 @@ pub(super) fn decode_pair(
 mod tests {
     use super::*;
     use crate::aarch64::scalable::{ScalableMode, VectorLength};
+    use alloc::string::ToString;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     const BASE: GuestAddress = GuestAddress(0x1000);
     const UNPREDICATED_PREFIX: u32 = 0x0420_bc20;
@@ -235,6 +240,8 @@ mod tests {
 mod window_boundary_tests {
     use super::*;
     use crate::aarch64::scalable::{ScalableMode, VectorLength};
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     const BASE: GuestAddress = GuestAddress(0x1000);
     const NOP: u32 = 0xd503_201f;
@@ -315,6 +322,7 @@ mod dispatcher_tests {
         scalable::{ScalableMode, VectorLength},
         sve::prefix::PrefixRequirement,
     };
+    use alloc::vec::Vec;
 
     const BASE: GuestAddress = GuestAddress(0x1000);
     const PREFIX: u32 = 0x0420_bc20;

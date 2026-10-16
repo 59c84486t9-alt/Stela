@@ -3,6 +3,7 @@ use crate::aarch64::{
     scalable::ElementSize,
     sve::shifts::{Count, Kind},
 };
+use alloc::vec::Vec;
 
 const CHUNK_BYTES: usize = 16;
 const BITS_PER_BYTE: u8 = 8;

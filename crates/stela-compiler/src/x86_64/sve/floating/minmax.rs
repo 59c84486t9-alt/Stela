@@ -19,6 +19,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 use super::classify::{
     guard_active_exception_enables, guard_normal_zero_or_infinity, prepare_classification,
@@ -240,6 +241,7 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn half_and_non_minmax_shapes_emit_no_frame() {

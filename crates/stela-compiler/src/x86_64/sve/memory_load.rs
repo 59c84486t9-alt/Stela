@@ -18,6 +18,7 @@ use crate::{
         profile_requirements,
     },
 };
+use alloc::vec::Vec;
 
 const STACK_ALIGNMENT: u32 = 16;
 const QWORD_BYTES: u32 = size_of::<u64>() as u32;

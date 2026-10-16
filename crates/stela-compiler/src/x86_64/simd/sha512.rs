@@ -6,6 +6,7 @@ use crate::{
     aarch64::simd::sha512::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const QWORD_BITS: u8 = 64;
 const QWORD_BYTES: u32 = 8;
@@ -260,6 +261,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, _target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn scoped_qword_encodings_keep_rex_operand_roles_and_state_base() {

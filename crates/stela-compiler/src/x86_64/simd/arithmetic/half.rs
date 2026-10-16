@@ -1,4 +1,5 @@
 //! Guarded Half arithmetic with exact normal intermediates.
+use alloc::vec::Vec;
 mod product;
 
 use super::super::super::isa::ShiftOpcode;

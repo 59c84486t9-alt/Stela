@@ -10,6 +10,7 @@ use crate::{
         atomic::{Kind, Operand},
     },
 };
+use alloc::vec::Vec;
 
 const WORD_PAIR_BYTES: u8 = 2 * DWORD_BYTES;
 const DOUBLEWORD_PAIR_BYTES: u8 = 2 * QWORD_BYTES;

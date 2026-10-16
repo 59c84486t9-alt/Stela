@@ -5,6 +5,7 @@ use crate::{
     aarch64::simd::sha3::{Kind, Operand},
     x86_64::isa::ShiftOpcode,
 };
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const SECOND: u8 = 1;
@@ -86,6 +87,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn staging_cost_accounts_for_complete_state_access_and_immediate_specializations() {

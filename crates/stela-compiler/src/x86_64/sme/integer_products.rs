@@ -1,5 +1,6 @@
 //! Exact packed integer product kernels shared by SME arithmetic families.
 use crate::{TargetCpu, x86_64::isa::SimdOpcode as Host};
+use alloc::vec::Vec;
 
 pub(crate) const PRODUCT_LEFT: u8 = 0;
 pub(crate) const PRODUCT_RIGHT: u8 = 1;

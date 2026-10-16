@@ -6,6 +6,7 @@ use crate::aarch64::{
     Register,
     atomic::{Kind, Operand, Rmw},
 };
+use alloc::vec::Vec;
 
 const BYTE_BYTES: u8 = 1;
 const HALFWORD_BYTES: u8 = 2;

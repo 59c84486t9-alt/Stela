@@ -6,6 +6,7 @@ use crate::{
     aarch64::{Instruction, Operation, Register, Width, literal},
     context::memory::{MemoryRequirements, SpAlignmentRequirement, profile_requirements},
 };
+use alloc::vec::Vec;
 
 /// Exact decoded access, owned by the plan that emits its callback request.
 /// The actual runtime must revalidate source, controls, physical RAM and outer
@@ -131,6 +132,7 @@ impl Plan {
 mod tests {
     use super::*;
     use crate::block::{BlockProfile, CompilationPlan, EL1_M0_INTEGER_BLOCK_ABI};
+    use alloc::vec::Vec;
     const ADRP_X0: u32 = 0x9000_0000;
     const ADD_X0: u32 = 0x9100_0000;
     const LDR_X1: u32 = 0x5800_1bc1;

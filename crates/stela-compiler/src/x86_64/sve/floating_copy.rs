@@ -10,6 +10,7 @@ use crate::{
         scalable::{load_z_chunk, read_predicate_mask, store_z_chunk},
     },
 };
+use alloc::vec::Vec;
 
 const IMMEDIATE: u8 = 0;
 const ACTIVE: u8 = 1;

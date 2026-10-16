@@ -1,5 +1,8 @@
 //! Private emitted adapter ABI tests with an explicit callback test double.
 //! These tests make no MemoryThread, original ARM or checked-entry claim.
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 use super::*;
 use crate::{
     GuestState,
@@ -14,7 +17,7 @@ use crate::{
         },
     },
 };
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 unsafe extern "C" {
     fn mmap(
@@ -56,7 +59,7 @@ impl Executable {
         // SAFETY: private anonymous memory becomes RX after exact bytes copy.
         let pointer = unsafe {
             mmap(
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
                 CODE_ALLOCATION_BYTES,
                 PROT_READ_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS,
@@ -65,7 +68,7 @@ impl Executable {
             )
         };
         assert_ne!(pointer as usize, usize::MAX);
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast(), bytes.len()) };
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast(), bytes.len()) };
         assert_eq!(
             unsafe { mprotect(pointer, CODE_ALLOCATION_BYTES, PROT_READ_EXECUTE) },
             0
@@ -74,11 +77,11 @@ impl Executable {
     }
     fn run(&self, state: &mut GuestState, view: &mut MemoryContextView) -> u32 {
         let context = ExecutionContext {
-            memory: std::ptr::from_mut(view).cast(),
+            memory: core::ptr::from_mut(view).cast(),
             ..ExecutionContext::default()
         };
         let entry: unsafe extern "C" fn(*mut GuestState, *const ExecutionContext) -> u32 =
-            unsafe { std::mem::transmute(self.pointer) };
+            unsafe { core::mem::transmute(self.pointer) };
         unsafe { entry(state, &context) }
     }
 }
@@ -139,7 +142,7 @@ fn view(observation: &mut Observation) -> MemoryContextView {
         version: MEMORY_CONTEXT_VERSION,
         bytes: MEMORY_CONTEXT_BYTES,
         callback,
-        opaque: std::ptr::from_mut(observation).cast(),
+        opaque: core::ptr::from_mut(observation).cast(),
         fault_kind: 7,
         reserved: 0,
         fault_address: 0x1234,
@@ -348,7 +351,7 @@ fn emitted_exclusive_payloads_results_and_faults_match_private_abi() {
             }
         }
     }
-    println!("exclusive_component_bodies={bodies} executions={executions}");
+    std::println!("exclusive_component_bodies={bodies} executions={executions}");
 }
 
 #[test]
@@ -397,7 +400,7 @@ fn emitted_original_sp_faults_precede_the_callback_and_all_results() {
 
 #[test]
 fn exclusive_wire_layout_and_negative_payloads_are_explicit() {
-    use std::mem::offset_of;
+    use core::mem::offset_of;
     assert_eq!(size_of::<ExclusiveData>(), EXCLUSIVE_DATA_BYTES);
     assert_eq!(align_of::<ExclusiveData>(), EXCLUSIVE_DATA_ALIGNMENT);
     assert_eq!(

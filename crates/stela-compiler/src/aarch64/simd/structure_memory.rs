@@ -143,6 +143,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn operand(layout: Layout) -> Operand {
         Operand {

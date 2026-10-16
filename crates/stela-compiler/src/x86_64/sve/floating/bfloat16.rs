@@ -1,4 +1,5 @@
 //! BF arithmetic and Single accumulation use distinct native kernel families.
+use alloc::vec::Vec;
 mod accumulation;
 mod arithmetic;
 

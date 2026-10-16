@@ -14,6 +14,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec::Vec;
 
 use super::{
     commit,

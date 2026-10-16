@@ -8,6 +8,7 @@ use crate::{
     aarch64::checked_pointer::{Kind, Operand},
     context::pointer::EffectivePointerChecks,
 };
+use alloc::vec::Vec;
 
 const NOP: u8 = 0x90;
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];

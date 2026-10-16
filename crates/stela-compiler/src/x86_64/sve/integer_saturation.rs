@@ -6,6 +6,7 @@ use crate::aarch64::{
     scalable::{ElementSize, Predication, VectorLength},
     sve::integer_saturation::{Arithmetic, Half, Input, Kind, Operand, Signedness},
 };
+use alloc::vec::Vec;
 
 use super::super::isa::{ShiftOpcode, SimdOpcode as Host};
 

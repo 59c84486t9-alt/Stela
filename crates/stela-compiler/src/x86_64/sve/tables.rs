@@ -12,6 +12,7 @@ use crate::{
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
+use alloc::vec::Vec;
 const SUB_RSP: &[u8] = &[0x48, 0x81, 0xec];
 const ADD_RSP: &[u8] = &[0x48, 0x81, 0xc4];
 const STACK_DISP32: u8 = 0x84;

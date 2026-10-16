@@ -1,4 +1,5 @@
 //! True-BF arithmetic families; shared frame and numerical helpers own effects.
+use alloc::vec::Vec;
 mod binary;
 mod fused;
 mod selection;

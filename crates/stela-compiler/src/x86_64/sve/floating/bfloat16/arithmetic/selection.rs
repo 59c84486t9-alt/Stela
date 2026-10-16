@@ -21,6 +21,7 @@ use crate::{
         sve::floating::classify::guard_active_exception_enables,
     },
 };
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const LEFT: u8 = 1;
@@ -110,7 +111,7 @@ fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, 
     }
     if alternative {
         code.extend(TEST_STATE_IMMEDIATE);
-        code.extend((std::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
+        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
         code.extend(FPCR_AH.to_le_bytes());
         let ordinary = branch(code, Condition::Zero);
         Host::AndNot.register(code, TEMPORARY, RESULT, target);
@@ -242,6 +243,7 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod mapping_tests {
     use super::*;
+    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const CLAMP_LEFT: u8 = 1;

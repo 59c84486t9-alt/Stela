@@ -4,6 +4,7 @@ use crate::aarch64::scalable::{ElementSize, Predication, VECTOR_CHUNK_BYTES, Vec
 use crate::aarch64::sve::integer_logic::{Boolean, CopySource, Kind, Operand, Ternary};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
+use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;

@@ -227,15 +227,15 @@ fn negate(format: Format, bits: u64, control: Control) -> u64 {
 }
 
 /// Compare already unpacked, non-NaN values without numerical host effects.
-fn compare_operands(left: Operand, right: Operand) -> std::cmp::Ordering {
+fn compare_operands(left: Operand, right: Operand) -> core::cmp::Ordering {
     debug_assert!(!left.class.nan() && !right.class.nan());
     if left.class == Class::Zero && right.class == Class::Zero {
-        std::cmp::Ordering::Equal
+        core::cmp::Ordering::Equal
     } else if left.negative != right.negative {
         if left.negative {
-            std::cmp::Ordering::Less
+            core::cmp::Ordering::Less
         } else {
-            std::cmp::Ordering::Greater
+            core::cmp::Ordering::Greater
         }
     } else if left.negative {
         right.bits.cmp(&left.bits)

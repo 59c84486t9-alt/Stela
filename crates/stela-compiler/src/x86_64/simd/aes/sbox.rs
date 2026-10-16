@@ -5,6 +5,7 @@
 //! PAND/PXOR memory operand. GuestState accesses stay unaligned in the parent.
 //! There is one fallthrough path and the exact frame is restored before commit.
 use super::{BYTE_BITS, Host, LEFT, MASK, RESULT, Shift, TargetCpu, byte_constant, packed};
+use alloc::vec::Vec;
 
 const VECTOR_BYTES: u32 = 16;
 const INPUT_PLANES: usize = 8;

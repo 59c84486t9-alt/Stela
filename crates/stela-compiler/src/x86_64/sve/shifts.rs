@@ -13,6 +13,7 @@ use crate::{
         simd::shifts::{logical_shift, right_shift, rounded_right},
     },
 };
+use alloc::vec::Vec;
 
 mod saturating;
 mod scalar;
@@ -216,6 +217,7 @@ fn immediate_chunk(code: &mut Vec<u8>, operand: Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn variable_operand(element_size: ElementSize, kind: Kind) -> Operand {
         Operand {

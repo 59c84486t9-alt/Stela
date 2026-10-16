@@ -17,6 +17,7 @@ use crate::{
     },
     context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZT0_OFFSET},
 };
+use alloc::vec::Vec;
 
 const VALUE: u8 = 0;
 const PREVIOUS: u8 = 1;
@@ -31,7 +32,7 @@ const REGISTER_SHIFT: u8 = 3;
 const PREFIX_WORD: u8 = 0x66;
 const PREFIX_REP: u8 = 0xf3;
 const REX_R8_BASE: u8 = 0x41;
-const GPR_BYTES: usize = std::mem::size_of::<u64>();
+const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const D_TILE_COUNT: usize = 8;
 const ZT0_BYTES: usize = 64;
 const MOV_R8_CONTEXT_DISP8: &[u8] = &[0x4d, 0x8b, 0x47];
@@ -279,7 +280,7 @@ pub(crate) fn emit_debug_table_gpr(
     }
     pointer(code, SCALABLE_ZT0_OFFSET);
     let state_offset =
-        (std::mem::offset_of!(GuestState, x) + usize::from(register) * GPR_BYTES) as u32;
+        (core::mem::offset_of!(GuestState, x) + usize::from(register) * GPR_BYTES) as u32;
     let lane_offset = lane * GPR_BYTES as u8;
     match (direction, recipe) {
         (Direction::ToZa, Recipe::Scalar) => {
@@ -328,7 +329,7 @@ fn pointer(code: &mut Vec<u8>, field: u32) {
 fn index_offset(code: &mut Vec<u8>, register: u8, offset: u8, align: usize, modulus: usize) {
     code.extend(MOV_EAX_STATE_DISP32);
     code.extend(
-        (std::mem::offset_of!(GuestState, x) as u32 + u32::from(register) * GPR_BYTES as u32)
+        (core::mem::offset_of!(GuestState, x) as u32 + u32::from(register) * GPR_BYTES as u32)
             .to_le_bytes(),
     );
     if align > 1 {
@@ -529,7 +530,7 @@ fn zero_rows(code: &mut Vec<u8>, count: usize, step: usize, length: VectorLength
     add_address(code, step);
     code.extend(DEC_ECX);
     code.extend(JNZ_REL32);
-    let relative = start as i64 - (code.len() as i64 + std::mem::size_of::<i32>() as i64);
+    let relative = start as i64 - (code.len() as i64 + core::mem::size_of::<i32>() as i64);
     code.extend((relative as i32).to_le_bytes());
 }
 
@@ -537,6 +538,8 @@ fn zero_rows(code: &mut Vec<u8>, count: usize, step: usize, length: VectorLength
 mod tests {
     use super::*;
     use crate::aarch64::sme::movement::decode;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn rejected_debug_and_short_length_emit_nothing() {

@@ -10,6 +10,7 @@ use crate::{
     },
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host, VexShiftOpcode},
 };
+use alloc::vec::Vec;
 
 /// Only complete unsigned per-element counts map directly. Wide counts,
 /// signed bidirectional/rounded shifts and narrower lanes retain their own
@@ -42,8 +43,8 @@ fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
 }
 fn constant(code: &mut Vec<u8>, xmm: u8, element: ElementSize, value: u64) {
     let limbs = value.to_le_bytes();
-    let repeated: [u8; std::mem::size_of::<u64>()] =
-        std::array::from_fn(|i| limbs[i % element.bytes()]);
+    let repeated: [u8; core::mem::size_of::<u64>()] =
+        core::array::from_fn(|i| limbs[i % element.bytes()]);
     code.extend(MOV_RAX_IMM64);
     code.extend(repeated);
     packed(code, Host::MoveGprQword, xmm, 0);

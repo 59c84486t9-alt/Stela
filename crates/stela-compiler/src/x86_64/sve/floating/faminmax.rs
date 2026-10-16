@@ -18,6 +18,7 @@ use crate::{
         simd::absolute_selection,
     },
 };
+use alloc::vec::Vec;
 
 const LEFT: u8 = 5;
 const RIGHT: u8 = 6;

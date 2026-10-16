@@ -12,6 +12,7 @@ use crate::{
         sme::integer_products::{PRODUCT_HIGH, PRODUCT_LEFT, PRODUCT_RIGHT, word_products},
     },
 };
+use alloc::vec::Vec;
 
 const ACCUMULATOR: u8 = 2;
 const COMPONENT: u8 = 6;
@@ -26,8 +27,8 @@ const ODD_DWORDS: u8 = 0xdd;
 const REPEAT_LOW_QWORD: u8 = 0x44;
 const REPEAT_HIGH_QWORD: u8 = 0xee;
 const HALFWORDS_PER_QWORD: u8 = 4;
-const BYTES_PER_DWORD: u8 = std::mem::size_of::<u32>() as u8;
-const GPR_BYTES: usize = std::mem::size_of::<u64>();
+const BYTES_PER_DWORD: u8 = core::mem::size_of::<u32>() as u8;
+const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
 const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
 const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
@@ -64,7 +65,7 @@ fn za_pointer(code: &mut Vec<u8>, operand: &LongOperation, length: VectorLength)
     load_za_pointer_r8(code);
     code.extend(MOV_ECX_STATE_DISP32);
     code.extend(
-        ((std::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
+        ((core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
             .to_le_bytes(),
     );
     if operand.offset != 0 {

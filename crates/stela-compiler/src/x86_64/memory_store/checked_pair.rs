@@ -18,6 +18,7 @@ use crate::{
         store,
     },
 };
+use alloc::vec::Vec;
 
 const WORD_BYTES: u8 = size_of::<u32>() as u8;
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;

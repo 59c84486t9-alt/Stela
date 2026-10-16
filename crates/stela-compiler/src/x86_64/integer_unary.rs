@@ -4,6 +4,7 @@ use crate::{
     TargetCpu,
     aarch64::integer_unary::{Kind, Operand},
 };
+use alloc::vec::Vec;
 
 const REX_W: u8 = 0x48;
 const NOP: u8 = 0x90; // NOP keeps the source-map interval nonempty.
@@ -176,6 +177,7 @@ fn population_count(code: &mut Vec<u8>, width: Width) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn emitted(kind: Kind, width: Width, source: Register, target: TargetCpu) -> Vec<u8> {
         let mut code = Vec::new();

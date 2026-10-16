@@ -21,6 +21,7 @@ use crate::{
         },
     },
 };
+use alloc::vec::Vec;
 
 const SIGN_BITS: u8 = 1;
 const SINGLE_SIGN_SHIFT: u8 = Format::Single.bits() as u8 - SIGN_BITS;
