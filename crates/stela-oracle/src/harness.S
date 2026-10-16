@@ -25,19 +25,26 @@
     .equ DATA_BYTES,       0x4000
     .equ PAGE_BYTES,       0x1000
 
-    // Batch header.
+    // Batch header. Case and result strides depend on the batch's largest SVL.
     .equ BATCH_COUNT,      0
     .equ BATCH_NAME_BYTES, 8
-    .equ BATCH_NAME,       16
+    .equ BATCH_CASE_BYTES, 16
+    .equ BATCH_RESULT_BYTES, 24
+    .equ BATCH_NAME,       32
     .equ BATCH_CASES,      0x1000
 
-    // One case input.
+    // One case input; scalable registers follow the data window.
     .equ CASE_WORDS,       0
     .equ CASE_STEPS,       8
-    .equ CASE_CODE,        16
+    .equ CASE_SVL,         16
+    .equ CASE_SVCR,        24
+    .equ CASE_TPIDR2,      32
+    .equ CASE_FPMR,        40
+    .equ CASE_FLAGS,       48
+    .equ CASE_CODE,        64
     .equ CASE_STATE,       512
     .equ CASE_DATA,        0x1000
-    .equ CASE_BYTES,       0x5000
+    .equ CASE_SCALABLE,    0x5000
 
     // One result record; DATA_BYTES of the window follow the header.
     .equ RESULT_X,         0
@@ -49,8 +56,11 @@
     .equ RESULT_ELR,       288
     .equ RESULT_FAR,       296
     .equ RESULT_V,         320
+    .equ RESULT_SVCR,      832
+    .equ RESULT_TPIDR2,    840
+    .equ RESULT_FPMR,      848
     .equ RESULT_DATA,      0x400
-    .equ RESULT_BYTES,     0x4400
+    .equ RESULT_SCALABLE,  0x4400
 
     // GuestState layout (stela-state).
     .equ STATE_X,          0
@@ -74,6 +84,12 @@
     .equ MDSCR_SS,         1
     .equ ESR_CLASS_SHIFT,  26
     .equ ESR_SOFTWARE_STEP, 0x32
+    .equ SVCR_SM,          1
+    .equ SVCR_ZA,          2
+    .equ SMCR_EZT0,        1 << 30
+    .equ SVE_GRANULE,      16
+    .equ FLAG_FPMR,        1
+    .equ ZT0_BYTES,        64
     .equ DESC_TABLE,       3
     .equ DESC_BLOCK,       1
     .equ DESC_PAGE,        3
@@ -119,9 +135,11 @@ _start:
     msr     sctlr_el1, x0
     isb
 
-    ldr     x20, =BATCH
-    ldr     x22, [x20, #BATCH_COUNT]
-    add     x20, x20, #BATCH_CASES
+    ldr     x23, =BATCH
+    ldr     x22, [x23, #BATCH_COUNT]
+    ldr     x24, [x23, #BATCH_CASE_BYTES]
+    ldr     x25, [x23, #BATCH_RESULT_BYTES]
+    add     x20, x23, #BATCH_CASES
     ldr     x21, =RESULTS
     mov     x19, #0
 next_case:
@@ -152,11 +170,15 @@ next_case:
     isb
 
     // Load the guest state and enter EL0.
+    bl      load_scalable
     add     x30, x20, #CASE_STATE
     ldr     w0, [x30, #STATE_FPCR]
     msr     fpcr, x0
     ldr     w0, [x30, #STATE_FPSR]
     msr     fpsr, x0
+    // In streaming mode V is the low part of Z, already loaded.
+    mrs     x0, svcr
+    tbnz    x0, #0, 4f
     add     x0, x30, #STATE_V
     ldp     q0, q1, [x0], #32
     ldp     q2, q3, [x0], #32
@@ -174,7 +196,7 @@ next_case:
     ldp     q26, q27, [x0], #32
     ldp     q28, q29, [x0], #32
     ldp     q30, q31, [x0], #32
-    ldr     x0, [x30, #STATE_SP]
+4:  ldr     x0, [x30, #STATE_SP]
     msr     sp_el0, x0
     ldr     x0, [x20, #CASE_STEPS]
     msr     tpidr_el1, x0
@@ -249,6 +271,13 @@ lower_sync:
     stp     x0, x1, [sp, #RESULT_ESR]
     mrs     x0, far_el1
     str     x0, [sp, #RESULT_FAR]
+    mrs     x0, svcr
+    str     x0, [sp, #RESULT_SVCR]
+    mrs     x0, tpidr2_el0
+    str     x0, [sp, #RESULT_TPIDR2]
+    bl      save_scalable
+    mrs     x0, svcr
+    tbnz    x0, #0, 4f
     add     x0, sp, #RESULT_V
     stp     q0, q1, [x0], #32
     stp     q2, q3, [x0], #32
@@ -266,26 +295,26 @@ lower_sync:
     stp     q26, q27, [x0], #32
     stp     q28, q29, [x0], #32
     stp     q30, q31, [x0], #32
+4:  smstop
 
     // Restore the loop registers from the record position and save the window.
     mov     x21, sp
-    ldr     x20, =BATCH + BATCH_CASES
-    ldr     x22, =BATCH
-    ldr     x22, [x22, #BATCH_COUNT]
+    ldr     x23, =BATCH
+    ldr     x22, [x23, #BATCH_COUNT]
+    ldr     x24, [x23, #BATCH_CASE_BYTES]
+    ldr     x25, [x23, #BATCH_RESULT_BYTES]
+    add     x20, x23, #BATCH_CASES
     ldr     x0, =RESULTS
     sub     x19, x21, x0
-    mov     x0, #RESULT_BYTES
-    udiv    x19, x19, x0
-    mov     x0, #CASE_BYTES
-    madd    x20, x19, x0, x20
+    udiv    x19, x19, x25
+    madd    x20, x19, x24, x20
     ldr     x0, =DATA_WINDOW
     add     x1, x21, #RESULT_DATA
     mov     x2, #DATA_BYTES
     bl      copy
     add     x19, x19, #1
-    add     x20, x20, #CASE_BYTES
-    mov     x0, #RESULT_BYTES
-    add     x21, x21, x0
+    add     x20, x20, x24
+    add     x21, x21, x25
     b       next_case
 
 finish:
@@ -303,7 +332,7 @@ finish:
     adr     x1, params
     ldr     x2, =RESULTS
     ldr     x3, [x23, #BATCH_COUNT]
-    mov     x4, #RESULT_BYTES
+    ldr     x4, [x23, #BATCH_RESULT_BYTES]
     mul     x3, x3, x4
     stp     x24, x2, [x1]
     str     x3, [x1, #16]
@@ -324,6 +353,91 @@ exit:
     mov     w0, #SYS_EXIT
     hlt     #0xf000
     b       .
+
+    // Set the case's streaming vector length, SVCR, TPIDR2 and FPMR, then load
+    // Z, P, ZA and ZT0 from the case (x20). Clobbers x0-x3 and w12.
+load_scalable:
+    smstop
+    ldr     x1, [x20, #CASE_SVL]
+    cbz     x1, 9f
+    lsr     x1, x1, #4
+    sub     x1, x1, #1
+    orr     x1, x1, #SMCR_EZT0
+    msr     smcr_el1, x1
+    isb
+    ldr     x0, [x20, #CASE_TPIDR2]
+    msr     tpidr2_el0, x0
+    ldr     x0, [x20, #CASE_FLAGS]
+    tbz     x0, #0, 1f
+    ldr     x0, [x20, #CASE_FPMR]
+    msr     S3_3_C4_C4_2, x0
+1:  ldr     x3, [x20, #CASE_SVCR]
+    tbz     x3, #0, 2f
+    smstart sm
+2:  tbz     x3, #1, 3f
+    smstart za
+3:  add     x0, x20, #CASE_SCALABLE
+    tbz     x3, #0, 5f
+    ldr     z0, [x0]
+    addvl   x0, x0, #1
+    .irp n, 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    ldr     z\n, [x0]
+    addvl   x0, x0, #1
+    .endr
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    ldr     p\n, [x0]
+    addpl   x0, x0, #1
+    .endr
+    b       6f
+    // Without streaming mode the register banks are skipped.
+5:  rdsvl   x1, #1
+    lsl     x2, x1, #5
+    add     x0, x0, x2
+    lsl     x2, x1, #1
+    add     x0, x0, x2
+6:  tbz     x3, #1, 9f
+    rdsvl   x1, #1
+    mov     w12, #0
+7:  ldr     za[w12, 0], [x0]
+    addsvl  x0, x0, #1
+    add     w12, w12, #1
+    cmp     x12, x1
+    b.ne    7b
+    ldr     zt0, [x0]
+9:  ret
+
+    // Save Z, P, ZA and ZT0 into the result record at SP (lower_sync).
+    // Clobbers x0-x3 and w12.
+save_scalable:
+    mrs     x3, svcr
+    mov     x0, #RESULT_SCALABLE
+    add     x0, sp, x0
+    cbz     x3, 9f
+    tbz     x3, #0, 5f
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    str     z\n, [x0]
+    addvl   x0, x0, #1
+    .endr
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    str     p\n, [x0]
+    addpl   x0, x0, #1
+    .endr
+    b       6f
+5:  rdsvl   x1, #1
+    lsl     x2, x1, #5
+    add     x0, x0, x2
+    lsl     x2, x1, #1
+    add     x0, x0, x2
+6:  tbz     x3, #1, 9f
+    rdsvl   x1, #1
+    mov     w12, #0
+7:  str     za[w12, 0], [x0]
+    addsvl  x0, x0, #1
+    add     w12, w12, #1
+    cmp     x12, x1
+    b.ne    7b
+    str     zt0, [x0]
+9:  ret
 
     // copy x2 bytes (a multiple of 16) from x0 to x1; clobbers x0-x4.
 copy:

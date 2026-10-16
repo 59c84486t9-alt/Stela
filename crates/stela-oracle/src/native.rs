@@ -1,17 +1,26 @@
 //! Run Stela's native translation of a case at the guest's own addresses.
-use crate::{CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Outcome};
+use crate::{
+    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Outcome, SVCR_SM,
+    SVCR_ZA, Scalable,
+};
 use anyhow::{Context, Result, ensure};
 use std::{
     ptr::NonNull,
     sync::{Mutex, OnceLock},
 };
-use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
+use stela_compiler::{
+    GuestAddress, GuestState, TargetCpu,
+    block::BlockProfile,
+    context::{ExecutionContext, ScalableStateView},
+};
 use stela_runtime::blocks::{BlockRuntime, ThreadState};
 
 const PAGE_BYTES: usize = 0x1000;
 const INSTRUCTION_BYTES: usize = 4;
 const RET: u32 = 0xd65f_03c0;
 const ADDRESS_SPACE: u64 = 1;
+/// Bytes of each Z register held in the guest state's V register.
+const V_BYTES: usize = 16;
 
 /// Host mappings at the guest code region and data window. One process-wide
 /// instance exists; the lock serializes every native case.
@@ -125,6 +134,8 @@ pub enum Translation {
         runtime: BlockRuntime,
         _cache: tempfile::TempDir,
     },
+    /// A context leaf over guest and scalable state, without a memory service.
+    Context(Executable),
 }
 
 impl Translation {
@@ -164,6 +175,11 @@ impl Translation {
         })
     }
 
+    /// Wrap a compiled register-only context leaf.
+    pub fn context(native: &[u8]) -> Result<Self> {
+        Ok(Self::Context(Executable::new(native)?))
+    }
+
     /// Run the translation against `case`'s state and data window.
     ///
     /// # Safety
@@ -184,6 +200,7 @@ impl Translation {
                 .copy_from_slice(&case.data);
         }
         let saved = mxcsr();
+        let mut scalable_result = None;
         let result = match self {
             Self::Leaf(executable) => {
                 let mut state = case.state.clone();
@@ -193,6 +210,10 @@ impl Translation {
                 leaf(&mut state);
                 Ok((state, CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64))
             }
+            Self::Context(executable) => context(executable, case).map(|(state, scalable)| {
+                scalable_result = Some(scalable);
+                (state, CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64)
+            }),
             Self::Block { runtime, .. } => {
                 let mut thread = ThreadState {
                     registers: case.state.clone(),
@@ -211,9 +232,68 @@ impl Translation {
             state,
             next_pc,
             data,
+            scalable: scalable_result,
             exception: None,
         })
     }
+}
+
+/// Call a context leaf with the case's scalable banks behind a state view.
+fn context(executable: &Executable, case: &Case) -> Result<(GuestState, Scalable)> {
+    let initial = case
+        .scalable
+        .as_ref()
+        .context("context leaves need scalable state")?;
+    let svl = initial.svl;
+    let mut z_upper: Vec<u8> = initial
+        .z
+        .chunks_exact(svl)
+        .flat_map(|z| z[V_BYTES..].iter().copied())
+        .collect();
+    let mut p = initial.p.clone();
+    let mut ffr = vec![0; svl / 8];
+    let mut za = initial.za.clone();
+    let mut zt0 = initial.zt0;
+    let mut view = ScalableStateView {
+        svl_bytes: u16::try_from(svl)?,
+        reserved: [0; 6],
+        svcr: initial.svcr,
+        tpidr2_el0: initial.tpidr2,
+        fpmr: 0,
+        z_upper: z_upper.as_mut_ptr(),
+        predicates: p.as_mut_ptr(),
+        ffr: ffr.as_mut_ptr(),
+        za: za.as_mut_ptr(),
+        zt0: zt0.as_mut_ptr(),
+    };
+    let mut context = ExecutionContext {
+        scalable: &mut view,
+        ..ExecutionContext::default()
+    };
+    let mut state = case.state.clone();
+    // SAFETY: the mapping holds a context leaf over these live buffers.
+    let leaf: extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) =
+        unsafe { std::mem::transmute(executable.pointer.as_ptr()) };
+    leaf(&mut state, &mut context);
+    let mut result = Scalable {
+        svcr: view.svcr,
+        tpidr2: view.tpidr2_el0,
+        ..initial.clone()
+    };
+    // Banks the original keeps disabled are not observable; keep them as given.
+    if result.svcr & SVCR_SM != 0 {
+        for (index, z) in result.z.chunks_exact_mut(svl).enumerate() {
+            z[..8].copy_from_slice(&state.v[index][0].to_le_bytes());
+            z[8..V_BYTES].copy_from_slice(&state.v[index][1].to_le_bytes());
+            z[V_BYTES..].copy_from_slice(&z_upper[index * (svl - V_BYTES)..][..svl - V_BYTES]);
+        }
+        result.p = p;
+    }
+    if result.svcr & SVCR_ZA != 0 {
+        result.za = za;
+        result.zt0 = zt0;
+    }
+    Ok((state, result))
 }
 
 fn target() -> TargetCpu {

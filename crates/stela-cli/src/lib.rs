@@ -9,6 +9,7 @@ mod execute;
 mod images;
 mod input;
 mod loader;
+pub mod registry;
 mod restore;
 
 #[derive(Parser)]

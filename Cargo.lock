@@ -1752,6 +1752,7 @@ dependencies = [
  "object",
  "serde_json",
  "sha2",
+ "stela-cli",
  "stela-compiler",
  "stela-oracle",
 ]
